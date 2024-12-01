@@ -1,0 +1,2 @@
+/var/spool/slurmd/job24480615/slurm_script: line 8: /sci/home/omripo/.bashrc: No such file or directory
+/var/spool/slurmd/job24480615/slurm_script: line 9: module: command not found
