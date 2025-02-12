@@ -82,26 +82,16 @@ class BaseTester(object):
 
     def _set_device(self):
         if self.cfg.device is not None:
-            if self.cfg.device.startswith("cuda"):
+            if "cuda" in self.cfg.device:
                 gpu_id = int(self.cfg.device.split(':')[-1])
                 if gpu_id > torch.cuda.device_count():
                     raise RuntimeError(f"This machine does not have GPU #{gpu_id} ")
                 else:
                     self.device = torch.device(self.cfg.device)
-            elif self.cfg.device == "mps":
-                if torch.backends.mps.is_available():
-                    self.device = torch.device("mps")
-                else:
-                    raise RuntimeError("MPS device is not available.")
             else:
                 self.device = torch.device("cpu")
         else:
-            if torch.cuda.is_available():
-                self.device = torch.device("cuda:0")
-            elif torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            else:
-                self.device = torch.device("cpu")
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     def _load_run_data(self):
         """Load run specific data from run directory"""
@@ -110,7 +100,7 @@ class BaseTester(object):
         self.basins = load_basin_file(getattr(self.cfg, f"{self.period}_basin_file"))
 
         # load feature scaler
-        self.scaler = load_scaler(self.run_dir)
+        self.scaler = load_scaler(self.cfg.run_dir)
 
         # check for old scaler files, where the center/scale parameters had still old names
         if "xarray_means" in self.scaler.keys():
@@ -120,7 +110,7 @@ class BaseTester(object):
 
         # load basin_id to integer dictionary for one-hot-encoding
         if self.cfg.use_basin_id_encoding:
-            self.id_to_int = load_basin_id_encoding(self.run_dir)
+            self.id_to_int = load_basin_id_encoding(self.cfg.run_dir)
 
         for file in self.cfg.additional_feature_files:
             with open(file, "rb") as fp:
@@ -221,8 +211,8 @@ class BaseTester(object):
                 if self.cfg.cache_validation_data and self.period == "validation":
                     self.cached_datasets[basin] = ds
 
-            loader = DataLoader(ds, batch_size=self.cfg.batch_size, num_workers=0, collate_fn=ds.collate_fn)
-
+            loader = DataLoader(ds, batch_size=self.cfg.batch_size, num_workers=0, collate_fn=ds.collate_fn, shuffle=True)
+            print('check')
             y_hat, y, dates, all_losses, all_output[basin] = self._evaluate(model, loader, ds.frequencies,
                                                                             save_all_output)
 
