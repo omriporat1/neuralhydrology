@@ -333,6 +333,10 @@ def get_frequency_factor(freq_one: str, freq_two: str) -> float:
         E.g., a month does not represent a fixed time delta. Thus, 1D and 1M are not comparable. However, 1M and 2M are
         comparable since they have the same unit.
     """
+    #  OMRI PORAT 2025-02-17 - Added lowercase normalization of frequencies to avoid warnings (2 lines)
+    freq_one = freq_one.lower()  # Normalize to lowercase
+    freq_two = freq_two.lower()  # Normalize to lowercase
+
     if freq_one == freq_two:
         return 1
 
