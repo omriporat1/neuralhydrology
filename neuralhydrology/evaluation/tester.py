@@ -221,10 +221,10 @@ class BaseTester(object):
                 if self.cfg.cache_validation_data and self.period == "validation":
                     self.cached_datasets[basin] = ds
 
-            # loader = DataLoader(ds, batch_size=self.cfg.batch_size, num_workers=0, collate_fn=ds.collate_fn)
 
+            # OMRI PORAT 2025-02-2025 - added shuffle=True (2 following lines)
+            # loader = DataLoader(ds, batch_size=self.cfg.batch_size, num_workers=0, collate_fn=ds.collate_fn)
             loader = DataLoader(ds, batch_size=self.cfg.batch_size, num_workers=0, collate_fn=ds.collate_fn, shuffle=True)
-            print('check')
 
             y_hat, y, dates, all_losses, all_output[basin] = self._evaluate(model, loader, ds.frequencies,
                                                                             save_all_output)

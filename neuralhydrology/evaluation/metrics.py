@@ -797,6 +797,7 @@ def calculate_all_metrics(obs: DataArray,
         "FMS": fdc_fms(obs, sim),
         "FLV": fdc_flv(obs, sim),
         "Peak-Timing": mean_peak_timing(obs, sim, resolution=resolution, datetime_coord=datetime_coord),
+        "Missed-Peaks": missed_peaks(obs, sim, resolution=resolution, datetime_coord=datetime_coord),  # OMRI PORAT 2025-02-17 - added missed peaks metric (the function was already defined but is now part of the default metrics)
         "Peak-MAPE": mean_absolute_percentage_peak_error(obs, sim)
     }
 

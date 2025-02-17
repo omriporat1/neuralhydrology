@@ -28,7 +28,7 @@ class Logger(object):
         self._img_log_dir = cfg.img_log_dir
 
         # get git commit hash if folder is a git repository
-        cfg.update_config({'commit_hash': get_git_hash()})
+        cfg.update_config({'commit_hash': get_git_hash()})  # OMRI PORAT 2025-02-17 - This caused error in the past. I hashed it, see if it works now.
 
         # save git diff to file if branch is dirty
         if cfg.save_git_diff:
