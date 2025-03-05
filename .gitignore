@@ -19,3 +19,4 @@ data/*
 docs/build/*
 
 slurm-scripts/*.out
+/Static_parameters/~$feature_decisions.xlsx
