@@ -100,97 +100,6 @@ def plot_gantt_chart(df, title):
     fig.show()
 
 
-'''
-def create_linked_gantt_chart(station_file, gauge_file, linkage_file, output_folder):
-    """
-    Creates a Gantt chart showing data coverage for hydrometric stations (green) and linked rain gauges (blue),
-    with a dropdown filter for selecting specific stations.
-    """
-
-    # Load the time period data
-    stations_df = pd.read_csv(os.path.join(output_folder, station_file))
-    gauges_df = pd.read_csv(os.path.join(output_folder, gauge_file))
-    linkage_df = pd.read_csv(linkage_file)
-
-    # Reshape linkage table (wide to long format for gauge stations)
-    melted_df = linkage_df.melt(
-        id_vars=["station_id", "station_name"],
-        value_vars=["gauge_id_1", "gauge_id_2", "gauge_id_3", "gauge_id_4", "gauge_id_5"],
-        var_name="Gauge_Index",
-        value_name="Gauge_ID"
-    ).dropna()
-
-    # Rename for merging consistency
-    melted_df.rename(columns={"Hydrometric_Station": "Station_name", "Gauge_ID": "Station_ID"}, inplace=True)
-
-    # Merge station time periods
-    stations_df["Type"] = "Hydrometric Station"
-    gauges_df["Type"] = "Rain Gauge"
-
-    merged_gauges = melted_df.merge(gauges_df, on="Station_ID", how="left")
-    merged_stations = stations_df[["Station_name", "Start_Date", "End_Date", "Type"]]
-
-    # Combine both dataframes
-    final_df = pd.concat([merged_stations, merged_gauges[["Station_name", "Start_Date", "End_Date", "Type"]]])
-
-    # Convert datetime columns
-    final_df["Start_Date"] = pd.to_datetime(final_df["Start_Date"], utc=True)
-    final_df["End_Date"] = pd.to_datetime(final_df["End_Date"], utc=True)
-
-    # Create an initial figure with all data
-    fig = px.timeline(
-        final_df,
-        x_start="Start_Date",
-        x_end="End_Date",
-        y="Station_name",
-        title="Hydrometric Stations & Linked Rain Gauges Coverage",
-        labels={"Station_name": "Station", "Start_Date": "Start Date", "End_Date": "End Date"},
-        color="Type",
-        category_orders={"Type": ["Hydrometric Station", "Rain Gauge"]},
-        color_discrete_map={"Hydrometric Station": "green", "Rain Gauge": "blue"}
-    )
-
-    fig.update_yaxes(categoryorder="category ascending")
-    fig.update_layout(xaxis_title="Time Period", yaxis_title="Station / Gauge")
-
-    # Create dropdown menu
-    unique_stations = final_df["Station_name"].unique()
-    dropdown_buttons = [
-        {
-            "label": "All Stations",
-            "method": "update",
-            "args": [
-                {"visible": [True] * len(final_df)}
-            ]
-        }
-    ]
-
-    for station in unique_stations:
-        dropdown_buttons.append(
-            {
-                "label": station,
-                "method": "update",
-                "args": [
-                    {"visible": (final_df["Station_name"] == station).tolist()}
-                ]
-            }
-        )
-
-    fig.update_layout(
-        updatemenus=[
-            {
-                "buttons": dropdown_buttons,
-                "direction": "down",
-                "showactive": True
-            }
-        ]
-    )
-
-    # Show the interactive chart
-    fig.show()
-'''
-
-
 def create_linked_gantt_chart(station_file, gauge_file, linkage_file, output_folder):
     """
     Creates a Gantt chart showing data coverage for hydrometric stations (green) and linked rain gauges (blue),
@@ -203,8 +112,8 @@ def create_linked_gantt_chart(station_file, gauge_file, linkage_file, output_fol
     linkage_df = pd.read_csv(linkage_file)
 
     # Ensure station names exist
-    if "station_name" not in stations_df.columns:
-        raise KeyError("Column 'station_name' not found in stations_df")
+    # if "station_name" not in stations_df.columns:
+    #     raise KeyError("Column 'station_name' not found in stations_df")
 
     # Reshape linkage table (wide to long format for gauge stations)
     melted_df = linkage_df.melt(
