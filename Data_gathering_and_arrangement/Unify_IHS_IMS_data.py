@@ -1,4 +1,4 @@
-'''
+"""
 This script reads the optimized Stations_With_3_Gauges_Wide_assessment.csv file and creates the unified IMS+IHS
 data accordingly, only for the overlapping record periods of each station.
 
@@ -9,18 +9,24 @@ This means:
 3. find the overlapping period between the IMS and IHS data
 4. unify the data for the overlapping period, excluding rows with missing values
 5. save the unified data to a new csv file
-'''
+"""
+
 
 # import relevant:
 import os
 import pandas as pd
 import multiprocessing as mp
+import pickle
 
 # Define paths
 station_info_file = r'C:\PhD\Data\IHS_IMS_wide\Stations_With_3_Gauges_Wide_assessment.csv'
 stations_folder = r'C:\PhD\Data\IHS\stations_hydrographs'
 rain_gauges_folder = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted'
-output_folder = r'C:\PhD\Data\IHS_IMS_wide\IHS_IMS_wide_unified'
+output_folder = r'C:\PhD\Data\IHS_IMS_wide\IHS_IMS_wide_unified_' + str(pd.Timestamp.now().date())
+rain_gauge_pickle = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\rain_gauge_data.pkl'
+
+
+
 
 # Ensure output folder exists
 os.makedirs(output_folder, exist_ok=True)
@@ -48,17 +54,29 @@ if missing_files:
         print(file)
     exit(1)
 
-# Load and filter all rain gauge data into a dictionary
-rain_gauge_data = {}
-for gauge_id in all_gauge_ids:
-    gauge_id = int(gauge_id)
-    gauge_file = os.path.join(rain_gauges_folder, f"{gauge_id}.csv")
-    df_gauge = pd.read_csv(gauge_file, parse_dates=['datetime'])
-    df_gauge = df_gauge[(df_gauge['Rain'] >= 0) & (df_gauge['Rain'] <= 100)].dropna()
-    df_gauge.drop_duplicates(subset=['datetime'], inplace=True)
-    rain_gauge_data[gauge_id] = df_gauge
+# Check if the rain gauge data is already pickled
+if os.path.exists(rain_gauge_pickle):
+    with open(rain_gauge_pickle, 'rb') as f:
+        rain_gauge_data = pickle.load(f)
+        print("Loaded rain gauge data from pickle.")
+else:
+    # Load and filter all rain gauge data into a dictionary
+    rain_gauge_data = {}
+    count = 0
+    for gauge_id in all_gauge_ids:
+        gauge_id = int(gauge_id)
+        gauge_file = os.path.join(rain_gauges_folder, f"{gauge_id}.csv")
+        df_gauge = pd.read_csv(gauge_file, parse_dates=['datetime'], dayfirst=True)
+        df_gauge['datetime'] = pd.to_datetime(df_gauge['datetime']).dt.tz_localize(None)
+        df_gauge = df_gauge[(df_gauge['Rain'] >= 0) & (df_gauge['Rain'] <= 100)].dropna()
+        df_gauge.drop_duplicates(subset=['datetime'], inplace=True)
+        rain_gauge_data[gauge_id] = df_gauge
+        print(f"Loaded and filtered rain gauge data for {gauge_id} - {count+1}/{len(all_gauge_ids)}")
+        count += 1
 
-print("All rain gauge data loaded and filtered.")
+    with open(rain_gauge_pickle, "wb") as f:
+        pickle.dump(rain_gauge_data, f)
+    print("All rain gauge data loaded and filtered.")
 
 
 def process_station(row):
@@ -74,6 +92,7 @@ def process_station(row):
     df_station = df_station[(df_station['Flow_m3_sec'] >= 0) & (df_station['Flow_m3_sec'] <= 1000)]
     df_station = df_station[(df_station['Water_level_m'] >= 0)].dropna()
     df_station.drop_duplicates(subset=['datetime'], inplace=True)
+    df_station['datetime'] = pd.to_datetime(df_station['datetime']).dt.tz_localize(None)
 
     # Merge with rain gauge data
     for i, gauge_id in enumerate(gauge_ids, start=1):
@@ -94,8 +113,15 @@ def process_station(row):
 
 
 # Use multiprocessing to parallelize station processing
+"""
 if __name__ == "__main__":
     with mp.Pool(processes=mp.cpu_count() - 1) as pool:
-        pool.map(process_station, [row for _, row in df_mapping.iterrows()])
+        pool.map(process_station, [row._asdict() for row in df_mapping.itertuples(index=False)])
 
+    print("All stations processed.")
+"""
+
+if __name__ == "__main__":
+    for row in df_mapping.itertuples(index=False):
+        process_station(row._asdict())
     print("All stations processed.")
