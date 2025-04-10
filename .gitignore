@@ -22,3 +22,5 @@ slurm-scripts/*.out
 /Static_parameters/~$feature_decisions.xlsx
 /1laggerman hydrology-project main Scripts.zip
 /1laggerman hydrology-project main utils.zip
+/Data_gathering_and_arrangement/station_gantt_discontinuous.html
+/Data_gathering_and_arrangement/all_stations_and_gauges_gantt_with_assessment.png
