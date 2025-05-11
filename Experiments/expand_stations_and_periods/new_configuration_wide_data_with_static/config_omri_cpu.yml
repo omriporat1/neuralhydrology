@@ -185,3 +185,4 @@ static_attributes:
 
 statics_embedding:
   hiddens: 25
+
