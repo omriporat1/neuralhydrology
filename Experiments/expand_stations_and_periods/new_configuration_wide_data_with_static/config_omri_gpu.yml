@@ -1,0 +1,73 @@
+autoregressive_inputs:
+- Flow_m3_sec_zscore_norm_shift18
+batch_size: 512
+clip_gradient_norm: 1
+clip_targets_to_zero:
+- Flow_m3_sec_zscore_norm
+# data_dir: ..\..\..\..\data\Caravan
+data_dir: /sci/labs/efratmorin/omripo/PhD/Data/Caravan/
+dataset: caravan
+# device: cpu
+device: cuda:0
+dynamic_inputs:
+- Rain_gauge_1_zscore_norm
+- Rain_gauge_2_zscore_norm
+- Rain_gauge_3_zscore_norm
+epochs: 15
+experiment_name: Best_HPC_training_zscore_norm_ensemble_hidden_size256_batch_size512_learning_rate0001
+forcings:
+- il
+head: regression
+hidden_size: 256
+initial_forget_bias: 3
+lagged_features:
+  Flow_m3_sec_zscore_norm:
+  - 18
+  Rain_gauge_1_zscore_norm:
+  - 18
+  Rain_gauge_2_zscore_norm:
+  - 18
+  Rain_gauge_3_zscore_norm:
+  - 18
+learning_rate: 0.001
+log_interval: 5
+log_n_figures: 8
+log_tensorboard: true
+loss: MSE
+metrics:
+- NSE
+model: arlstm
+num_workers: 0
+optimizer: Adam
+output_activation: linear
+output_dropout: 0.4
+predict_last_n: 1
+save_weights_every: 1
+seq_length: 36
+target_variables:
+- Flow_m3_sec_zscore_norm
+# test_basin_file: LSTM_shared_8basins.txt
+test_basin_file: /sci/labs/efratmorin/omripo/PhD/NH-shared-flow-rain/nhWrap/neuralhydrology/trial/LSTM_shared_8basins.txt
+test_end_date: 28/05/2018
+test_start_date: 01/10/2017
+# train_basin_file: LSTM_shared_8basins.txt
+train_basin_file: /sci/labs/efratmorin/omripo/PhD/NH-shared-flow-rain/nhWrap/neuralhydrology/trial/LSTM_shared_8basins.txt
+train_end_date:
+- 30/05/2011
+- 30/05/2012
+- 30/05/2013
+- 30/05/2014
+- 30/05/2015
+train_start_date:
+- 07/10/2010
+- 07/10/2011
+- 07/10/2012
+- 07/10/2013
+- 07/10/2014
+use_basin_id_encoding: false
+validate_every: 1
+validate_n_random_basins: 0
+# validation_basin_file: LSTM_shared_8basins.txt
+validation_basin_file: /sci/labs/efratmorin/omripo/PhD/NH-shared-flow-rain/nhWrap/neuralhydrology/trial/LSTM_shared_8basins.txt
+validation_end_date: 30/05/2017
+validation_start_date: 01/10/2015
