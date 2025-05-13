@@ -12,7 +12,7 @@ from neuralhydrology.utils.config import Config
 
 def main():
     print("running correct file")
-    start_run(config_file=Path(r"C:\PhD\Python\neuralhydrology\Experiments\expand_stations_and_periods\new_configuration_wide_data_with_static\config_omri_gpu.yml"))
+    start_run(config_file=Path(r"/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/config_omri_gpu.yml"))
 
 
 if __name__ == '__main__':

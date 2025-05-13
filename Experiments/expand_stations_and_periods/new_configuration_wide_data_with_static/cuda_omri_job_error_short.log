@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/Best_HPC_omri_trial_cluster.py", line 19, in <module>
+    main()
+  File "/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/Best_HPC_omri_trial_cluster.py", line 15, in main
+    start_run(config_file=Path(r"C:\PhD\Python\neuralhydrology\Experiments\expand_stations_and_periods\new_configuration_wide_data_with_static\config_omri_gpu.yml"))
+  File "/sci/labs/efratmorin/haimasree/neuralhydrology/neuralhydrology/nh_run.py", line 68, in start_run
+    config = Config(config_file)
+  File "/sci/labs/efratmorin/haimasree/neuralhydrology/neuralhydrology/utils/config.py", line 45, in __init__
+    self._cfg = Config._read_and_parse_config(yml_path=yml_path_or_dict)
+  File "/sci/labs/efratmorin/haimasree/neuralhydrology/neuralhydrology/utils/config.py", line 257, in _read_and_parse_config
+    raise FileNotFoundError(yml_path)
+FileNotFoundError: C:\PhD\Python\neuralhydrology\Experiments\expand_stations_and_periods\new_configuration_wide_data_with_static\config_omri_gpu.yml
