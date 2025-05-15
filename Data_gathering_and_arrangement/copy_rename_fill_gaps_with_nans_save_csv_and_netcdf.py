@@ -3,7 +3,7 @@ import pandas as pd
 import xarray as xr
 
 # === Define paths ===
-input_folder_path = r'C:\PhD\Data\IHS_IMS_wide\IHS_IMS_wide_unified_2025-04-08'
+input_folder_path = r'C:\PhD\Data\IHS_IMS_wide\IHS_IMS_wide_unified_2025-05-15'
 output_folder_path = r'C:\PhD\Data\Caravan\timeseries\csv\il'
 output_netcdf_folder_path = r'C:\PhD\Data\Caravan\timeseries\netcdf\il'
 
