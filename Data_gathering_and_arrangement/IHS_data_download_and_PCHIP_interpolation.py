@@ -74,8 +74,10 @@ def main():
         single_station_data = single_station_data[keep_columns]
 
         # extrapolate the data of each station into 10-minute intervals
-        single_station_data['Flow_sampling_time'] = pd.to_datetime(single_station_data['Flow_sampling_time'], format='%d/%m/%Y %H:%M:%S')
+        single_station_data.loc[:, 'Flow_sampling_time'] = pd.to_datetime(single_station_data['Flow_sampling_time'],
+                                                                          format='%d/%m/%Y %H:%M:%S')
         single_station_data.set_index('Flow_sampling_time', inplace=True)
+        single_station_data = single_station_data.sort_index()
 
         single_station_data = single_station_data.loc[(single_station_data.index >= start_date) &
                                                       (single_station_data.index <= end_date)]
@@ -120,6 +122,11 @@ def main():
 
     for station_number in stations_to_plot:
         station_df_original = stations_data[station_number].copy()
+        station_df_original.loc[:, 'Flow_sampling_time'] = pd.to_datetime(station_df_original['Flow_sampling_time'],
+                                                                          format='%d/%m/%Y %H:%M:%S')
+        station_df_original.set_index('Flow_sampling_time', inplace=True)
+        station_df_original = station_df_original.sort_index()
+
         station_df_resampled = pd.read_csv(os.path.join(output_hydrograph_folder, f'{station_number}.csv'),
                                            parse_dates=['Flow_sampling_time'],
                                            index_col='Flow_sampling_time')
