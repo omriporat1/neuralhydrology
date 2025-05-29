@@ -15,15 +15,13 @@ def main():
 
     # Load base config and update
     config = Config(Path("template.yml"))
-    config.update({
-        "batch_size": int(params["batch_size"]),
-        "hidden_size": int(params["hidden_size"]),
-        "learning_rate": float(params["learning_rate"]),
-        "output_dropout": float(params["output_dropout"]),
-        "seq_length": int(params["seq_length"]),
-    })
+    config["batch_size"] = int(params["batch_size"])
+    config["hidden_size"] = int(params["hidden_size"])
+    config["learning_rate"] = float(params["learning_rate"])
+    config["output_dropout"] = float(params["output_dropout"])
+    config["seq_length"] = int(params["seq_length"])
+    config["statics_embedding"]["hiddens"] = int(params["statics_embedding"])
 
-    config.statics_embedding["hiddens"] = int(params["statics_embedding"])
     config.run_dir = str(run_dir)
 
     config.save(run_dir / "config.yml")
