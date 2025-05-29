@@ -14,7 +14,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=False)  # Fail if directory exists
 
     # Load base config and update
-    config = Config("template.yml")
+    config = Config(Path("template.yml"))
     config.batch_size = int(params["batch_size"])
     config.hidden_size = int(params["hidden_size"])
     config.learning_rate = float(params["learning_rate"])
