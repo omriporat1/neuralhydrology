@@ -16,6 +16,10 @@ source /usr/local/spack/opt/spack/linux-debian12-x86_64/gcc-12.2.0/miniconda3-24
 
 conda activate /sci/labs/efratmorin/haimasree/condaenvs/neuralhydrology
 
+mkdir -p logs
+
+mkdir -p logs results
+
 start=$(date +%s)
 
 python train_model.py ${SLURM_ARRAY_TASK_ID}
