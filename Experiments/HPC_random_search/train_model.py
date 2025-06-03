@@ -4,6 +4,7 @@ from pathlib import Path
 from neuralhydrology.utils.config import Config
 from neuralhydrology.nh_run import start_run
 
+
 def main():
     job_id = int(sys.argv[1])
     df = pd.read_csv("random_search_configurations.csv", index_col="job_id")
@@ -29,3 +30,29 @@ def main():
 
     config.save(run_dir / "config.yml")
     start_run(config_file=run_dir / "config.yml")
+
+if __name__ == "__main__":
+    main()
+# The script is designed to run a specific configuration of a neural network model
+# using a configuration file and parameters specified in a CSV file.
+# It reads the job ID from command line arguments, retrieves the corresponding
+# parameters from the CSV file, creates a directory for the run,
+# modifies a template configuration with the parameters, saves the modified
+# configuration, and then starts the run using the modified configuration file.
+# It is intended to be run in a batch processing environment where multiple
+# configurations can be executed in parallel by specifying different job IDs.
+# The script uses the `neuralhydrology` library to handle configurations and runs.
+# The parameters include batch size, hidden size, learning rate, output dropout,
+# sequence length, and static embedding size, which are common hyperparameters
+# for training neural network models.
+# The script assumes that the necessary libraries and modules are installed
+# and that the CSV file with configurations is present in the working directory.
+# It also assumes that the template configuration file is named "template.yml"
+# and is located in the same directory as the script.
+# The results of the run will be saved in a directory named "results/run_XXX",
+# where "XXX" is the job ID padded to three digits.
+# The script is executed from the command line with the job ID as an argument,
+# for example: `python train_model.py 0` to run the first configuration.
+# The script is designed to be run in a controlled environment where the
+# configurations and parameters are predefined, allowing for systematic exploration
+# of hyperparameter space through random search.
