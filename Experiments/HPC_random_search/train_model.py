@@ -21,7 +21,8 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=False)
 
     # Load and copy config as dict
-    template_config = Config(Path("template.yml")).__dict__.copy()
+    # template_config = Config(Path("template.yml")).__dict__.copy()
+    template_config = Config(Path("template.yml")).to_dict()
 
     # Modify hyperparameters
     template_config["batch_size"] = int(params["batch_size"])
