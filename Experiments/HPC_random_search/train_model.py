@@ -22,7 +22,7 @@ def main():
 
     # Load and copy config as dict
     # template_config = Config(Path("template.yml")).__dict__.copy()
-    template_config = Config(Path("template.yml")).to_dict()
+    template_config = Config(Path("template.yml")).as_dict()
 
     # Modify hyperparameters
     template_config["batch_size"] = int(params["batch_size"])
