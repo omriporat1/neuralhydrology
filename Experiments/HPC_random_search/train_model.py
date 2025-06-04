@@ -6,11 +6,18 @@ from neuralhydrology.nh_run import start_run
 
 
 def main():
-    job_id = int(sys.argv[1])
-    df = pd.read_csv("random_search_configurations.csv", index_col="job_id")
-    params = df.loc[job_id]
+    job_sub_id = int(sys.argv[1])
+    job_id = int(sys.argv[2])
 
-    run_dir = Path(f"results/run_{job_id:03d}")
+    df = pd.read_csv("random_search_configurations.csv", index_col="job_id")
+    params = df.loc[job_sub_id]
+
+    # Create a directory for the job
+    job_dir = Path(f"results/job_{job_id}")
+    job_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = job_dir / f"run_{job_sub_id:03d}"
+
+    # run_dir = Path(f"results/run_{job_sub_id:03d}")
     run_dir.mkdir(parents=True, exist_ok=False)
 
     # Load and copy config as dict
