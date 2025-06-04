@@ -16,18 +16,17 @@ source /usr/local/spack/opt/spack/linux-debian12-x86_64/gcc-12.2.0/miniconda3-24
 
 conda activate /sci/labs/efratmorin/haimasree/condaenvs/neuralhydrology
 
-mkdir -p logs
-
-mkdir -p logs results
+mkdir -p logs/${SLURM_JOB_ID}
+mkdir -p results/${SLURM_JOB_ID}
 
 start=$(date +%s)
 
-python train_model.py ${SLURM_ARRAY_TASK_ID}
+python train_model.py ${SLURM_ARRAY_TASK_ID} > logs/${SLURM_JOB_ID}/output_${SLURM_ARRAY_TASK_ID}.log 2> logs/${SLURM_JOB_ID}/error_${SLURM_ARRAY_TASK_ID}.log
 
 end=$(date +%s)
 
 runtime=$((end-start))
 
-printf 'Training time: %02d:%02d:%02d\n' $((runtime/3600)) $((runtime%3600/60)) $((runtime%60))
+printf 'Training time: %02d:%02d:%02d\n' $((runtime/3600)) $((runtime%3600/60)) $((runtime%60)) > logs/${SLURM_JOB_ID}/runtime.log
 
 conda deactivate
