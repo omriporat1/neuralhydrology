@@ -14,9 +14,10 @@ def make_yaml_safe(obj):
     elif isinstance(obj, Path):
         return str(obj)
     elif isinstance(obj, pd.Timestamp):
-        return obj.isoformat()
+        return obj.strftime("%d/%m/%Y")  # Match NH expectation
     else:
         return obj
+
 
 
 def main():
@@ -49,17 +50,19 @@ def main():
     }
     template_config["run_dir"] = str(run_dir)
 
-    # Create the final config object
-    # config = Config(template_config)
 
     safe_config_dict = make_yaml_safe(template_config)
 
     # Save to config.yml
     config_path = run_dir / "config.yml"
-    with open(config_path, "w") as f:
-        yaml.safe_dump(safe_config_dict, f)
 
-    # Launch training
+    safe_config = make_yaml_safe(template_config)
+
+    # Save to YAML
+    with open(config_path, "w") as f:
+        yaml.safe_dump(safe_config, f)
+
+    # Launch training using the saved config
     start_run(config_file=config_path)
 
 
