@@ -6,13 +6,15 @@ from neuralhydrology.nh_run import start_run
 import yaml
 
 
-def convert_paths_to_strings(obj):
+def make_yaml_safe(obj):
     if isinstance(obj, dict):
-        return {k: convert_paths_to_strings(v) for k, v in obj.items()}
+        return {k: make_yaml_safe(v) for k, v in obj.items()}
     elif isinstance(obj, list):
-        return [convert_paths_to_strings(i) for i in obj]
+        return [make_yaml_safe(i) for i in obj]
     elif isinstance(obj, Path):
         return str(obj)
+    elif isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
     else:
         return obj
 
@@ -48,9 +50,17 @@ def main():
     template_config["run_dir"] = str(run_dir)
 
     # Create the final config object
-    config = Config(template_config)
+    # config = Config(template_config)
 
-    start_run(config=config)
+    safe_config_dict = make_yaml_safe(template_config)
+
+    # Save to config.yml
+    config_path = run_dir / "config.yml"
+    with open(config_path, "w") as f:
+        yaml.safe_dump(safe_config_dict, f)
+
+    # Launch training
+    start_run(config_file=config_path)
 
 
 if __name__ == "__main__":
