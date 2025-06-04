@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=15:00:00
-#SBATCH --mkdir=logs/%A
 #SBATCH --output=logs/%A/output_%a.log
 #SBATCH --error=logs/%A/error_%a.log
 #SBATCH --account=efratmorin
@@ -19,6 +18,10 @@ conda activate /sci/labs/efratmorin/haimasree/condaenvs/neuralhydrology
 
 # mkdir -p logs/${SLURM_ARRAY_JOB_ID}
 # mkdir -p results/${SLURM_ARRAY_JOB_ID}
+
+mkdir -p logs/${SLURM_ARRAY_JOB_ID}
+mkdir -p results/${SLURM_ARRAY_JOB_ID}
+
 
 start=$(date +%s)
 
