@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from neuralhydrology.utils.config import Config
 from neuralhydrology.nh_run import start_run
-
+import yaml
 
 def main():
     job_sub_id = int(sys.argv[1])
@@ -38,8 +38,11 @@ def main():
     # Create the final config object
     config = Config(template_config)
 
-    config.save(run_dir / "config.yml")
+    with open(run_dir / "config.yml", "w") as f:
+        yaml.safe_dump(template_config, f)
+
     start_run(config_file=run_dir / "config.yml")
+
 
 if __name__ == "__main__":
     main()
