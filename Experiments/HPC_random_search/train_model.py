@@ -50,11 +50,7 @@ def main():
     # Create the final config object
     config = Config(template_config)
 
-    clean_config = convert_paths_to_strings(template_config)
-    with open(run_dir / "config.yml", "w") as f:
-        yaml.safe_dump(clean_config, f)
-
-    start_run(config_file=run_dir / "config.yml")
+    start_run(config=config)
 
 
 if __name__ == "__main__":
