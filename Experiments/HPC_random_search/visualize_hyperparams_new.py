@@ -49,7 +49,7 @@ fig_tsne.show()
 df_parallel = df.copy()
 df_parallel["index"] = df_parallel.index.astype(str)
 
-plt.figure(figsize=(14, 6))
+plt.figure(figsize=(20, 9))
 parallel_coordinates(df_parallel, "index", colormap=plt.cm.tab20, alpha=0.5)
 plt.title("Parallel Coordinates Plot of Hyperparameter Configurations")
 plt.xticks(rotation=45)
@@ -134,14 +134,3 @@ plt.suptitle("Pairplot with Jitter, Histograms, Colored by Learning Rate Bins", 
 plt.tight_layout()
 plt.show()
 
-# Normalize numeric columns for parallel coordinates
-df_scaled = df[numeric_cols].copy()
-df_scaled[numeric_cols] = MinMaxScaler().fit_transform(df_scaled[numeric_cols])
-df_scaled['group'] = df_jittered['group']
-
-plt.figure(figsize=(14, 6))
-parallel_coordinates(df_scaled, "group", colormap=plt.cm.Set1, alpha=0.6)
-plt.title("Normalized Parallel Coordinates Colored by Learning Rate Bins")
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.show()
