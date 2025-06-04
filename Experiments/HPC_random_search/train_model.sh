@@ -20,7 +20,7 @@ conda activate /sci/labs/efratmorin/haimasree/condaenvs/neuralhydrology
 # mkdir -p results/${SLURM_ARRAY_JOB_ID}
 
 mkdir -p logs/${SLURM_ARRAY_JOB_ID}
-mkdir -p results/${SLURM_ARRAY_JOB_ID}
+mkdir -p results
 
 
 start=$(date +%s)
