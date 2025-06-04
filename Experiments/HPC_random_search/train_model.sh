@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=15:00:00
+#SBATCH --mkdir=logs/%A
 #SBATCH --output=logs/%A/output_%a.log
 #SBATCH --error=logs/%A/error_%a.log
 #SBATCH --account=efratmorin
