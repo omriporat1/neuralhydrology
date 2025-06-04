@@ -29,7 +29,9 @@ def main():
     template_config["learning_rate"] = float(params["learning_rate"])
     template_config["output_dropout"] = float(params["output_dropout"])
     template_config["seq_length"] = int(params["seq_length"])
-    template_config["statics_embedding"]["hiddens"] = int(params["statics_embedding"])
+    template_config["statics_embedding"] = {
+        "hiddens": [int(params["statics_embedding"])]
+    }
     template_config["run_dir"] = str(run_dir)
 
     # Create the final config object
