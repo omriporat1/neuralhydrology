@@ -188,5 +188,4 @@ static_attributes:
 - cmi_ix_s09
 
 statics_embedding:
-  hiddens:
-  - 25
+  hiddens: [25]
