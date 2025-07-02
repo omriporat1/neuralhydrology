@@ -1,0 +1,4 @@
+/var/spool/slurmd/job41562220/slurm_script: line 19: nvidia-smi: command not found
+MoTTY X11 proxy: No authorisation provided
+
+slurmstepd: error: *** JOB 41562220 ON dogfish-01 CANCELLED AT 2025-05-14T12:40:01 DUE TO TIME LIMIT ***

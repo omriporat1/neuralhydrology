@@ -31,4 +31,5 @@ samples = pd.DataFrame({
     for k, v in param_space.items()
 })
 
-samples.to_csv("random_search_configurations_denser.csv", index_label="job_id")
+samples.to_csv("random_search_configurations_denser_test.csv", index_label="job_id")
+print("Random search configurations generated and saved to 'random_search_configurations_denser_test.csv'.")

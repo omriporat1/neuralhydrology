@@ -1,0 +1,191 @@
+autoregressive_inputs:
+- Flow_m3_sec_shift18
+batch_size: 512
+clip_gradient_norm: 1
+clip_targets_to_zero:
+- Flow_m3_sec
+
+data_dir: /sci/labs/efratmorin/omripo/PhD/Data/Caravan/ # Change to this for cluster
+# data_dir: C:\PhD\Data\Caravan # Change to this for local
+dataset: caravan
+
+# device: cpu
+device: cuda:0
+
+dynamic_inputs:
+- Rain_gauge_1
+- Rain_gauge_2
+- Rain_gauge_3
+epochs: 15
+experiment_name: N38_A30_4CPU_SMI
+forcings:
+- il
+head: regression
+hidden_size: 256
+initial_forget_bias: 3
+lagged_features:
+  Flow_m3_sec:
+  - 18
+  Rain_gauge_1:
+  - 18
+  Rain_gauge_2:
+  - 18
+  Rain_gauge_3:
+  - 18
+learning_rate: 0.001
+log_interval: 1
+log_n_figures: 8
+log_tensorboard: true
+loss: MSE
+metrics:
+- NSE
+model: arlstm
+num_workers: 0
+optimizer: Adam
+output_activation: linear
+output_dropout: 0.4
+predict_last_n: 1
+save_weights_every: 1
+seq_length: 36
+target_variables:
+- Flow_m3_sec
+
+# test_basin_file: il_basins_high_qual_0_04_N38.txt # for local
+test_basin_file: /sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/il_basins_high_qual_0_04_N38.txt # for cluster
+
+test_start_date: 01/10/2016
+test_end_date: 30/09/2019
+
+# train_basin_file: il_basins_high_qual_0_04_N38.txt # for CPU
+train_basin_file: /sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/il_basins_high_qual_0_04_N38.txt # for GPU
+
+train_start_date:
+- 01/10/2006
+- 01/10/2013
+- 01/10/2020
+train_end_date:
+- 30/09/2010
+- 30/09/2016
+- 30/09/2023
+
+# validation_basin_file: il_basins_high_qual_0_04_N38.txt # for CPU
+validation_basin_file: /sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static/il_basins_high_qual_0_04_N38.txt # for GPU
+
+validation_start_date: 01/10/2010
+validation_end_date: 30/09/2013
+
+use_basin_id_encoding: false
+validate_every: 1
+validate_n_random_basins: 0
+
+
+static_attributes:
+- cmi_ix_s02
+- glc_pc_s20
+- lka_pc_sse
+- glc_pc_s22
+- glc_pc_s15
+- cmi_ix_s12
+- cmi_ix_s01
+- pnv_pc_s11
+- ele_mt_smn
+- cmi_ix_s11
+- riv_tc_usu
+- area
+- glc_pc_s14
+- dis_m3_pmn
+- glc_pc_s19
+- for_pc_sse
+- glc_pc_s03
+- pre_mm_s09
+- inu_pc_smn
+- dis_m3_pyr
+- ero_kh_sav
+- glc_pc_s18
+- pnv_pc_s12
+- dis_m3_pmx
+- pnv_pc_s09
+- glc_pc_s16
+- urb_pc_sse
+- cmi_ix_s03
+- glc_pc_s12
+- pre_mm_s05
+- inu_pc_smx
+- crp_pc_sse
+- rdd_mk_sav
+- sgr_dk_sav
+- swc_pc_s10
+- pst_pc_sse
+- swc_pc_s09
+- pre_mm_s04
+- aet_mm_s10
+- aet_mm_s09
+- ari_ix_sav
+- swc_pc_s11
+- pre_mm_s10
+- p_mean
+- low_prec_dur
+- ele_mt_sav
+- swc_pc_s12
+- pre_mm_s01
+- aet_mm_s11
+- pre_mm_s02
+- swc_pc_s05
+- kar_pc_sse
+- swc_pc_syr
+- seasonality
+- pre_mm_syr
+- pre_mm_s12
+- swc_pc_s01
+- aet_mm_s12
+- swc_pc_s02
+- run_mm_syr
+- pre_mm_s11
+- swc_pc_s04
+- swc_pc_s03
+- pre_mm_s03
+- aet_mm_s05
+- aet_mm_syr
+- aet_mm_s01
+- ele_mt_smx
+- aet_mm_s02
+- aet_mm_s04
+- aet_mm_s03
+- slp_dg_sav
+- hft_ix_s09
+- gwt_cm_sav
+- cmi_ix_syr
+- moisture_index
+- pet_mean
+- tmp_dc_s01
+- cly_pc_sav
+- tmp_dc_s02
+- cmi_ix_s04
+- high_prec_freq
+- pet_mm_s01
+- tmp_dc_s03
+- tmp_dc_s12
+- pet_mm_s02
+- pet_mm_s12
+- pet_mm_s03
+- tmp_dc_s04
+- pet_mm_s11
+- snd_pc_sav
+- tmp_dc_s11
+- cmi_ix_s10
+- pet_mm_s04
+- pet_mm_syr
+- tmp_dc_syr
+- pet_mm_s05
+- tmp_dc_s05
+- pet_mm_s10
+- pet_mm_s09
+- low_prec_freq
+- tmp_dc_s10
+- tmp_dc_s09
+- cmi_ix_s05
+- high_prec_dur
+- cmi_ix_s09
+
+statics_embedding:
+  hiddens: 25
