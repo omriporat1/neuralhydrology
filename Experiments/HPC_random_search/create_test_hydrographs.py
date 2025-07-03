@@ -101,6 +101,45 @@ def create_test_hydrographs(experiment_folder):
         
         # Load configuration
         config = Config(config_path)
+
+        # User-defined local modifications (set RUN_LOCALLY to True for local execution)
+        RUN_LOCALLY = True  # Set to False when running on HPC/original environment
+
+        if RUN_LOCALLY:
+            logger.info("Applying local configuration modifications...")
+            
+            # Load the YAML file directly and modify it
+            import yaml
+            with open(config_path, 'r') as f:
+                config_dict = yaml.safe_load(f)
+            
+            # Modify paths in the dictionary
+            config_dict['data_dir'] = str(Path("C:/PhD/Data/Caravan"))
+            config_dict['device'] = 'cpu'
+            
+            # Update basin files if they exist
+            LOCAL_BASIN_PATH = Path("C:/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static")
+            
+            if 'test_basin_file' in config_dict and config_dict['test_basin_file']:
+                basin_filename = Path(config_dict['test_basin_file']).name
+                config_dict['test_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            if 'train_basin_file' in config_dict and config_dict['train_basin_file']:
+                basin_filename = Path(config_dict['train_basin_file']).name
+                config_dict['train_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            if 'validation_basin_file' in config_dict and config_dict['validation_basin_file']:
+                basin_filename = Path(config_dict['validation_basin_file']).name
+                config_dict['validation_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            # Create new config from modified dictionary
+            config = Config(config_dict)
+            logger.info("Local configuration modifications applied successfully")
+        else:
+            # Original config loading
+            config = Config(config_path)
+            config.device = "cpu"  # This works because device is settable
+
         logger.info(f"Processing experiment: {config.experiment_name}")
         
         # Get the last epoch
