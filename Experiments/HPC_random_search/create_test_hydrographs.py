@@ -54,13 +54,36 @@ def extract_hydrographs_from_results(results, basin_list):
                     if 'xr' in basin_data[freq_key]:
                         xr_data = basin_data[freq_key]['xr']
                         df = xr_data.to_dataframe().reset_index()
-                        hydrographs[basin] = df
+                        
+                        # Ensure we have datetime and flow columns
+                        if 'date' in df.columns:
+                            # Create clean hydrograph with datetime and flow values
+                            hydrograph_df = pd.DataFrame()
+                            hydrograph_df['datetime'] = pd.to_datetime(df['date'])
+                            
+                            # Look for flow columns (observed and simulated)
+                            flow_cols = [col for col in df.columns if col not in ['date', 'basin']]
+                            for col in flow_cols:
+                                hydrograph_df[col] = df[col]
+                            
+                            hydrographs[basin] = hydrograph_df
                 else:
                     # Direct xarray data
                     if 'xr' in basin_data:
                         xr_data = basin_data['xr']
                         df = xr_data.to_dataframe().reset_index()
-                        hydrographs[basin] = df
+                        
+                        # Ensure we have datetime and flow columns
+                        if 'date' in df.columns:
+                            hydrograph_df = pd.DataFrame()
+                            hydrograph_df['datetime'] = pd.to_datetime(df['date'])
+                            
+                            # Look for flow columns
+                            flow_cols = [col for col in df.columns if col not in ['date', 'basin']]
+                            for col in flow_cols:
+                                hydrograph_df[col] = df[col]
+                            
+                            hydrographs[basin] = hydrograph_df
             
             # If no structured data found, log warning
             if basin not in hydrographs:
@@ -90,7 +113,7 @@ def create_test_hydrographs(experiment_folder):
         
         # Create tester instance
         try:
-            tester = get_tester(cfg=config, run_dir=experiment_folder, period="test", init_model=True)
+            tester = get_tester(cfg=config, run_dir=experiment_folder, period="validation", init_model=True)
         except Exception as e:
             logger.error(f"Error creating tester: {e}")
             return False
@@ -142,8 +165,8 @@ def main():
     """Main function to process all experiments."""
     # Define the base directory containing experiments
     # Adjust this path based on your workspace structure
-    base_experiment_dir = Path("Experiments")  # Change this to your experiments directory
-    
+    base_experiment_dir = Path("Experiments/HPC_random_search/results")  # Change this to your experiments directory
+
     if not base_experiment_dir.exists():
         # Try alternative paths
         alternative_paths = [
