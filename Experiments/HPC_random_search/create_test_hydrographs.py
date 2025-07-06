@@ -147,6 +147,19 @@ def create_test_hydrographs(experiment_folder):
             # Create new config from modified dictionary
             config = Config(config_dict)
             logger.info("Local configuration modifications applied successfully")
+        else:
+            logger.info("Running on HPC/cluster - using original configuration paths")
+            # On cluster, just ensure the run_dir is set correctly
+            import yaml
+            with open(config_path, 'r') as f:
+                config_dict = yaml.safe_load(f)
+            
+            # Only modify run_dir to the current experiment folder absolute path
+            config_dict['run_dir'] = str(experiment_folder.absolute())
+            
+            # Create config from potentially modified dictionary
+            config = Config(config_dict)
+            logger.info("HPC configuration applied successfully")
 
         logger.info(f"Processing experiment: {config.experiment_name}")
         
@@ -176,13 +189,22 @@ def create_test_hydrographs(experiment_folder):
             logger.info(f"Scaler YML exists: {scaler_yml.exists()}")
             logger.info(f"Scaler pickle exists: {scaler_pickle.exists()}")
             
-            # Set device to CPU explicitly
-            if hasattr(torch, 'cuda') and torch.cuda.is_available():
-                logger.info("CUDA available but forcing CPU for evaluation")
-            torch.set_default_tensor_type('torch.FloatTensor')  # Ensure CPU tensors
+            # Set device appropriately
+            if RUN_LOCALLY:
+                # Force CPU for local execution
+                if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    logger.info("CUDA available but forcing CPU for local evaluation")
+                torch.set_default_tensor_type('torch.FloatTensor')  # Ensure CPU tensors
+            else:
+                # On cluster, use the device specified in config (likely GPU)
+                logger.info(f"Running on cluster with device: {config.device}")
+                if config.device.startswith('cuda') and torch.cuda.is_available():
+                    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+                else:
+                    torch.set_default_tensor_type('torch.FloatTensor')
             
-            tester = get_tester(cfg=config, run_dir=experiment_folder, period="validation", init_model=True)
-            logger.info(f"Tester created successfully")
+            tester = get_tester(cfg=config, run_dir=experiment_folder, period="test", init_model=True)
+            logger.info(f"Tester created successfully (using test period instead of validation)")
             
         except Exception as e:
             logger.error(f"Error creating tester: {e}")
@@ -193,6 +215,9 @@ def create_test_hydrographs(experiment_folder):
         
         # Debug validation basin file and data availability
         logger.info("=== DEBUGGING VALIDATION SETUP ===")
+        logger.info(f"Dataset type: {getattr(config, 'dataset', 'Not specified')}")
+        logger.info(f"Data directory: {config.data_dir}")
+        
         if hasattr(config, 'validation_basin_file') and config.validation_basin_file:
             val_basin_path = Path(config.validation_basin_file)
             logger.info(f"Validation basin file: {val_basin_path}")
@@ -204,51 +229,26 @@ def create_test_hydrographs(experiment_folder):
                     logger.info(f"Total validation basins from file: {len(val_basins)}")
                     logger.info(f"First 5 validation basins: {val_basins[:5]}")
                     
-                    # Debug: Check validation period
-                    if hasattr(config, 'val_start_date') and hasattr(config, 'val_end_date'):
-                        logger.info(f"Validation period: {config.val_start_date} to {config.val_end_date}")
-                    else:
-                        logger.warning("No validation period found in config")
-                    
-                    # Debug: Check data directory and available basins
+                    # Check NetCDF files in data directory
                     data_dir = Path(config.data_dir)
-                    logger.info(f"Data directory: {data_dir}")
-                    logger.info(f"Data directory exists: {data_dir.exists()}")
+                    netcdf_dir = data_dir / "timeseries" / "netcdf" / "il"
+                    logger.info(f"NetCDF directory: {netcdf_dir}")
+                    logger.info(f"NetCDF directory exists: {netcdf_dir.exists()}")
                     
-                    if data_dir.exists():
-                        # Check what basins are actually available in the data directory
-                        all_dirs = [d.name for d in data_dir.iterdir() if d.is_dir()]
-                        logger.info(f"Total directories in data folder: {len(all_dirs)}")
-                        logger.info(f"First 5 directories: {all_dirs[:5]}")
+                    if netcdf_dir.exists():
+                        netcdf_files = list(netcdf_dir.glob("*.nc"))
+                        netcdf_basin_names = [f.stem for f in netcdf_files]
+                        available_val_basins = [b for b in val_basins if b in netcdf_basin_names]
                         
-                        # Check which validation basins are available
-                        available_val_basins = [b for b in val_basins if b in all_dirs]
-                        logger.info(f"Available validation basins in data: {len(available_val_basins)}")
+                        logger.info(f"Total NetCDF files found: {len(netcdf_files)}")
+                        logger.info(f"Available validation basins in NetCDF data: {len(available_val_basins)}")
                         
-                        missing_basins = [b for b in val_basins if b not in all_dirs]
+                        missing_basins = [b for b in val_basins if b not in netcdf_basin_names]
                         if missing_basins:
                             logger.warning(f"Missing basins count: {len(missing_basins)}")
                             logger.warning(f"First 5 missing basins: {missing_basins[:5]}")
-                        
-                        # Check if any validation basin has data files for the validation period
-                        if available_val_basins:
-                            sample_basin = available_val_basins[0]
-                            basin_dir = data_dir / sample_basin
-                            data_files = list(basin_dir.glob("*.csv"))
-                            logger.info(f"Sample basin {sample_basin} has {len(data_files)} data files")
-                            
-                            # Check date range in the first data file
-                            if data_files:
-                                try:
-                                    sample_df = pd.read_csv(data_files[0], parse_dates=['date'], nrows=10)
-                                    if 'date' in sample_df.columns:
-                                        logger.info(f"Sample data date range starts: {sample_df['date'].min()}")
-                                        
-                                        # Read the whole file to get end date
-                                        full_df = pd.read_csv(data_files[0], parse_dates=['date'])
-                                        logger.info(f"Sample data date range ends: {full_df['date'].max()}")
-                                except Exception as e:
-                                    logger.warning(f"Could not read sample data file: {e}")
+                        else:
+                            logger.info("All validation basins found in NetCDF data!")
                     
                 except Exception as e:
                     logger.error(f"Error in validation debugging: {e}")
@@ -256,6 +256,86 @@ def create_test_hydrographs(experiment_folder):
             logger.warning("No validation_basin_file found in config")
         
         logger.info("=== END DEBUGGING ===")
+        
+        # Additional debugging: Check validation period and data availability
+        logger.info("=== VALIDATION PERIOD DEBUGGING ===")
+        if hasattr(config, 'validation_start_date') and hasattr(config, 'validation_end_date'):
+            logger.info(f"Validation start: {config.validation_start_date}")
+            logger.info(f"Validation end: {config.validation_end_date}")
+        else:
+            logger.warning("Validation period not found in config")
+            # Check for alternative date attributes
+            date_attrs = [attr for attr in dir(config) if 'date' in attr.lower()]
+            logger.info(f"Available date attributes: {date_attrs}")
+            for attr in date_attrs:
+                if hasattr(config, attr):
+                    logger.info(f"{attr}: {getattr(config, attr)}")
+        
+        # Check if we can peek at actual data for one basin
+        if netcdf_dir.exists() and val_basins:
+            sample_basin = val_basins[0]
+            sample_nc_file = netcdf_dir / f"{sample_basin}.nc"
+            if sample_nc_file.exists():
+                try:
+                    import xarray as xr
+                    logger.info(f"Checking sample NetCDF file: {sample_nc_file}")
+                    ds = xr.open_dataset(sample_nc_file)
+                    logger.info(f"NetCDF variables: {list(ds.variables.keys())}")
+                    if 'date' in ds.variables:
+                        dates = ds['date'].values
+                        logger.info(f"Date range in NetCDF: {dates.min()} to {dates.max()}")
+                        logger.info(f"Total time steps: {len(dates)}")
+                    else:
+                        logger.warning("No 'date' variable found in NetCDF")
+                    ds.close()
+                except Exception as e:
+                    logger.warning(f"Could not read sample NetCDF: {e}")
+        
+        logger.info("=== END VALIDATION PERIOD DEBUGGING ===")
+        
+        # Now actually run the evaluation
+        try:
+            logger.info("Starting evaluation on validation period...")
+            results = tester.evaluate()
+            logger.info(f"Evaluation completed. Results type: {type(results)}")
+            
+            # Check if results were written to files even if the return value is empty
+            validation_dir = experiment_folder / "validation" / f"model_epoch{last_epoch:03d}"
+            results_file_p = validation_dir / "validation_results.p"
+            metrics_file = validation_dir / "validation_metrics.csv"
+            
+            logger.info(f"Checking for results files:")
+            logger.info(f"Results file exists: {results_file_p.exists()}")
+            logger.info(f"Metrics file exists: {metrics_file.exists()}")
+            
+            # Try to load results from the saved file if the return value is empty
+            if (not results or len(results) == 0) and results_file_p.exists():
+                logger.info("Loading results from saved file...")
+                with open(results_file_p, 'rb') as f:
+                    results = pickle.load(f)
+                logger.info(f"Loaded results type: {type(results)}")
+                if isinstance(results, dict):
+                    logger.info(f"Loaded results keys: {list(results.keys())}")
+            
+            if results and len(results) > 0:
+                logger.info(f"Results available with {len(results)} entries")
+                
+                # Save results for later processing (our own copy)
+                our_results_file = experiment_folder / "validation_results.pickle"
+                with open(our_results_file, 'wb') as f:
+                    pickle.dump(results, f)
+                logger.info(f"Saved results to {our_results_file}")
+                
+                return True
+            else:
+                logger.warning("No results returned from evaluation and no valid saved results found")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return False
             
     except Exception as e:
         logger.error(f"Unexpected error processing {experiment_folder}: {e}")
