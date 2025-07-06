@@ -12,12 +12,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def find_experiment_folders(base_dir):
-    """Find all experiment folders containing config.yml files."""
+    """Find all experiment folders containing config.yml files and model files."""
     experiment_folders = []
     base_path = Path(base_dir)
     
     for item in base_path.rglob("config.yml"):
-        experiment_folders.append(item.parent)
+        config_dir = item.parent
+        
+        # Check if this directory contains model files (indicating it's the actual experiment directory)
+        model_files = list(config_dir.glob("model_epoch*.pt"))
+        
+        if model_files:
+            experiment_folders.append(config_dir)
+            logger.debug(f"Found experiment directory with {len(model_files)} model files: {config_dir}")
+        else:
+            logger.debug(f"Skipping config.yml without model files: {config_dir}")
     
     return experiment_folders
 
@@ -117,6 +126,9 @@ def create_test_hydrographs(experiment_folder):
             config_dict['data_dir'] = str(Path("C:/PhD/Data/Caravan"))
             config_dict['device'] = 'cpu'
             
+            # IMPORTANT: Set the run_dir to the absolute local path
+            config_dict['run_dir'] = str(experiment_folder.absolute())
+            
             # Update basin files if they exist
             LOCAL_BASIN_PATH = Path("C:/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static")
             
@@ -135,10 +147,6 @@ def create_test_hydrographs(experiment_folder):
             # Create new config from modified dictionary
             config = Config(config_dict)
             logger.info("Local configuration modifications applied successfully")
-        else:
-            # Original config loading
-            config = Config(config_path)
-            config.device = "cpu"  # This works because device is settable
 
         logger.info(f"Processing experiment: {config.experiment_name}")
         
@@ -152,50 +160,103 @@ def create_test_hydrographs(experiment_folder):
         
         # Create tester instance
         try:
+            import torch
+            
+            # Ensure CPU device is set in config
+            logger.info(f"Config device before tester creation: {config.device}")
+            
+            # Debug: Check if model files exist
+            model_files = list(experiment_folder.glob("model_epoch*.pt"))
+            logger.info(f"Found {len(model_files)} model files in {experiment_folder}")
+            
+            # Debug: Check scaler files
+            train_data_dir = experiment_folder / "train_data"
+            scaler_yml = train_data_dir / "train_data_scaler.yml"
+            scaler_pickle = train_data_dir / "train_data_scaler.p"
+            logger.info(f"Scaler YML exists: {scaler_yml.exists()}")
+            logger.info(f"Scaler pickle exists: {scaler_pickle.exists()}")
+            
+            # Set device to CPU explicitly
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                logger.info("CUDA available but forcing CPU for evaluation")
+            torch.set_default_tensor_type('torch.FloatTensor')  # Ensure CPU tensors
+            
             tester = get_tester(cfg=config, run_dir=experiment_folder, period="validation", init_model=True)
+            logger.info(f"Tester created successfully")
+            
         except Exception as e:
             logger.error(f"Error creating tester: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
         
-        # Run evaluation
-        try:
-            results = tester.evaluate(epoch=last_epoch, save_results=False, save_all_output=False, metrics=[])
-            logger.info(f"Evaluation completed for {len(results)} basins")
-        except Exception as e:
-            logger.error(f"Error during evaluation: {e}")
-            return False
+        # Debug validation basin file and data availability
+        logger.info("=== DEBUGGING VALIDATION SETUP ===")
+        if hasattr(config, 'validation_basin_file') and config.validation_basin_file:
+            val_basin_path = Path(config.validation_basin_file)
+            logger.info(f"Validation basin file: {val_basin_path}")
+            logger.info(f"Validation basin file exists: {val_basin_path.exists()}")
+            
+            if val_basin_path.exists():
+                try:
+                    val_basins = load_basin_file(val_basin_path)
+                    logger.info(f"Total validation basins from file: {len(val_basins)}")
+                    logger.info(f"First 5 validation basins: {val_basins[:5]}")
+                    
+                    # Debug: Check validation period
+                    if hasattr(config, 'val_start_date') and hasattr(config, 'val_end_date'):
+                        logger.info(f"Validation period: {config.val_start_date} to {config.val_end_date}")
+                    else:
+                        logger.warning("No validation period found in config")
+                    
+                    # Debug: Check data directory and available basins
+                    data_dir = Path(config.data_dir)
+                    logger.info(f"Data directory: {data_dir}")
+                    logger.info(f"Data directory exists: {data_dir.exists()}")
+                    
+                    if data_dir.exists():
+                        # Check what basins are actually available in the data directory
+                        all_dirs = [d.name for d in data_dir.iterdir() if d.is_dir()]
+                        logger.info(f"Total directories in data folder: {len(all_dirs)}")
+                        logger.info(f"First 5 directories: {all_dirs[:5]}")
+                        
+                        # Check which validation basins are available
+                        available_val_basins = [b for b in val_basins if b in all_dirs]
+                        logger.info(f"Available validation basins in data: {len(available_val_basins)}")
+                        
+                        missing_basins = [b for b in val_basins if b not in all_dirs]
+                        if missing_basins:
+                            logger.warning(f"Missing basins count: {len(missing_basins)}")
+                            logger.warning(f"First 5 missing basins: {missing_basins[:5]}")
+                        
+                        # Check if any validation basin has data files for the validation period
+                        if available_val_basins:
+                            sample_basin = available_val_basins[0]
+                            basin_dir = data_dir / sample_basin
+                            data_files = list(basin_dir.glob("*.csv"))
+                            logger.info(f"Sample basin {sample_basin} has {len(data_files)} data files")
+                            
+                            # Check date range in the first data file
+                            if data_files:
+                                try:
+                                    sample_df = pd.read_csv(data_files[0], parse_dates=['date'], nrows=10)
+                                    if 'date' in sample_df.columns:
+                                        logger.info(f"Sample data date range starts: {sample_df['date'].min()}")
+                                        
+                                        # Read the whole file to get end date
+                                        full_df = pd.read_csv(data_files[0], parse_dates=['date'])
+                                        logger.info(f"Sample data date range ends: {full_df['date'].max()}")
+                                except Exception as e:
+                                    logger.warning(f"Could not read sample data file: {e}")
+                    
+                except Exception as e:
+                    logger.error(f"Error in validation debugging: {e}")
+        else:
+            logger.warning("No validation_basin_file found in config")
         
-        # Load basin list
-        try:
-            if hasattr(config, 'test_basin_file') and config.test_basin_file:
-                basin_list = load_basin_file(Path(config.test_basin_file))
-            else:
-                basin_list = list(results.keys())
-        except Exception as e:
-            logger.warning(f"Could not load basin file, using results keys: {e}")
-            basin_list = list(results.keys())
-        
-        # Extract hydrographs
-        hydrographs = extract_hydrographs_from_results(results, basin_list)
-        
-        # Create hydrographs directory
-        hydrographs_dir = experiment_folder / "hydrographs"
-        hydrographs_dir.mkdir(exist_ok=True)
-        
-        # Save hydrographs to CSV files
-        saved_count = 0
-        for basin, df in hydrographs.items():
-            try:
-                output_file = hydrographs_dir / f"{basin}.csv"
-                df.to_csv(output_file, index=False)
-                logger.info(f"Saved hydrograph for basin {basin}")
-                saved_count += 1
-            except Exception as e:
-                logger.error(f"Error saving hydrograph for basin {basin}: {e}")
-        
-        logger.info(f"Successfully saved {saved_count} hydrographs to {hydrographs_dir}")
-        return True
-        
+        logger.info("=== END DEBUGGING ===")
+            
     except Exception as e:
         logger.error(f"Unexpected error processing {experiment_folder}: {e}")
         return False
