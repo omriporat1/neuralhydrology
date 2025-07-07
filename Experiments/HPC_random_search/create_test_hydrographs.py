@@ -1,11 +1,13 @@
 import os
 import pickle
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from neuralhydrology.utils.config import Config
 from neuralhydrology.evaluation import get_tester
 from neuralhydrology.datautils.utils import load_basin_file
 import logging
+import xarray as xr
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,6 +32,76 @@ def find_experiment_folders(base_dir):
     
     return experiment_folders
 
+def find_results_pickle_files(experiment_folder):
+    """Find existing results pickle files in the experiment folder."""
+    # Look for test results
+    test_files = list(experiment_folder.glob("test/model_epoch*/test_results.p"))
+    
+    # Look for validation results
+    val_files = list(experiment_folder.glob("validation/model_epoch*/validation_results.p"))
+    
+    # all_files = test_files + val_files
+    all_files = test_files
+
+    if all_files:
+        # Get the most recent one (highest epoch number)
+        all_files.sort(key=lambda x: int(x.parent.name.split('epoch')[1]))
+        return all_files[-1]  # Return the latest epoch
+    
+    return None
+
+def has_valid_pickle_results(experiment_folder):
+    """Check if experiment has valid (non-empty) pickle results."""
+    results_file = find_results_pickle_files(experiment_folder)
+    
+    if not results_file:
+        logger.debug(f"No pickle file found for {experiment_folder.name}")
+        return False
+    
+    logger.debug(f"Checking pickle file: {results_file}")
+    
+    try:
+        with open(results_file, 'rb') as f:
+            results = pickle.load(f)
+        
+        logger.debug(f"Loaded pickle for {experiment_folder.name}: {type(results)}, {len(results) if hasattr(results, '__len__') else 'no length'} entries")
+        
+        # Check if results actually contain data
+        if results and len(results) > 0:
+            logger.debug(f"Results has {len(results)} entries, checking content...")
+            
+            # Additional check: make sure at least one basin has actual data
+            valid_basins = 0
+            for basin_id, basin_data in results.items():
+                if basin_data:  # If any basin has data
+                    logger.debug(f"Basin {basin_id} has data: {type(basin_data)}")
+                    if isinstance(basin_data, dict):
+                        logger.debug(f"  Basin data keys: {list(basin_data.keys())}")
+                    valid_basins += 1
+                    break  # We only need to find one valid basin
+            
+            if valid_basins > 0:
+                logger.debug(f"Found {valid_basins} valid basins in {experiment_folder.name}")
+                return True
+            else:
+                logger.debug(f"All basins are empty in {experiment_folder.name}")
+                return False
+        else:
+            logger.debug(f"Results dict is empty for {experiment_folder.name}")
+            return False
+            
+    except Exception as e:
+        logger.debug(f"Error checking pickle file {results_file}: {e}")
+        return False
+
+def has_existing_csv_results(experiment_folder):
+    """Check if experiment already has CSV results generated."""
+    results_dir = experiment_folder / "test_results"
+    if results_dir.exists():
+        csv_files = list(results_dir.glob("*.csv"))
+        return len(csv_files) > 0
+    return False
+
 def get_last_epoch_number(run_dir):
     """Get the last epoch number from model files."""
     model_files = list(run_dir.glob("model_epoch*.pt"))
@@ -44,64 +116,272 @@ def get_last_epoch_number(run_dir):
     
     return max(epochs)
 
-def extract_hydrographs_from_results(results, basin_list):
-    """Extract hydrograph data from evaluation results."""
-    hydrographs = {}
+def debug_data_availability(config):
+    """Debug what data is actually available for the configured period and basins."""
+    logger.info("=== DETAILED DATA DEBUGGING ===")
     
-    for basin in basin_list:
-        if basin in results:
-            basin_data = results[basin]
+    # Get validation basins
+    try:
+        val_basins = load_basin_file(config.validation_basin_file)
+        logger.info(f"Validation basins from config: {len(val_basins)} basins")
+        logger.info(f"First 5 basins: {val_basins[:5]}")
+    except Exception as e:
+        logger.error(f"Could not load validation basin file: {e}")
+        return
+    
+    # Check data availability for a sample basin
+    sample_basin = val_basins[0]
+    data_file = Path(config.data_dir) / "timeseries" / "netcdf" / "il" / f"{sample_basin}.nc"
+    
+    if data_file.exists():
+        logger.info(f"Checking data for sample basin: {sample_basin}")
+        
+        try:
+            # Load the NetCDF file
+            ds = xr.open_dataset(data_file)
+            logger.info(f"NetCDF variables: {list(ds.variables.keys())}")
             
-            # Handle different frequency structures
-            if isinstance(basin_data, dict):
-                # Check if there are frequency keys (like '1D', '1h')
-                freq_keys = [k for k in basin_data.keys() if k not in ['qobs', 'date']]
+            # Check date range
+            if 'date' in ds.variables:
+                dates = pd.to_datetime(ds['date'].values)
+                logger.info(f"Data date range: {dates.min()} to {dates.max()}")
                 
-                if freq_keys:
-                    # Use the first frequency found
-                    freq_key = freq_keys[0]
-                    if 'xr' in basin_data[freq_key]:
-                        xr_data = basin_data[freq_key]['xr']
-                        df = xr_data.to_dataframe().reset_index()
-                        
-                        # Ensure we have datetime and flow columns
-                        if 'date' in df.columns:
-                            # Create clean hydrograph with datetime and flow values
-                            hydrograph_df = pd.DataFrame()
-                            hydrograph_df['datetime'] = pd.to_datetime(df['date'])
-                            
-                            # Look for flow columns (observed and simulated)
-                            flow_cols = [col for col in df.columns if col not in ['date', 'basin']]
-                            for col in flow_cols:
-                                hydrograph_df[col] = df[col]
-                            
-                            hydrographs[basin] = hydrograph_df
+                # Check validation period overlap
+                val_start = pd.to_datetime(f"{config.validation_start_date}")
+                val_end = pd.to_datetime(f"{config.validation_end_date}")
+                
+                logger.info(f"Validation period: {val_start} to {val_end}")
+                
+                # Check if there's overlap
+                overlap_mask = (dates >= val_start) & (dates <= val_end)
+                overlap_count = overlap_mask.sum()
+                
+                logger.info(f"Overlapping time steps: {overlap_count}")
+                
+                if overlap_count > 0:
+                    logger.info(f"Overlap range: {dates[overlap_mask].min()} to {dates[overlap_mask].max()}")
                 else:
-                    # Direct xarray data
-                    if 'xr' in basin_data:
-                        xr_data = basin_data['xr']
+                    logger.warning("NO OVERLAP between validation period and available data!")
+                
+                # Check for discharge data
+                discharge_vars = [var for var in ds.variables if 'flow' in var.lower() or 'discharge' in var.lower() or 'q' in var.lower()]
+                logger.info(f"Potential discharge variables: {discharge_vars}")
+                
+                # Check for missing data in validation period
+                if overlap_count > 0 and discharge_vars:
+                    for var in discharge_vars:
+                        var_data = ds[var].values[overlap_mask]
+                        valid_count = (~pd.isna(var_data)).sum()
+                        logger.info(f"Variable {var}: {valid_count}/{overlap_count} valid values in validation period")
+            
+            ds.close()
+            
+        except Exception as e:
+            logger.error(f"Error reading NetCDF file: {e}")
+    else:
+        logger.error(f"Data file not found: {data_file}")
+    
+    logger.info("=== END DATA DEBUGGING ===")
+    
+    
+
+def save_basin_hydrographs(results, output_dir):
+    """Save individual basin hydrographs as CSV files."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    saved_count = 0
+    
+    if not results or len(results) == 0:
+        logger.warning("No results to save")
+        return saved_count
+    
+    logger.info(f"Attempting to save hydrographs for {len(results)} basins to {output_path}")
+    
+    for basin_id, basin_data in results.items():
+        try:
+            logger.debug(f"Processing basin {basin_id}")
+            
+            # Initialize variables
+            observed = None
+            predicted = None
+            dates = None
+            
+            # Handle different possible data structures
+            if isinstance(basin_data, dict):
+                logger.debug(f"Basin data keys: {list(basin_data.keys())}")
+                
+                # Check for frequency-based structure (e.g., '10min', '1D', '1H', etc.)
+                freq_keys = [key for key in basin_data.keys() if any(char.isdigit() for char in key)]
+                if freq_keys:
+                    freq_key = freq_keys[0]  # Use the first frequency
+                    logger.debug(f"Using frequency key: {freq_key}")
+                    freq_data = basin_data[freq_key]
+                    
+                    if isinstance(freq_data, dict) and 'xr' in freq_data:
+                        logger.debug("Found xarray data in frequency structure")
+                        xr_data = freq_data['xr']
+                        logger.debug(f"Xarray data variables: {list(xr_data.variables.keys())}")
+                        
+                        # Convert to DataFrame
+                        df = xr_data.to_dataframe().reset_index()
+                        logger.debug(f"DataFrame columns: {list(df.columns)}")
+                        
+                        # Extract time series data
+                        if 'date' in df.columns:
+                            dates = pd.to_datetime(df['date'])
+                        
+                        # Look for observed and predicted columns in neuralhydrology format
+                        for col in df.columns:
+                            col_lower = col.lower()
+                            if 'qobs' in col_lower or ('obs' in col_lower and 'flow' in col_lower):
+                                observed = df[col].values
+                                logger.debug(f"Found observed data in column: {col}")
+                            elif 'qsim' in col_lower or ('sim' in col_lower and 'flow' in col_lower):
+                                predicted = df[col].values
+                                logger.debug(f"Found predicted data in column: {col}")
+                
+                # Check for direct xarray structure (backup)
+                elif 'xr' in basin_data:
+                    logger.debug("Found direct xarray structure")
+                    xr_data = basin_data['xr']
+                    df = xr_data.to_dataframe().reset_index()
+                    
+                    # Extract time series data
+                    if 'date' in df.columns:
+                        dates = pd.to_datetime(df['date'])
+                    
+                    # Look for observed and predicted columns
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        if 'qobs' in col_lower or ('obs' in col_lower and 'flow' in col_lower):
+                            observed = df[col].values
+                            logger.debug(f"Found observed data in column: {col}")
+                        elif 'qsim' in col_lower or ('sim' in col_lower and 'flow' in col_lower):
+                            predicted = df[col].values
+                            logger.debug(f"Found predicted data in column: {col}")
+                
+                # Check for legacy frequency structure
+                elif any(key in ['1D', '1H', '3H', '6H', '12H', '24H', '10min'] for key in basin_data.keys()):
+                    freq_key = next(key for key in basin_data.keys() if key in ['1D', '1H', '3H', '6H', '12H', '24H', '10min'])
+                    freq_data = basin_data[freq_key]
+                    
+                    if 'xr' in freq_data:
+                        xr_data = freq_data['xr']
                         df = xr_data.to_dataframe().reset_index()
                         
-                        # Ensure we have datetime and flow columns
                         if 'date' in df.columns:
-                            hydrograph_df = pd.DataFrame()
-                            hydrograph_df['datetime'] = pd.to_datetime(df['date'])
-                            
-                            # Look for flow columns
-                            flow_cols = [col for col in df.columns if col not in ['date', 'basin']]
-                            for col in flow_cols:
-                                hydrograph_df[col] = df[col]
-                            
-                            hydrographs[basin] = hydrograph_df
+                            dates = pd.to_datetime(df['date'])
+                        
+                        for col in df.columns:
+                            col_lower = col.lower()
+                            if 'qobs' in col_lower or ('obs' in col_lower and 'flow' in col_lower):
+                                observed = df[col].values
+                                logger.debug(f"Found observed data in column: {col}")
+                            elif 'qsim' in col_lower or ('sim' in col_lower and 'flow' in col_lower):
+                                predicted = df[col].values
+                                logger.debug(f"Found predicted data in column: {col}")
             
-            # If no structured data found, log warning
-            if basin not in hydrographs:
-                logger.warning(f"Could not extract hydrograph data for basin {basin}")
+            # Create DataFrame if we have the required data
+            if observed is not None and predicted is not None:
+                # Ensure arrays are 1D
+                observed = np.array(observed).flatten()
+                predicted = np.array(predicted).flatten()
+                
+                logger.debug(f"Data shapes - Observed: {observed.shape}, Predicted: {predicted.shape}")
+                
+                # Create DataFrame
+                data_dict = {
+                    'observed': observed,
+                    'predicted': predicted
+                }
+                
+                # Add dates if available
+                if dates is not None:
+                    dates = pd.to_datetime(np.array(dates).flatten())
+                    data_dict['datetime'] = dates
+                    logger.debug(f"Date range: {dates.min()} to {dates.max()}")
+                else:
+                    # Create a simple index if no dates
+                    data_dict['time_step'] = range(len(observed))
+                    logger.debug("No dates found - using time step index")
+                
+                df = pd.DataFrame(data_dict)
+                
+                # Save to CSV
+                csv_file = output_path / f"{basin_id}_hydrograph.csv"
+                df.to_csv(csv_file, index=False)
+                
+                logger.debug(f"Saved hydrograph for {basin_id}: {len(df)} time steps")
+                saved_count += 1
+                
+            else:
+                logger.warning(f"Could not extract observed/predicted data for basin {basin_id}")
+                # More detailed debugging for first few failures
+                if saved_count < 3 and isinstance(basin_data, dict):
+                    logger.warning(f"Available keys for {basin_id}: {list(basin_data.keys())}")
+                    
+                    # Try to explore the frequency structure more deeply
+                    for key, value in basin_data.items():
+                        if isinstance(value, dict):
+                            logger.warning(f"  {key} contains: {list(value.keys())}")
+                            if 'xr' in value:
+                                xr_data = value['xr']
+                                logger.warning(f"    xr variables: {list(xr_data.variables.keys())}")
+                
+        except Exception as e:
+            logger.error(f"Error saving hydrograph for basin {basin_id}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
     
-    return hydrographs
+    logger.info(f"Successfully saved {saved_count} hydrographs")
+    return saved_count
 
-def create_test_hydrographs(experiment_folder):
-    """Create test hydrographs for a single experiment."""
+def extract_hydrographs_from_pickle(experiment_folder):
+    """Extract hydrographs from existing pickle files without re-running evaluation."""
+    logger.info(f"Processing existing results for: {experiment_folder.name}")
+    
+    # Find existing results pickle file
+    results_file = find_results_pickle_files(experiment_folder)
+    
+    if not results_file:
+        logger.warning(f"No results pickle file found in {experiment_folder}")
+        return False
+    
+    logger.info(f"Found results file: {results_file}")
+    
+    try:
+        # Load the results
+        with open(results_file, 'rb') as f:
+            results = pickle.load(f)
+        
+        logger.info(f"Loaded results: {type(results)}, {len(results)} entries")
+        
+        if not results or len(results) == 0:
+            logger.warning("Results file is empty")
+            return False
+        
+        # Create output directory
+        output_dir = experiment_folder / "test_results"
+        
+        # Save individual basin CSV files
+        saved_count = save_basin_hydrographs(results, output_dir)
+        
+        if saved_count > 0:
+            logger.info(f"Successfully saved {saved_count} basin hydrographs to {output_dir}")
+            return True
+        else:
+            logger.warning("No hydrographs were saved")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error processing pickle file {results_file}: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return False
+
+def run_full_evaluation(experiment_folder):
+    """Run full evaluation for experiments that don't have results yet."""
     try:
         config_path = experiment_folder / "config.yml"
         if not config_path.exists():
@@ -161,7 +441,7 @@ def create_test_hydrographs(experiment_folder):
             config = Config(config_dict)
             logger.info("HPC configuration applied successfully")
 
-        logger.info(f"Processing experiment: {config.experiment_name}")
+        logger.info(f"Running full evaluation for: {config.experiment_name}")
         
         # Get the last epoch
         try:
@@ -174,20 +454,6 @@ def create_test_hydrographs(experiment_folder):
         # Create tester instance
         try:
             import torch
-            
-            # Ensure CPU device is set in config
-            logger.info(f"Config device before tester creation: {config.device}")
-            
-            # Debug: Check if model files exist
-            model_files = list(experiment_folder.glob("model_epoch*.pt"))
-            logger.info(f"Found {len(model_files)} model files in {experiment_folder}")
-            
-            # Debug: Check scaler files
-            train_data_dir = experiment_folder / "train_data"
-            scaler_yml = train_data_dir / "train_data_scaler.yml"
-            scaler_pickle = train_data_dir / "train_data_scaler.p"
-            logger.info(f"Scaler YML exists: {scaler_yml.exists()}")
-            logger.info(f"Scaler pickle exists: {scaler_pickle.exists()}")
             
             # Set device appropriately
             if RUN_LOCALLY:
@@ -203,138 +469,53 @@ def create_test_hydrographs(experiment_folder):
                 else:
                     torch.set_default_tensor_type('torch.FloatTensor')
             
-            tester = get_tester(cfg=config, run_dir=experiment_folder, period="test", init_model=True)
-            logger.info(f"Tester created successfully (using test period instead of validation)")
+            # Try test period first since it worked before
+            try:
+                tester = get_tester(cfg=config, run_dir=experiment_folder, period="test", init_model=True)
+                logger.info("Tester created successfully using test period")
+                period_used = "test"
+            except Exception as test_error:
+                logger.warning(f"Could not create tester for test period: {test_error}")
+                try:
+                    tester = get_tester(cfg=config, run_dir=experiment_folder, period="validation", init_model=True)
+                    logger.info("Tester created successfully using validation period")
+                    period_used = "validation"
+                except Exception as val_error:
+                    logger.error(f"Could not create tester for validation period either: {val_error}")
+                    raise val_error
             
         except Exception as e:
             logger.error(f"Error creating tester: {e}")
-            logger.error(f"Exception type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
         
-        # Debug validation basin file and data availability
-        logger.info("=== DEBUGGING VALIDATION SETUP ===")
-        logger.info(f"Dataset type: {getattr(config, 'dataset', 'Not specified')}")
-        logger.info(f"Data directory: {config.data_dir}")
-        
-        if hasattr(config, 'validation_basin_file') and config.validation_basin_file:
-            val_basin_path = Path(config.validation_basin_file)
-            logger.info(f"Validation basin file: {val_basin_path}")
-            logger.info(f"Validation basin file exists: {val_basin_path.exists()}")
-            
-            if val_basin_path.exists():
-                try:
-                    val_basins = load_basin_file(val_basin_path)
-                    logger.info(f"Total validation basins from file: {len(val_basins)}")
-                    logger.info(f"First 5 validation basins: {val_basins[:5]}")
-                    
-                    # Check NetCDF files in data directory
-                    data_dir = Path(config.data_dir)
-                    netcdf_dir = data_dir / "timeseries" / "netcdf" / "il"
-                    logger.info(f"NetCDF directory: {netcdf_dir}")
-                    logger.info(f"NetCDF directory exists: {netcdf_dir.exists()}")
-                    
-                    if netcdf_dir.exists():
-                        netcdf_files = list(netcdf_dir.glob("*.nc"))
-                        netcdf_basin_names = [f.stem for f in netcdf_files]
-                        available_val_basins = [b for b in val_basins if b in netcdf_basin_names]
-                        
-                        logger.info(f"Total NetCDF files found: {len(netcdf_files)}")
-                        logger.info(f"Available validation basins in NetCDF data: {len(available_val_basins)}")
-                        
-                        missing_basins = [b for b in val_basins if b not in netcdf_basin_names]
-                        if missing_basins:
-                            logger.warning(f"Missing basins count: {len(missing_basins)}")
-                            logger.warning(f"First 5 missing basins: {missing_basins[:5]}")
-                        else:
-                            logger.info("All validation basins found in NetCDF data!")
-                    
-                except Exception as e:
-                    logger.error(f"Error in validation debugging: {e}")
-        else:
-            logger.warning("No validation_basin_file found in config")
-        
-        logger.info("=== END DEBUGGING ===")
-        
-        # Additional debugging: Check validation period and data availability
-        logger.info("=== VALIDATION PERIOD DEBUGGING ===")
-        if hasattr(config, 'validation_start_date') and hasattr(config, 'validation_end_date'):
-            logger.info(f"Validation start: {config.validation_start_date}")
-            logger.info(f"Validation end: {config.validation_end_date}")
-        else:
-            logger.warning("Validation period not found in config")
-            # Check for alternative date attributes
-            date_attrs = [attr for attr in dir(config) if 'date' in attr.lower()]
-            logger.info(f"Available date attributes: {date_attrs}")
-            for attr in date_attrs:
-                if hasattr(config, attr):
-                    logger.info(f"{attr}: {getattr(config, attr)}")
-        
-        # Check if we can peek at actual data for one basin
-        if netcdf_dir.exists() and val_basins:
-            sample_basin = val_basins[0]
-            sample_nc_file = netcdf_dir / f"{sample_basin}.nc"
-            if sample_nc_file.exists():
-                try:
-                    import xarray as xr
-                    logger.info(f"Checking sample NetCDF file: {sample_nc_file}")
-                    ds = xr.open_dataset(sample_nc_file)
-                    logger.info(f"NetCDF variables: {list(ds.variables.keys())}")
-                    if 'date' in ds.variables:
-                        dates = ds['date'].values
-                        logger.info(f"Date range in NetCDF: {dates.min()} to {dates.max()}")
-                        logger.info(f"Total time steps: {len(dates)}")
-                    else:
-                        logger.warning("No 'date' variable found in NetCDF")
-                    ds.close()
-                except Exception as e:
-                    logger.warning(f"Could not read sample NetCDF: {e}")
-        
-        logger.info("=== END VALIDATION PERIOD DEBUGGING ===")
-        
-        # Now actually run the evaluation
+        # Run the evaluation
         try:
-            logger.info("Starting evaluation on validation period...")
+            logger.info(f"Starting evaluation on {period_used} period...")
             results = tester.evaluate()
             logger.info(f"Evaluation completed. Results type: {type(results)}")
-            
-            # Check if results were written to files even if the return value is empty
-            validation_dir = experiment_folder / "validation" / f"model_epoch{last_epoch:03d}"
-            results_file_p = validation_dir / "validation_results.p"
-            metrics_file = validation_dir / "validation_metrics.csv"
-            
-            logger.info(f"Checking for results files:")
-            logger.info(f"Results file exists: {results_file_p.exists()}")
-            logger.info(f"Metrics file exists: {metrics_file.exists()}")
-            
-            # Try to load results from the saved file if the return value is empty
-            if (not results or len(results) == 0) and results_file_p.exists():
-                logger.info("Loading results from saved file...")
-                with open(results_file_p, 'rb') as f:
-                    results = pickle.load(f)
-                logger.info(f"Loaded results type: {type(results)}")
-                if isinstance(results, dict):
-                    logger.info(f"Loaded results keys: {list(results.keys())}")
             
             if results and len(results) > 0:
                 logger.info(f"Results available with {len(results)} entries")
                 
-                # Save results for later processing (our own copy)
-                our_results_file = experiment_folder / "validation_results.pickle"
-                with open(our_results_file, 'wb') as f:
-                    pickle.dump(results, f)
-                logger.info(f"Saved results to {our_results_file}")
+                # Create output directory for this experiment
+                output_dir = experiment_folder / "test_results"
                 
-                return True
+                # Save individual basin CSV files
+                saved_count = save_basin_hydrographs(results, output_dir)
+                
+                if saved_count > 0:
+                    logger.info(f"Successfully saved {saved_count} basin hydrographs to {output_dir}")
+                    return True
+                else:
+                    logger.warning("No hydrographs were saved")
+                    return False
+                    
             else:
-                logger.warning("No results returned from evaluation and no valid saved results found")
+                logger.warning("No results returned from evaluation")
                 return False
                 
         except Exception as e:
             logger.error(f"Error during evaluation: {e}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
             
     except Exception as e:
@@ -344,24 +525,11 @@ def create_test_hydrographs(experiment_folder):
 def main():
     """Main function to process all experiments."""
     # Define the base directory containing experiments
-    # Adjust this path based on your workspace structure
-    base_experiment_dir = Path("Experiments/HPC_random_search/results")  # Change this to your experiments directory
+    base_experiment_dir = Path("Experiments/HPC_random_search/results")
 
     if not base_experiment_dir.exists():
-        # Try alternative paths
-        alternative_paths = [
-            Path("runs"),
-            Path("./runs"),
-            Path("../runs"),
-        ]
-        
-        for alt_path in alternative_paths:
-            if alt_path.exists():
-                base_experiment_dir = alt_path
-                break
-        else:
-            logger.error(f"Could not find experiments directory. Please specify the correct path.")
-            return
+        logger.error(f"Could not find experiments directory: {base_experiment_dir}")
+        return
     
     logger.info(f"Searching for experiments in: {base_experiment_dir.absolute()}")
     
@@ -373,22 +541,110 @@ def main():
         logger.warning("No experiment folders with config.yml found")
         return
     
-    # Process each experiment
-    successful_count = 0
-    failed_count = 0
+    # Show sample paths for verification
+    logger.info("Sample experiment paths:")
+    for folder in experiment_folders[:3]:
+        logger.info(f"  - {folder}")
+        # Also show what pickle files exist
+        test_files = list(folder.glob("test/model_epoch*/test_results.p"))
+        val_files = list(folder.glob("validation/model_epoch*/validation_results.p"))
+        logger.info(f"    Test files: {len(test_files)}")
+        logger.info(f"    Validation files: {len(val_files)}")
+        if test_files:
+            logger.info(f"    Latest test: {test_files[-1]}")
+        if val_files:
+            logger.info(f"    Latest validation: {val_files[-1]}")
     
+    # Categorize experiments - now with proper validation
+    experiments_with_results = []
+    experiments_without_results = []
+    experiments_with_csv = []
+    
+    logger.info("Categorizing experiments...")
     for i, folder in enumerate(experiment_folders, 1):
-        logger.info(f"Processing experiment {i}/{len(experiment_folders)}: {folder.name}")
+        logger.info(f"Checking experiment {i}/{len(experiment_folders)}: {folder.name}")
         
-        try:
-            success = create_test_hydrographs(folder)
-            if success:
-                successful_count += 1
-            else:
+        if has_existing_csv_results(folder):
+            experiments_with_csv.append(folder)
+            logger.info(f"  -> Already has CSV results")
+        elif has_valid_pickle_results(folder):
+            experiments_with_results.append(folder)
+            logger.info(f"  -> Has valid pickle results")
+        else:
+            experiments_without_results.append(folder)
+            logger.info(f"  -> Needs full evaluation")
+    
+    logger.info(f"Categorization complete:")
+    logger.info(f"  - Already have CSV results: {len(experiments_with_csv)}")
+    logger.info(f"  - Have valid pickle results (need CSV extraction): {len(experiments_with_results)}")
+    logger.info(f"  - Need full evaluation: {len(experiments_without_results)}")
+    
+    # For debugging, let's also manually check one of the "failed" experiments
+    if experiments_without_results:
+        sample_folder = experiments_without_results[0]
+        logger.info(f"DEBUG: Manually checking {sample_folder.name}")
+        
+        # Check what files actually exist
+        test_files = list(sample_folder.glob("test/model_epoch*/test_results.p"))
+        val_files = list(sample_folder.glob("validation/model_epoch*/validation_results.p"))
+        
+        logger.info(f"DEBUG: Found {len(test_files)} test files, {len(val_files)} validation files")
+        
+        if test_files:
+            latest_file = test_files[-1]
+            logger.info(f"DEBUG: Checking latest file: {latest_file}")
+            
+            try:
+                with open(latest_file, 'rb') as f:
+                    results = pickle.load(f)
+                logger.info(f"DEBUG: Loaded {type(results)} with {len(results) if hasattr(results, '__len__') else 'unknown'} entries")
+                
+                if results:
+                    sample_basin = list(results.keys())[0] if results else None
+                    if sample_basin:
+                        logger.info(f"DEBUG: Sample basin {sample_basin}: {type(results[sample_basin])}")
+                        if isinstance(results[sample_basin], dict):
+                            logger.info(f"DEBUG: Sample basin keys: {list(results[sample_basin].keys())}")
+            except Exception as e:
+                logger.error(f"DEBUG: Error loading {latest_file}: {e}")
+    
+    # Continue with processing...
+    # 1. Skip experiments that already have CSV results
+    if experiments_with_csv:
+        logger.info(f"Skipping {len(experiments_with_csv)} experiments that already have CSV results")
+        successful_count += len(experiments_with_csv)
+    
+    # 2. Process experiments with existing valid pickle results (fast)
+    if experiments_with_results:
+        logger.info(f"Processing {len(experiments_with_results)} experiments with valid pickle results...")
+        for i, folder in enumerate(experiments_with_results, 1):
+            logger.info(f"Extracting from pickle {i}/{len(experiments_with_results)}: {folder.name}")
+            
+            try:
+                success = extract_hydrographs_from_pickle(folder)
+                if success:
+                    successful_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to extract from pickle {folder}: {e}")
                 failed_count += 1
-        except Exception as e:
-            logger.error(f"Failed to process {folder}: {e}")
-            failed_count += 1
+    
+    # 3. Process experiments without results (slow - full evaluation)
+    if experiments_without_results:
+        logger.info(f"Running full evaluation for {len(experiments_without_results)} experiments...")
+        for i, folder in enumerate(experiments_without_results, 1):
+            logger.info(f"Full evaluation {i}/{len(experiments_without_results)}: {folder.name}")
+            
+            try:
+                success = run_full_evaluation(folder)
+                if success:
+                    successful_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to evaluate {folder}: {e}")
+                failed_count += 1
     
     logger.info(f"Processing complete. Successful: {successful_count}, Failed: {failed_count}")
 
