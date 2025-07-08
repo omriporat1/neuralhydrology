@@ -38,3 +38,5 @@ slurm-scripts/*.out
 /Data_gathering_and_arrangement/station_gantt_discontinuous.html
 /Data_gathering_and_arrangement/all_stations_and_gauges_gantt_with_assessment.png
 *.log
+Experiments/HPC_random_search/logs/
+Experiments/HPC_random_search/results/
