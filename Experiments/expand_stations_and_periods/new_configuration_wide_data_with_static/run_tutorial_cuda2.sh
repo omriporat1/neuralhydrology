@@ -2,6 +2,7 @@
 
 #SBATCH --job-name=gpu_job_short_trycpu
 #SBATCH --time=1:00:00
+
 #SBATCH --mem=32G
 #SBATCH --output=cuda_omri_job_output_short_trycpu.log
 #SBATCH --error=cuda_omri_job_error_short_trycpu.log
