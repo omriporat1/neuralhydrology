@@ -17,6 +17,7 @@ configs/*
 .ipynb_checkpoints/
 data/*
 docs/build/*
+Experiments/HPC_random_search/results/*
 
 slurm-scripts/*.out
 /Static_parameters/~$feature_decisions.xlsx
@@ -24,3 +25,4 @@ slurm-scripts/*.out
 /1laggerman hydrology-project main utils.zip
 /Data_gathering_and_arrangement/station_gantt_discontinuous.html
 /Data_gathering_and_arrangement/all_stations_and_gauges_gantt_with_assessment.png
+*.log
