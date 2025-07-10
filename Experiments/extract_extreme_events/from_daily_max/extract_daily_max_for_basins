@@ -1,0 +1,145 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def extract_annual_max_discharge():
+    """
+    Extract the dates of maximum daily discharge for each basin for each year.
+    Saves results to a CSV file with basin, year, date of maximum, and discharge value.
+    """
+    # Input file path
+    input_file = Path("C:/PhD/Data/IHS/Daily_discharge_2010-2015_corrected.csv")
+    
+    # Output file path
+    output_dir = Path("C:/PhD/Python/neuralhydrology/Experiments/extract_extreme_events/from_daily_max")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "annual_max_discharge_dates.csv"
+    
+    print(f"Reading data from {input_file}...")
+    
+    # Read the daily discharge data
+    df = pd.read_csv(input_file)
+    
+    # Convert date column to datetime - use dayfirst=True for DD/MM/YYYY format
+    date_col = [col for col in df.columns if 'date' in col.lower() or 'time' in col.lower()]
+    if date_col:
+        date_col = date_col[0]
+        df[date_col] = pd.to_datetime(df[date_col], dayfirst=True)
+    else:
+        # If no obvious date column, try to infer
+        for col in df.columns:
+            try:
+                df[col] = pd.to_datetime(df[col], dayfirst=True)
+                date_col = col
+                print(f"Using column '{col}' as date")
+                break
+            except:
+                continue
+    
+    if not date_col:
+        raise ValueError("Could not find a date column in the data")
+    
+    # Extract year from date
+    df['year'] = df[date_col].dt.year
+    
+    # Identify basin column
+    basin_col = [col for col in df.columns if 'basin' in col.lower() or 'station' in col.lower() or 'gauge' in col.lower()]
+    if basin_col:
+        basin_col = basin_col[0]
+    else:
+        # If no obvious basin column, use the first column that's not the date
+        non_date_cols = [col for col in df.columns if col != date_col and col != 'year']
+        if non_date_cols:
+            basin_col = non_date_cols[0]
+            print(f"Using column '{basin_col}' as basin identifier")
+        else:
+            raise ValueError("Could not identify a basin column")
+    
+    # Identify discharge column
+    discharge_col = [col for col in df.columns if 'discharge' in col.lower() or 'flow' in col.lower() or 'q' == col.lower()]
+    if discharge_col:
+        discharge_col = discharge_col[0]
+    else:
+        # If no obvious discharge column, use numeric columns that aren't year
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        numeric_cols = [col for col in numeric_cols if col != 'year']
+        if numeric_cols:
+            discharge_col = numeric_cols[0]
+            print(f"Using column '{discharge_col}' as discharge values")
+        else:
+            raise ValueError("Could not identify a discharge column")
+    
+    print(f"Identified columns: Date={date_col}, Basin={basin_col}, Discharge={discharge_col}")
+    
+    # Get unique basins
+    basins = df[basin_col].unique()
+    print(f"Found {len(basins)} unique basins")
+    
+    # Initialize results list
+    results = []
+    
+    # Process each basin
+    for basin in basins:
+        print(f"Processing basin {basin}...")
+        basin_data = df[df[basin_col] == basin]
+        
+        # Group by year and find max discharge
+        annual_maxima = basin_data.groupby('year').apply(
+            lambda x: x.loc[x[discharge_col].idxmax()] if not x[discharge_col].isna().all() else None
+        )
+        
+        # Skip if no valid data
+        if annual_maxima is None or len(annual_maxima) == 0:
+            print(f"  No valid data for basin {basin}")
+            continue
+        
+        # Add to results
+        for year, row in annual_maxima.iterrows():
+            if row is not None:
+                results.append({
+                    'basin': basin,
+                    'year': year,
+                    'max_date': row[date_col],
+                    'max_discharge': row[discharge_col]
+                })
+    
+    # Convert to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    # Sort by basin and year
+    results_df = results_df.sort_values(['basin', 'year'])
+    
+    # Save to CSV
+    results_df.to_csv(output_file, index=False)
+    print(f"Annual maximum discharge dates saved to {output_file}")
+    
+    # Create a visualization of the results
+    plot_file = output_dir / "annual_max_discharge_plot.png"
+    
+    plt.figure(figsize=(12, 8))
+    sns.scatterplot(data=results_df, x='max_date', y='max_discharge', hue='basin', size='max_discharge',
+                    sizes=(20, 200), alpha=0.7)
+    plt.title('Annual Maximum Discharge Events by Basin')
+    plt.xlabel('Date')
+    plt.ylabel('Discharge')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(plot_file)
+    print(f"Visualization saved to {plot_file}")
+    
+    return results_df
+
+if __name__ == "__main__":
+    annual_max_df = extract_annual_max_discharge()
+    print("First few rows of results:")
+    print(annual_max_df.head())
+    
+    # Summary statistics
+    print("\nSummary by basin:")
+    summary = annual_max_df.groupby('basin').agg({
+        'max_discharge': ['count', 'mean', 'min', 'max'],
+        'year': ['min', 'max']
+    })
+    print(summary)

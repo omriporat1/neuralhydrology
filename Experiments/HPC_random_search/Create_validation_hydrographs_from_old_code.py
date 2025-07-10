@@ -9,6 +9,7 @@ from neuralhydrology.utils.config import Config
 import os
 import xarray
 from datetime import datetime
+import yaml
 
 
 
@@ -17,6 +18,55 @@ from datetime import datetime
 
 
 def main():
+    experiments_dir = Path("Experiments/HPC_random_search/results/job_41780893")
+    max_events_path = (r"C:\PhD\Python\neuralhydrology-neuralhydrology-e4329c3"
+                    r"\neuralhydrology\max_event_dates.csv")
+
+    # iterate over all runs in the experiments directory:
+    for run_dir_upper in experiments_dir.iterdir():
+    # define run_dir as the path of the direcory within run_dir_upper that contains the config.yml file
+        run_dir = next(run_dir_upper.glob("runs/*/"), None)
+        config_path = run_dir / "config.yml"
+
+        RUN_LOCALLY = True  # Set to False when running on HPC/original environment
+
+        if RUN_LOCALLY:
+            with open(config_path, 'r') as f:
+                config_dict = yaml.safe_load(f)
+            
+            # Modify paths in the dictionary
+            config_dict['data_dir'] = str(Path("C:/PhD/Data/Caravan"))
+            config_dict['device'] = 'cpu'
+            
+            # IMPORTANT: Set the run_dir to the absolute local path
+            config_dict['run_dir'] = str(run_dir.absolute())
+            
+            # Update basin files if they exist
+            LOCAL_BASIN_PATH = Path("C:/PhD/Python/neuralhydrology/Experiments/expand_stations_and_periods/new_configuration_wide_data_with_static")
+            
+            if 'test_basin_file' in config_dict and config_dict['test_basin_file']:
+                basin_filename = Path(config_dict['test_basin_file']).name
+                config_dict['test_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            if 'train_basin_file' in config_dict and config_dict['train_basin_file']:
+                basin_filename = Path(config_dict['train_basin_file']).name
+                config_dict['train_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            if 'validation_basin_file' in config_dict and config_dict['validation_basin_file']:
+                basin_filename = Path(config_dict['validation_basin_file']).name
+                config_dict['validation_basin_file'] = str(LOCAL_BASIN_PATH / basin_filename)
+            
+            # Create new config from modified dictionary
+            config = Config(config_dict)
+        else:
+            # If running on HPC, use the original config file
+            config = Config(config_path)
+        
+        tester = get_tester(cfg=config, run_dir=run_dir, period="validation", init_model=True)
+        results = tester.evaluate(save_results=False, metrics=run_config.metrics)
+        basins = results.keys()
+
+
     run_dir = Path(
         "runs/HPC_training_zscore_norm_hidden_size256_batch_size512_learning_rate0001_2812_002447")  # you'll find this path in the output of the training above.
     # run_config = Config(Path("Feature_normalization\Best_HPC_flow_only.yml"))
