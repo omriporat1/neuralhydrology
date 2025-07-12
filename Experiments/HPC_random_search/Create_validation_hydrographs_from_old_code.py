@@ -92,7 +92,7 @@ def main():
             config_dict['test_end_date'] = config_dict['validation_end_date']
 
             # for debugging purposes, change config_dict['test_end_date'] to 31/12/2023:
-            config_dict['test_end_date'] = '31/10/2010'  # Change to a fixed date for debugging
+            # config_dict['test_end_date'] = '31/10/2010'  # Change to a fixed date for debugging
 
 
         # Create new config from modified dictionary
