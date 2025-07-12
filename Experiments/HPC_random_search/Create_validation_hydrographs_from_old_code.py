@@ -186,33 +186,6 @@ def main():
                     plt.savefig(fig_file)
                     plt.close()
 
-                # # Save the combined hydrographs for this basin
-                # if not all_hydrographs.empty:
-                #     csv_file = validation_hydrographs_dir / f"{basin}_validation_hydrographs.csv"
-                #     all_hydrographs.to_csv(csv_file, index=False)
-                #     print(f"Saved validation hydrographs for basin {basin} to {csv_file}")
-
-                #     # Plotting, deduplicate legend
-                #     plt.figure(figsize=(12, 8))
-                #     used_labels = set()
-                #     for event_date in all_hydrographs['event_date'].unique():
-                #         event_data = all_hydrographs[all_hydrographs['event_date'] == event_date]
-                #         label_obs = f"Observed ({pd.to_datetime(event_date).strftime('%Y-%m-%d')})"
-                #         label_sim = f"Simulated ({pd.to_datetime(event_date).strftime('%Y-%m-%d')})"
-                #         l1 = label_obs if label_obs not in used_labels else None
-                #         l2 = label_sim if label_sim not in used_labels else None
-                #         plt.plot(event_data['date'], event_data['observed'], label=l1)
-                #         plt.plot(event_data['date'], event_data['simulated'], linestyle='--', label=l2)
-                #         used_labels.update([label_obs, label_sim])
-                #     plt.title(f"Validation Hydrographs for Basin {basin}")
-                #     plt.xlabel("Date")
-                #     plt.ylabel("Discharge (m³/s)")
-                #     plt.grid(True)
-                #     plt.legend()
-                #     plt.savefig(validation_hydrographs_dir / f"{basin}_validation_hydrographs.png")
-                #     plt.close()
-
-                # Also save the entire evaluation period for this basin
                 try:
                     # Get the entire period data
                     # qobs, qsim, qobs_shift already defined above
@@ -268,73 +241,94 @@ def main():
                 print(f"Error processing basin {basin}: {str(e)}")
                 continue
 
-        # --- Metrics collection ---
+        # --- Metrics collection and saving ---
         metrics_rows = []
-
         for basin in basins:
             try:
+                basin_results = results[basin]["10min"]["xr"]
+                qobs = basin_results["Flow_m3_sec_obs"]
+                qsim = basin_results["Flow_m3_sec_sim"]
+                if 'time_step' in qobs.dims:
+                    qobs = qobs.isel(time_step=-1)
+                if 'time_step' in qsim.dims:
+                    qsim = qsim.isel(time_step=-1)
+
                 # Full period metrics
-                obs_array = full_df['observed'].values
-                sim_array = full_df['simulated'].values
+                obs_array = np.asarray(qobs).flatten()
+                sim_array = np.asarray(qsim).flatten()
                 mse_full = np.nanmean((obs_array - sim_array) ** 2)
                 mean_obs = np.nanmean(obs_array)
                 numerator = np.nansum((obs_array - sim_array) ** 2)
                 denominator = np.nansum((obs_array - mean_obs) ** 2)
                 nse_full = 1 - (numerator / denominator if denominator != 0 else np.nan)
                 metrics_rows.append({
-                    'run': run_dir.name,
-                    'basin': basin,
-                    'event': 'full_period',
-                    'MSE': mse_full,
-                    'NSE': nse_full
+                    "run": run_dir.name,
+                    "basin": basin,
+                    "event": "full_period",
+                    "MSE": mse_full,
+                    "NSE": nse_full
                 })
 
                 # Per-event metrics
-                event_metrics = []
+                basin_key = basin if basin in max_events_df.index else int(basin.split('_')[-1])
+                basin_events = max_events_df.loc[basin_key]
+                if isinstance(basin_events, pd.Series):
+                    basin_events = pd.DataFrame([basin_events])
+
+                event_mse_list = []
+                event_nse_list = []
                 for _, event in basin_events.iterrows():
                     start_date = event['start_date']
                     end_date = event['end_date']
                     try:
                         qobs_event = qobs.sel(date=slice(start_date, end_date))
                         qsim_event = qsim.sel(date=slice(start_date, end_date))
+                        obs_event = np.asarray(qobs_event).flatten()
+                        sim_event = np.asarray(qsim_event).flatten()
+                        mse_event = np.nanmean((obs_event - sim_event) ** 2)
+                        mean_obs_event = np.nanmean(obs_event)
+                        numerator_event = np.nansum((obs_event - sim_event) ** 2)
+                        denominator_event = np.nansum((obs_event - mean_obs_event) ** 2)
+                        nse_event = 1 - (numerator_event / denominator_event if denominator_event != 0 else np.nan)
+                        metrics_rows.append({
+                            "run": run_dir.name,
+                            "basin": basin,
+                            "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
+                            "MSE": mse_event,
+                            "NSE": nse_event
+                        })
+                        event_mse_list.append(mse_event)
+                        event_nse_list.append(nse_event)
                     except Exception as e:
+                        print(f"Error calculating event metrics for basin {basin}, event {start_date}-{end_date}: {e}")
                         continue
-                    obs_event = np.asarray(qobs_event).flatten()
-                    sim_event = np.asarray(qsim_event).flatten()
-                    mse_event = np.nanmean((obs_event - sim_event) ** 2)
-                    mean_obs_event = np.nanmean(obs_event)
-                    numerator_event = np.nansum((obs_event - sim_event) ** 2)
-                    denominator_event = np.nansum((obs_event - mean_obs_event) ** 2)
-                    nse_event = 1 - (numerator_event / denominator_event if denominator_event != 0 else np.nan)
-                    metrics_rows.append({
-                        'run': run_dir.name,
-                        'basin': basin,
-                        'event': f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
-                        'MSE': mse_event,
-                        'NSE': nse_event
-                    })
-                    event_metrics.append((mse_event, nse_event))
 
                 # Average event metrics
-                if event_metrics:
-                    avg_mse = np.nanmean([m[0] for m in event_metrics])
-                    avg_nse = np.nanmean([m[1] for m in event_metrics])
+                if event_mse_list and event_nse_list:
                     metrics_rows.append({
-                        'run': run_dir.name,
-                        'basin': basin,
-                        'event': 'events_average',
-                        'MSE': avg_mse,
-                        'NSE': avg_nse
+                        "run": run_dir.name,
+                        "basin": basin,
+                        "event": "events_average",
+                        "MSE": np.nanmean(event_mse_list),
+                        "NSE": np.nanmean(event_nse_list)
                     })
-
             except Exception as e:
-                print(f"Error processing basin {basin}: {str(e)}")
+                print(f"Error calculating metrics for basin {basin}: {e}")
                 continue
 
-        # Save all metrics for this run to a single CSV
+        # Save metrics to CSV
         metrics_df = pd.DataFrame(metrics_rows)
         metrics_csv_file = validation_hydrographs_dir / "metrics_summary.csv"
         metrics_df.to_csv(metrics_csv_file, index=False)
         print(f"Saved metrics summary to {metrics_csv_file}")
 
-# ...existing code...
+
+if __name__ == '__main__':
+    try:
+        print("Starting script execution...")
+        main()
+        print("Script execution completed.")
+    except Exception as e:
+        print(f"Error in main script execution: {str(e)}")
+        import traceback
+        traceback.print_exc()
