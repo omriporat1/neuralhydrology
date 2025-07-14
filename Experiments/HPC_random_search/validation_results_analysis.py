@@ -60,7 +60,7 @@ def main():
                 continue
             df = pd.read_csv(hydro_file, parse_dates=["date"])
             for _, event in basin_events.iterrows():
-                event_date = event["max_date"]
+                event_date = pd.to_datetime(event["max_date"], dayfirst=True)
                 start = pd.Timestamp(event_date) - pd.Timedelta(days=1)
                 start = start.replace(hour=0, minute=0, second=0)
                 end = pd.Timestamp(event_date) + pd.Timedelta(days=1)
@@ -83,18 +83,19 @@ def main():
                 event_df.to_csv(event_csv, index=False)
                 plt.figure(figsize=(10, 6))
                 plt.plot(event_df["date"], event_df["observed"], label="Observed")
-                plt.plot(event_df["date"], event_df["predicted"], label="Predicted")
-                plt.plot(event_df["date"], event_df["shifted"], label="Shifted")
+                plt.plot(event_df["date"], event_df["simulated"], linestyle='--', label="Simulated")
+                plt.plot(event_df["date"], event_df["shifted"], linestyle=':', label="Observed Shifted (3 hours)")
                 plt.title(f"Basin {basin_id} Event {event_str}")
                 plt.xlabel("Date")
-                plt.ylabel("Discharge")
+                plt.ylabel("Discharge [m³/s]")
                 plt.legend()
+                plt.grid(True)
                 plt.tight_layout()
                 fig_file = output_dir / f"{basin_id}_event_{event_str}.png"
                 plt.savefig(fig_file)
                 plt.close()
                 obs = event_df["observed"].values
-                sim = event_df["predicted"].values
+                sim = event_df["simulated"].values
                 shifted = event_df["shifted"].values
                 nse_val = nse(obs, sim)
                 pnse_val = persistent_nse(obs, sim, lag_steps=18)
@@ -121,7 +122,9 @@ def main():
         summary["erroneous_count"] = metrics_df["erroneous"].sum()
         summary.to_csv(hydro_dir / "event_metrics_summary.csv")
         plt.figure(figsize=(8, 5))
-        plt.bar(["NSE", "pNSE", "PeakFlowError", "VolumeError"], summary.loc["mean"])
+        metrics_to_plot = ["NSE", "pNSE", "PeakFlowError", "VolumeError"]
+        mean_values = [summary.loc["mean", m] for m in metrics_to_plot if m in summary.columns]
+        plt.bar(metrics_to_plot[:len(mean_values)], mean_values)
         plt.ylabel("Mean Metric Value")
         plt.title(f"Run {run_dir.name} Event Metrics (mean)")
         plt.tight_layout()
@@ -132,6 +135,35 @@ def main():
     # Optionally, aggregate across all runs
     all_metrics_df = pd.concat([pd.DataFrame(m).T for m in all_metrics])
     all_metrics_df.to_csv(results_dir / "all_event_metrics_summary.csv")
+    plt.figure(figsize=(8, 5))
+    all_mean_values = [all_metrics_df.loc["mean", m] for m in metrics_to_plot if m in all_metrics_df.columns]
+    plt.bar(metrics_to_plot[:len(all_mean_values)], all_mean_values)
+    plt.ylabel("Mean Metric Value")
+    plt.title("All Runs Event Metrics (mean)")
+    plt.tight_layout()
+    plt.savefig(results_dir / "all_event_metrics_summary.png")
+    plt.close()
+
+    # create a summary plot for all runs showing the mean and sd values for each metric for each run:
+    plt.figure(figsize=(10, 6))
+    for metric in metrics_to_plot:
+        if metric in all_metrics_df.columns:
+            plt.errorbar(
+                all_metrics_df.index, 
+                all_metrics_df[metric]['mean'], 
+                yerr=all_metrics_df[metric]['std'], 
+                label=metric, 
+                marker='o'
+            )
+    plt.xlabel("Run")
+    plt.ylabel("Metric Value")
+    plt.title("Event Metrics Summary Across All Runs")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(results_dir / "all_runs_event_metrics_summary.png")
+    plt.close()
+    
 
 if __name__ == "__main__":
     main()
