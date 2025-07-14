@@ -18,7 +18,7 @@ import yaml
 def main():
     # Accept run index and job id from command line
     run_id = int(sys.argv[1])
-    job_id = int(sys.argv[2])
+    job_id = int(41780893)
 
     job_dir = Path(f"Experiments/HPC_random_search/results/job_{job_id}")
     run_dir = job_dir / f"run_{run_id:03d}"
