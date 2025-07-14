@@ -4,11 +4,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import os
 
-# Load event maxima
-max_events_df = pd.read_csv(
-    "c:/PhD/Python/neuralhydrology/Experiments/extract_extreme_events/from_daily_max/annual_max_discharge_dates.csv",
-    parse_dates=["max_date"]
-)
 
 # Helper functions for metrics
 def nse(obs, sim):
@@ -20,17 +15,29 @@ def nse(obs, sim):
     return 1 - (numerator / denominator if denominator != 0 else np.nan)
 
 def peak_flow_error(obs, sim):
-    return np.nanmax(sim) - np.nanmax(obs)
+    peak_obs = np.nanmax(obs)
+    return (np.nanmax(sim) - peak_obs) / peak_obs if peak_obs != 0 else np.nan
 
 def volume_error(obs, sim):
-    return np.nansum(sim) - np.nansum(obs)
+    vol_obs = np.nansum(obs)
+    return (np.nansum(sim) - vol_obs) / vol_obs if vol_obs != 0 else np.nan
 
 def persistent_nse(obs, sim, lag_steps=18):
-    obs_shifted = np.roll(obs, lag_steps)
-    obs_shifted[:lag_steps] = obs[0]
-    return nse(obs_shifted, sim)
+    obs = np.asarray(obs)
+    sim = np.asarray(sim)
+    persistence = np.roll(obs, lag_steps)
+    persistence[:lag_steps] = obs[0]  # handle edge
+    num = np.nansum((obs - sim) ** 2)
+    denom = np.nansum((obs - persistence) ** 2)
+    return 1 - (num / denom if denom != 0 else np.nan)
 
 def main():
+    # Load event maxima
+    max_events_df = pd.read_csv(
+        "c:/PhD/Python/neuralhydrology/Experiments/extract_extreme_events/from_daily_max/annual_max_discharge_dates.csv",
+        parse_dates=["max_date"]
+    )
+    
     results_dir = Path("c:/PhD/Python/neuralhydrology/Experiments/HPC_random_search/results")
     run_dirs = [d for d in results_dir.glob("job_*/run_*/*") if d.is_dir()]
 
@@ -123,8 +130,8 @@ def main():
         all_metrics.append(summary)
 
     # Optionally, aggregate across all runs
-    # all_metrics_df = pd.concat([pd.DataFrame(m).T for m in all_metrics])
-    # all_metrics_df.to_csv(results_dir / "all_event_metrics_summary.csv")
+    all_metrics_df = pd.concat([pd.DataFrame(m).T for m in all_metrics])
+    all_metrics_df.to_csv(results_dir / "all_event_metrics_summary.csv")
 
 if __name__ == "__main__":
     main()
