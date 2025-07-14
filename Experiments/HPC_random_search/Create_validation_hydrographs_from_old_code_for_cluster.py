@@ -20,7 +20,7 @@ def main():
     run_id = int(sys.argv[1])
     job_id = int(41780893)
 
-    job_dir = Path(f"Experiments/HPC_random_search/results/job_{job_id}")
+    job_dir = Path(f"/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/HPC_random_search/results/job_{job_id}")
     run_dir = job_dir / f"run_{run_id:03d}"
     print(f"\nProcessing run directory: {run_dir}")
     if not run_dir.exists():
@@ -37,7 +37,7 @@ def main():
     run_dir = run_subdirs[0]
     print(f"Using run directory: {run_dir}")
 
-    max_events_path = Path("Experiments/extract_extreme_events/from_daily_max/annual_max_discharge_dates.csv")
+    max_events_path = Path("/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/extract_extreme_events/from_daily_max/annual_max_discharge_dates.csv")
     delay = 18  # 3 hours = 18 10-minute steps
 
     print(f"Checking if run directory exists: {run_dir.exists()}")
