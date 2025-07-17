@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import RidgeCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ========== CONFIGURATION ==========
+TARGET = "pNSE_median"  # Change to "NSE_median" if desired
+TOP_K = 5               # Number of top configurations to suggest
+NUM_SAMPLES = 10000     # Number of new configs to sample
+# ===================================
+
+
+# Load the datasets
+config_df = pd.read_csv(r"C:\PhD\Python\neuralhydrology\Experiments\HPC_random_search\Analyze_HPC_results\random_search_configurations.csv")
+metrics_df = pd.read_excel(r"C:\PhD\Python\neuralhydrology\Experiments\HPC_random_search\Analyze_HPC_results\improved_event_metrics_summary_excel.xlsx")
+
+# Merge them on the common column
+df = pd.merge(config_df, metrics_df, on="job_id")
+df = df.dropna(subset=[TARGET])
+
+# Define features and target
+features = ['batch_size', 'hidden_size', 'learning_rate', 'output_dropout', 'seq_length', 'statics_embedding']
+X = df[features]
+y = df[TARGET]
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42)
+
+# Define models
+models = {
+    "Random Forest": RandomForestRegressor(n_estimators=200, random_state=42),
+    "Gradient Boosting": GradientBoostingRegressor(n_estimators=200, random_state=42),
+    "Ridge Regression": RidgeCV(alphas=(0.1, 1.0, 10.0))
+}
+
+# Evaluate models
+results = {}
+for name, model in models.items():
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('regressor', model)
+    ])
+    scores = cross_val_score(pipeline, X, y, scoring='r2', cv=5)
+    results[name] = scores.mean()
+
+# Train the best model
+best_model_name = max(results, key=results.get)
+best_model = models[best_model_name]
+final_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('regressor', best_model)
+])
+final_pipeline.fit(X, y)
+
+# Visualize predicted vs actual
+y_pred = final_pipeline.predict(X)
+plt.figure(figsize=(6, 6))
+sns.scatterplot(x=y, y=y_pred)
+plt.xlabel(f"Actual {TARGET}")
+plt.ylabel(f"Predicted {TARGET}")
+plt.title(f"{best_model_name} Predictions")
+plt.plot([y.min(), y.max()], [y.min(), y.max()], '--k')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Show model performance
+performance_df = pd.DataFrame.from_dict(results, orient="index", columns=["Mean R2 Score"])
+print("Model Performance Comparison:")
+print(performance_df)
+
+# Generate new hyperparameter configurations
+param_space = {
+    'batch_size': [128, 256, 512, 1024],
+    'hidden_size': [128, 256, 512],
+    'learning_rate': [0.0005, 0.001, 0.00, 0.005],
+    'output_dropout': np.round(np.linspace(0.1, 0.9, 20), 3),
+    'seq_length': np.arange(36, 144),
+    'statics_embedding': np.arange(5, 20)
+}
+
+# Sample new configurations
+samples = pd.DataFrame({
+    'batch_size': np.random.choice(param_space['batch_size'], NUM_SAMPLES),
+    'hidden_size': np.random.choice(param_space['hidden_size'], NUM_SAMPLES),
+    'learning_rate': np.random.choice(param_space['learning_rate'], NUM_SAMPLES),
+    'output_dropout': np.random.choice(param_space['output_dropout'], NUM_SAMPLES),
+    'seq_length': np.random.choice(param_space['seq_length'], NUM_SAMPLES),
+    'statics_embedding': np.random.choice(param_space['statics_embedding'], NUM_SAMPLES)
+})
+
+# Predict their performance
+predicted_scores = final_pipeline.predict(samples)
+samples['predicted_' + TARGET] = predicted_scores
+
+# Get top configurations
+top_configs = samples.sort_values(by='predicted_' + TARGET, ascending=False).head(TOP_K)
+print(f"\nTop {TOP_K} Suggested Configurations:")
+print(top_configs)
+
+# Save top configs
+top_configs.to_csv(r"C:\PhD\Python\neuralhydrology\Experiments\HPC_random_search\Analyze_HPC_results\top_suggested_configs_pNSE_median.csv", index=False)

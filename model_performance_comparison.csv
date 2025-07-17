@@ -1,0 +1,4 @@
+,Mean R2 Score
+Random Forest,0.7560040068822123
+Gradient Boosting,0.6886445069784696
+Ridge Regression,0.6962005126706249

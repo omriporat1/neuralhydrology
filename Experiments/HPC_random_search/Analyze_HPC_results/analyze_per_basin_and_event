@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+
+results_dir = Path("c:/PhD/Python/neuralhydrology/Experiments/HPC_random_search/results")
+run_dirs = [d for d in results_dir.glob("job_*/run_*/*") if d.is_dir()]
+metrics_to_analyze = ["NSE", "pNSE", "PeakFlowError", "VolumeError"]
+
+# Collect all event metrics for all runs (predicted)
+all_pred = []
+for run_dir in run_dirs:
+    hydro_dir = run_dir / "validation_hydrographs_cluster"
+    pred_file = hydro_dir / "event_metrics.csv"
+    if pred_file.exists():
+        df_pred = pd.read_csv(pred_file)
+        df_pred["run"] = run_dir.name
+        all_pred.append(df_pred)
+df_pred_all = pd.concat(all_pred, ignore_index=True)
+df_pred_all = df_pred_all[~df_pred_all["erroneous"]]
+
+# Per-basin statistics for predicted
+basin_stats_pred = []
+for basin, group in df_pred_all.groupby("basin"):
+    row = {"basin": basin}
+    for metric in metrics_to_analyze:
+        vals = group[metric].dropna()
+        row[f"{metric}_mean"] = vals.mean()
+        row[f"{metric}_median"] = vals.median()
+        row[f"{metric}_std"] = vals.std()
+        row[f"{metric}_p25"] = np.percentile(vals, 25)
+        row[f"{metric}_p75"] = np.percentile(vals, 75)
+    basin_stats_pred.append(row)
+basin_stats_pred_df = pd.DataFrame(basin_stats_pred)
+
+# For shifted: use only the first available event_metrics_shifted.csv
+shifted_stats_done = False
+for run_dir in run_dirs:
+    hydro_dir = run_dir / "validation_hydrographs_cluster"
+    shifted_file = hydro_dir / "event_metrics_shifted.csv"
+    if shifted_file.exists():
+        df_shifted = pd.read_csv(shifted_file)
+        df_shifted = df_shifted[~df_shifted["erroneous"]]
+        basin_stats_shifted = []
+        for basin, group in df_shifted.groupby("basin"):
+            row = {"basin": basin}
+            for metric in ["NSE_shifted", "pNSE_shifted"]:
+                vals = group[metric].dropna()
+                row[f"{metric}_mean"] = vals.mean()
+                row[f"{metric}_median"] = vals.median()
+                row[f"{metric}_std"] = vals.std()
+                row[f"{metric}_p25"] = np.percentile(vals, 25)
+                row[f"{metric}_p75"] = np.percentile(vals, 75)
+            basin_stats_shifted.append(row)
+        basin_stats_shifted_df = pd.DataFrame(basin_stats_shifted)
+        shifted_stats_done = True
+        break  # Only do this once!
+
+if not shifted_stats_done:
+    raise RuntimeError("No event_metrics_shifted.csv file found in any run.")
+
+# Merge for comparison
+compare_df = pd.merge(
+    basin_stats_pred_df,
+    basin_stats_shifted_df,
+    on="basin",
+    how="outer",
+    suffixes=("_pred", "_shifted")
+)
+
+# Save to CSV
+compare_df.to_csv(results_dir / "per_basin_metrics_comparison.csv", index=False)
+print(f"Saved per-basin comparison to {results_dir / 'per_basin_metrics_comparison.csv'}")
+
+# Optional: plot comparison for each basin (NSE and pNSE)
+for metric in ["NSE", "pNSE"]:
+    plt.figure(figsize=(12, 6))
+    plt.scatter(compare_df[f"{metric}_mean_pred"], compare_df[f"{metric}_mean_shifted"], alpha=0.7)
+    plt.plot([compare_df[f"{metric}_mean_pred"].min(), compare_df[f"{metric}_mean_pred"].max()],
+             [compare_df[f"{metric}_mean_pred"].min(), compare_df[f"{metric}_mean_pred"].max()],
+             'r--', label='y=x')
+    plt.xlabel(f"{metric} Mean (Predicted)")
+    plt.ylabel(f"{metric} Mean (Shifted)")
+    plt.title(f"Per-basin {metric} Mean: Predicted vs Shifted")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(results_dir / f"per_basin_{metric}_mean_pred_vs_shifted.png")
+    plt.close()
