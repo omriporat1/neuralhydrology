@@ -17,7 +17,7 @@ dynamic_inputs:
 - Rain_gauge_2
 - Rain_gauge_3
 epochs: 15
-experiment_name: N38_A30_4CPU_SMI
+experiment_name: N38_A100_4CPU
 forcings:
 - il
 head: regression
