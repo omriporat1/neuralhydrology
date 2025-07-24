@@ -1,0 +1,52 @@
+import pandas as pd
+from pathlib import Path
+from tensorboard.backend.event_processing import event_accumulator
+
+job_dir = Path("Experiments/HPC_random_search/results/job_41780893")
+run_dirs = [d for d in job_dir.glob("run_*/*") if d.is_dir()]
+
+summary_rows = []
+
+for run_dir in run_dirs:
+    # Find the TensorBoard event file
+    event_files = list(run_dir.glob("events.out.tfevents.*"))
+    if not event_files:
+        print(f"No TensorBoard event file found in {run_dir}")
+        continue
+    event_file = event_files[0]  # If multiple, take the first
+
+    ea = event_accumulator.EventAccumulator(str(event_file))
+    ea.Reload()
+
+    # Check for the correct tag (may be 'train/loss', 'loss', etc.)
+    if 'train/loss' in ea.Tags()['scalars']:
+        tag = 'train/loss'
+    elif 'loss' in ea.Tags()['scalars']:
+        tag = 'loss'
+    else:
+        print(f"No train loss tag found in {event_file}")
+        continue
+
+    # Get all loss events
+    loss_events = ea.Scalars(tag)
+    if not loss_events:
+        print(f"No loss events found in {event_file}")
+        continue
+
+    # Extract steps (epochs) and values
+    steps = [e.step for e in loss_events]
+    losses = [e.value for e in loss_events]
+
+    min_loss = min(losses)
+    best_epochs = [str(steps[i]) for i, v in enumerate(losses) if v == min_loss]
+
+    summary_rows.append({
+        "run": run_dir.name,
+        "min_train_loss": min_loss,
+        "best_epochs": ";".join(best_epochs)
+    })
+
+summary_df = pd.DataFrame(summary_rows)
+summary_csv = job_dir / "best_training_epochs_tensorboard.csv"
+summary_df.to_csv(summary_csv, index=False)
+print(f"Saved summary to {summary_csv}")
