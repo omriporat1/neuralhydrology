@@ -1,0 +1,119 @@
+import re
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+
+try:
+    from ipywidgets import interact, Dropdown
+    from IPython.display import display
+except ImportError:
+    print("To use the interactive window, please run this in a Jupyter environment and install ipywidgets.")
+
+job_dir = Path("Experiments/HPC_random_search/results/job_41780893")
+run_dirs = [d for d in job_dir.glob("run_*") if d.is_dir()]
+
+run_data = {}
+
+for run_dir in run_dirs:
+    # Find output log file
+    log_dirs = [d for d in run_dir.iterdir() if d.is_dir()]
+    log_file = None
+    for d in log_dirs:
+        candidate = d / "output.log"
+        if candidate.exists():
+            log_file = candidate
+            break
+    if not log_file:
+        print(f"No output.log found in {run_dir}")
+        continue
+
+    epochs = []
+    train_losses = []
+    val_losses = []
+    val_nses = []
+
+    with open(log_file, "r") as f:
+        for line in f:
+            # Training loss
+            m_train = re.search(r"Epoch (\d+) average loss: avg_loss: ([0-9.]+)", line)
+            if m_train:
+                epoch = int(m_train.group(1))
+                train_loss = float(m_train.group(2))
+                epochs.append(epoch)
+                train_losses.append(train_loss)
+            # Validation loss
+            m_val = re.search(r"Epoch (\d+) average validation loss: ([0-9.]+)", line)
+            if m_val:
+                val_loss = float(m_val.group(2))
+                val_losses.append(val_loss)
+            # Validation metrics (NSE)
+            m_nse = re.search(r"Median validation metrics: avg_loss: ([0-9.]+), NSE: ([0-9.\-]+)", line)
+            if m_nse:
+                # Optionally, you can check that this matches the epoch
+                nse = float(m_nse.group(2))
+                val_nses.append(nse)
+
+    # Pad lists to same length
+    max_len = max(len(epochs), len(train_losses), len(val_losses), len(val_nses))
+    def pad(lst):
+        return lst + [None]*(max_len - len(lst))
+    data = pd.DataFrame({
+        "epoch": pad(epochs),
+        "train_loss": pad(train_losses),
+        "val_loss": pad(val_losses),
+        "val_nse": pad(val_nses)
+    })
+    run_data[run_dir.name] = data
+
+# Interactive plot
+def plot_run(run_name):
+    df = run_data[run_name]
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    axs[0,0].plot(df["epoch"], df["train_loss"], marker='o')
+    axs[0,0].set_title("Training Loss")
+    axs[0,0].set_xlabel("Epoch")
+    axs[0,0].set_ylabel("Loss")
+    axs[0,1].plot(df["epoch"], df["val_loss"], marker='o', color='orange')
+    axs[0,1].set_title("Validation Loss")
+    axs[0,1].set_xlabel("Epoch")
+    axs[0,1].set_ylabel("Loss")
+    axs[1,0].plot(df["epoch"], df["val_nse"], marker='o', color='green')
+    axs[1,0].set_title("Validation NSE")
+    axs[1,0].set_xlabel("Epoch")
+    axs[1,0].set_ylabel("NSE")
+    axs[1,1].axis('off')
+    plt.suptitle(f"Run: {run_name}")
+    plt.tight_layout()
+    plt.show()
+
+# Only show interactive if in Jupyter
+try:
+    run_selector = Dropdown(options=list(run_data.keys()), description='Run:')
+    interact(plot_run, run_name=run_selector)
+except Exception as e:
+    print("Interactive plotting only works in Jupyter Notebook/Lab with ipywidgets installed.")
+    print("You can call plot_run('run_000') etc. manually in a script.")
+
+import tkinter as tk
+from tkinter import ttk
+
+def select_and_plot():
+    root = tk.Tk()
+    root.title("Select Run for Loss/Validation Plots")
+    label = tk.Label(root, text="Select a run:")
+    label.pack(pady=10)
+    run_names = list(run_data.keys())
+    combo = ttk.Combobox(root, values=run_names, state="readonly")
+    combo.pack(pady=10)
+    combo.set(run_names[0])
+
+    def on_select(event=None):
+        run_name = combo.get()
+        plot_run(run_name)
+
+    btn = tk.Button(root, text="Show Plots", command=on_select)
+    btn.pack(pady=10)
+    root.mainloop()
+
+if __name__ == "__main__":
+    select_and_plot()
