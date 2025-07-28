@@ -106,9 +106,27 @@ def main():
             if 'time_step' in qsim.dims:
                 qsim = qsim.isel(time_step=-1)
             
-            # Shifted obs for full period
-            fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs[0].item()
+            # Check if data is empty
+            if qobs.size == 0:
+                print(f"No observed data for basin {basin}, skipping...")
+                continue
+            
+            if qsim.size == 0:
+                print(f"No simulated data for basin {basin}, skipping...")
+                continue
+            
+            # Shifted obs for full period with safe fill_value
+            try:
+                fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs.values.flat[0]
+            except (IndexError, ValueError):
+                print(f"Cannot determine fill_value for basin {basin}, using 0.0")
+                fill_value = 0.0
+            
             qobs_shift = qobs.shift(date=delay, fill_value=fill_value)
+            
+            # Store event metrics for averaging
+            event_mse_list = []
+            event_nse_list = []
             
             # Process each event
             for _, event in basin_events.iterrows():
@@ -137,6 +155,21 @@ def main():
                 event_str = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
                 csv_file = validation_hydrographs_dir / f"{basin}_event_{event_str}.csv"
                 event_df.to_csv(csv_file, index=False)
+                print(f"Saved event hydrograph for basin {basin} ({event_str}) to {csv_file}")
+                
+                # NEW: Create event plot
+                plt.figure(figsize=(12, 8))
+                plt.plot(event_df['date'], event_df['observed'], label="Observed")
+                plt.plot(event_df['date'], event_df['simulated'], linestyle='--', label="Simulated")
+                plt.plot(event_df['date'], event_df['shifted'], linestyle=':', label="Observed shifted (3 hours)")
+                plt.title(f"Event Hydrograph for Basin {basin}\n{event_str}")
+                plt.xlabel("Date")
+                plt.ylabel("Discharge (m³/s)")
+                plt.grid(True)
+                plt.legend()
+                fig_file = validation_hydrographs_dir / f"{basin}_event_{event_str}.png"
+                plt.savefig(fig_file)
+                plt.close()
                 
                 # Calculate metrics for this event
                 obs_vals = event_df['observed'].values
@@ -155,6 +188,10 @@ def main():
                     
                     # Calculate MSE
                     mse_event = np.mean((obs_clean - sim_clean) ** 2)
+                    
+                    # Store for averaging
+                    event_mse_list.append(mse_event)
+                    event_nse_list.append(nse_event)
                 else:
                     nse_event = np.nan
                     mse_event = np.nan
@@ -167,6 +204,16 @@ def main():
                     "NSE": nse_event
                 })
             
+            # NEW: Add events_average metrics
+            if event_mse_list and event_nse_list:
+                metrics_rows.append({
+                    "run": actual_run_dir.name,
+                    "basin": basin,
+                    "event": "events_average",
+                    "MSE": np.nanmean(event_mse_list),
+                    "NSE": np.nanmean(event_nse_list)
+                })
+            
             # Save full period data
             try:
                 full_df = pd.DataFrame({
@@ -177,7 +224,31 @@ def main():
                 })
                 full_csv_file = validation_hydrographs_dir / f"{basin}_full_period.csv"
                 full_df.to_csv(full_csv_file, index=False)
-                print(f"Saved full period data for basin {basin}")
+                print(f"Saved full period data for basin {basin} to {full_csv_file}")
+                
+                # NEW: Create full period plot with event highlighting
+                plt.figure(figsize=(16, 10))
+                plt.plot(full_df['date'], full_df['observed'], label="Observed")
+                plt.plot(full_df['date'], full_df['simulated'], label="Simulated", linestyle='--')
+                plt.plot(full_df['date'], full_df['shifted'], label="Observed shifted (3 hours)")
+                
+                # Highlight events
+                for idx, (_, event) in enumerate(basin_events.iterrows()):
+                    event_start = event['start_date']
+                    event_end = event['end_date']
+                    event_max = event['max_date']
+                    plt.axvspan(event_start, event_end, alpha=0.2, color='yellow')
+                    max_discharge = event['max_discharge']
+                    plt.scatter([event_max], [max_discharge], color='red', s=100, zorder=5, 
+                              label=f"Max Discharge ({event_max.strftime('%Y-%m-%d')})" if idx == 0 else "")
+                
+                plt.title(f"Full Validation Period for Basin {basin}")
+                plt.xlabel("Date")
+                plt.ylabel("Discharge (m³/s)")
+                plt.grid(True)
+                plt.legend()
+                plt.savefig(validation_hydrographs_dir / f"{basin}_full_period.png")
+                plt.close()
                 
                 # Calculate full period metrics
                 obs_vals = full_df['observed'].values
@@ -224,6 +295,7 @@ def main():
         print(f"Total events processed: {len(metrics_rows)}")
         
         event_metrics = metrics_df[metrics_df['event'] != 'full_period']
+        event_metrics = event_metrics[event_metrics['event'] != 'events_average']
         if not event_metrics.empty:
             print(f"Average NSE (events): {event_metrics['NSE'].mean():.4f}")
             print(f"Average MSE (events): {event_metrics['MSE'].mean():.4f}")
