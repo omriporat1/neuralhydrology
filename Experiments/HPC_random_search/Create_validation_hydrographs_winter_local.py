@@ -55,7 +55,7 @@ def main():
         # create a dictionary with the timerange of the events to be extracted - from day before max of each year to day after max of each year, for each basin, unless it's zero:
         max_events_df = pd.read_csv(max_events_path)
         max_events_df = max_events_df[max_events_df['max_discharge'] > 0]  # Filter out zero discharge events
-        max_events_df['max_date'] = pd.to_datetime(max_events_df['max_date'])
+        max_events_df['max_date'] = pd.to_datetime(max_events_df['max_date'], format='mixed', dayfirst=True)
         max_events_df['start_date'] = max_events_df['max_date'] - pd.Timedelta(days=1)
         max_events_df['end_date'] = max_events_df['max_date'] + pd.Timedelta(days=1)
         max_events_df = max_events_df.set_index('basin')
@@ -320,7 +320,7 @@ def main():
 
         # Save metrics to CSV
         metrics_df = pd.DataFrame(metrics_rows)
-        metrics_csv_file = validation_hydrographs_dir / "metrics_summary.csv"
+        metrics_csv_file = validation_hydrographs_dir / "metrics_summary_winter.csv"
         metrics_df.to_csv(metrics_csv_file, index=False)
         print(f"Saved metrics summary to {metrics_csv_file}")
 
