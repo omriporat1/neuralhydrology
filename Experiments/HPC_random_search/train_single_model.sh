@@ -13,7 +13,7 @@ module load spack miniconda3 cuda/11.7
 
 source /usr/local/spack/opt/spack/linux-debian12-x86_64/gcc-12.2.0/miniconda3-24.3.0-iqeknetqo7ngpr57d6gmu3dg4rzlcgk6/etc/profile.d/conda.sh
 
-conda activate /sci/labs/efratmorin/haimasree/condaenvs/neuralhydrology
+conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
 
 mkdir -p logs results
 
