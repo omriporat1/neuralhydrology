@@ -128,6 +128,8 @@ def main():
                     "erroneous": False
                 })
         metrics_df = pd.DataFrame(run_metrics)
+        if "erroneous" not in metrics_df.columns:
+            metrics_df["erroneous"] = False
         metrics_df.to_csv(hydro_dir / "event_metrics.csv", index=False)
         summary = metrics_df[~metrics_df["erroneous"]].agg({
             "NSE": ["mean", "std"],
