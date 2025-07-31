@@ -165,9 +165,6 @@ def main():
             config_dict['test_end_date'] = config_dict['validation_end_date']
         config = Config(config_dict)
 
-    tester = get_tester(cfg=config, run_dir=run_dir, period="test", init_model=True)
-    results = tester.evaluate(save_results=False, metrics=config.metrics)
-    basins = results.keys()
 
     # Find all epoch model files
     epoch_files = sorted(run_dir.glob("model_epoch*.pt"))
@@ -176,8 +173,6 @@ def main():
     # Prepare to collect metrics
     epoch_metrics = []
 
-    # Try to find the log file for this run
-    logs_dir = run_dir
     # Search for output.log in any subdirectory of run_dir
     log_files = list(run_dir.glob("*/output.log"))
     if log_files:
