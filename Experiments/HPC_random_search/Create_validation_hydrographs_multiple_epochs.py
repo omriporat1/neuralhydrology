@@ -133,10 +133,10 @@ def main():
         with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         remote_basin_path = Path(config_dict['test_basin_file'])
-        # change file name to the new basin file:
-        config_dict['test_basin_file'] = str(remote_basin_path / basin_filename)
-        config_dict['train_basin_file'] = str(remote_basin_path / basin_filename)
-        config_dict['validation_basin_file'] = str(remote_basin_path / basin_filename)
+        basin_dir = remote_basin_path.parent
+        config_dict['test_basin_file'] = str(basin_dir / basin_filename)
+        config_dict['train_basin_file'] = str(basin_dir / basin_filename)
+        config_dict['validation_basin_file'] = str(basin_dir / basin_filename)
 
         if 'test_start_date' in config_dict and 'test_end_date' in config_dict:
             config_dict['test_start_date'] = config_dict['validation_start_date']
