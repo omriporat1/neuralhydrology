@@ -178,14 +178,10 @@ def main():
 
     # Try to find the log file for this run
     logs_dir = run_dir
-    # You may need to adjust this pattern to match your log file naming
-    log_file = None
-    for f in logs_dir.glob("*.log"):
-        if str(run_dir.name) in f.name or str(run_id) in f.name:
-            log_file = f
-            break
-
-    if log_file is not None:
+    # Search for output.log in any subdirectory of run_dir
+    log_files = list(run_dir.glob("*/output.log"))
+    if log_files:
+        log_file = log_files[0]  # Use the first matching log file
         train_epochs, train_losses, val_losses, val_nses = extract_train_metrics_from_log(log_file)
         train_metrics_dict = {e: (l, v, n) for e, l, v, n in zip(train_epochs, train_losses, val_losses, val_nses)}
     else:
