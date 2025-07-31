@@ -89,7 +89,7 @@ def main():
 
     max_events_df = pd.read_csv(max_events_path)
     max_events_df = max_events_df[max_events_df['max_discharge'] > 0]
-    max_events_df['max_date'] = pd.to_datetime(max_events_df['max_date'])
+    max_events_df['max_date'] = pd.to_datetime(max_events_df['max_date'], dayfirst=True)
     # For 72 hours: day before, day of, day after
     max_events_df['start_date'] = max_events_df['max_date'] - pd.Timedelta(days=1)
     max_events_df['end_date'] = max_events_df['max_date'] + pd.Timedelta(days=1)
