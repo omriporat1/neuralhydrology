@@ -180,6 +180,8 @@ def main():
         train_epochs, train_losses, val_losses, val_nses = extract_train_metrics_from_log(log_file)
         train_metrics_dict = {e: (l, v, n) for e, l, v, n in zip(train_epochs, train_losses, val_losses, val_nses)}
     else:
+        print ("log file list:", log_files)
+        print(run_dir.glob("*/output.log"))
         print("No log file found for this run.")
         train_metrics_dict = {}
 
