@@ -173,16 +173,15 @@ def main():
     # Prepare to collect metrics
     epoch_metrics = []
 
-    # Search for output.log in any subdirectory of run_dir
-    log_files = list(run_dir.glob("*/output.log"))
-    if log_files:
-        log_file = log_files[0]  # Use the first matching log file
+    # Look for output.log directly in run_dir
+    log_file = run_dir / "output.log"
+    if log_file.exists():
+        print(f"Found log file: {log_file}")
         train_epochs, train_losses, val_losses, val_nses = extract_train_metrics_from_log(log_file)
         train_metrics_dict = {e: (l, v, n) for e, l, v, n in zip(train_epochs, train_losses, val_losses, val_nses)}
     else:
-        print ("log file list:", log_files)
-        print(run_dir.glob("*/output.log"))
-        print("No log file found for this run.")
+        print("output.log not found in", run_dir)
+        print("Files in run_dir:", list(run_dir.iterdir()))
         train_metrics_dict = {}
 
     # Prepare validation hydrographs output directory
