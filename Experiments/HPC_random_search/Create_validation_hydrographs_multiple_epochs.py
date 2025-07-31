@@ -35,19 +35,41 @@ def persistent_nse(obs, sim, lag_steps=18):
     return 1 - (num / denom if denom != 0 else np.nan)
 
 def extract_train_metrics_from_log(log_path):
-    """Extract train loss and train MSE per epoch from a log file."""
+    """Extract train and validation metrics per epoch from a log file matching the actual log format."""
     epochs = []
-    losses = []
-    mses = []
+    train_losses = []
+    val_losses = []
+    val_nses = []
     with open(log_path, "r") as f:
         for line in f:
-            # Example log line: "Epoch 1: train_loss=0.123, train_MSE=0.456"
-            match = re.search(r"Epoch\s+(\d+).*?train_loss=([0-9.eE+-]+).*?train_MSE=([0-9.eE+-]+)", line)
-            if match:
-                epochs.append(int(match.group(1)))
-                losses.append(float(match.group(2)))
-                mses.append(float(match.group(3)))
-    return epochs, losses, mses
+            # Match: Epoch 1 average loss: avg_loss: 0.05254, avg_total_loss: 0.05254
+            train_match = re.search(r"Epoch\s+(\d+) average loss: avg_loss: ([0-9.eE+-]+)", line)
+            if train_match:
+                epoch = int(train_match.group(1))
+                train_loss = float(train_match.group(2))
+                # Store epoch and train loss
+                epochs.append(epoch)
+                train_losses.append(train_loss)
+            # Match: Epoch 1 average validation loss: 0.11096 -- Median validation metrics: avg_loss: 0.11096, NSE: 0.77376
+            val_match = re.search(r"Epoch\s+(\d+) average validation loss: ([0-9.eE+-]+) -- Median validation metrics: avg_loss: ([0-9.eE+-]+), NSE: ([0-9.eE+-]+)", line)
+            if val_match:
+                epoch = int(val_match.group(1))
+                val_loss = float(val_match.group(2))
+                val_nse = float(val_match.group(4))
+                # Ensure lists are aligned by epoch
+                while len(val_losses) < len(epochs) - 1:
+                    val_losses.append(float('nan'))
+                    val_nses.append(float('nan'))
+                val_losses.append(val_loss)
+                val_nses.append(val_nse)
+    # Pad lists to same length
+    while len(train_losses) < len(epochs):
+        train_losses.append(float('nan'))
+    while len(val_losses) < len(epochs):
+        val_losses.append(float('nan'))
+    while len(val_nses) < len(epochs):
+        val_nses.append(float('nan'))
+    return epochs, train_losses, val_losses, val_nses
 
 def main():
     run_id = int(sys.argv[1])
@@ -164,8 +186,8 @@ def main():
             break
 
     if log_file is not None:
-        train_epochs, train_losses, train_mses = extract_train_metrics_from_log(log_file)
-        train_metrics_dict = {e: (l, m) for e, l, m in zip(train_epochs, train_losses, train_mses)}
+        train_epochs, train_losses, val_losses, val_nses = extract_train_metrics_from_log(log_file)
+        train_metrics_dict = {e: (l, v, n) for e, l, v, n in zip(train_epochs, train_losses, val_losses, val_nses)}
     else:
         print("No log file found for this run.")
         train_metrics_dict = {}
@@ -204,13 +226,14 @@ def main():
         val_mse = np.nanmean(mse_list)
         val_nse = np.nanmean(nse_list)
 
-        # Get train loss/MSE if available
-        train_loss, train_mse = train_metrics_dict.get(epoch, (np.nan, np.nan))
+        # Get train/val loss/NSE if available
+        train_loss, val_loss, val_nse_log = train_metrics_dict.get(epoch, (np.nan, np.nan, np.nan))
 
         epoch_metrics.append({
             "epoch": epoch,
             "train_loss": train_loss,
-            "train_MSE": train_mse,
+            "val_loss_log": val_loss,
+            "val_NSE_log": val_nse_log,
             "val_MSE": val_mse,
             "val_NSE": val_nse
         })
@@ -260,9 +283,12 @@ def main():
                     basin_key = basin
                 else:
                     basin_id = basin.split('_')[-1] if '_' in basin else basin
-                    if int(basin_id) in max_events_df.index:
+                    try:
                         basin_key = int(basin_id)
-                    else:
+                    except Exception:
+                        print(f"Could not parse basin id for {basin}, skipping.")
+                        continue
+                    if basin_key not in max_events_df.index:
                         print(f"Basin {basin} not found in max_events_df")
                         continue
 
@@ -278,26 +304,47 @@ def main():
                 if 'time_step' in qsim.dims:
                     qsim = qsim.isel(time_step=-1)
 
+                # Check for empty arrays or all NaN
+                if len(qobs) == 0 or len(qsim) == 0:
+                    print(f"Basin {basin}: qobs or qsim is empty, skipping.")
+                    continue
+                obs_array = np.asarray(qobs).flatten()
+                sim_array = np.asarray(qsim).flatten()
+                if np.all(np.isnan(sim_array)):
+                    print(f"Basin {basin}: All simulated values are NaN, skipping.")
+                    continue
+
                 fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs[0].item()
                 qobs_shift = qobs.shift(date=delay, fill_value=fill_value)
 
                 # --- Full period metrics ---
-                obs_array = np.asarray(qobs).flatten()
-                sim_array = np.asarray(qsim).flatten()
-                nse_full = nse(obs_array, sim_array)
-                pnse_full = persistent_nse(obs_array, sim_array, lag_steps=delay)
-                peak_err_full = peak_flow_error(obs_array, sim_array)
-                vol_err_full = volume_error(obs_array, sim_array)
-                metrics_rows.append({
-                    "run": run_dir.name,
-                    "basin": basin,
-                    "event": "full_period",
-                    "NSE": nse_full,
-                    "pNSE": pnse_full,
-                    "PeakFlowError": peak_err_full,
-                    "VolumeError": vol_err_full,
-                    "erroneous": False
-                })
+                try:
+                    nse_full_val = nse(obs_array, sim_array)
+                    pnse_full = persistent_nse(obs_array, sim_array, lag_steps=delay)
+                    peak_err_full = peak_flow_error(obs_array, sim_array)
+                    vol_err_full = volume_error(obs_array, sim_array)
+                    metrics_rows.append({
+                        "run": run_dir.name,
+                        "basin": basin,
+                        "event": "full_period",
+                        "NSE": nse_full_val,
+                        "pNSE": pnse_full,
+                        "PeakFlowError": peak_err_full,
+                        "VolumeError": vol_err_full,
+                        "erroneous": False
+                    })
+                except Exception as e:
+                    print(f"Error calculating full period metrics for basin {basin}: {e}")
+                    metrics_rows.append({
+                        "run": run_dir.name,
+                        "basin": basin,
+                        "event": "full_period",
+                        "NSE": np.nan,
+                        "pNSE": np.nan,
+                        "PeakFlowError": np.nan,
+                        "VolumeError": np.nan,
+                        "erroneous": True
+                    })
 
                 # --- Event metrics (72h window) ---
                 for _, event in basin_events.iterrows():
@@ -309,7 +356,20 @@ def main():
                         qobs_shift_event = qobs_shift.sel(date=slice(start_date, end_date))
                         obs_event = np.asarray(qobs_event).flatten()
                         sim_event = np.asarray(qsim_event).flatten()
-                        nse_event = nse(obs_event, sim_event)
+                        if len(obs_event) == 0 or len(sim_event) == 0 or np.all(np.isnan(sim_event)):
+                            print(f"Basin {basin} event {start_date}-{end_date}: empty or all-NaN, skipping.")
+                            metrics_rows.append({
+                                "run": run_dir.name,
+                                "basin": basin,
+                                "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
+                                "NSE": np.nan,
+                                "pNSE": np.nan,
+                                "PeakFlowError": np.nan,
+                                "VolumeError": np.nan,
+                                "erroneous": True
+                            })
+                            continue
+                        nse_event_val = nse(obs_event, sim_event)
                         pnse_event = persistent_nse(obs_event, sim_event, lag_steps=delay)
                         peak_err_event = peak_flow_error(obs_event, sim_event)
                         vol_err_event = volume_error(obs_event, sim_event)
@@ -317,7 +377,7 @@ def main():
                             "run": run_dir.name,
                             "basin": basin,
                             "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
-                            "NSE": nse_event,
+                            "NSE": nse_event_val,
                             "pNSE": pnse_event,
                             "PeakFlowError": peak_err_event,
                             "VolumeError": vol_err_event,
@@ -398,42 +458,47 @@ def main():
 
         # --- Save metrics and summary for this epoch ---
         metrics_df = pd.DataFrame(metrics_rows)
+        if "erroneous" not in metrics_df.columns:
+            metrics_df["erroneous"] = False
         metrics_csv_file = epoch_out_dir / "event_metrics.csv"
         metrics_df.to_csv(metrics_csv_file, index=False)
         print(f"Saved event metrics to {metrics_csv_file}")
 
         # Summary statistics and plotting
         metrics_to_analyze = ["NSE", "pNSE", "PeakFlowError", "VolumeError"]
-        summary = metrics_df[~metrics_df["erroneous"]].agg({
-            "NSE": ["mean", "std"],
-            "pNSE": ["mean", "std"],
-            "PeakFlowError": ["mean", "std"],
-            "VolumeError": ["mean", "std"]
-        })
-        summary["erroneous_count"] = metrics_df["erroneous"].sum()
-        summary_csv_file = epoch_out_dir / "event_metrics_summary.csv"
-        summary.to_csv(summary_csv_file)
-        print(f"Saved event metrics summary to {summary_csv_file}")
+        if not metrics_df.empty and "erroneous" in metrics_df.columns:
+            summary = metrics_df[~metrics_df["erroneous"]].agg({
+                "NSE": ["mean", "std"],
+                "pNSE": ["mean", "std"],
+                "PeakFlowError": ["mean", "std"],
+                "VolumeError": ["mean", "std"]
+            })
+            summary["erroneous_count"] = metrics_df["erroneous"].sum()
+            summary_csv_file = epoch_out_dir / "event_metrics_summary.csv"
+            summary.to_csv(summary_csv_file)
+            print(f"Saved event metrics summary to {summary_csv_file}")
 
-        # Bar plot of mean metrics
-        plt.figure(figsize=(8, 5))
-        mean_values = [summary.loc["mean", m] for m in metrics_to_analyze if m in summary.columns]
-        plt.bar(metrics_to_analyze[:len(mean_values)], mean_values)
-        plt.ylabel("Mean Metric Value")
-        plt.title(f"Run {run_dir.name} Epoch {epoch} Event Metrics (mean)")
-        plt.tight_layout()
-        plt.savefig(epoch_out_dir / "event_metrics_summary.png")
-        plt.close()
+            # Bar plot of mean metrics
+            plt.figure(figsize=(8, 5))
+            mean_values = [summary.loc["mean", m] for m in metrics_to_analyze if m in summary.columns]
+            plt.bar(metrics_to_analyze[:len(mean_values)], mean_values)
+            plt.ylabel("Mean Metric Value")
+            plt.title(f"Run {run_dir.name} Epoch {epoch} Event Metrics (mean)")
+            plt.tight_layout()
+            plt.savefig(epoch_out_dir / "event_metrics_summary.png")
+            plt.close()
 
-        # Boxplot for each metric
-        plt.figure(figsize=(12, 8))
-        for i, metric in enumerate(metrics_to_analyze):
-            plt.subplot(2, 2, i+1)
-            sns.boxplot(y=metrics_df.loc[~metrics_df["erroneous"], metric])
-            plt.title(f"{metric} Distribution")
-        plt.tight_layout()
-        plt.savefig(epoch_out_dir / "event_metrics_boxplots.png")
-        plt.close()
+            # Boxplot for each metric
+            plt.figure(figsize=(12, 8))
+            for i, metric in enumerate(metrics_to_analyze):
+                plt.subplot(2, 2, i+1)
+                sns.boxplot(y=metrics_df.loc[~metrics_df["erroneous"], metric])
+                plt.title(f"{metric} Distribution")
+            plt.tight_layout()
+            plt.savefig(epoch_out_dir / "event_metrics_boxplots.png")
+            plt.close()
+        else:
+            print("No valid metrics to summarize or plot for this epoch.")
 
 if __name__ == '__main__':
     try:
