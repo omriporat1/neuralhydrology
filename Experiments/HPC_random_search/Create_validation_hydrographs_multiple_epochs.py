@@ -3,10 +3,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import seaborn as sns
 from neuralhydrology.evaluation import get_tester
 from neuralhydrology.utils.config import Config
 import yaml
-import seaborn as sns
+import re
 
 def nse(obs, sim):
     obs = np.asarray(obs)
@@ -33,6 +34,21 @@ def persistent_nse(obs, sim, lag_steps=18):
     denom = np.nansum((obs - persistence) ** 2)
     return 1 - (num / denom if denom != 0 else np.nan)
 
+def extract_train_metrics_from_log(log_path):
+    """Extract train loss and train MSE per epoch from a log file."""
+    epochs = []
+    losses = []
+    mses = []
+    with open(log_path, "r") as f:
+        for line in f:
+            # Example log line: "Epoch 1: train_loss=0.123, train_MSE=0.456"
+            match = re.search(r"Epoch\s+(\d+).*?train_loss=([0-9.eE+-]+).*?train_MSE=([0-9.eE+-]+)", line)
+            if match:
+                epochs.append(int(match.group(1)))
+                losses.append(float(match.group(2)))
+                mses.append(float(match.group(3)))
+    return epochs, losses, mses
+
 def main():
     run_id = int(sys.argv[1])
     job_id = int(41780893)
@@ -44,11 +60,11 @@ def main():
         print(f"Run directory does not exist: {run_dir}")
         return
 
+    # Find the actual run subdirectory (e.g., N38_A30_4CPU_SMI_0506_225956)
     run_subdirs = [d for d in run_dir.iterdir() if d.is_dir()]
     if not run_subdirs:
         print(f"No run subdirectories found in {run_dir}")
         return
-
     run_dir = run_subdirs[0]
     print(f"Using run directory: {run_dir}")
 
@@ -131,27 +147,44 @@ def main():
     results = tester.evaluate(save_results=False, metrics=config.metrics)
     basins = results.keys()
 
+    # Find all epoch model files
+    epoch_files = sorted(run_dir.glob("model_epoch*.pt"))
+    epoch_numbers = [int(f.stem.split("epoch")[-1]) for f in epoch_files]
+
+    # Prepare to collect metrics
+    epoch_metrics = []
+
+    # Try to find the log file for this run
+    logs_dir = Path("c:/PhD/Python/neuralhydrology/Experiments/HPC_random_search/logs")
+    # You may need to adjust this pattern to match your log file naming
+    log_file = None
+    for f in logs_dir.glob("*.log"):
+        if str(run_dir.name) in f.name or str(run_id) in f.name:
+            log_file = f
+            break
+
+    if log_file is not None:
+        train_epochs, train_losses, train_mses = extract_train_metrics_from_log(log_file)
+        train_metrics_dict = {e: (l, m) for e, l, m in zip(train_epochs, train_losses, train_mses)}
+    else:
+        print("No log file found for this run.")
+        train_metrics_dict = {}
+
+    # Prepare validation hydrographs output directory
     validation_hydrographs_dir = run_dir / "validation_hydrographs_cluster"
     validation_hydrographs_dir.mkdir(exist_ok=True)
 
-    metrics_rows = []
-    for basin in basins:
-        try:
-            # Find matching events for this basin
-            if basin in max_events_df.index:
-                basin_key = basin
-            else:
-                basin_id = basin.split('_')[-1] if '_' in basin else basin
-                if int(basin_id) in max_events_df.index:
-                    basin_key = int(basin_id)
-                else:
-                    print(f"Basin {basin} not found in max_events_df")
-                    continue
+    # For each epoch, evaluate and collect metrics
+    for epoch, epoch_file in zip(epoch_numbers, epoch_files):
+        print(f"Evaluating epoch {epoch} ({epoch_file.name})")
+        tester = get_tester(cfg=config, run_dir=run_dir, period="test", init_model=True)
+        results = tester.evaluate(epoch=epoch, save_results=False, metrics=config.metrics)
+        basins = results.keys()
 
-            basin_events = max_events_df.loc[basin_key]
-            if isinstance(basin_events, pd.Series):
-                basin_events = pd.DataFrame([basin_events])
-
+        # Aggregate full-period metrics across all basins
+        mse_list = []
+        nse_list = []
+        for basin in basins:
             basin_results = results[basin]["10min"]["xr"]
             qobs = basin_results["Flow_m3_sec_obs"]
             qsim = basin_results["Flow_m3_sec_sim"]
@@ -159,163 +192,248 @@ def main():
                 qobs = qobs.isel(time_step=-1)
             if 'time_step' in qsim.dims:
                 qsim = qsim.isel(time_step=-1)
-
-            fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs[0].item()
-            qobs_shift = qobs.shift(date=delay, fill_value=fill_value)
-
-            # --- Full period metrics ---
             obs_array = np.asarray(qobs).flatten()
             sim_array = np.asarray(qsim).flatten()
-            nse_full = nse(obs_array, sim_array)
-            pnse_full = persistent_nse(obs_array, sim_array, lag_steps=delay)
-            peak_err_full = peak_flow_error(obs_array, sim_array)
-            vol_err_full = volume_error(obs_array, sim_array)
-            metrics_rows.append({
-                "run": run_dir.name,
-                "basin": basin,
-                "event": "full_period",
-                "NSE": nse_full,
-                "pNSE": pnse_full,
-                "PeakFlowError": peak_err_full,
-                "VolumeError": vol_err_full,
-                "erroneous": False
-            })
+            mse = np.nanmean((obs_array - sim_array) ** 2)
+            mean_obs = np.nanmean(obs_array)
+            numerator = np.nansum((obs_array - sim_array) ** 2)
+            denominator = np.nansum((obs_array - mean_obs) ** 2)
+            nse = 1 - (numerator / denominator if denominator != 0 else np.nan)
+            mse_list.append(mse)
+            nse_list.append(nse)
+        val_mse = np.nanmean(mse_list)
+        val_nse = np.nanmean(nse_list)
 
-            # --- Event metrics (72h window) ---
-            for _, event in basin_events.iterrows():
-                start_date = event['start_date']
-                end_date = event['end_date']
+        # Get train loss/MSE if available
+        train_loss, train_mse = train_metrics_dict.get(epoch, (np.nan, np.nan))
+
+        epoch_metrics.append({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_MSE": train_mse,
+            "val_MSE": val_mse,
+            "val_NSE": val_nse
+        })
+
+    # Save metrics CSV
+    metrics_df = pd.DataFrame(epoch_metrics)
+    metrics_df = metrics_df.sort_values("epoch")
+    metrics_csv = run_dir / "epoch_metrics_summary.csv"
+    metrics_df.to_csv(metrics_csv, index=False)
+    print(f"Saved epoch metrics summary to {metrics_csv}")
+
+    # Plot metrics as function of epoch
+    plt.figure(figsize=(10, 7))
+    plt.plot(metrics_df["epoch"], metrics_df["train_loss"], label="Train Loss")
+    plt.plot(metrics_df["epoch"], metrics_df["train_MSE"], label="Train MSE")
+    plt.plot(metrics_df["epoch"], metrics_df["val_MSE"], label="Validation MSE")
+    plt.plot(metrics_df["epoch"], metrics_df["val_NSE"], label="Validation NSE")
+    plt.xlabel("Epoch")
+    plt.ylabel("Metric Value")
+    plt.title(f"Training and Validation Metrics vs. Epoch ({run_dir.name})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(run_dir / "epoch_metrics_summary.png")
+    plt.close()
+
+    # Find all epoch model files
+    epoch_files = sorted(run_dir.glob("model_epoch*.pt"))
+    epoch_numbers = [int(f.stem.split("epoch")[-1]) for f in epoch_files]
+
+    for epoch, epoch_file in zip(epoch_numbers, epoch_files):
+        print(f"Processing epoch {epoch} ({epoch_file.name})")
+
+        # Create output folder for this epoch
+        epoch_out_dir = run_dir / f"validation_hydrographs_epoch_{epoch:03d}"
+        epoch_out_dir.mkdir(exist_ok=True)
+
+        # Evaluate this epoch
+        tester = get_tester(cfg=config, run_dir=run_dir, period="test", init_model=True)
+        results = tester.evaluate(epoch=epoch, save_results=False, metrics=config.metrics)
+        basins = results.keys()
+
+        metrics_rows = []
+        for basin in basins:
+            try:
+                # Find matching events for this basin
+                if basin in max_events_df.index:
+                    basin_key = basin
+                else:
+                    basin_id = basin.split('_')[-1] if '_' in basin else basin
+                    if int(basin_id) in max_events_df.index:
+                        basin_key = int(basin_id)
+                    else:
+                        print(f"Basin {basin} not found in max_events_df")
+                        continue
+
+                basin_events = max_events_df.loc[basin_key]
+                if isinstance(basin_events, pd.Series):
+                    basin_events = pd.DataFrame([basin_events])
+
+                basin_results = results[basin]["10min"]["xr"]
+                qobs = basin_results["Flow_m3_sec_obs"]
+                qsim = basin_results["Flow_m3_sec_sim"]
+                if 'time_step' in qobs.dims:
+                    qobs = qobs.isel(time_step=-1)
+                if 'time_step' in qsim.dims:
+                    qsim = qsim.isel(time_step=-1)
+
+                fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs[0].item()
+                qobs_shift = qobs.shift(date=delay, fill_value=fill_value)
+
+                # --- Full period metrics ---
+                obs_array = np.asarray(qobs).flatten()
+                sim_array = np.asarray(qsim).flatten()
+                nse_full = nse(obs_array, sim_array)
+                pnse_full = persistent_nse(obs_array, sim_array, lag_steps=delay)
+                peak_err_full = peak_flow_error(obs_array, sim_array)
+                vol_err_full = volume_error(obs_array, sim_array)
+                metrics_rows.append({
+                    "run": run_dir.name,
+                    "basin": basin,
+                    "event": "full_period",
+                    "NSE": nse_full,
+                    "pNSE": pnse_full,
+                    "PeakFlowError": peak_err_full,
+                    "VolumeError": vol_err_full,
+                    "erroneous": False
+                })
+
+                # --- Event metrics (72h window) ---
+                for _, event in basin_events.iterrows():
+                    start_date = event['start_date']
+                    end_date = event['end_date']
+                    try:
+                        qobs_event = qobs.sel(date=slice(start_date, end_date))
+                        qsim_event = qsim.sel(date=slice(start_date, end_date))
+                        qobs_shift_event = qobs_shift.sel(date=slice(start_date, end_date))
+                        obs_event = np.asarray(qobs_event).flatten()
+                        sim_event = np.asarray(qsim_event).flatten()
+                        nse_event = nse(obs_event, sim_event)
+                        pnse_event = persistent_nse(obs_event, sim_event, lag_steps=delay)
+                        peak_err_event = peak_flow_error(obs_event, sim_event)
+                        vol_err_event = volume_error(obs_event, sim_event)
+                        metrics_rows.append({
+                            "run": run_dir.name,
+                            "basin": basin,
+                            "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
+                            "NSE": nse_event,
+                            "pNSE": pnse_event,
+                            "PeakFlowError": peak_err_event,
+                            "VolumeError": vol_err_event,
+                            "erroneous": False
+                        })
+
+                        # Save event hydrograph and plot
+                        event_df = pd.DataFrame({
+                            'date': qobs_event['date'].values,
+                            'observed': obs_event,
+                            'simulated': sim_event,
+                            'shifted': np.asarray(qobs_shift_event).flatten(),
+                            'event_date': event['max_date'],
+                            'event_discharge': event['max_discharge']
+                        })
+                        event_str = f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}"
+                        csv_file = epoch_out_dir / f"{basin}_event_{event_str}.csv"
+                        event_df.to_csv(csv_file, index=False)
+                        plt.figure(figsize=(12, 8))
+                        plt.plot(event_df['date'], event_df['observed'], label="Observed")
+                        plt.plot(event_df['date'], event_df['simulated'], linestyle='--', label="Simulated")
+                        plt.plot(event_df['date'], event_df['shifted'], linestyle=':', label="Observed shifted (3 hours)")
+                        plt.title(f"Event Hydrograph for Basin {basin}\n{event_str}")
+                        plt.xlabel("Date")
+                        plt.ylabel("Discharge (m³/s)")
+                        plt.grid(True)
+                        plt.legend()
+                        fig_file = epoch_out_dir / f"{basin}_event_{event_str}.png"
+                        plt.savefig(fig_file)
+                        plt.close()
+                    except Exception as e:
+                        print(f"Error calculating event metrics for basin {basin}, event {start_date}-{end_date}: {e}")
+                        metrics_rows.append({
+                            "run": run_dir.name,
+                            "basin": basin,
+                            "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
+                            "NSE": np.nan,
+                            "pNSE": np.nan,
+                            "PeakFlowError": np.nan,
+                            "VolumeError": np.nan,
+                            "erroneous": True
+                        })
+                        continue
+
+                # Save full period hydrograph and plot
                 try:
-                    qobs_event = qobs.sel(date=slice(start_date, end_date))
-                    qsim_event = qsim.sel(date=slice(start_date, end_date))
-                    qobs_shift_event = qobs_shift.sel(date=slice(start_date, end_date))
-                    obs_event = np.asarray(qobs_event).flatten()
-                    sim_event = np.asarray(qsim_event).flatten()
-                    nse_event = nse(obs_event, sim_event)
-                    pnse_event = persistent_nse(obs_event, sim_event, lag_steps=delay)
-                    peak_err_event = peak_flow_error(obs_event, sim_event)
-                    vol_err_event = volume_error(obs_event, sim_event)
-                    metrics_rows.append({
-                        "run": run_dir.name,
-                        "basin": basin,
-                        "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
-                        "NSE": nse_event,
-                        "pNSE": pnse_event,
-                        "PeakFlowError": peak_err_event,
-                        "VolumeError": vol_err_event,
-                        "erroneous": False
+                    full_df = pd.DataFrame({
+                        'date': qobs['date'].values,
+                        'observed': obs_array,
+                        'simulated': sim_array,
+                        'shifted': np.asarray(qobs_shift).flatten()
                     })
-
-                    # Save event hydrograph and plot
-                    event_df = pd.DataFrame({
-                        'date': qobs_event['date'].values,
-                        'observed': obs_event,
-                        'simulated': sim_event,
-                        'shifted': np.asarray(qobs_shift_event).flatten(),
-                        'event_date': event['max_date'],
-                        'event_discharge': event['max_discharge']
-                    })
-                    event_str = f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}"
-                    csv_file = validation_hydrographs_dir / f"{basin}_event_{event_str}.csv"
-                    event_df.to_csv(csv_file, index=False)
-                    plt.figure(figsize=(12, 8))
-                    plt.plot(event_df['date'], event_df['observed'], label="Observed")
-                    plt.plot(event_df['date'], event_df['simulated'], linestyle='--', label="Simulated")
-                    plt.plot(event_df['date'], event_df['shifted'], linestyle=':', label="Observed shifted (3 hours)")
-                    plt.title(f"Event Hydrograph for Basin {basin}\n{event_str}")
+                    full_csv_file = epoch_out_dir / f"{basin}_full_period.csv"
+                    full_df.to_csv(full_csv_file, index=False)
+                    plt.figure(figsize=(16, 10))
+                    plt.plot(full_df['date'], full_df['observed'], label="Observed")
+                    plt.plot(full_df['date'], full_df['simulated'], label="Simulated", linestyle='--')
+                    plt.plot(full_df['date'], full_df['shifted'], label="Observed shifted (3 hours)")
+                    for idx, (_, event) in enumerate(basin_events.iterrows()):
+                        event_start = event['start_date']
+                        event_end = event['end_date']
+                        event_max = event['max_date']
+                        plt.axvspan(event_start, event_end, alpha=0.2, color='yellow')
+                        max_discharge = event['max_discharge']
+                        plt.scatter([event_max], [max_discharge], color='red', s=100, zorder=5, label=f"Max Discharge ({pd.to_datetime(event_max).strftime('%Y-%m-%d')})" if idx == 0 else "")
+                    plt.title(f"Full Validation Period for Basin {basin}")
                     plt.xlabel("Date")
                     plt.ylabel("Discharge (m³/s)")
                     plt.grid(True)
                     plt.legend()
-                    fig_file = validation_hydrographs_dir / f"{basin}_event_{event_str}.png"
-                    plt.savefig(fig_file)
+                    plt.savefig(epoch_out_dir / f"{basin}_full_period.png")
                     plt.close()
                 except Exception as e:
-                    print(f"Error calculating event metrics for basin {basin}, event {start_date}-{end_date}: {e}")
-                    metrics_rows.append({
-                        "run": run_dir.name,
-                        "basin": basin,
-                        "event": f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}",
-                        "NSE": np.nan,
-                        "pNSE": np.nan,
-                        "PeakFlowError": np.nan,
-                        "VolumeError": np.nan,
-                        "erroneous": True
-                    })
-                    continue
-
-            # Save full period hydrograph and plot
-            try:
-                full_df = pd.DataFrame({
-                    'date': qobs['date'].values,
-                    'observed': obs_array,
-                    'simulated': sim_array,
-                    'shifted': np.asarray(qobs_shift).flatten()
-                })
-                full_csv_file = validation_hydrographs_dir / f"{basin}_full_period.csv"
-                full_df.to_csv(full_csv_file, index=False)
-                plt.figure(figsize=(16, 10))
-                plt.plot(full_df['date'], full_df['observed'], label="Observed")
-                plt.plot(full_df['date'], full_df['simulated'], label="Simulated", linestyle='--')
-                plt.plot(full_df['date'], full_df['shifted'], label="Observed shifted (3 hours)")
-                for idx, (_, event) in enumerate(basin_events.iterrows()):
-                    event_start = event['start_date']
-                    event_end = event['end_date']
-                    event_max = event['max_date']
-                    plt.axvspan(event_start, event_end, alpha=0.2, color='yellow')
-                    max_discharge = event['max_discharge']
-                    plt.scatter([event_max], [max_discharge], color='red', s=100, zorder=5, label=f"Max Discharge ({pd.to_datetime(event_max).strftime('%Y-%m-%d')})" if idx == 0 else "")
-                plt.title(f"Full Validation Period for Basin {basin}")
-                plt.xlabel("Date")
-                plt.ylabel("Discharge (m³/s)")
-                plt.grid(True)
-                plt.legend()
-                plt.savefig(validation_hydrographs_dir / f"{basin}_full_period.png")
-                plt.close()
+                    print(f"Error creating full period visualization for basin {basin}: {str(e)}")
             except Exception as e:
-                print(f"Error creating full period visualization for basin {basin}: {str(e)}")
-        except Exception as e:
-            print(f"Error processing basin {basin}: {str(e)}")
-            continue
+                print(f"Error processing basin {basin}: {str(e)}")
+                continue
 
-    # --- Save metrics and summary ---
-    metrics_df = pd.DataFrame(metrics_rows)
-    metrics_csv_file = validation_hydrographs_dir / "event_metrics.csv"
-    metrics_df.to_csv(metrics_csv_file, index=False)
-    print(f"Saved event metrics to {metrics_csv_file}")
+        # --- Save metrics and summary for this epoch ---
+        metrics_df = pd.DataFrame(metrics_rows)
+        metrics_csv_file = epoch_out_dir / "event_metrics.csv"
+        metrics_df.to_csv(metrics_csv_file, index=False)
+        print(f"Saved event metrics to {metrics_csv_file}")
 
-    # Summary statistics and plotting
-    metrics_to_analyze = ["NSE", "pNSE", "PeakFlowError", "VolumeError"]
-    summary = metrics_df[~metrics_df["erroneous"]].agg({
-        "NSE": ["mean", "std"],
-        "pNSE": ["mean", "std"],
-        "PeakFlowError": ["mean", "std"],
-        "VolumeError": ["mean", "std"]
-    })
-    summary["erroneous_count"] = metrics_df["erroneous"].sum()
-    summary_csv_file = validation_hydrographs_dir / "event_metrics_summary.csv"
-    summary.to_csv(summary_csv_file)
-    print(f"Saved event metrics summary to {summary_csv_file}")
+        # Summary statistics and plotting
+        metrics_to_analyze = ["NSE", "pNSE", "PeakFlowError", "VolumeError"]
+        summary = metrics_df[~metrics_df["erroneous"]].agg({
+            "NSE": ["mean", "std"],
+            "pNSE": ["mean", "std"],
+            "PeakFlowError": ["mean", "std"],
+            "VolumeError": ["mean", "std"]
+        })
+        summary["erroneous_count"] = metrics_df["erroneous"].sum()
+        summary_csv_file = epoch_out_dir / "event_metrics_summary.csv"
+        summary.to_csv(summary_csv_file)
+        print(f"Saved event metrics summary to {summary_csv_file}")
 
-    # Bar plot of mean metrics
-    plt.figure(figsize=(8, 5))
-    mean_values = [summary.loc["mean", m] for m in metrics_to_analyze if m in summary.columns]
-    plt.bar(metrics_to_analyze[:len(mean_values)], mean_values)
-    plt.ylabel("Mean Metric Value")
-    plt.title(f"Run {run_dir.name} Event Metrics (mean)")
-    plt.tight_layout()
-    plt.savefig(validation_hydrographs_dir / "event_metrics_summary.png")
-    plt.close()
+        # Bar plot of mean metrics
+        plt.figure(figsize=(8, 5))
+        mean_values = [summary.loc["mean", m] for m in metrics_to_analyze if m in summary.columns]
+        plt.bar(metrics_to_analyze[:len(mean_values)], mean_values)
+        plt.ylabel("Mean Metric Value")
+        plt.title(f"Run {run_dir.name} Epoch {epoch} Event Metrics (mean)")
+        plt.tight_layout()
+        plt.savefig(epoch_out_dir / "event_metrics_summary.png")
+        plt.close()
 
-    # Boxplot for each metric
-    plt.figure(figsize=(12, 8))
-    for i, metric in enumerate(metrics_to_analyze):
-        plt.subplot(2, 2, i+1)
-        sns.boxplot(y=metrics_df.loc[~metrics_df["erroneous"], metric])
-        plt.title(f"{metric} Distribution")
-    plt.tight_layout()
-    plt.savefig(validation_hydrographs_dir / "event_metrics_boxplots.png")
-    plt.close()
+        # Boxplot for each metric
+        plt.figure(figsize=(12, 8))
+        for i, metric in enumerate(metrics_to_analyze):
+            plt.subplot(2, 2, i+1)
+            sns.boxplot(y=metrics_df.loc[~metrics_df["erroneous"], metric])
+            plt.title(f"{metric} Distribution")
+        plt.tight_layout()
+        plt.savefig(epoch_out_dir / "event_metrics_boxplots.png")
+        plt.close()
 
 if __name__ == '__main__':
     try:
