@@ -177,7 +177,7 @@ def main():
     epoch_metrics = []
 
     # Try to find the log file for this run
-    logs_dir = Path("c:/PhD/Python/neuralhydrology/Experiments/HPC_random_search/logs")
+    logs_dir = run_dir
     # You may need to adjust this pattern to match your log file naming
     log_file = None
     for f in logs_dir.glob("*.log"):
