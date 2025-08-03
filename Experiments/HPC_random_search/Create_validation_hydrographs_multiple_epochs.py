@@ -124,7 +124,7 @@ def main():
         print(f"Error: Config file not found at {config_path}")
         return
 
-    RUN_LOCALLY = False  # Set to False when running on HPC/original environment
+    RUN_LOCALLY = True  # Set to False when running on HPC/original environment
 
     if RUN_LOCALLY:
         with open(config_path, 'r') as f:
@@ -266,10 +266,15 @@ def main():
         tester = get_tester(cfg=config, run_dir=run_dir, period="test", init_model=True)
         results = tester.evaluate(epoch=epoch, save_results=False, metrics=config.metrics)
         basins = results.keys()
+        print(f"Number of basins in results: {len(basins)}")
+        print(f"Basin names: {list(basins)[:5]}...")  # Show first 5 basin names
 
         metrics_rows = []
+        processed_basins = 0
+        skipped_basins = 0
         for basin in basins:
             try:
+                print(f"Processing basin: {basin}")
                 # Find matching events for this basin
                 if basin in max_events_df.index:
                     basin_key = basin
@@ -279,11 +284,14 @@ def main():
                         basin_key = int(basin_id)
                     except Exception:
                         print(f"Could not parse basin id for {basin}, skipping.")
+                        skipped_basins += 1
                         continue
                     if basin_key not in max_events_df.index:
                         print(f"Basin {basin} not found in max_events_df")
+                        skipped_basins += 1
                         continue
 
+                print(f"Basin key found: {basin_key}")
                 basin_events = max_events_df.loc[basin_key]
                 if isinstance(basin_events, pd.Series):
                     basin_events = pd.DataFrame([basin_events])
@@ -291,6 +299,7 @@ def main():
                 basin_results = results[basin]["10min"]["xr"]
                 qobs = basin_results["Flow_m3_sec_obs"]
                 qsim = basin_results["Flow_m3_sec_sim"]
+                print(f"qobs shape: {qobs.shape}, qsim shape: {qsim.shape}")
                 if 'time_step' in qobs.dims:
                     qobs = qobs.isel(time_step=-1)
                 if 'time_step' in qsim.dims:
@@ -299,12 +308,22 @@ def main():
                 # Check for empty arrays or all NaN
                 if len(qobs) == 0 or len(qsim) == 0:
                     print(f"Basin {basin}: qobs or qsim is empty, skipping.")
+                    skipped_basins += 1
                     continue
                 obs_array = np.asarray(qobs).flatten()
                 sim_array = np.asarray(qsim).flatten()
+                print(f"obs_array shape: {obs_array.shape}, sim_array shape: {sim_array.shape}")
+                print(f"obs_array nan count: {np.isnan(obs_array).sum()}, sim_array nan count: {np.isnan(sim_array).sum()}")
                 if np.all(np.isnan(sim_array)):
                     print(f"Basin {basin}: All simulated values are NaN, skipping.")
+                    skipped_basins += 1
                     continue
+
+                processed_basins += 1
+                print(f"Basin {basin}: Processing data successfully")
+
+                # Process events for this basin
+                print(f"DEBUG: Processing {len(basin_events)} events for basin {basin}")
 
                 fill_value = qobs.isel(date=0).item() if 'date' in qobs.dims else qobs[0].item()
                 qobs_shift = qobs.shift(date=delay, fill_value=fill_value)
@@ -339,7 +358,8 @@ def main():
                     })
 
                 # --- Event metrics (72h window) ---
-                for _, event in basin_events.iterrows():
+                for idx, (_, event) in enumerate(basin_events.iterrows()):
+                    print(f"DEBUG: Processing event {idx+1}/{len(basin_events)} for basin {basin}")
                     start_date = event['start_date']
                     end_date = event['end_date']
                     try:
@@ -377,6 +397,7 @@ def main():
                         })
 
                         # Save event hydrograph and plot
+                        print(f"DEBUG: Saving event CSV and plot for basin {basin}, event {start_date}-{end_date}")
                         event_df = pd.DataFrame({
                             'date': qobs_event['date'].values,
                             'observed': obs_event,
@@ -387,7 +408,9 @@ def main():
                         })
                         event_str = f"{pd.to_datetime(start_date).strftime('%Y%m%d')}_{pd.to_datetime(end_date).strftime('%Y%m%d')}"
                         csv_file = epoch_out_dir / f"{basin}_event_{event_str}.csv"
+                        print(f"DEBUG: Saving event CSV to: {csv_file}")
                         event_df.to_csv(csv_file, index=False)
+                        print(f"DEBUG: Event CSV saved successfully")
                         plt.figure(figsize=(12, 8))
                         plt.plot(event_df['date'], event_df['observed'], label="Observed")
                         plt.plot(event_df['date'], event_df['simulated'], linestyle='--', label="Simulated")
@@ -398,8 +421,10 @@ def main():
                         plt.grid(True)
                         plt.legend()
                         fig_file = epoch_out_dir / f"{basin}_event_{event_str}.png"
+                        print(f"DEBUG: Saving event plot to: {fig_file}")
                         plt.savefig(fig_file)
                         plt.close()
+                        print(f"DEBUG: Event plot saved successfully")
                     except Exception as e:
                         print(f"Error calculating event metrics for basin {basin}, event {start_date}-{end_date}: {e}")
                         metrics_rows.append({
@@ -415,6 +440,7 @@ def main():
                         continue
 
                 # Save full period hydrograph and plot
+                print(f"DEBUG: Saving full period CSV and plot for basin {basin}")
                 try:
                     full_df = pd.DataFrame({
                         'date': qobs['date'].values,
@@ -423,7 +449,9 @@ def main():
                         'shifted': np.asarray(qobs_shift).flatten()
                     })
                     full_csv_file = epoch_out_dir / f"{basin}_full_period.csv"
+                    print(f"DEBUG: Saving full period CSV to: {full_csv_file}")
                     full_df.to_csv(full_csv_file, index=False)
+                    print(f"DEBUG: Full period CSV saved successfully")
                     plt.figure(figsize=(16, 10))
                     plt.plot(full_df['date'], full_df['observed'], label="Observed")
                     plt.plot(full_df['date'], full_df['simulated'], label="Simulated", linestyle='--')
@@ -440,12 +468,18 @@ def main():
                     plt.ylabel("Discharge (m³/s)")
                     plt.grid(True)
                     plt.legend()
-                    plt.savefig(epoch_out_dir / f"{basin}_full_period.png")
+                    plot_file = epoch_out_dir / f"{basin}_full_period.png"
+                    print(f"DEBUG: Saving full period plot to: {plot_file}")
+                    plt.savefig(plot_file)
                     plt.close()
+                    print(f"DEBUG: Full period plot saved successfully")
                 except Exception as e:
                     print(f"Error creating full period visualization for basin {basin}: {str(e)}")
+                
+                print(f"DEBUG: Completed processing basin {basin} successfully")
             except Exception as e:
                 print(f"Error processing basin {basin}: {str(e)}")
+                skipped_basins += 1
                 continue
 
         # --- Save metrics and summary for this epoch ---
