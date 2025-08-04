@@ -410,8 +410,8 @@ def main():
 
     # Process data
     # Read all CSV files in the specified directory
-    # data_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted'
-    data_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023'
+    # data_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023'
+    data_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted'
 
     all_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.csv')]
 
@@ -441,7 +441,7 @@ def main():
     # Sort and fill missing values
     gauges_data = gauges_data.sort_values(by=['Station_ID', 'datetime'])
     gauges_data = fill_missing(gauges_data, timestep_minutes=10)
-    gauges_data = quality_check(gauges_data, log_folder=r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023\log')
+    gauges_data = quality_check(gauges_data, log_folder=r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\log')
 
     # extract grid edges from the basins shapefile
     # if basins are not in EPSG:2039 - transform them from their current CRS to EPSG:2039
@@ -456,11 +456,12 @@ def main():
     # plot_map(basins, gauges, grid_edges)
 
     # Interpolate to grid and save as NetCDF
-    output_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023\output'
+    # output_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023\output'
+    output_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output'
     # Export first 10 unique gauge datetimes
 
     # We'll get these after idw_ds is created
-    idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("2022-01-01", "2022-01-03"))
+    idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("2022-10-01", "2023-10-01"))
 
 
     # Animate the grid for a specific date range
