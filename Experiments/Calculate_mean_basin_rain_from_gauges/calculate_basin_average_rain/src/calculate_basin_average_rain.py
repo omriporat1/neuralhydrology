@@ -341,7 +341,9 @@ def main():
     # Combine all files into a single DataFrame
     gauges_data = pd.concat((pd.read_csv(f) for f in all_files), ignore_index=True)
 
-   
+    # Merge with available stations to get ITM_X and ITM_Y
+    gauges_data = pd.merge(gauges_data, gauges[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
+    
     # Process the combined data
     gauges_data['datetime'] = pd.to_datetime(gauges_data['datetime'], dayfirst=True)
     # print the first few rows to verify datetime conversion

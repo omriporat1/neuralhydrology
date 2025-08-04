@@ -15,6 +15,9 @@
         mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] <= end)
         gauges_data = gauges_data[mask]
 
+    # Merge gauge location columns into gauges_data
+    gauges_data = pd.merge(gauges_data, gauges[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
+
     for i, t in enumerate(times):
         frame = gauges_data[gauges_data['datetime'] == t]
         if frame.empty:
