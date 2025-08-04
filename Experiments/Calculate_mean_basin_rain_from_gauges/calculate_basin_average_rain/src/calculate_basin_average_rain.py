@@ -260,11 +260,19 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
         gauges_data = gauges_data[mask]
 
     times = np.sort(gauges_data['datetime'].unique())
+    times = np.array(times, dtype='datetime64[ns]')
     grid_shape = xx.shape
     grid_array = np.full((len(times), grid_shape[0], grid_shape[1]), np.nan, dtype=np.float32)
 
     for i, t in enumerate(times):
         frame = gauges_data[gauges_data['datetime'] == t]
+        print(f"\nIDW timestep {i+1}/{len(times)}: {t} (type: {type(t)})")
+        print(f"Number of gauges: {len(frame)}")
+        if not frame.empty:
+            print("Gauge rainfall values:", frame['rain'].values)
+            print("Gauge coordinates:", list(zip(frame['ITM_X'].values, frame['ITM_Y'].values)))
+        else:
+            print("No gauges found for this timestep.")
         if frame.empty:
             continue
         coords = frame[['ITM_X', 'ITM_Y']].values
@@ -277,6 +285,10 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
             weights[dists == 0] = 1e12  # Large weight for exact matches
         grid_vals = np.nansum(weights * values, axis=1) / np.nansum(weights, axis=1)
         grid_array[i] = grid_vals.reshape(grid_shape)
+        if np.all(np.isnan(grid_array[i])):
+            print("Warning: Interpolated grid is all NaN for this timestep!")
+        else:
+            print(f"Grid min: {np.nanmin(grid_array[i])}, max: {np.nanmax(grid_array[i])}")
 
     # Save to NetCDF
     ds = xr.Dataset({
@@ -321,8 +333,73 @@ def animate_grid(ds, date_range=None):
         return [im]
 
     anim = FuncAnimation(fig, update, frames=len(times), interval=300, blit=True)
+    # Save animation as MP4 in output directory
+    output_dir = os.getcwd()
+    if hasattr(ds, 'encoding') and 'rain' in ds.encoding and 'source' in ds.encoding['rain']:
+        output_dir = os.path.dirname(ds.encoding['rain']['source'])
+    anim_path = os.path.join(output_dir, 'rain_grid_animation.mp4')
+    try:
+        anim.save(anim_path, writer='ffmpeg', dpi=150)
+        print(f"Saved animation to {anim_path}")
+    except Exception as e:
+        print(f"Could not save animation as MP4: {e}")
     plt.show()
     return anim
+
+def plot_top_rainfall_timesteps(idw_ds, gauges_data, gauges, top_n=5, output_dir=None):
+    """
+    Create a separate figure for each of the top_n timesteps with highest rainfall.
+    Overlay gauges colored by their value at each timestep, and adjust colorscale per map.
+    """
+    # Find top_n timesteps with highest grid rainfall
+    top_times = idw_ds['time'].values[np.argsort(idw_ds['rain'].max(dim=('y', 'x')).values)[-top_n:]]
+    print(f"Top {top_n} timesteps (raw):", top_times)
+
+    for idx, t in enumerate(top_times):
+        print(f"\n--- Plotting timestep {idx+1}/{top_n} ---")
+        print(f"Raw time value: {t} (type: {type(t)})")
+        rain_grid = idw_ds['rain'].sel(time=t)
+        print(f"Rain grid shape: {rain_grid.shape}, min: {np.nanmin(rain_grid.values)}, max: {np.nanmax(rain_grid.values)}")
+        # Get gauge values for this timestep
+        if isinstance(t, np.datetime64):
+            t_pd = pd.to_datetime(str(t))
+        else:
+            t_pd = pd.to_datetime(t)
+        print(f"Converted pandas datetime: {t_pd} (type: {type(t_pd)})")
+        # Try to match gauges by rounding to minute
+        gauges_data_dt_rounded = gauges_data.copy()
+        gauges_data_dt_rounded['dt_rounded'] = gauges_data_dt_rounded['datetime'].dt.round('min')
+        t_pd_rounded = pd.to_datetime(t_pd).round('min')
+        gauges_at_t = gauges_data_dt_rounded[gauges_data_dt_rounded['dt_rounded'] == t_pd_rounded]
+        print(f"Number of gauges at this timestep: {len(gauges_at_t)}")
+        if not gauges_at_t.empty:
+            print("Gauge rainfall values:", gauges_at_t['rain'].values)
+            print("Gauge coordinates:", list(zip(gauges_at_t['ITM_X'].values, gauges_at_t['ITM_Y'].values)))
+        else:
+            print("No gauges found for this timestep.")
+        # Set up figure in ITM coordinates (meters)
+        fig, ax = plt.subplots(figsize=(8, 8))
+        # Plot rain grid
+        vmin = np.nanmin(rain_grid.values)
+        vmax = np.nanmax(rain_grid.values)
+        im = ax.imshow(rain_grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
+                      extent=[idw_ds['x'].values[0], idw_ds['x'].values[-1], idw_ds['y'].values[0], idw_ds['y'].values[-1]])
+        ax.set_title(f"Rainfall at {t_pd}")
+        plt.colorbar(im, ax=ax, label="Rain (mm)")
+        # Overlay gauges colored by their value
+        if not gauges_at_t.empty:
+            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, vmin=vmin, vmax=vmax, label='Gauges')
+            plt.colorbar(sc, ax=ax, label="Gauge Rain (mm)")
+        ax.set_xlabel('ITM X (meters)')
+        ax.set_ylabel('ITM Y (meters)')
+        ax.legend()
+        # Save figure to output_dir
+        fname = f"rain_map_{idx+1}_{t_pd.strftime('%Y%m%d_%H%M')}.png"
+        fig_path = os.path.join(output_dir, fname)
+        plt.savefig(fig_path, bbox_inches='tight')
+        print(f"Saved figure to {fig_path}")
+        plt.close(fig)
+
 
 # Main script
 def main():
@@ -346,6 +423,18 @@ def main():
     
     # Process the combined data
     gauges_data['datetime'] = pd.to_datetime(gauges_data['datetime'], dayfirst=True)
+    # Remove timezone info to make all datetimes naive for robust matching with grid times
+    if gauges_data['datetime'].dt.tz is not None:
+        gauges_data['datetime'] = gauges_data['datetime'].dt.tz_convert('UTC').dt.tz_localize(None)
+    # Ensure there is a 'rain' column (case-insensitive search)
+    if 'rain' not in gauges_data.columns:
+        # Try to find a likely candidate
+        rain_candidates = [col for col in gauges_data.columns if col.lower() in ['rain', 'rainfall', 'precip', 'precipitation']]
+        if rain_candidates:
+            gauges_data.rename(columns={rain_candidates[0]: 'rain'}, inplace=True)
+            print(f"Renamed column '{rain_candidates[0]}' to 'rain'.")
+        else:
+            raise ValueError("No 'rain' column found in gauge data. Please check your input CSVs for a valid rainfall column.")
     # print the first few rows to verify datetime conversion
     # print(gauges_data.head())
     
@@ -364,14 +453,21 @@ def main():
     # print("Extracted grid edges:", grid_edges)
 
     # plot a map with the basins, gauges, and grid edges - in a function
-    plot_map(basins, gauges, grid_edges)
+    # plot_map(basins, gauges, grid_edges)
 
     # Interpolate to grid and save as NetCDF
     output_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023\output'
+    # Export first 10 unique gauge datetimes
+
+    # We'll get these after idw_ds is created
     idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("2022-01-01", "2022-01-03"))
 
+
     # Animate the grid for a specific date range
-    animate_grid(idw_ds, date_range=("2022-01-01", "2022-12-31"))
+    # animate_grid(idw_ds, date_range=("2022-01-01", "2022-01-03"))
+    
+    # Plot top rainfall timesteps as separate figures
+    plot_top_rainfall_timesteps(idw_ds, gauges_data, gauges, top_n=5, output_dir=output_dir)
     
 
 if __name__ == '__main__':
