@@ -10,6 +10,8 @@ import os
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import requests
+import xarray as xr
+from matplotlib.animation import FuncAnimation
 
 # Function to fill missing values
 def fill_missing(data, timestep_minutes):
@@ -214,6 +216,114 @@ def plot_map(basins, gauges, grid_edges):
     plt.show()
 
 
+def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
+    """
+    Interpolate rain gauge data to a grid for each timestep using IDW and save as NetCDF.
+
+    Parameters:
+    gauges_data : pd.DataFrame
+        DataFrame with columns ['Station_ID', 'datetime', 'ITM_X', 'ITM_Y', 'rain']
+    grid_edges : dict
+        Dictionary with keys ['minx', 'miny', 'maxx', 'maxy']
+    power : int, optional
+        Power coefficient for IDW (default=2)
+    max_radius : float, optional
+        Maximal radius for interpolation in meters (default=50000)
+    output_dir : str, optional
+        Directory to save NetCDF output
+    date_range : tuple, optional
+        (start_date, end_date) as strings or pd.Timestamp
+    grid_resolution : int, optional
+        Grid spacing in meters (default=1000)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    # Define grid
+    x = np.arange(grid_edges['minx'], grid_edges['maxx'], grid_resolution)
+    y = np.arange(grid_edges['miny'], grid_edges['maxy'], grid_resolution)
+    xx, yy = np.meshgrid(x, y)
+    grid_points = np.vstack([xx.ravel(), yy.ravel()]).T
+
+    # Filter date range
+    if date_range:
+        start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+        # Make start/end UTC if the data is UTC-aware
+        if hasattr(gauges_data['datetime'].dt, 'tz') and gauges_data['datetime'].dt.tz is not None:
+            if start.tzinfo is None:
+                start = start.tz_localize(gauges_data['datetime'].dt.tz)
+            else:
+                start = start.tz_convert(gauges_data['datetime'].dt.tz)
+            if end.tzinfo is None:
+                end = end.tz_localize(gauges_data['datetime'].dt.tz)
+            else:
+                end = end.tz_convert(gauges_data['datetime'].dt.tz)
+        mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] <= end)
+        gauges_data = gauges_data[mask]
+
+    times = np.sort(gauges_data['datetime'].unique())
+    grid_shape = xx.shape
+    grid_array = np.full((len(times), grid_shape[0], grid_shape[1]), np.nan, dtype=np.float32)
+
+    for i, t in enumerate(times):
+        frame = gauges_data[gauges_data['datetime'] == t]
+        if frame.empty:
+            continue
+        coords = frame[['ITM_X', 'ITM_Y']].values
+        values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
+        # IDW interpolation
+        dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+        with np.errstate(divide='ignore'):  # Ignore division by zero
+            weights = 1 / np.power(dists, power)
+            weights[dists > max_radius] = 0
+            weights[dists == 0] = 1e12  # Large weight for exact matches
+        grid_vals = np.nansum(weights * values, axis=1) / np.nansum(weights, axis=1)
+        grid_array[i] = grid_vals.reshape(grid_shape)
+
+    # Save to NetCDF
+    ds = xr.Dataset({
+        "rain": (("time", "y", "x"), grid_array)
+    }, coords={
+        "time": times,
+        "y": y,
+        "x": x
+    })
+    nc_path = os.path.join(output_dir, "rain_grid.nc")
+    ds.to_netcdf(nc_path, encoding={"rain": {"dtype": "float32", "zlib": True, "complevel": 4}})
+    print(f"Saved interpolated grid to {nc_path}")
+    return ds
+
+
+def animate_grid(ds, date_range=None):
+    """
+    Animate the rain grid for a selected date range.
+
+    Parameters:
+    ds : xarray.Dataset
+        Dataset containing the rain grid
+    date_range : tuple, optional
+        (start_date, end_date) as strings or pd.Timestamp
+    """
+    rain = ds["rain"]
+    times = ds["time"].values
+    if date_range:
+        start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
+        idx = (times >= start) & (times <= end)
+        rain = rain[idx]
+        times = times[idx]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    im = ax.imshow(rain[0], origin="lower", cmap="Blues", interpolation="nearest")
+    ax.set_title(str(times[0]))
+    plt.colorbar(im, ax=ax, label="Rain (mm)")
+
+    def update(frame):
+        im.set_data(rain[frame])
+        ax.set_title(str(times[frame]))
+        return [im]
+
+    anim = FuncAnimation(fig, update, frames=len(times), interval=300, blit=True)
+    plt.show()
+    return anim
+
 # Main script
 def main():
     # Load data
@@ -235,7 +345,7 @@ def main():
     # Process the combined data
     gauges_data['datetime'] = pd.to_datetime(gauges_data['datetime'], dayfirst=True)
     # print the first few rows to verify datetime conversion
-    print(gauges_data.head())
+    # print(gauges_data.head())
     
     # Sort and fill missing values
     gauges_data = gauges_data.sort_values(by=['Station_ID', 'datetime'])
@@ -249,12 +359,17 @@ def main():
     grid_edges = extract_grid_edges(basins)
 
     # Print the extracted grid edges
-    print("Extracted grid edges:", grid_edges)
+    # print("Extracted grid edges:", grid_edges)
 
     # plot a map with the basins, gauges, and grid edges - in a function
     plot_map(basins, gauges, grid_edges)
 
+    # Interpolate to grid and save as NetCDF
+    output_dir = r'C:\PhD\Data\IMS\Data_by_station\5_stations_filtered_2022_2023\output'
+    idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("2022-01-01", "2022-01-03"))
 
+    # Animate the grid for a specific date range
+    animate_grid(idw_ds, date_range=("2022-01-01", "2022-12-31"))
     
 
 if __name__ == '__main__':
