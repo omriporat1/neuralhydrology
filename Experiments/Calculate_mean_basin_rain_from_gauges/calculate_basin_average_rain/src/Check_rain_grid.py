@@ -4,6 +4,8 @@ import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import geopandas as gpd
+
 
 def load_rain_grid(nc_path):
     """Load the NetCDF rain grid as xarray.Dataset."""
@@ -51,23 +53,33 @@ def rain_grid_stats(rain_ds, output_dir):
 
 def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
     """Create and save an animation for each extreme date, overlaying gauge values."""
+    # Load basins shapefile
+    basins_path = r'C:\PhD\Data\Caravan\shapefiles\il\il_basin_shapes.shp'
+    basins = gpd.read_file(basins_path)
+    if basins.crs is None or basins.crs.to_epsg() != 2039:
+        basins = basins.to_crs(epsg=2039)
     rain = rain_ds['rain']
     x = rain_ds['x'].values
     y = rain_ds['y'].values
     times = pd.to_datetime(rain_ds['time'].values)
+    # Set constant colorscales
+    vmin = 0
+    vmax = min(30, float(np.nanpercentile(rain.values, 99)))  # Not too extreme, but visible
+    gauge_vmin = 0
+    gauge_vmax = min(30, float(np.nanpercentile(gauges_df['Rain'].values, 99)))
+    # Save per-date animations as well as figures
     for date in extreme_dates:
-        # Find closest timestep in grid
         idx = np.argmin(np.abs(times - date))
         grid = rain[idx].values
-        # Get gauge values for this date
         gauges_at_t = gauges_df[gauges_df['datetime'] == date]
         fig, ax = plt.subplots(figsize=(8, 8))
-        im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest",
+        im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
                       extent=[x[0], x[-1], y[0], y[-1]])
+        basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
         ax.set_title(f"Rainfall at {date.strftime('%Y-%m-%d')}")
         plt.colorbar(im, ax=ax, label="Rain (mm)")
         if not gauges_at_t.empty:
-            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, label='Gauges')
+            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['Rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
             plt.colorbar(sc, ax=ax, label="Gauge Rain (mm)")
         ax.set_xlabel('ITM X (meters)')
         ax.set_ylabel('ITM Y (meters)')
@@ -76,18 +88,40 @@ def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
         fig_path = os.path.join(output_dir, fname)
         plt.savefig(fig_path, bbox_inches='tight')
         print(f"Saved figure to {fig_path}")
+        # Save animation for this date (single frame, but for consistency)
+        def update_single(frame):
+            ax.clear()
+            im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
+                          extent=[x[0], x[-1], y[0], y[-1]])
+            basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
+            ax.set_title(f"Rainfall at {date.strftime('%Y-%m-%d')}")
+            if not gauges_at_t.empty:
+                sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
+            ax.set_xlabel('ITM X (meters)')
+            ax.set_ylabel('ITM Y (meters)')
+            ax.legend()
+            return [im]
+        anim = FuncAnimation(fig, update_single, frames=1, interval=1000, blit=False)
+        anim_path = os.path.join(output_dir, f'rain_extreme_{date.strftime("%Y%m%d")}_animation.mp4')
+        try:
+            anim.save(anim_path, writer='ffmpeg', dpi=150)
+            print(f"Saved animation to {anim_path}")
+        except Exception as e:
+            print(f"Could not save animation as MP4: {e}")
         plt.close(fig)
-    # Optionally, create an animation across all extreme dates
+    # Animation across all extreme dates
     fig, ax = plt.subplots(figsize=(8, 8))
     def update(i):
         ax.clear()
-        grid = rain[np.argmin(np.abs(times - extreme_dates[i]))].values
-        im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest",
+        idx = np.argmin(np.abs(times - extreme_dates[i]))
+        grid = rain[idx].values
+        im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
                       extent=[x[0], x[-1], y[0], y[-1]])
+        basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
         ax.set_title(f"Rainfall at {extreme_dates[i].strftime('%Y-%m-%d')}")
         gauges_at_t = gauges_df[gauges_df['datetime'] == extreme_dates[i]]
         if not gauges_at_t.empty:
-            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, label='Gauges')
+            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
         ax.set_xlabel('ITM X (meters)')
         ax.set_ylabel('ITM Y (meters)')
         ax.legend()
@@ -105,17 +139,43 @@ def main():
     # Paths (edit as needed)
     nc_path = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output\rain_grid.nc'
     gauge_csv = r'C:\PhD\Data\IMS\Data_by_station\available_stations.csv'
-    gauge_data_csv = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\all_gauges.csv'  # or merge all station CSVs
     extreme_dates_csv = r'C:\PhD\Python\neuralhydrology\Experiments\extract_extreme_events\from_daily_max\annual_max_discharge_dates.csv'
     output_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output'
     os.makedirs(output_dir, exist_ok=True)
     # Load data
     rain_ds = load_rain_grid(nc_path)
-    gauges_df = load_gauge_data(gauge_data_csv)
-    # Merge with locations
-    stations_df = pd.read_csv(gauge_csv)
-    gauges_df = pd.merge(gauges_df, stations_df[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
+    # Get relevant extreme dates first
     extreme_dates = load_extreme_dates(extreme_dates_csv)
+    # Merge only relevant rows from all gauge CSVs
+    gauge_data_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted'
+    gauge_csv_files = [os.path.join(gauge_data_dir, f) for f in os.listdir(gauge_data_dir) if f.endswith('.csv') and 'available_stations' not in f]
+    cache_path = os.path.join(output_dir, 'relevant_gauges.csv')
+    if os.path.exists(cache_path):
+        print(f"Loading cached relevant gauges from {cache_path}")
+        gauges_df = pd.read_csv(cache_path, parse_dates=['datetime'])
+    else:
+        relevant_gauges = []
+        for f in gauge_csv_files:
+            df = pd.read_csv(f, parse_dates=['datetime'], dayfirst=True)
+            # Remove timezone info for robust matching
+            if df['datetime'].dt.tz is not None:
+                df['datetime'] = df['datetime'].dt.tz_convert('UTC').dt.tz_localize(None)
+            # Match by date only (ignore hour)
+            df['date'] = df['datetime'].dt.date
+            extreme_dates_dates = set([d.date() for d in extreme_dates])
+            df_relevant = df[df['date'].isin(extreme_dates_dates)]
+            if not df_relevant.empty:
+                relevant_gauges.append(df_relevant)
+        gauges_df = pd.concat(relevant_gauges, ignore_index=True)
+        # Merge with locations before caching
+        stations_df = pd.read_csv(gauge_csv)
+        gauges_df = pd.merge(gauges_df, stations_df[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
+        gauges_df.to_csv(cache_path, index=False)
+        print(f"Saved relevant gauges to {cache_path}")
+    # If loaded from cache, ensure location columns are present
+    if 'ITM_X' not in gauges_df.columns or 'ITM_Y' not in gauges_df.columns:
+        stations_df = pd.read_csv(gauge_csv)
+        gauges_df = pd.merge(gauges_df, stations_df[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
     # Stats
     rain_grid_stats(rain_ds, output_dir)
     # Animation/figures
