@@ -17,13 +17,15 @@ def load_gauge_data(csv_path):
     df['datetime'] = pd.to_datetime(df['datetime'], dayfirst=True)
     return df
 
-def load_extreme_dates(csv_path):
-    """Load unique dates from annual_max_discharge_dates.csv."""
-    df = pd.read_csv(csv_path)
-    # Parse max_date column to datetime
-    df['max_date'] = pd.to_datetime(df['max_date'], dayfirst=True, errors='coerce')
-    unique_dates = pd.Series(df['max_date'].unique()).dropna().sort_values()
-    return unique_dates
+def load_event_days(txt_path):
+    """Load event days from a txt file, one date per line, format YYYY-MM-DD."""
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    # Parse each line to datetime.date
+    dates = [pd.to_datetime(line, format='%Y-%m-%d', errors='coerce').date() for line in lines]
+    # Remove any failed parses
+    dates = [d for d in dates if pd.notnull(d)]
+    return dates
 
 def rain_grid_stats(rain_ds, output_dir):
     """Compute and save statistics about the rain grid."""
@@ -96,18 +98,18 @@ def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
             basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
             ax.set_title(f"Rainfall at {date.strftime('%Y-%m-%d')}")
             if not gauges_at_t.empty:
-                sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
+                sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['Rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
             ax.set_xlabel('ITM X (meters)')
             ax.set_ylabel('ITM Y (meters)')
             ax.legend()
             return [im]
         anim = FuncAnimation(fig, update_single, frames=1, interval=1000, blit=False)
-        anim_path = os.path.join(output_dir, f'rain_extreme_{date.strftime("%Y%m%d")}_animation.mp4')
+        anim_path = os.path.join(output_dir, f'rain_extreme_{date.strftime("%Y%m%d")}_animation.gif')
         try:
-            anim.save(anim_path, writer='ffmpeg', dpi=150)
+            anim.save(anim_path, writer='pillow', dpi=150)
             print(f"Saved animation to {anim_path}")
         except Exception as e:
-            print(f"Could not save animation as MP4: {e}")
+            print(f"Could not save animation as gif: {e}")
         plt.close(fig)
     # Animation across all extreme dates
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -121,35 +123,46 @@ def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
         ax.set_title(f"Rainfall at {extreme_dates[i].strftime('%Y-%m-%d')}")
         gauges_at_t = gauges_df[gauges_df['datetime'] == extreme_dates[i]]
         if not gauges_at_t.empty:
-            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
+            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['Rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
         ax.set_xlabel('ITM X (meters)')
         ax.set_ylabel('ITM Y (meters)')
         ax.legend()
         return [im]
     anim = FuncAnimation(fig, update, frames=len(extreme_dates), interval=1000, blit=False)
-    anim_path = os.path.join(output_dir, 'rain_extreme_dates_animation.mp4')
+    anim_path = os.path.join(output_dir, 'rain_extreme_dates_animation.git')
     try:
-        anim.save(anim_path, writer='ffmpeg', dpi=150)
+        anim.save(anim_path, writer='pillow', dpi=150)
         print(f"Saved animation to {anim_path}")
     except Exception as e:
-        print(f"Could not save animation as MP4: {e}")
+        print(f"Could not save animation as gif: {e}")
     plt.close(fig)
 
 def main():
     # Paths (edit as needed)
     nc_path = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output\rain_grid.nc'
     gauge_csv = r'C:\PhD\Data\IMS\Data_by_station\available_stations.csv'
-    extreme_dates_csv = r'C:\PhD\Python\neuralhydrology\Experiments\extract_extreme_events\from_daily_max\annual_max_discharge_dates.csv'
+    event_days_txt = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output\max_dates_2022_2023.txt'
     output_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted\output'
     os.makedirs(output_dir, exist_ok=True)
     # Load data
     rain_ds = load_rain_grid(nc_path)
-    # Get relevant extreme dates first
-    extreme_dates = load_extreme_dates(extreme_dates_csv)
+    # Get relevant event days from txt
+    event_days = load_event_days(event_days_txt)
+    # Convert event_days to pandas Timestamps and filter to rain grid time range
+    rain_times = pd.to_datetime(rain_ds['time'].values)
+    min_time = rain_times.min()
+    max_time = rain_times.max()
+    # Convert event_days to Timestamps
+    event_days_ts = pd.to_datetime(event_days)
+    # Only keep event days within rain grid time range
+    event_days_in_range = [d for d in event_days_ts if (d >= min_time) and (d <= max_time)]
+    if not event_days_in_range:
+        print("No event days within rain grid time range. Exiting.")
+        return
     # Merge only relevant rows from all gauge CSVs
     gauge_data_dir = r'C:\PhD\Data\IMS\Data_by_station\Data_by_station_formatted'
     gauge_csv_files = [os.path.join(gauge_data_dir, f) for f in os.listdir(gauge_data_dir) if f.endswith('.csv') and 'available_stations' not in f]
-    cache_path = os.path.join(output_dir, 'relevant_gauges.csv')
+    cache_path = os.path.join(output_dir, f'relevant_gauges_{os.path.splitext(os.path.basename(event_days_txt))[0]}.csv')
     if os.path.exists(cache_path):
         print(f"Loading cached relevant gauges from {cache_path}")
         gauges_df = pd.read_csv(cache_path, parse_dates=['datetime'])
@@ -162,8 +175,8 @@ def main():
                 df['datetime'] = df['datetime'].dt.tz_convert('UTC').dt.tz_localize(None)
             # Match by date only (ignore hour)
             df['date'] = df['datetime'].dt.date
-            extreme_dates_dates = set([d.date() for d in extreme_dates])
-            df_relevant = df[df['date'].isin(extreme_dates_dates)]
+            event_days_dates = set([d.date() for d in event_days_in_range])
+            df_relevant = df[df['date'].isin(event_days_dates)]
             if not df_relevant.empty:
                 relevant_gauges.append(df_relevant)
         gauges_df = pd.concat(relevant_gauges, ignore_index=True)
@@ -172,14 +185,10 @@ def main():
         gauges_df = pd.merge(gauges_df, stations_df[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
         gauges_df.to_csv(cache_path, index=False)
         print(f"Saved relevant gauges to {cache_path}")
-    # If loaded from cache, ensure location columns are present
-    if 'ITM_X' not in gauges_df.columns or 'ITM_Y' not in gauges_df.columns:
-        stations_df = pd.read_csv(gauge_csv)
-        gauges_df = pd.merge(gauges_df, stations_df[['Station_ID', 'ITM_X', 'ITM_Y']], on='Station_ID', how='left')
     # Stats
-    rain_grid_stats(rain_ds, output_dir)
+    # rain_grid_stats(rain_ds, output_dir)
     # Animation/figures
-    animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir)
+    animate_extreme_dates(rain_ds, gauges_df, event_days_in_range, output_dir)
 
 if __name__ == '__main__':
     main()
