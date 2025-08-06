@@ -177,6 +177,11 @@ def interpolate_single_timestep(i, t, gauges_data, grid_points, grid_shape, powe
         logging.info(f"Grid min: {np.nanmin(result)}, max: {np.nanmax(result)}")
     return result, gauge_count
 
+
+# Wrapper for multiprocessing to unpack arguments (must be top-level for pickling)
+def interpolate_single_timestep_wrapper(args):
+    return interpolate_single_timestep(*args)
+
 def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
     os.makedirs(output_dir, exist_ok=True)
     x = np.arange(grid_edges['minx'], grid_edges['maxx'], grid_resolution)
@@ -204,7 +209,7 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
     logging.info(f"Starting IDW interpolation for {len(times)} timesteps using {os.cpu_count()} CPUs...")
     with concurrent.futures.ProcessPoolExecutor() as executor:
         results = list(executor.map(
-            interpolate_single_timestep,
+            interpolate_single_timestep_wrapper,
             [(i, t, gauges_data, grid_points, grid_shape, power, max_radius) for i, t in enumerate(times)]
         ))
     for i, (rain_arr, count_arr) in enumerate(results):
