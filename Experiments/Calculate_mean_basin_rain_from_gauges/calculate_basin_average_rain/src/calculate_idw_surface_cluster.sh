@@ -4,9 +4,12 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=400G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=logs/idw_surface_%j.log
-#SBATCH --error=logs/idw_surface_error_%j.log
+#SBATCH --output=idw_surface_%j.log
+#SBATCH --error=idw_surface_error_%j.log
 #SBATCH --account=efratmorin
+
+pwd
+ls -l
 
 module load spack miniconda3
 
@@ -16,14 +19,6 @@ conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
 
 mkdir -p logs
 
-start=$(date +%s)
-
 /usr/bin/time -v python calculate_idw_surface_cluster.py
-
-end=$(date +%s)
-
-runtime=$((end-start))
-
-printf 'Run time: %02d:%02d:%02d\n' $((runtime/3600)) $((runtime%3600/60)) $((runtime%60))
 
 conda deactivate
