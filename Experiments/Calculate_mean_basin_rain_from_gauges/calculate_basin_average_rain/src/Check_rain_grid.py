@@ -66,47 +66,50 @@ def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
     times = pd.to_datetime(rain_ds['time'].values)
     # Set constant colorscales
     vmin = 0
-    vmax = min(30, float(np.nanpercentile(rain.values, 99)))  # Not too extreme, but visible
+    vmax = 1.5  # Not too extreme, but visible
     gauge_vmin = 0
-    gauge_vmax = min(30, float(np.nanpercentile(gauges_df['Rain'].values, 99)))
-    # Save per-date animations as well as figures
+    gauge_vmax = 1.5
+    # Create a GIF animation for each event date, showing all 24 hours (every 10 min)
+    fps = 10  # Default frames per second
     for date in extreme_dates:
-        idx = np.argmin(np.abs(times - date))
-        grid = rain[idx].values
-        gauges_at_t = gauges_df[gauges_df['datetime'] == date]
+        day_mask = times.date == date.date()
+        day_indices = np.where(day_mask)[0]
+        if len(day_indices) == 0:
+            print(f"No rain grid timesteps found for {date.strftime('%Y-%m-%d')}")
+            continue
         fig, ax = plt.subplots(figsize=(8, 8))
-        im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
-                      extent=[x[0], x[-1], y[0], y[-1]])
-        basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
-        ax.set_title(f"Rainfall at {date.strftime('%Y-%m-%d')}")
-        plt.colorbar(im, ax=ax, label="Rain (mm)")
-        if not gauges_at_t.empty:
-            sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['Rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
-            plt.colorbar(sc, ax=ax, label="Gauge Rain (mm)")
-        ax.set_xlabel('ITM X (meters)')
-        ax.set_ylabel('ITM Y (meters)')
-        ax.legend()
-        fname = f"rain_extreme_{date.strftime('%Y%m%d')}.png"
-        fig_path = os.path.join(output_dir, fname)
-        plt.savefig(fig_path, bbox_inches='tight')
-        print(f"Saved figure to {fig_path}")
-        # Save animation for this date (single frame, but for consistency)
-        def update_single(frame):
+        import matplotlib as mpl
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        divider = make_axes_locatable(ax)
+        cax_grid = divider.append_axes("right", size="5%", pad=0.05)
+        cax_gauge = divider.append_axes("bottom", size="5%", pad=0.4)
+        def update_hourly(frame_idx):
             ax.clear()
+            cax_grid.cla()
+            cax_gauge.cla()
+            idx = day_indices[frame_idx]
+            grid = rain[idx].values
             im = ax.imshow(grid, origin="lower", cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax,
                           extent=[x[0], x[-1], y[0], y[-1]])
             basins.boundary.plot(ax=ax, edgecolor='black', linewidth=1)
-            ax.set_title(f"Rainfall at {date.strftime('%Y-%m-%d')}")
+            tstamp = times[idx]
+            ax.set_title(f"Rainfall at {tstamp.strftime('%Y-%m-%d %H:%M')}")
+            gauges_at_t = gauges_df[gauges_df['datetime'] == tstamp]
+            sc = None
             if not gauges_at_t.empty:
                 sc = ax.scatter(gauges_at_t['ITM_X'], gauges_at_t['ITM_Y'], c=gauges_at_t['Rain'], cmap="Reds", edgecolor='black', s=80, vmin=gauge_vmin, vmax=gauge_vmax, label='Gauges')
             ax.set_xlabel('ITM X (meters)')
             ax.set_ylabel('ITM Y (meters)')
             ax.legend()
+            # Add colorbars
+            fig.colorbar(im, cax=cax_grid, label="Rain (mm)")
+            if sc is not None:
+                fig.colorbar(sc, cax=cax_gauge, orientation='horizontal', label="Gauge Rain (mm)")
             return [im]
-        anim = FuncAnimation(fig, update_single, frames=1, interval=1000, blit=False)
+        anim = FuncAnimation(fig, update_hourly, frames=len(day_indices), interval=1000/fps, blit=False)
         anim_path = os.path.join(output_dir, f'rain_extreme_{date.strftime("%Y%m%d")}_animation.gif')
         try:
-            anim.save(anim_path, writer='pillow', dpi=150)
+            anim.save(anim_path, writer='pillow', dpi=150, fps=fps)
             print(f"Saved animation to {anim_path}")
         except Exception as e:
             print(f"Could not save animation as gif: {e}")
@@ -129,7 +132,7 @@ def animate_extreme_dates(rain_ds, gauges_df, extreme_dates, output_dir):
         ax.legend()
         return [im]
     anim = FuncAnimation(fig, update, frames=len(extreme_dates), interval=1000, blit=False)
-    anim_path = os.path.join(output_dir, 'rain_extreme_dates_animation.git')
+    anim_path = os.path.join(output_dir, 'rain_extreme_dates_animation.gif')
     try:
         anim.save(anim_path, writer='pillow', dpi=150)
         print(f"Saved animation to {anim_path}")
