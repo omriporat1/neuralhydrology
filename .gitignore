@@ -17,6 +17,7 @@ configs/*
 .ipynb_checkpoints/
 data/*
 docs/build/*
+Experiments/HPC_random_search/results/*
 
 slurm-scripts/*.out
 /Static_parameters/~$feature_decisions.xlsx
