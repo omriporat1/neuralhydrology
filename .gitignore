@@ -18,6 +18,9 @@ configs/*
 data/*
 docs/build/*
 Experiments/HPC_random_search/results/*
+Experiments/HPC_random_search/logs/
+Experiments/HPC_random_search/outputs/*
+Experiments/HPC_random_search/plots/*
 
 slurm-scripts/*.out
 /Static_parameters/~$feature_decisions.xlsx
