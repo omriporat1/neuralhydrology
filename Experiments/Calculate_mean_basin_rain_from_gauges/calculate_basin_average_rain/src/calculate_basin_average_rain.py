@@ -1,4 +1,13 @@
+
 # This file implements the entire process of calculating basin-average rainfall from point rain gauge data using IDW interpolation.
+import concurrent.futures
+import logging
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s:%(processName)s:%(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 import pandas as pd
 import numpy as np
@@ -263,45 +272,76 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
     times = np.array(times, dtype='datetime64[ns]')
     grid_shape = xx.shape
     grid_array = np.full((len(times), grid_shape[0], grid_shape[1]), np.nan, dtype=np.float32)
-
-    for i, t in enumerate(times):
-        frame = gauges_data[gauges_data['datetime'] == t]
-        print(f"\nIDW timestep {i+1}/{len(times)}: {t} (type: {type(t)})")
-        print(f"Number of gauges: {len(frame)}")
-        if not frame.empty:
-            print("Gauge rainfall values:", frame['rain'].values)
-            print("Gauge coordinates:", list(zip(frame['ITM_X'].values, frame['ITM_Y'].values)))
-        else:
-            print("No gauges found for this timestep.")
-        if frame.empty:
-            continue
-        coords = frame[['ITM_X', 'ITM_Y']].values
-        values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
-        # IDW interpolation
-        dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
-        with np.errstate(divide='ignore'):  # Ignore division by zero
-            weights = 1 / np.power(dists, power)
-            weights[dists > max_radius] = 0
-            weights[dists == 0] = 1e12  # Large weight for exact matches
-        grid_vals = np.nansum(weights * values, axis=1) / np.nansum(weights, axis=1)
-        grid_array[i] = grid_vals.reshape(grid_shape)
-        if np.all(np.isnan(grid_array[i])):
-            print("Warning: Interpolated grid is all NaN for this timestep!")
-        else:
-            print(f"Grid min: {np.nanmin(grid_array[i])}, max: {np.nanmax(grid_array[i])}")
+    count_array = np.zeros((len(times), grid_shape[0], grid_shape[1]), dtype=np.int16)
+    # Use ProcessPoolExecutor for parallel processing
+    logging.info(f"Starting IDW interpolation for {len(times)} timesteps using {os.cpu_count()} CPUs...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        results = list(executor.map(
+            lambda args: interpolate_single_timestep(*args),
+            [(i, t, gauges_data, grid_points, grid_shape, power, max_radius) for i, t in enumerate(times)]
+        ))
+    for i, (rain_arr, count_arr) in enumerate(results):
+        grid_array[i] = rain_arr
+        count_array[i] = count_arr
+    logging.info("IDW interpolation completed.")
 
     # Save to NetCDF
     ds = xr.Dataset({
-        "rain": (("time", "y", "x"), grid_array)
+        "rain": (("time", "y", "x"), grid_array),
+        "gauge_count": (("time", "y", "x"), count_array)
     }, coords={
         "time": times,
         "y": y,
         "x": x
     })
     nc_path = os.path.join(output_dir, "rain_grid.nc")
-    ds.to_netcdf(nc_path, encoding={"rain": {"dtype": "float32", "zlib": True, "complevel": 4}})
-    print(f"Saved interpolated grid to {nc_path}")
+    ds.to_netcdf(nc_path, encoding={
+        "rain": {"dtype": "float32", "zlib": True, "complevel": 4},
+        "gauge_count": {"dtype": "int16", "zlib": True, "complevel": 1}
+    })
+    logging.info(f"Saved interpolated grid and gauge counts to {nc_path}")
     return ds
+
+
+# --- Moved out for multiprocessing pickling ---
+def interpolate_single_timestep(i, t, gauges_data, grid_points, grid_shape, power, max_radius):
+    frame = gauges_data[gauges_data['datetime'] == t]
+    logging.info(f"IDW timestep {i+1}: {t} (type: {type(t)})")
+    logging.info(f"Number of gauges: {len(frame)}")
+    if not frame.empty:
+        logging.debug(f"Gauge rainfall values: {frame['rain'].values}")
+        logging.debug(f"Gauge coordinates: {list(zip(frame['ITM_X'].values, frame['ITM_Y'].values))}")
+    else:
+        logging.warning("No gauges found for this timestep.")
+    if frame.empty:
+        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+        zero_grid = np.zeros(grid_shape, dtype=np.int16)
+        return nan_grid, zero_grid
+    coords = frame[['ITM_X', 'ITM_Y']].values
+    values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
+    # Only use valid (not NaN, not out-of-range) stations
+    valid_mask = (~np.isnan(values)) & (values >= 0) & (values <= 50)
+    coords = coords[valid_mask]
+    values = values[valid_mask]
+    if len(values) == 0:
+        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+        zero_grid = np.zeros(grid_shape, dtype=np.int16)
+        logging.warning(f"No valid stations for timestep {t}!")
+        return nan_grid, zero_grid
+    dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+    with np.errstate(divide='ignore'):
+        weights = 1 / np.power(dists, power)
+        weights[dists > max_radius] = 0
+        weights[dists == 0] = 1e12
+    # Count number of stations used for each pixel (within radius and valid)
+    gauge_count = np.sum((dists <= max_radius), axis=1).reshape(grid_shape)
+    grid_vals = np.nansum(weights * values, axis=1) / np.nansum(weights, axis=1)
+    result = grid_vals.reshape(grid_shape)
+    if np.all(np.isnan(result)):
+        logging.warning(f"Interpolated grid is all NaN for timestep {t}!")
+    else:
+        logging.info(f"Grid min: {np.nanmin(result)}, max: {np.nanmax(result)}")
+    return result, gauge_count
 
 
 def animate_grid(ds, date_range=None):
