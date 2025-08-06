@@ -1,3 +1,5 @@
+import logging
+import concurrent.futures
 # This file implements the entire process of calculating basin-average rainfall from point rain gauge data using IDW interpolation.
 
 import pandas as pd
@@ -11,6 +13,38 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import requests
 import xarray as xr
+
+
+def extract_grid_edges(basins, buffer=5000):
+    """
+    Extract the grid edges from the basins shapefile and return the overall min and max values of x and y as integers, with an optional buffer.
+
+    Parameters:
+    basins : gpd.GeoDataFrame
+        GeoDataFrame containing the basin shapes.
+    buffer : int, optional
+        Buffer value to add/subtract to the min and max x and y values (default is 5000).
+
+    Returns:
+    dict
+        Dictionary containing the overall min and max values of x and y with keys ['minx', 'miny', 'maxx', 'maxy'] as integers, adjusted by the buffer.
+    """
+    # Ensure the basins GeoDataFrame has a valid geometry column
+    if 'geometry' not in basins.columns:
+        raise ValueError("The provided GeoDataFrame does not contain a 'geometry' column.")
+
+    # Extract the bounds (minx, miny, maxx, maxy) for each basin
+    bounds = basins.geometry.bounds
+
+    # Calculate the overall min and max values of x and y and convert to integers
+    overall_bounds = {
+        'minx': int(bounds['minx'].min()) - buffer,
+        'miny': int(bounds['miny'].min()) - buffer,
+        'maxx': int(bounds['maxx'].max()) + buffer,
+        'maxy': int(bounds['maxy'].max()) + buffer
+    }
+
+    return overall_bounds
 from matplotlib.animation import FuncAnimation
 
 # Function to fill missing values
@@ -89,131 +123,98 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
                     'Missing Percentage': missing_percentage
                 })
 
-        # Flag stations with excessive missing data
-        if missing_percentage > excessive_missing_threshold:
-            print(f"Warning: Station {station_id} has excessive missing data ({missing_percentage:.2%}).")
 
-        # Update the original data with changes made to station_data
-        data.loc[station_data.index, 'QC_Flag'] = station_data['QC_Flag']
+# --- Moved out for multiprocessing pickling ---
+def interpolate_single_timestep(i, t, gauges_data, grid_points, grid_shape, power, max_radius):
+    frame = gauges_data[gauges_data['datetime'] == t]
+    logging.info(f"IDW timestep {i+1}: {t} (type: {type(t)})")
+    logging.info(f"Number of gauges: {len(frame)}")
+    if not frame.empty:
+        logging.debug(f"Gauge rainfall values: {frame['rain'].values}")
+        logging.debug(f"Gauge coordinates: {list(zip(frame['ITM_X'].values, frame['ITM_Y'].values))}")
+    else:
+        logging.warning("No gauges found for this timestep.")
+    if frame.empty:
+        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+        zero_grid = np.zeros(grid_shape, dtype=np.int16)
+        return nan_grid, zero_grid
+    coords = frame[['ITM_X', 'ITM_Y']].values
+    values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
+    # Only use valid (not NaN, not out-of-range) stations
+    valid_mask = (~np.isnan(values)) & (values >= 0) & (values <= 50)
+    coords = coords[valid_mask]
+    values = values[valid_mask]
+    if len(values) == 0:
+        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+        zero_grid = np.zeros(grid_shape, dtype=np.int16)
+        logging.warning(f"No valid stations for timestep {t}!")
+        return nan_grid, zero_grid
+    dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+    with np.errstate(divide='ignore'):
+        weights = 1 / np.power(dists, power)
+        weights[dists > max_radius] = 0
+        weights[dists == 0] = 1e12
+    # Count number of stations used for each pixel (within radius and valid)
+    gauge_count = np.sum((dists <= max_radius), axis=1).reshape(grid_shape)
+    grid_vals = np.nansum(weights * values, axis=1) / np.nansum(weights, axis=1)
+    result = grid_vals.reshape(grid_shape)
+    if np.all(np.isnan(result)):
+        logging.warning(f"Interpolated grid is all NaN for timestep {t}!")
+    else:
+        logging.info(f"Grid min: {np.nanmin(result)}, max: {np.nanmax(result)}")
+    return result, gauge_count
 
-    # Save unified log to CSV
-    unified_log_df = pd.DataFrame(unified_log)
-    unified_log_df.to_csv(os.path.join(log_folder, 'quality_control_log.csv'), index=False)
+def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
+    os.makedirs(output_dir, exist_ok=True)
+    x = np.arange(grid_edges['minx'], grid_edges['maxx'], grid_resolution)
+    y = np.arange(grid_edges['miny'], grid_edges['maxy'], grid_resolution)
+    xx, yy = np.meshgrid(x, y)
+    grid_points = np.vstack([xx.ravel(), yy.ravel()]).T
+    if date_range:
+        start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+        if hasattr(gauges_data['datetime'].dt, 'tz') and gauges_data['datetime'].dt.tz is not None:
+            if start.tzinfo is None:
+                start = start.tz_localize(gauges_data['datetime'].dt.tz)
+            else:
+                start = start.tz_convert(gauges_data['datetime'].dt.tz)
+            if end.tzinfo is None:
+                end = end.tz_localize(gauges_data['datetime'].dt.tz)
+            else:
+                end = end.tz_convert(gauges_data['datetime'].dt.tz)
+        mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] <= end)
+        gauges_data = gauges_data[mask]
+    times = np.sort(gauges_data['datetime'].unique())
+    times = np.array(times, dtype='datetime64[ns]')
+    grid_shape = xx.shape
+    grid_array = np.full((len(times), grid_shape[0], grid_shape[1]), np.nan, dtype=np.float32)
+    count_array = np.zeros((len(times), grid_shape[0], grid_shape[1]), dtype=np.int16)
+    logging.info(f"Starting IDW interpolation for {len(times)} timesteps using {os.cpu_count()} CPUs...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        results = list(executor.map(
+            lambda args: interpolate_single_timestep(*args),
+            [(i, t, gauges_data, grid_points, grid_shape, power, max_radius) for i, t in enumerate(times)]
+        ))
+    for i, (rain_arr, count_arr) in enumerate(results):
+        grid_array[i] = rain_arr
+        count_array[i] = count_arr
+    logging.info("IDW interpolation completed.")
+    ds = xr.Dataset({
+        "rain": (("time", "y", "x"), grid_array),
+        "gauge_count": (("time", "y", "x"), count_array)
+    }, coords={
+        "time": times,
+        "y": y,
+        "x": x
+    })
+    nc_path = os.path.join(output_dir, "rain_grid.nc")
+    ds.to_netcdf(nc_path, encoding={
+        "rain": {"dtype": "float32", "zlib": True, "complevel": 4},
+        "gauge_count": {"dtype": "int16", "zlib": True, "complevel": 1}
+    })
+    logging.info(f"Saved interpolated grid and gauge counts to {nc_path}")
+    return ds
 
-    return data
 
-# Function to extract grid edges
-def extract_grid_edges(basins, buffer=5000):
-    """
-    Extract the grid edges from the basins shapefile and return the overall min and max values of x and y as integers, with an optional buffer.
-
-    Parameters:
-    basins : gpd.GeoDataFrame
-        GeoDataFrame containing the basin shapes.
-    buffer : int, optional
-        Buffer value to add/subtract to the min and max x and y values (default is 5000).
-
-    Returns:
-    dict
-        Dictionary containing the overall min and max values of x and y with keys ['minx', 'miny', 'maxx', 'maxy'] as integers, adjusted by the buffer.
-    """
-    # Ensure the basins GeoDataFrame has a valid geometry column
-    if 'geometry' not in basins.columns:
-        raise ValueError("The provided GeoDataFrame does not contain a 'geometry' column.")
-
-    # Extract the bounds (minx, miny, maxx, maxy) for each basin
-    bounds = basins.geometry.bounds
-
-    # Calculate the overall min and max values of x and y and convert to integers
-    overall_bounds = {
-        'minx': int(bounds['minx'].min()) - buffer,
-        'miny': int(bounds['miny'].min()) - buffer,
-        'maxx': int(bounds['maxx'].max()) + buffer,
-        'maxy': int(bounds['maxy'].max()) + buffer
-    }
-
-    return overall_bounds
-
-
-
-def plot_map(basins, gauges, grid_edges):
-    """
-    Plot a map with the basins, gauges, grid edges, and international borders in ITM (EPSG:2039).
-
-    Parameters:
-    basins : gpd.GeoDataFrame
-        GeoDataFrame containing the basin shapes.
-    gauges : pd.DataFrame
-        DataFrame containing the rain gauge data.
-    grid_edges : dict
-        Dictionary containing the grid edges with keys ['minx', 'miny', 'maxx', 'maxy'].
-    """
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Plot basins
-    basins.plot(ax=ax, color='lightblue', edgecolor='black', alpha=0.5)
-
-    # Plot gauges
-    ax.scatter(gauges['ITM_X'], gauges['ITM_Y'], color='red', label='Rain Gauges')
-
-    # Draw grid edges
-    rect = plt.Rectangle((grid_edges['minx'], grid_edges['miny']),
-                         grid_edges['maxx'] - grid_edges['minx'],
-                         grid_edges['maxy'] - grid_edges['miny'],
-                         linewidth=1, edgecolor='black', facecolor='none')
-    ax.add_patch(rect)
-
-    # --- New code to download and cache Natural Earth data ---
-    # Define the path for the cached shapefile
-    cache_dir = os.path.join(os.path.expanduser('~'), '.geopandas_cache')
-    os.makedirs(cache_dir, exist_ok=True)
-    shapefile_path = os.path.join(cache_dir, 'ne_10m_admin_0_countries.shp')
-
-    # Download and unzip if the shapefile doesn't exist
-    if not os.path.exists(shapefile_path):
-        url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip"
-        zip_path = os.path.join(cache_dir, 'ne_10m_admin_0_countries.zip')
-        
-        try:
-            import requests
-            import zipfile
-            import io
-
-            print("Downloading high-resolution Natural Earth countries dataset...")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()  # Raise an exception for bad status codes
-            
-            # Unzip the content
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                z.extractall(cache_dir)
-            print(f"Dataset cached at {cache_dir}")
-
-        except Exception as e:
-            print(f"Failed to download or process the Natural Earth dataset: {e}")
-            # As a fallback, we will not plot the borders
-            shapefile_path = None
-
-    # Plot the borders if the shapefile is available
-    if shapefile_path and os.path.exists(shapefile_path):
-        world = gpd.read_file(shapefile_path)
-        world = world.to_crs(epsg=2039)
-        world.boundary.plot(ax=ax, edgecolor='gray', linewidth=0.5)
-    # --- End of new code ---
-
-    map_buffer = 200000  # Buffer for the map edges
-    # Set plot limits to focus on the area of interest
-    ax.set_xlim(grid_edges['minx'] - map_buffer, grid_edges['maxx'] + map_buffer)
-    ax.set_ylim(grid_edges['miny'] - map_buffer, grid_edges['maxy'] + map_buffer)
-
-    ax.set_title('Basin Map with Rain Gauges, Grid Edges, and International Borders (EPSG:2039)')
-    ax.set_xlabel('X Coordinate (meters)')
-    ax.set_ylabel('Y Coordinate (meters)')
-    ax.legend()
-
-    plt.show()
 
 
 def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
