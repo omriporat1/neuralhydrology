@@ -94,6 +94,7 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
     pd.DataFrame
         DataFrame with quality-controlled data and flags.
     """
+
     os.makedirs(log_folder, exist_ok=True)
     unified_log = []
 
@@ -108,7 +109,6 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
         # Add a flag column to indicate missing or out-of-range values
         station_data['QC_Flag'] = 0
 
-        # Log missing values and flagged values per station
         for col in station_data.columns:
             if col not in ['Station_ID', 'datetime', 'QC_Flag']:
                 out_of_range = (station_data[col] < 0) | (station_data[col] > max_value)
@@ -122,6 +122,19 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
                     'Missing Values': missing_values,
                     'Missing Percentage': missing_percentage
                 })
+
+        # Flag stations with excessive missing data
+        if missing_percentage > excessive_missing_threshold:
+            print(f"Warning: Station {station_id} has excessive missing data ({missing_percentage:.2%}).")
+
+        # Update the original data with changes made to station_data
+        data.loc[station_data.index, 'QC_Flag'] = station_data['QC_Flag']
+
+    # Save unified log to CSV
+    unified_log_df = pd.DataFrame(unified_log)
+    unified_log_df.to_csv(os.path.join(log_folder, 'quality_control_log.csv'), index=False)
+
+    return data
 
 
 # --- Moved out for multiprocessing pickling ---
