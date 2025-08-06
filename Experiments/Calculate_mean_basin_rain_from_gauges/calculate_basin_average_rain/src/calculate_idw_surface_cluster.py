@@ -204,7 +204,7 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
     logging.info(f"Starting IDW interpolation for {len(times)} timesteps using {os.cpu_count()} CPUs...")
     with concurrent.futures.ProcessPoolExecutor() as executor:
         results = list(executor.map(
-            lambda args: interpolate_single_timestep(*args),
+            interpolate_single_timestep,
             [(i, t, gauges_data, grid_points, grid_shape, power, max_radius) for i, t in enumerate(times)]
         ))
     for i, (rain_arr, count_arr) in enumerate(results):
