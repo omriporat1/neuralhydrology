@@ -168,7 +168,8 @@ def interpolate_chunk(chunk_args):
             weights[dists == 0] = 1e12
         gauge_count = np.sum((dists <= max_radius), axis=1).reshape(grid_shape)
         denom = np.nansum(weights, axis=1)
-        grid_vals = np.where(denom == 0, np.nan, np.nansum(weights * values, axis=1) / denom)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            grid_vals = np.where(denom == 0, np.nan, np.nansum(weights * values, axis=1) / denom)
         result = grid_vals.reshape(grid_shape)
         chunk_results.append((result, gauge_count))
     # Print/log progress for this chunk
