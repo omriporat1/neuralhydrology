@@ -408,14 +408,14 @@ def main():
     # Export first 10 unique gauge datetimes
 
     # We'll get these after idw_ds is created
-    idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("2022-10-01", "2023-10-01"))
+    idw_ds = idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir=output_dir, grid_resolution=grid_resolution, date_range=("1999-10-01", "2023-10-01"))
 
 
     # Animate the grid for a specific date range
     # animate_grid(idw_ds, date_range=("2022-01-01", "2022-01-03"))
     
     # Plot top rainfall timesteps as separate figures
-    plot_top_rainfall_timesteps(idw_ds, gauges_data, gauges, top_n=5, output_dir=output_dir)
+    # plot_top_rainfall_timesteps(idw_ds, gauges_data, gauges, top_n=5, output_dir=output_dir)
     
 
 if __name__ == '__main__':

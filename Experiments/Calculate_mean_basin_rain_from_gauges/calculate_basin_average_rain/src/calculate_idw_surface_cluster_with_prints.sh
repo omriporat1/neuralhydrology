@@ -2,8 +2,8 @@
 
 #SBATCH --job-name=idw_surface
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=400G
-#SBATCH --time=2-00:00:00
+#SBATCH --mem=1T
+#SBATCH --time=16:00:00
 #SBATCH --output=idw_surface_%j.log
 #SBATCH --error=idw_surface_error_%j.log
 #SBATCH --account=efratmorin
