@@ -408,7 +408,7 @@ def main():
 
     # Interpolate to grid and save as NetCDF
     # output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/5_stations_filtered_2022_2023/output'
-    output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output'
+    output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output_full'
     # Export first 10 unique gauge datetimes
 
     # We'll get these after idw_ds is created
