@@ -142,7 +142,7 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
 
 # Chunked version: process a block of timesteps per worker, only sending relevant data
 def interpolate_chunk(chunk_args):
-    chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius, chunk_idx, total_chunks, global_chunk_idx, global_total_chunks = chunk_args
+    chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius, chunk_idx, total_chunks, global_chunk_idx, global_total_chunks, year_idx, total_years, year = chunk_args
     chunk_results = []
     for t in chunk_times:
         frame = gauges_data_chunk[gauges_data_chunk['datetime'] == t]
@@ -172,13 +172,13 @@ def interpolate_chunk(chunk_args):
             grid_vals = np.where(denom == 0, np.nan, np.nansum(weights * values, axis=1) / denom)
         result = grid_vals.reshape(grid_shape)
         chunk_results.append((result, gauge_count))
-    # Print/log progress for this chunk with per-year and global percentage, and clean date format
     percent_year = 100.0 * (chunk_idx + 1) / total_chunks
     percent_global = 100.0 * (global_chunk_idx + 1) / global_total_chunks
-    # Format dates as YYYY-MM-DD
-    date_start = pd.to_datetime(chunk_times[0]).strftime('%Y-%m-%d')
-    date_end = pd.to_datetime(chunk_times[-1]).strftime('%Y-%m-%d')
-    print(f"[Chunk {chunk_idx+1}/{total_chunks}] ({percent_year:.1f}%) | [Global {global_chunk_idx+1}/{global_total_chunks}] ({percent_global:.1f}%) {date_start} to {date_end}", flush=True)
+    date_str = pd.to_datetime(chunk_times[0]).strftime('%Y-%m-%d')
+    # Print year info only for the first chunk of each year
+    if chunk_idx == 0:
+        print(f"=== Year {year_idx+1}/{total_years}: {year} ===", flush=True)
+    print(f"[Chunk {chunk_idx+1}/{total_chunks} of year {year_idx+1}/{total_years}] ({percent_year:.1f}%) | [Global {global_chunk_idx+1}/{global_total_chunks}] ({percent_global:.1f}%) {date_str}", flush=True)
     return chunk_results
 
 
@@ -455,7 +455,7 @@ def main():
         os.makedirs(year_output_dir, exist_ok=True)
         nc_path = os.path.join(year_output_dir, f"rain_grid_{year}.nc")
         # Patch idw_interpolation_grid to accept global_chunk_offset/global_total_chunks
-        def idw_interpolation_grid_with_global(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
+        def idw_interpolation_grid_with_global(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000, year_idx=None, total_years=None, year=None):
             import time
             os.makedirs(output_dir, exist_ok=True)
             x = np.arange(grid_edges['minx'], grid_edges['maxx'], grid_resolution)
@@ -492,7 +492,8 @@ def main():
                 mask = (gauges_data['datetime'] >= t0) & (gauges_data['datetime'] <= t1)
                 gauges_data_chunk = gauges_data[mask].copy()
                 global_chunk_idx = global_chunk_offset + chunk_idx
-                chunk_args_list.append((chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius, chunk_idx, total_chunks, global_chunk_idx, global_total_chunks))
+                # Pass year index, total years, and year value for better progress reporting
+                chunk_args_list.append((chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius, chunk_idx, total_chunks, global_chunk_idx, global_total_chunks, year_idx, total_years, year))
             logging.info(f"Starting IDW interpolation for {len(times)} timesteps in {total_chunks} chunks using {os.cpu_count()} CPUs...")
             t_start = time.time()
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -522,10 +523,13 @@ def main():
         idw_ds = idw_interpolation_grid_with_global(
             gauges_data_year, grid_edges, power=2, max_radius=50000,
             output_dir=year_output_dir, grid_resolution=grid_resolution,
-            date_range=(str(year_start.date()), str(year_end.date()))
+            date_range=(str(year_start.date()), str(year_end.date())),
+            year_idx=i, total_years=len(years), year=year
         )
-        if hasattr(idw_ds, 'encoding') and 'source' in idw_ds.encoding['rain']:
-            yearly_files.append(idw_ds.encoding['rain']['source'])
+        # Robustly check for 'rain' and 'source' in encoding
+        rain_encoding = getattr(idw_ds, 'encoding', {}).get('rain', {})
+        if isinstance(rain_encoding, dict) and 'source' in rain_encoding:
+            yearly_files.append(rain_encoding['source'])
         else:
             yearly_files.append(nc_path)
         print(f"Finished year {year}, saved to {nc_path}", flush=True)
