@@ -139,52 +139,46 @@ def quality_check(data, excessive_missing_threshold=0.5, max_value=50, log_folde
 
 
 # --- Moved out for multiprocessing pickling ---
-def interpolate_single_timestep(i, t, gauges_data, grid_points, grid_shape, power, max_radius):
-    frame = gauges_data[gauges_data['datetime'] == t]
-    logging.info(f"IDW timestep {i+1}: {t} (type: {type(t)})")
-    logging.info(f"Number of gauges: {len(frame)}")
-    if not frame.empty:
-        logging.debug(f"Gauge rainfall values: {frame['rain'].values}")
-        logging.debug(f"Gauge coordinates: {list(zip(frame['ITM_X'].values, frame['ITM_Y'].values))}")
-    else:
-        logging.warning("No gauges found for this timestep.")
-    if frame.empty:
-        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
-        zero_grid = np.zeros(grid_shape, dtype=np.int16)
-        return nan_grid, zero_grid
-    coords = frame[['ITM_X', 'ITM_Y']].values
-    values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
-    # Only use valid (not NaN, not out-of-range) stations
-    valid_mask = (~np.isnan(values)) & (values >= 0) & (values <= 50)
-    coords = coords[valid_mask]
-    values = values[valid_mask]
-    if len(values) == 0:
-        nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
-        zero_grid = np.zeros(grid_shape, dtype=np.int16)
-        logging.warning(f"No valid stations for timestep {t}!")
-        return nan_grid, zero_grid
-    dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
-    with np.errstate(divide='ignore'):
-        weights = 1 / np.power(dists, power)
-        weights[dists > max_radius] = 0
-        weights[dists == 0] = 1e12
-    # Count number of stations used for each pixel (within radius and valid)
-    gauge_count = np.sum((dists <= max_radius), axis=1).reshape(grid_shape)
-    denom = np.nansum(weights, axis=1)
-    grid_vals = np.where(denom == 0, np.nan, np.nansum(weights * values, axis=1) / denom)
-    result = grid_vals.reshape(grid_shape)
-    if np.all(np.isnan(result)):
-        logging.warning(f"Interpolated grid is all NaN for timestep {t}!")
-    else:
-        logging.info(f"Grid min: {np.nanmin(result)}, max: {np.nanmax(result)}")
-    return result, gauge_count
+
+# Chunked version: process a block of timesteps per worker, only sending relevant data
+def interpolate_chunk(chunk_args):
+    chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius = chunk_args
+    chunk_results = []
+    for t in chunk_times:
+        frame = gauges_data_chunk[gauges_data_chunk['datetime'] == t]
+        if frame.empty:
+            nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+            zero_grid = np.zeros(grid_shape, dtype=np.int16)
+            chunk_results.append((nan_grid, zero_grid))
+            continue
+        coords = frame[['ITM_X', 'ITM_Y']].values
+        values = frame['rain'].values if 'rain' in frame.columns else frame.iloc[:, 3].values
+        valid_mask = (~np.isnan(values)) & (values >= 0) & (values <= 50)
+        coords = coords[valid_mask]
+        values = values[valid_mask]
+        if len(values) == 0:
+            nan_grid = np.full(grid_shape, np.nan, dtype=np.float32)
+            zero_grid = np.zeros(grid_shape, dtype=np.int16)
+            chunk_results.append((nan_grid, zero_grid))
+            continue
+        dists = np.sqrt(((grid_points[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+        with np.errstate(divide='ignore'):
+            weights = 1 / np.power(dists, power)
+            weights[dists > max_radius] = 0
+            weights[dists == 0] = 1e12
+        gauge_count = np.sum((dists <= max_radius), axis=1).reshape(grid_shape)
+        denom = np.nansum(weights, axis=1)
+        grid_vals = np.where(denom == 0, np.nan, np.nansum(weights * values, axis=1) / denom)
+        result = grid_vals.reshape(grid_shape)
+        chunk_results.append((result, gauge_count))
+    return chunk_results
 
 
 # Wrapper for multiprocessing to unpack arguments (must be top-level for pickling)
-def interpolate_single_timestep_wrapper(args):
-    return interpolate_single_timestep(*args)
+
 
 def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000):
+    import time
     os.makedirs(output_dir, exist_ok=True)
     x = np.arange(grid_edges['minx'], grid_edges['maxx'], grid_resolution)
     y = np.arange(grid_edges['miny'], grid_edges['maxy'], grid_resolution)
@@ -208,16 +202,31 @@ def idw_interpolation_grid(gauges_data, grid_edges, power=2, max_radius=50000, o
     grid_shape = xx.shape
     grid_array = np.full((len(times), grid_shape[0], grid_shape[1]), np.nan, dtype=np.float32)
     count_array = np.zeros((len(times), grid_shape[0], grid_shape[1]), dtype=np.int16)
-    logging.info(f"Starting IDW interpolation for {len(times)} timesteps using {os.cpu_count()} CPUs...")
+    # --- Chunking by day ---
+    times_pd = pd.to_datetime(times)
+    # Group times by day (change to 'H' for hourly, or N timesteps for custom chunking)
+    chunk_keys = times_pd.normalize()  # group by date
+    unique_days = np.unique(chunk_keys)
+    chunk_indices = [np.where(chunk_keys == day)[0] for day in unique_days]
+    chunk_args_list = []
+    for idxs in chunk_indices:
+        chunk_times = times[idxs]
+        # Only send relevant gauges_data for this chunk
+        t0, t1 = chunk_times[0], chunk_times[-1]
+        mask = (gauges_data['datetime'] >= t0) & (gauges_data['datetime'] <= t1)
+        gauges_data_chunk = gauges_data[mask].copy()
+        chunk_args_list.append((chunk_times, gauges_data_chunk, grid_points, grid_shape, power, max_radius))
+    logging.info(f"Starting IDW interpolation for {len(times)} timesteps in {len(chunk_args_list)} chunks using {os.cpu_count()} CPUs...")
+    t_start = time.time()
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        results = list(executor.map(
-            interpolate_single_timestep_wrapper,
-            [(i, t, gauges_data, grid_points, grid_shape, power, max_radius) for i, t in enumerate(times)]
-        ))
-    for i, (rain_arr, count_arr) in enumerate(results):
+        results = list(executor.map(interpolate_chunk, chunk_args_list))
+    t_end = time.time()
+    logging.info(f"IDW interpolation completed in {t_end-t_start:.1f} seconds.")
+    # Flatten results and fill arrays
+    flat_results = [item for chunk in results for item in chunk]
+    for i, (rain_arr, count_arr) in enumerate(flat_results):
         grid_array[i] = rain_arr
         count_array[i] = count_arr
-    logging.info("IDW interpolation completed.")
     ds = xr.Dataset({
         "rain": (("time", "y", "x"), grid_array),
         "gauge_count": (("time", "y", "x"), count_array)

@@ -19,6 +19,6 @@ conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
 
 mkdir -p logs
 
-/usr/bin/time -v python calculate_idw_surface_cluster.py
+/usr/bin/time -v python calculate_idw_surface_cluster_parallel.py
 
 conda deactivate
