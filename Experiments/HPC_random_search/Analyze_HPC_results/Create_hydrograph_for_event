@@ -1,0 +1,61 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
+import re
+
+# Path to the event CSV file (update as needed)
+csv_path = r"C:\PhD\Python\neuralhydrology\Experiments\HPC_random_search\results\job_41780893\run_014\N38_A30_4CPU_SMI_0506_225956\validation_hydrographs_cluster\metrics_evaluation\17144_event_20120131_20120202.csv"
+
+# Read the CSV file with correct separator and robust date parsing
+# The file is tab-separated, but the header may have a BOM or whitespace issue
+with open(csv_path, 'r', encoding='utf-8-sig') as f:
+    header = f.readline().strip().split('\t')
+
+# Clean header names
+header = [h.strip().lower() for h in header]
+
+# Read the data with the cleaned header
+if 'date' in header:
+    df = pd.read_csv(csv_path, sep='\t', encoding='utf-8-sig', skiprows=1, names=header, dtype=str)
+    date_col = 'date'
+else:
+    df = pd.read_csv(csv_path, sep=',', encoding='utf-8-sig', dtype=str)
+    date_col = [col for col in df.columns if 'date' in col.lower()][0]
+
+# Parse the date column strictly as dayfirst, handling both 'dd/mm/yyyy' and 'yyyy-mm-dd' by checking the format
+def parse_date_strict(val):
+    val = val.strip()
+    # If format is yyyy-mm-dd, parse as ISO
+    if re.match(r"^\d{4}-\d{2}-\d{2}", val):
+        return pd.to_datetime(val, errors='coerce')
+    # Otherwise, parse as dayfirst
+    return pd.to_datetime(val, dayfirst=True, errors='coerce')
+
+df[date_col] = df[date_col].apply(parse_date_strict)
+df = df.dropna(subset=[date_col])
+
+# Convert observed and simulated columns to float for correct plotting
+df['observed'] = pd.to_numeric(df['observed'], errors='coerce')
+df['simulated'] = pd.to_numeric(df['simulated'], errors='coerce')
+df = df.dropna(subset=['observed', 'simulated'])
+
+# Plot observed and simulated hydrographs
+fig, ax = plt.subplots(figsize=(5, 3))  # ~1/6 page in Word (inches)
+ax.plot(df[date_col], df['observed'], label='Observed', color='black', linewidth=1.2)
+ax.plot(df[date_col], df['simulated'], label='Simulated', color='green', linestyle='--', linewidth=1.2)
+ax.set_xlabel('Date', fontsize=12)
+ax.set_ylabel('Discharge [m³/s]', fontsize=9)
+ax.legend(fontsize=8)
+ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
+ax.tick_params(axis='both', which='major', labelsize=10)
+
+# Format x-axis for better date display
+locator = mdates.AutoDateLocator()
+formatter = mdates.ConciseDateFormatter(locator)
+ax.xaxis.set_major_locator(locator)
+ax.xaxis.set_major_formatter(formatter)
+fig.autofmt_xdate()
+
+plt.tight_layout(pad=0.5)
+plt.show()
