@@ -21,10 +21,13 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     print(f"[DEBUG] Checking which NetCDF files exist...")
     existing_files = []
     missing_files = []
-    for f in tqdm(nc_files, desc="Checking yearly files"):
+    for idx, f in enumerate(nc_files):
+        print(f"[DEBUG] Checking file {idx+1}/{len(nc_files)}: {f}")
         if os.path.isfile(f):
+            print(f"[DEBUG]   Exists: {f}")
             existing_files.append(f)
         else:
+            print(f"[DEBUG]   MISSING: {f}")
             missing_files.append(f)
     print(f"[DEBUG] {len(existing_files)} files found, {len(missing_files)} missing.")
     if missing_files:
