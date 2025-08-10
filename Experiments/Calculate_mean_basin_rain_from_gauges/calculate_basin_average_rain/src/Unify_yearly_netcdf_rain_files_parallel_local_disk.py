@@ -11,12 +11,14 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     Unify all yearly NetCDF files (rain_grid.nc in each output/year_YYYY folder) into a single NetCDF file.
     """
     # Find all year folders in the output directory
+    print("[DEBUG] Listing year folders...")
     year_folders = [os.path.join(output_dir, d) for d in os.listdir(output_dir)
                    if os.path.isdir(os.path.join(output_dir, d)) and d.startswith("year_")]
-    # Sort folders by year
+    print(f"[DEBUG] Found {len(year_folders)} year folders.")
     year_folders.sort()
-    # Collect paths to rain_grid.nc in each year folder
+    print("[DEBUG] Collecting NetCDF file paths...")
     nc_files = [os.path.join(folder, "rain_grid.nc") for folder in year_folders]
+    print(f"[DEBUG] Checking which NetCDF files exist...")
     existing_files = []
     missing_files = []
     for f in tqdm(nc_files, desc="Checking yearly files"):
@@ -24,6 +26,7 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
             existing_files.append(f)
         else:
             missing_files.append(f)
+    print(f"[DEBUG] {len(existing_files)} files found, {len(missing_files)} missing.")
     if missing_files:
         print(f"Warning: {len(missing_files)} yearly NetCDF files are missing and will be skipped:")
         for f in missing_files:
@@ -37,12 +40,15 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     print(f"Using scratch directory: {scratch_dir}")
     os.makedirs(scratch_dir, exist_ok=True)
     local_merged_path = os.path.join(scratch_dir, merged_filename)
+    print(f"[DEBUG] Opening {len(existing_files)} NetCDF files with xarray.open_mfdataset...")
     ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
+    print(f"[DEBUG] Writing merged NetCDF to local scratch: {local_merged_path}")
     with ProgressBar():
         ds_merged.to_netcdf(local_merged_path, engine='netcdf4', compute=True)
     print(f"Merged file saved to local scratch: {local_merged_path}")
     # Copy to final output directory
     final_merged_path = os.path.join(output_dir, merged_filename)
+    print(f"[DEBUG] Copying merged file to final output directory: {final_merged_path}")
     import shutil
     shutil.copy2(local_merged_path, final_merged_path)
     print(f"Copied merged file to {final_merged_path}")
