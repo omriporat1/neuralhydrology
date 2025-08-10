@@ -453,7 +453,6 @@ def main():
         print(f"Processing year {year}: {len(gauges_data_year)} rows", flush=True)
         year_output_dir = os.path.join(output_dir, f"year_{year}")
         os.makedirs(year_output_dir, exist_ok=True)
-        nc_path = os.path.join(year_output_dir, f"rain_grid_{year}.nc")
         # Patch idw_interpolation_grid to accept global_chunk_offset/global_total_chunks
         def idw_interpolation_grid_with_global(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000, year_idx=None, total_years=None, year=None):
             import time
@@ -526,22 +525,28 @@ def main():
             date_range=(str(year_start.date()), str(year_end.date())),
             year_idx=i, total_years=len(years), year=year
         )
-        # Robustly check for 'rain' and 'source' in encoding
-        rain_encoding = getattr(idw_ds, 'encoding', {}).get('rain', {})
-        if isinstance(rain_encoding, dict) and 'source' in rain_encoding:
-            yearly_files.append(rain_encoding['source'])
-        else:
-            yearly_files.append(nc_path)
-        print(f"Finished year {year}, saved to {nc_path}", flush=True)
+        # Always use the correct saved file path (rain_grid.nc in each year folder)
+        yearly_files.append(os.path.join(year_output_dir, "rain_grid.nc"))
+        print(f"Finished year {year}, saved to {os.path.join(year_output_dir, 'rain_grid.nc')}", flush=True)
         global_chunk_offset += all_chunk_counts[i]
 
     # Merge all yearly NetCDFs into one
     if yearly_files:
-        print(f"Merging {len(yearly_files)} yearly NetCDFs into one...", flush=True)
-        merged_path = os.path.join(output_dir, "rain_grid_full.nc")
-        ds_merged = xr.open_mfdataset(yearly_files, combine='by_coords')
-        ds_merged.to_netcdf(merged_path)
-        print(f"Merged file saved to {merged_path}", flush=True)
+        # Filter to only files that exist
+        existing_files = [f for f in yearly_files if os.path.isfile(f)]
+        missing_files = [f for f in yearly_files if not os.path.isfile(f)]
+        if missing_files:
+            print(f"Warning: {len(missing_files)} yearly NetCDF files are missing and will be skipped:", flush=True)
+            for f in missing_files:
+                print(f"  Missing: {f}", flush=True)
+        if existing_files:
+            print(f"Merging {len(existing_files)} yearly NetCDFs into one...", flush=True)
+            merged_path = os.path.join(output_dir, "rain_grid_full.nc")
+            ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
+            ds_merged.to_netcdf(merged_path)
+            print(f"Merged file saved to {merged_path}", flush=True)
+        else:
+            print("No existing yearly files to merge!", flush=True)
     else:
         print("No yearly files to merge!", flush=True)
 
