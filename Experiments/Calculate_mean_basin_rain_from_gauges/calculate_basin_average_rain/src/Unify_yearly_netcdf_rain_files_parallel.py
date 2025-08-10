@@ -2,11 +2,8 @@ import os
 import xarray as xr
 import dask
 import dask.array as da
-from dask.distributed import Client
 from tqdm import tqdm
 from dask.diagnostics import ProgressBar
-
-client = Client()  # This will use all available cores on the node
 
 def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parallel.nc"):
     """
@@ -41,6 +38,9 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     print(f"Merged file saved to {merged_path}")
 
 if __name__ == "__main__":
+    from dask.distributed import Client
+    client = Client()  # This will use all available cores on the node
+
     # Set the output directory where the yearly folders are located
     output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output'
     unify_yearly_netcdf_files(output_dir)
