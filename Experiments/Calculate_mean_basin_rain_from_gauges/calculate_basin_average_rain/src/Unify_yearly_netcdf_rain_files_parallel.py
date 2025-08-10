@@ -35,7 +35,7 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     merged_path = os.path.join(output_dir, merged_filename)
     # Use a reasonable chunk size for the time dimension to optimize Dask graph and parallelism
     # Here, chunk by 365 (about a year of daily data) or adjust as needed for your data frequency
-    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords', chunks={'time': 365})
+    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
     with ProgressBar():
         ds_merged.to_netcdf(merged_path, compute=True)
     print(f"Merged file saved to {merged_path}")
