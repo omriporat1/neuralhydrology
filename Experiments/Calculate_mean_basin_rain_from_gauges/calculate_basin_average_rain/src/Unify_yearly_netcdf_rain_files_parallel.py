@@ -4,6 +4,7 @@ import dask
 import dask.array as da
 from tqdm import tqdm
 from dask.diagnostics import ProgressBar
+from dask.distributed import Client
 
 def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parallel.nc"):
     """
@@ -40,9 +41,7 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     print(f"Merged file saved to {merged_path}")
 
 if __name__ == "__main__":
-    from dask.distributed import Client
-    import multiprocessing
-    n_workers = multiprocessing.cpu_count()
+    n_workers = int(os.environ.get("NHY_DASK_WORKERS", 4))
     client = Client(n_workers=n_workers, threads_per_worker=1)
     print(f"Dask client started with {n_workers} workers (1 thread per worker)")
 
