@@ -1,9 +1,9 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=merge_netcdf
+#SBATCH --job-name=merge_netcdf4
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
-#SBATCH --time=2:00:00
+#SBATCH --mem=64G
+#SBATCH --time=12:00:00
 #SBATCH --output=merge_netcdf_%j.log
 #SBATCH --error=merge_netcdf_error_%j.log
 #SBATCH --account=efratmorin
