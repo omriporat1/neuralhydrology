@@ -33,16 +33,14 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
         return
     print(f"Merging {len(existing_files)} yearly NetCDFs into one...")
     merged_path = os.path.join(output_dir, merged_filename)
-    # Use a reasonable chunk size for the time dimension to optimize Dask graph and parallelism
-    # Here, chunk by 365 (about a year of daily data) or adjust as needed for your data frequency
     ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
     with ProgressBar():
-        ds_merged.to_netcdf(merged_path, compute=True)
+        ds_merged.to_netcdf(merged_path, engine='netcdf4', compute=True)
     print(f"Merged file saved to {merged_path}")
 
 if __name__ == "__main__":
     n_workers = int(os.environ.get("NHY_DASK_WORKERS", 4))
-    client = Client(n_workers=n_workers, threads_per_worker=1)
+    client = Client(n_workers=n_workers, threads_per_worker=1, dashboard_address=":8787")
     print(f"Dask client started with {n_workers} workers (1 thread per worker)")
 
     # Set the output directory where the yearly folders are located
