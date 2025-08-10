@@ -32,14 +32,19 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
         return
     print(f"Merging {len(existing_files)} yearly NetCDFs into one...")
     merged_path = os.path.join(output_dir, merged_filename)
-    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords', chunks={})
+    # Use a reasonable chunk size for the time dimension to optimize Dask graph and parallelism
+    # Here, chunk by 365 (about a year of daily data) or adjust as needed for your data frequency
+    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords', chunks={'time': 365})
     with ProgressBar():
-        ds_merged.to_netcdf(merged_path)
+        ds_merged.to_netcdf(merged_path, compute=True)
     print(f"Merged file saved to {merged_path}")
 
 if __name__ == "__main__":
     from dask.distributed import Client
-    client = Client()  # This will use all available cores on the node
+    import multiprocessing
+    n_workers = multiprocessing.cpu_count()
+    client = Client(n_workers=n_workers, threads_per_worker=1)
+    print(f"Dask client started with {n_workers} workers (1 thread per worker)")
 
     # Set the output directory where the yearly folders are located
     output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output'
