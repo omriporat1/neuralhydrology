@@ -34,6 +34,7 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     print(f"Merging {len(existing_files)} yearly NetCDFs into one...")
     # Write to local scratch disk for fast I/O, then copy to output_dir
     scratch_dir = os.environ.get('SCRATCH', f"/tmp/{os.environ.get('USER', 'user')}")
+    print(f"Using scratch directory: {scratch_dir}")
     os.makedirs(scratch_dir, exist_ok=True)
     local_merged_path = os.path.join(scratch_dir, merged_filename)
     ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
