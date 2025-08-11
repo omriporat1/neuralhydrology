@@ -75,11 +75,11 @@ def _find_yearly_netcdfs(netcdf_path_or_dir):
 
 def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                              start_time=None, end_time=None, parallel=False, chunk_size=4320, log_every=200):
-    basin_id = basin_row['id'] if 'id' in basin_row else basin_idx
+    basin_id = basin_row.get('gauge_id', basin_row.get('id', basin_idx))
     basin_geom = basin_row['geometry']
 
     os.makedirs(out_dir, exist_ok=True)
-    csv_path = os.path.join(out_dir, f"basin_{basin_id}.csv")
+    csv_path = os.path.join(out_dir, f"basin_{str(basin_id)}.csv")
     first_write = not os.path.exists(csv_path)
 
     # Convert start/end to np.datetime64 if provided
@@ -114,45 +114,53 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 gauges_da = ds['gauge_count']
                 logging.info(f"Basin {basin_id}: {os.path.basename(nc_path)} timesteps={len(times)}")
 
-                # Process and write in chunks to show progress and limit RAM
+                # Build affine and a static mask for this basin and grid (compute once per file)
+                import rasterio
+                from rasterio.features import geometry_mask
+                xmin = float(np.nanmin(x_coords)); xmax = float(np.nanmax(x_coords))
+                ymin = float(np.nanmin(y_coords)); ymax = float(np.nanmax(y_coords))
+                height, width = int(ds.dims['y']), int(ds.dims['x'])
+                affine = rasterio.transform.from_bounds(xmin, ymin, xmax, ymax, width, height)
+
+                mask = geometry_mask([basin_geom], transform=affine, invert=True,
+                                     out_shape=(height, width), all_touched=True)
+
+                # Process and write in chunks
                 batch = []
                 for i in range(len(times)):
-                    args = (
-                        basin_idx, basin_geom,
-                        rain_da.isel(time=i).values,
-                        gauges_da.isel(time=i).values,
-                        x_coords, y_coords, times[i],
-                        basin_id, log_dir
-                    )
-                    _, res = extract_basin_stats_for_timestep(args)
-                    if res:
-                        batch.append(res)
+                    rain = rain_da.isel(time=i).values.astype(np.float32, copy=False)
+                    gauges = gauges_da.isel(time=i).values.astype(np.float32, copy=False)
+
+                    # Masked stats (NaNs respected in rain)
+                    rv = rain[mask]
+                    gv = gauges[mask]
+
+                    res = {
+                        'date': format_date(times[i]),
+                        'mean_rain': float(np.nanmean(rv)) if rv.size else np.nan,
+                        'max_rain': float(np.nanmax(rv)) if rv.size else np.nan,
+                        'min_gauges': float(np.nanmin(gv)) if gv.size else np.nan,
+                        'max_gauges': float(np.nanmax(gv)) if gv.size else np.nan,
+                    }
+                    batch.append(res)
 
                     if log_every and (i + 1) % log_every == 0:
                         logging.info(f"Basin {basin_id}: processed {i+1}/{len(times)} timesteps in {os.path.basename(nc_path)}")
 
-                    # Write every chunk_size timesteps or at file end
                     if (i + 1) % chunk_size == 0 or (i + 1) == len(times):
                         if batch:
                             df = pd.DataFrame(batch)
-                            df.to_csv(
-                                csv_path,
-                                index=False,
-                                encoding='utf-8',
-                                mode='w' if first_write else 'a',
-                                header=first_write
-                            )
+                            df.to_csv(csv_path, index=False, encoding='utf-8',
+                                      mode='w' if first_write else 'a',
+                                      header=first_write)
                             first_write = False
-                            logging.info(
-                                f"Basin {basin_id}: wrote {len(batch)} rows "
-                                f"({i+1}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}"
-                            )
+                            logging.info(f"Basin {basin_id}: wrote {len(batch)} rows ({i+1}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
                             batch.clear()
         except Exception as e:
             logging.exception(f"Basin {basin_id}: failed processing {nc_path}: {e}")
 
 def process_basin_timeseries(basin_idx, basin_row, ds, x_coords, y_coords, log_dir, out_dir, parallel=False):
-    basin_id = basin_row['id'] if 'id' in basin_row else basin_idx
+    basin_id = basin_row.get('gauge_id', basin_row.get('id', basin_idx))
     basin_geom = basin_row['geometry']
     times = ds['time'].values
     rain = ds['rain'].values
@@ -175,7 +183,7 @@ def process_basin_timeseries(basin_idx, basin_row, ds, x_coords, y_coords, log_d
     # Save to CSV
     os.makedirs(out_dir, exist_ok=True)
     df = pd.DataFrame(results)
-    csv_path = os.path.join(out_dir, f"basin_{basin_id}.csv")
+    csv_path = os.path.join(out_dir, f"basin_{str(basin_id)}.csv")
     df.to_csv(csv_path, index=False, encoding='utf-8')
     logging.info(f"Saved basin {basin_id} results to {csv_path}")
 
