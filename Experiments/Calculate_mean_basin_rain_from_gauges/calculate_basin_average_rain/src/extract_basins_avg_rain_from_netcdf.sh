@@ -1,9 +1,9 @@
 #!/bin/bash -l
 
 #SBATCH --job-name=basin_rain
-#SBATCH --time=12:00:00
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --time=48:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --account=efratmorin
@@ -47,7 +47,8 @@ mkdir -p "$OUT_DIR" "$LOG_DIR"
   --out_dir "$OUT_DIR" \
   --log_dir "$LOG_DIR" \
   --log_file "$LOG_FILE" \
-  --chunk_size 100 \
-  --log_every 20
-#  --parallel \
-#  --workers "$SLURM_CPUS_PER_TASK"
+  --chunk_size 1000 \
+  --log_every 20 \
+  --time_block 1000 \
+  --parallel \
+  --workers "$SLURM_CPUS_PER_TASK"

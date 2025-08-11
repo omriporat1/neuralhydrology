@@ -6,6 +6,7 @@ import geopandas as gpd
 import numpy as np
 import xarray as xr
 import concurrent.futures
+import time
 from logging.handlers import WatchedFileHandler
 
 def setup_logging(log_file=None):
@@ -88,7 +89,8 @@ def _find_yearly_netcdfs(netcdf_path_or_dir):
     raise FileNotFoundError(f"{netcdf_path_or_dir} is neither a file nor a directory")
 
 def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
-                             start_time=None, end_time=None, parallel=False, chunk_size=4320, log_every=200):
+                             start_time=None, end_time=None, parallel=False,
+                             chunk_size=4320, log_every=200, time_block=720):
     basin_id = basin_row.get('gauge_id', basin_row.get('id', basin_idx))
     basin_geom = basin_row['geometry']
 
@@ -100,22 +102,20 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
     start = np.datetime64(start_time) if start_time else None
     end = np.datetime64(end_time) if end_time else None
     chunk_size = max(1, int(chunk_size))
+    time_block = max(1, int(time_block))
 
     for nc_path in nc_files:
         try:
             logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")
             with xr.open_dataset(nc_path) as ds:
-                # Ensure array row 0 is the north/top once per file
+                # Ensure row 0 = top
                 if 'y' in ds.coords and ds['y'].size > 1 and (ds['y'].values[0] < ds['y'].values[-1]):
                     ds = ds.sortby('y', ascending=False)
                     logging.info(f"Basin {basin_id}: sorted y descending for {os.path.basename(nc_path)}")
-
-                # Optional: ensure x is ascending (left→right); most files already are
                 if 'x' in ds.coords and ds['x'].size > 1 and (ds['x'].values[0] > ds['x'].values[-1]):
                     ds = ds.sortby('x', ascending=True)
-                    logging.info(f"Basin {basin_id}: sorted x ascending for {os.path.basename(nc_path)}")
 
-                # Apply time filter per file if needed
+                # Optional time window
                 if start or end:
                     ds = ds.sel(time=slice(start or ds['time'].values[0], end or ds['time'].values[-1]))
                 if ds['time'].size == 0:
@@ -128,48 +128,67 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 gauges_da = ds['gauge_count']
                 logging.info(f"Basin {basin_id}: {os.path.basename(nc_path)} timesteps={len(times)}")
 
-                # Build affine and a static mask for this basin and grid (compute once per file)
+                # Build affine and basin mask once per file
                 import rasterio
                 from rasterio.features import geometry_mask
                 xmin = float(np.nanmin(x_coords)); xmax = float(np.nanmax(x_coords))
                 ymin = float(np.nanmin(y_coords)); ymax = float(np.nanmax(y_coords))
                 height, width = int(ds.sizes['y']), int(ds.sizes['x'])
                 affine = rasterio.transform.from_bounds(xmin, ymin, xmax, ymax, width, height)
-
                 mask = geometry_mask([basin_geom], transform=affine, invert=True,
                                      out_shape=(height, width), all_touched=True)
+                mask_flat = mask.ravel()
 
-                # Process and write in chunks
-                batch = []
-                for i in range(len(times)):
-                    rain = rain_da.isel(time=i).values.astype(np.float32, copy=False)
-                    gauges = gauges_da.isel(time=i).values.astype(np.float32, copy=False)
+                pending = []
+                processed = 0
+                # Process in blocks of timesteps (vectorized)
+                for t0 in range(0, len(times), time_block):
+                    t1 = min(t0 + time_block, len(times))
+                    # Read 3D blocks (t, y, x)
+                    r_blk = rain_da.isel(time=slice(t0, t1)).values.astype(np.float32, copy=False)
+                    g_blk = gauges_da.isel(time=slice(t0, t1)).values.astype(np.float32, copy=False)
+                    # Flatten spatial dims and mask once
+                    r2 = r_blk.reshape((t1 - t0), -1)[:, mask_flat]
+                    g2 = g_blk.reshape((t1 - t0), -1)[:, mask_flat]
+                    # Vectorized stats across spatial axis
+                    mean_r = np.nanmean(r2, axis=1)
+                    max_r = np.nanmax(r2, axis=1)
+                    # Gauge counts are non-NaN; use nanmin/nanmax for safety
+                    min_g = np.nanmin(g2, axis=1)
+                    max_g = np.nanmax(g2, axis=1)
 
-                    # Masked stats (NaNs respected in rain)
-                    rv = rain[mask]
-                    gv = gauges[mask]
+                    # Build rows for this block
+                    block_times = times[t0:t1]
+                    pending.extend(
+                        {
+                            'date': format_date(block_times[k]),
+                            'mean_rain': float(mean_r[k]),
+                            'max_rain': float(max_r[k]),
+                            'min_gauges': float(min_g[k]),
+                            'max_gauges': float(max_g[k]),
+                        }
+                        for k in range(t1 - t0)
+                    )
 
-                    res = {
-                        'date': format_date(times[i]),
-                        'mean_rain': float(np.nanmean(rv)) if rv.size else np.nan,
-                        'max_rain': float(np.nanmax(rv)) if rv.size else np.nan,
-                        'min_gauges': float(np.nanmin(gv)) if gv.size else np.nan,
-                        'max_gauges': float(np.nanmax(gv)) if gv.size else np.nan,
-                    }
-                    batch.append(res)
+                    processed = t1
+                    if log_every and (processed % log_every == 0 or processed == len(times)):
+                        logging.info(f"Basin {basin_id}: processed {processed}/{len(times)} timesteps in {os.path.basename(nc_path)}")
 
-                    if log_every and (i + 1) % log_every == 0:
-                        logging.info(f"Basin {basin_id}: processed {i+1}/{len(times)} timesteps in {os.path.basename(nc_path)}")
+                    # Write if we’ve collected at least chunk_size rows or at file end
+                    while len(pending) >= chunk_size or processed == len(times):
+                        take = min(len(pending), chunk_size) if processed != len(times) else len(pending)
+                        df = pd.DataFrame(pending[:take])
+                        df.to_csv(
+                            csv_path,
+                            index=False,
+                            encoding='utf-8',
+                            mode='w' if first_write else 'a',
+                            header=first_write
+                        )
+                        first_write = False
+                        logging.info(f"Basin {basin_id}: wrote {take} rows ({processed}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
+                        del pending[:take]
 
-                    if (i + 1) % chunk_size == 0 or (i + 1) == len(times):
-                        if batch:
-                            df = pd.DataFrame(batch)
-                            df.to_csv(csv_path, index=False, encoding='utf-8',
-                                      mode='w' if first_write else 'a',
-                                      header=first_write)
-                            first_write = False
-                            logging.info(f"Basin {basin_id}: wrote {len(batch)} rows ({i+1}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
-                            batch.clear()
         except Exception as e:
             logging.exception(f"Basin {basin_id}: failed processing {nc_path}: {e}")
 
@@ -217,6 +236,7 @@ def main():
     parser.add_argument('--workers', type=int, default=None, help='Number of worker processes (defaults to SLURM_CPUS_PER_TASK or os.cpu_count())')
     parser.add_argument('--chunk_size', type=int, default=4320, help='Rows written per chunk')
     parser.add_argument('--log_every', type=int, default=200, help='Log every N timesteps within a file')
+    parser.add_argument('--time_block', type=int, default=720, help='Timesteps to process per vectorized block')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -247,7 +267,8 @@ def main():
                 executor.submit(
                     process_basin_over_files,
                     idx, row, nc_files, args.log_dir, args.out_dir,
-                    args.start_time, args.end_time, False, args.chunk_size, args.log_every
+                    args.start_time, args.end_time, False,
+                    args.chunk_size, args.log_every, args.time_block
                 )
                 for idx, row in basin_rows
             ]
@@ -264,7 +285,8 @@ def main():
         for i, (idx, row) in enumerate(basin_rows, 1):
             process_basin_over_files(
                 idx, row, nc_files, args.log_dir, args.out_dir,
-                args.start_time, args.end_time, False, args.chunk_size, args.log_every
+                args.start_time, args.end_time, False,
+                args.chunk_size, args.log_every, args.time_block
             )
             logging.info(f"Progress: {i}/{total} basins finished")
 
