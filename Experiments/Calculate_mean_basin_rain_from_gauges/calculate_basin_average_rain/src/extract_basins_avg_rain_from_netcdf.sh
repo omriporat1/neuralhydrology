@@ -29,6 +29,9 @@ export MKL_NUM_THREADS=1
 export NUMEXPR_MAX_THREADS=1
 export GDAL_NUM_THREADS=1
 
+# Optional: flush Python stdout/stderr immediately
+export PYTHONUNBUFFERED=1
+
 # Paths on the cluster filesystem (final locations)
 BASINS=/sci/labs/efratmorin/omripo/PhD/Data/Caravan/Caravan_winter/shapefiles/il/il_basin_shapes.shp
 NETCDF_ROOT=/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output/            # folder with yearly subfolders containing rain_grid.nc
@@ -44,5 +47,5 @@ mkdir -p "$OUT_DIR" "$LOG_DIR"
   --out_dir "$OUT_DIR" \
   --log_dir "$LOG_DIR" \
   --log_file "$LOG_FILE" \
-  --parallel \
-  --workers "$SLURM_CPUS_PER_TASK"
+#  --parallel \
+#  --workers "$SLURM_CPUS_PER_TASK"
