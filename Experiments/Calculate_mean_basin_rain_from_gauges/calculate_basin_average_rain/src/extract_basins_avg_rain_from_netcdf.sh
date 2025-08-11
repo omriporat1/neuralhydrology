@@ -8,12 +8,17 @@
 #SBATCH --error=%x-%j.err
 #SBATCH --account=efratmorin
 
-set -euo pipefail
+# Safer defaults; defer -u until after env activation
+set -e -o pipefail
 
 # Activate your conda env
-
+# Temporarily disable nounset because some activation scripts reference unset vars (e.g., GDAL_DATA)
+set +u
 source /usr/local/spack/opt/spack/linux-debian12-x86_64/gcc-12.2.0/miniconda3-24.3.0-iqeknetqo7ngpr57d6gmu3dg4rzlcgk6/etc/profile.d/conda.sh
 conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
+
+# Re‑enable nounset for the rest of the script
+set -u
 
 
 
