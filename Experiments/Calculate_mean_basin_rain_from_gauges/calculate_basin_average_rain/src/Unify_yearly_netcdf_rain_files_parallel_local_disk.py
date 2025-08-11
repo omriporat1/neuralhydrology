@@ -44,7 +44,7 @@ def unify_yearly_netcdf_files(output_dir, merged_filename="rain_grid_full_parall
     os.makedirs(scratch_dir, exist_ok=True)
     local_merged_path = os.path.join(scratch_dir, merged_filename)
     print(f"[DEBUG] Opening {len(existing_files)} NetCDF files with xarray.open_mfdataset...")
-    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords')
+    ds_merged = xr.open_mfdataset(existing_files, combine='by_coords', chunks={'time': 100})
     print(f"[DEBUG] Writing merged NetCDF to local scratch: {local_merged_path}")
     with ProgressBar():
         ds_merged.to_netcdf(local_merged_path, engine='netcdf4', compute=True)
