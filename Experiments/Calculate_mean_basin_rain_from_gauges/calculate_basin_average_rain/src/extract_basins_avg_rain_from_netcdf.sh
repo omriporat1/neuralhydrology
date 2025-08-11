@@ -1,11 +1,12 @@
 #!/bin/bash -l
+
 #SBATCH --job-name=basin_rain
-#SBATCH --partition=standard
 #SBATCH --time=12:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
+#SBATCH --account=efratmorin
 
 set -euo pipefail
 
