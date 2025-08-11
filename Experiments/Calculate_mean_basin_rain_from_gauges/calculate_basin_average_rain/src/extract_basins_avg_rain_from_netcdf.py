@@ -119,7 +119,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 from rasterio.features import geometry_mask
                 xmin = float(np.nanmin(x_coords)); xmax = float(np.nanmax(x_coords))
                 ymin = float(np.nanmin(y_coords)); ymax = float(np.nanmax(y_coords))
-                height, width = int(ds.dims['y']), int(ds.dims['x'])
+                height, width = int(ds.sizes['y']), int(ds.sizes['x'])
                 affine = rasterio.transform.from_bounds(xmin, ymin, xmax, ymax, width, height)
 
                 mask = geometry_mask([basin_geom], transform=affine, invert=True,
