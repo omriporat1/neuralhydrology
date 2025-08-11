@@ -6,12 +6,26 @@ import geopandas as gpd
 import numpy as np
 import xarray as xr
 import concurrent.futures
+from logging.handlers import WatchedFileHandler
 
 def setup_logging(log_file=None):
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+
+    # Always log to stdout (captured by SLURM .out)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    # Optional: also log to file (more robust on NFS)
     if log_file:
-        logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-    else:
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        fh = WatchedFileHandler(log_file, delay=True)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
 
 def format_date(dt):
     # dt: np.datetime64 or pd.Timestamp
