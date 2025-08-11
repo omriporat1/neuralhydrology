@@ -47,6 +47,7 @@ mkdir -p "$OUT_DIR" "$LOG_DIR"
   --out_dir "$OUT_DIR" \
   --log_dir "$LOG_DIR" \
   --log_file "$LOG_FILE" \
-  --chunk_size 4320
+  --chunk_size 100 \
+  --log_every 20
 #  --parallel \
 #  --workers "$SLURM_CPUS_PER_TASK"

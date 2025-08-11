@@ -74,7 +74,7 @@ def _find_yearly_netcdfs(netcdf_path_or_dir):
     raise FileNotFoundError(f"{netcdf_path_or_dir} is neither a file nor a directory")
 
 def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
-                             start_time=None, end_time=None, parallel=False, chunk_size=4320):
+                             start_time=None, end_time=None, parallel=False, chunk_size=4320, log_every=200):
     basin_id = basin_row['id'] if 'id' in basin_row else basin_idx
     basin_geom = basin_row['geometry']
 
@@ -91,7 +91,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
         try:
             logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")
             with xr.open_dataset(nc_path) as ds:
-                # Ensure array row 0 is the north/top: sort y descending once per file
+                # Ensure array row 0 is the north/top once per file
                 if 'y' in ds.coords and ds['y'].size > 1 and (ds['y'].values[0] < ds['y'].values[-1]):
                     ds = ds.sortby('y', ascending=False)
                     logging.info(f"Basin {basin_id}: sorted y descending for {os.path.basename(nc_path)}")
@@ -127,6 +127,9 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                     _, res = extract_basin_stats_for_timestep(args)
                     if res:
                         batch.append(res)
+
+                    if log_every and (i + 1) % log_every == 0:
+                        logging.info(f"Basin {basin_id}: processed {i+1}/{len(times)} timesteps in {os.path.basename(nc_path)}")
 
                     # Write every chunk_size timesteps or at file end
                     if (i + 1) % chunk_size == 0 or (i + 1) == len(times):
@@ -190,7 +193,8 @@ def main():
     parser.add_argument('--start_time', type=str, default=None, help='Start time (inclusive) in YYYY-MM-DD[ HH:MM] format')
     parser.add_argument('--end_time', type=str, default=None, help='End time (inclusive) in YYYY-MM-DD[ HH:MM] format')
     parser.add_argument('--workers', type=int, default=None, help='Number of worker processes (defaults to SLURM_CPUS_PER_TASK or os.cpu_count())')
-    parser.add_argument('--chunk_size', type=int, default=4320, help='Write progress every N timesteps (e.g., ~monthly=4320 for 10-min data)')
+    parser.add_argument('--chunk_size', type=int, default=4320, help='Rows written per chunk')
+    parser.add_argument('--log_every', type=int, default=200, help='Log every N timesteps within a file')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -221,7 +225,7 @@ def main():
                 executor.submit(
                     process_basin_over_files,
                     idx, row, nc_files, args.log_dir, args.out_dir,
-                    args.start_time, args.end_time, False, args.chunk_size
+                    args.start_time, args.end_time, False, args.chunk_size, args.log_every
                 )
                 for idx, row in basin_rows
             ]
@@ -237,7 +241,8 @@ def main():
         total = len(basin_rows)
         for i, (idx, row) in enumerate(basin_rows, 1):
             process_basin_over_files(
-                idx, row, nc_files, args.log_dir, args.out_dir, args.start_time, args.end_time, False, args.chunk_size
+                idx, row, nc_files, args.log_dir, args.out_dir,
+                args.start_time, args.end_time, False, args.chunk_size, args.log_every
             )
             logging.info(f"Progress: {i}/{total} basins finished")
 
