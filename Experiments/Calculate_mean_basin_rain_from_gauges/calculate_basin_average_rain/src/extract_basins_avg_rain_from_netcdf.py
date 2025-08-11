@@ -65,7 +65,7 @@ def extract_basin_stats_for_timestep(args):
     except Exception as e:
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
-            with open(os.path.join(log_dir, f'basin_{basin_id}_error.log'), 'a') as f:
+            with open(os.path.join(log_dir, f'{basin_id}_error.log'), 'a') as f:
                 f.write(f"Error at {format_date(time)}: {e}\n")
         return (basin_id, None)
 
@@ -93,7 +93,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
     basin_geom = basin_row['geometry']
 
     os.makedirs(out_dir, exist_ok=True)
-    csv_path = os.path.join(out_dir, f"basin_{str(basin_id)}.csv")
+    csv_path = os.path.join(out_dir, f"{str(basin_id)}.csv")
     first_write = not os.path.exists(csv_path)
 
     # Convert start/end to np.datetime64 if provided
@@ -197,7 +197,7 @@ def process_basin_timeseries(basin_idx, basin_row, ds, x_coords, y_coords, log_d
     # Save to CSV
     os.makedirs(out_dir, exist_ok=True)
     df = pd.DataFrame(results)
-    csv_path = os.path.join(out_dir, f"basin_{str(basin_id)}.csv")
+    csv_path = os.path.join(out_dir, f"{str(basin_id)}.csv")
     df.to_csv(csv_path, index=False, encoding='utf-8')
     logging.info(f"Saved basin {basin_id} results to {csv_path}")
 
