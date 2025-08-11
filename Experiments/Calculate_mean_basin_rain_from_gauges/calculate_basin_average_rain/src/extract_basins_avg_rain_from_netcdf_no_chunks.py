@@ -68,8 +68,7 @@ def _find_yearly_netcdfs(netcdf_path_or_dir):
         return [netcdf_path_or_dir]
     raise FileNotFoundError(f"{netcdf_path_or_dir} is neither a file nor a directory")
 
-def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
-                             start_time=None, end_time=None, parallel=False, chunk_size=4320):
+def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir, start_time=None, end_time=None, parallel=False):
     basin_id = basin_row['id'] if 'id' in basin_row else basin_idx
     basin_geom = basin_row['geometry']
 
@@ -80,11 +79,10 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
     # Convert start/end to np.datetime64 if provided
     start = np.datetime64(start_time) if start_time else None
     end = np.datetime64(end_time) if end_time else None
-    chunk_size = max(1, int(chunk_size))
 
     for nc_path in nc_files:
         try:
-            logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")
+            logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")  # progress from workers
             with xr.open_dataset(nc_path) as ds:
                 # Apply time filter per file if needed
                 if start or end:
@@ -94,42 +92,49 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
 
                 x_coords = ds['x'].values
                 y_coords = ds['y'].values
+
                 times = ds['time'].values
-                rain_da = ds['rain']          # keep as DataArray
-                gauges_da = ds['gauge_count'] # keep as DataArray
-                logging.info(f"Basin {basin_id}: {os.path.basename(nc_path)} timesteps={len(times)}")
+                rain_da = ds['rain']              # keep as DataArray
+                gauges_da = ds['gauge_count']     # keep as DataArray
 
-                # Process and write in chunks to show progress and limit RAM
-                batch = []
-                for i in range(len(times)):
-                    args = (
-                        basin_idx, basin_geom,
-                        rain_da.isel(time=i).values,
-                        gauges_da.isel(time=i).values,
-                        x_coords, y_coords, times[i],
-                        basin_id, log_dir
+                args_list = [
+                    (
+                        basin_idx,
+                        basin_geom,
+                        rain_da.isel(time=i).values,          # 2D numpy per timestep
+                        gauges_da.isel(time=i).values,        # 2D numpy per timestep
+                        x_coords,
+                        y_coords,
+                        times[i],
+                        basin_id,
+                        log_dir
                     )
-                    _, res = extract_basin_stats_for_timestep(args)
-                    if res:
-                        batch.append(res)
+                    for i in range(len(times))
+                ]
 
-                    # Write every chunk_size timesteps or at file end
-                    if (i + 1) % chunk_size == 0 or (i + 1) == len(times):
-                        if batch:
-                            df = pd.DataFrame(batch)
-                            df.to_csv(
-                                csv_path,
-                                index=False,
-                                encoding='utf-8',
-                                mode='w' if first_write else 'a',
-                                header=first_write
-                            )
-                            first_write = False
-                            logging.info(
-                                f"Basin {basin_id}: wrote {len(batch)} rows "
-                                f"({i+1}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}"
-                            )
-                            batch.clear()
+                results = []
+                if parallel:
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        for _, res in executor.map(extract_basin_stats_for_timestep, args_list):
+                            if res:
+                                results.append(res)
+                else:
+                    for a in args_list:
+                        _, res = extract_basin_stats_for_timestep(a)
+                        if res:
+                            results.append(res)
+
+                if results:
+                    df = pd.DataFrame(results)
+                    df.to_csv(
+                        csv_path,
+                        index=False,
+                        encoding='utf-8',
+                        mode='w' if first_write else 'a',
+                        header=first_write
+                    )
+                    first_write = False
+                    logging.info(f"Saved basin {basin_id} results from {os.path.basename(nc_path)} to {csv_path}")
         except Exception as e:
             logging.exception(f"Basin {basin_id}: failed processing {nc_path}: {e}")
 
@@ -175,7 +180,6 @@ def main():
     parser.add_argument('--start_time', type=str, default=None, help='Start time (inclusive) in YYYY-MM-DD[ HH:MM] format')
     parser.add_argument('--end_time', type=str, default=None, help='End time (inclusive) in YYYY-MM-DD[ HH:MM] format')
     parser.add_argument('--workers', type=int, default=None, help='Number of worker processes (defaults to SLURM_CPUS_PER_TASK or os.cpu_count())')
-    parser.add_argument('--chunk_size', type=int, default=4320, help='Write progress every N timesteps (e.g., ~monthly=4320 for 10-min data)')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -205,8 +209,7 @@ def main():
             futs = [
                 executor.submit(
                     process_basin_over_files,
-                    idx, row, nc_files, args.log_dir, args.out_dir,
-                    args.start_time, args.end_time, False, args.chunk_size
+                    idx, row, nc_files, args.log_dir, args.out_dir, args.start_time, args.end_time, False
                 )
                 for idx, row in basin_rows
             ]
@@ -222,7 +225,7 @@ def main():
         total = len(basin_rows)
         for i, (idx, row) in enumerate(basin_rows, 1):
             process_basin_over_files(
-                idx, row, nc_files, args.log_dir, args.out_dir, args.start_time, args.end_time, False, args.chunk_size
+                idx, row, nc_files, args.log_dir, args.out_dir, args.start_time, args.end_time, False
             )
             logging.info(f"Progress: {i}/{total} basins finished")
 
