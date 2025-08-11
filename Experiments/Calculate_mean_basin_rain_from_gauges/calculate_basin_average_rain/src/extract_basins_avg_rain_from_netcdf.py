@@ -20,27 +20,32 @@ def format_date(dt):
     return dt.strftime('%d/%m/%Y %H:%M')
 
 def extract_basin_stats_for_timestep(args):
-    # For parallelization: (basin_idx, basin_geom, rain_grid, gauge_grid, x_coords, y_coords, time, basin_id, log_dir)
+    # (basin_idx, basin_geom, rain_grid, gauge_grid, x_coords, y_coords, time, basin_id, log_dir)
     (basin_idx, basin_geom, rain_grid, gauge_grid, x_coords, y_coords, time, basin_id, log_dir) = args
-    # Import GDAL-dependent libs inside the worker context to avoid fork issues
-    import rasterio
-    from rasterstats import zonal_stats
     try:
-        # Prepare a temporary raster for this timestep
-        affine = rasterio.transform.from_bounds(
-            x_coords[0], min(y_coords[0], y_coords[-1]), x_coords[-1], max(y_coords[0], y_coords[-1]),
-            rain_grid.shape[1], rain_grid.shape[0]
-        )
-        zs_rain = zonal_stats(
-            [basin_geom], rain_grid, affine=affine, stats=["mean", "max"], nodata=np.nan, all_touched=True)
-        zs_gauges = zonal_stats(
-            [basin_geom], gauge_grid, affine=affine, stats=["min", "max"], nodata=np.nan, all_touched=True)
+        import numpy as np
+        import rasterio
+        from rasterstats import zonal_stats
+
+        # Arrays (rain is float with NaNs; gauges can be float to keep NaNs safe if present)
+        rain = np.asarray(rain_grid, dtype=np.float32)
+        gauges = np.asarray(gauge_grid, dtype=np.float32)
+
+        # Build affine from bounds (row 0 is top; we sorted y to be north→south once per file)
+        xmin = float(np.nanmin(x_coords)); xmax = float(np.nanmax(x_coords))
+        ymin = float(np.nanmin(y_coords)); ymax = float(np.nanmax(y_coords))
+        height, width = rain.shape
+        affine = rasterio.transform.from_bounds(xmin, ymin, xmax, ymax, width, height)
+
+        zs_rain = zonal_stats([basin_geom], rain, affine=affine, stats=["mean", "max"], nodata=np.nan, all_touched=True)
+        zs_gauges = zonal_stats([basin_geom], gauges, affine=affine, stats=["min", "max"], nodata=np.nan, all_touched=True)
+
         result = {
             'date': format_date(time),
-            'mean_rain': zs_rain[0]['mean'],
-            'max_rain': zs_rain[0]['max'],
-            'min_gauges': zs_gauges[0]['min'],
-            'max_gauges': zs_gauges[0]['max']
+            'mean_rain': zs_rain[0].get('mean'),
+            'max_rain': zs_rain[0].get('max'),
+            'min_gauges': zs_gauges[0].get('min'),
+            'max_gauges': zs_gauges[0].get('max')
         }
         return (basin_id, result)
     except Exception as e:
@@ -86,6 +91,16 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
         try:
             logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")
             with xr.open_dataset(nc_path) as ds:
+                # Ensure array row 0 is the north/top: sort y descending once per file
+                if 'y' in ds.coords and ds['y'].size > 1 and (ds['y'].values[0] < ds['y'].values[-1]):
+                    ds = ds.sortby('y', ascending=False)
+                    logging.info(f"Basin {basin_id}: sorted y descending for {os.path.basename(nc_path)}")
+
+                # Optional: ensure x is ascending (left→right); most files already are
+                if 'x' in ds.coords and ds['x'].size > 1 and (ds['x'].values[0] > ds['x'].values[-1]):
+                    ds = ds.sortby('x', ascending=True)
+                    logging.info(f"Basin {basin_id}: sorted x ascending for {os.path.basename(nc_path)}")
+
                 # Apply time filter per file if needed
                 if start or end:
                     ds = ds.sel(time=slice(start or ds['time'].values[0], end or ds['time'].values[-1]))
@@ -95,8 +110,8 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 x_coords = ds['x'].values
                 y_coords = ds['y'].values
                 times = ds['time'].values
-                rain_da = ds['rain']          # keep as DataArray
-                gauges_da = ds['gauge_count'] # keep as DataArray
+                rain_da = ds['rain']
+                gauges_da = ds['gauge_count']
                 logging.info(f"Basin {basin_id}: {os.path.basename(nc_path)} timesteps={len(times)}")
 
                 # Process and write in chunks to show progress and limit RAM

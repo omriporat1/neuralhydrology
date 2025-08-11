@@ -41,12 +41,12 @@ LOG_FILE="$OUT_DIR"/run.log
 
 mkdir -p "$OUT_DIR" "$LOG_DIR"
 
-/usr/bin/time -v python /sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/Calculate_mean_basin_rain_from_gauges/calculate_basin_average_rain/src/extract_basins_avg_rain_from_netcdf.py \
+/usr/bin/time -v python -u /sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology/Experiments/Calculate_mean_basin_rain_from_gauges/calculate_basin_average_rain/src/extract_basins_avg_rain_from_netcdf.py \
   --basins "$BASINS" \
   --netcdf "$NETCDF_ROOT" \
   --out_dir "$OUT_DIR" \
   --log_dir "$LOG_DIR" \
   --log_file "$LOG_FILE" \
-  --chunk_size 4320
+  -chunk_size 4320
 #  --parallel \
 #  --workers "$SLURM_CPUS_PER_TASK"
