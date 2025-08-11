@@ -5,10 +5,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import xarray as xr
-from rasterstats import zonal_stats
-from datetime import datetime
 import concurrent.futures
-import rasterio
 
 def setup_logging(log_file=None):
     if log_file:
@@ -25,10 +22,15 @@ def format_date(dt):
 def extract_basin_stats_for_timestep(args):
     # For parallelization: (basin_idx, basin_geom, rain_grid, gauge_grid, x_coords, y_coords, time, basin_id, log_dir)
     (basin_idx, basin_geom, rain_grid, gauge_grid, x_coords, y_coords, time, basin_id, log_dir) = args
+    # Import GDAL-dependent libs inside the worker context to avoid fork issues
+    import rasterio
+    from rasterstats import zonal_stats
     try:
         # Prepare a temporary raster for this timestep
         affine = rasterio.transform.from_bounds(
-            x_coords[0], y_coords[0], x_coords[-1], y_coords[-1], rain_grid.shape[1], rain_grid.shape[0])
+            x_coords[0], min(y_coords[0], y_coords[-1]), x_coords[-1], max(y_coords[0], y_coords[-1]),
+            rain_grid.shape[1], rain_grid.shape[0]
+        )
         zs_rain = zonal_stats(
             [basin_geom], rain_grid, affine=affine, stats=["mean", "max"], nodata=np.nan, all_touched=True)
         zs_gauges = zonal_stats(
@@ -80,7 +82,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir, s
 
     for nc_path in nc_files:
         try:
-            # Open one year at a time; iterate per timestep to keep RAM low
+            logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")  # progress from workers
             with xr.open_dataset(nc_path) as ds:
                 # Apply time filter per file if needed
                 if start or end:
@@ -166,6 +168,7 @@ def process_basin_timeseries(basin_idx, basin_row, ds, x_coords, y_coords, log_d
 
 def main():
     import argparse
+    import multiprocessing as mp
 
     parser = argparse.ArgumentParser(description="Extract mean/max rain and gauge stats for each basin from NetCDF rain surfaces.")
     parser.add_argument('--basins', type=str, required=True, help='Path to basins shapefile')
@@ -195,22 +198,18 @@ def main():
     logging.info(f"Processing {len(basins)} basins...")
     basin_rows = list(basins.iterrows())
     if args.parallel:
-        # Respect SLURM cpus-per-task if present
-        import multiprocessing as mp
+        # Use spawn context to avoid GDAL/rasterio fork hangs
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
         n_workers = args.workers or int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count() or 1))
         logging.info(f"Starting per-basin multiprocessing with {n_workers} workers...")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn")) as executor:
             futs = [
                 executor.submit(
                     process_basin_over_files,
-                    idx,
-                    row,
-                    nc_files,
-                    args.log_dir,
-                    args.out_dir,
-                    args.start_time,
-                    args.end_time,
-                    False
+                    idx, row, nc_files, args.log_dir, args.out_dir, args.start_time, args.end_time, False
                 )
                 for idx, row in basin_rows
             ]
