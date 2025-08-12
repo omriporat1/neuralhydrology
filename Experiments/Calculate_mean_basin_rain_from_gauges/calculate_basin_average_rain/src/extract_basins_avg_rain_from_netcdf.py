@@ -88,9 +88,28 @@ def _find_yearly_netcdfs(netcdf_path_or_dir):
         return [netcdf_path_or_dir]
     raise FileNotFoundError(f"{netcdf_path_or_dir} is neither a file nor a directory")
 
+def _ensure_worker_logging(log_dir):
+    # Attach stdout + file handler in child processes if none exist
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s: [PID %(process)d] %(message)s')
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        fh = WatchedFileHandler(os.path.join(log_dir, "run.log"), delay=True)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+
 def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                              start_time=None, end_time=None, parallel=False,
                              chunk_size=4320, log_every=200, time_block=720):
+    _ensure_worker_logging(log_dir)
     basin_id = basin_row.get('gauge_id', basin_row.get('id', basin_idx))
     basin_geom = basin_row['geometry']
 
@@ -106,8 +125,9 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
 
     for nc_path in nc_files:
         try:
-            logging.info(f"Basin {basin_id}: starting {os.path.basename(nc_path)}")
-            with xr.open_dataset(nc_path) as ds:
+            year = os.path.basename(os.path.dirname(nc_path))
+            logging.info(f"Basin {basin_id}: opening {year}/rain_grid.nc")
+            with xr.open_dataset(nc_path, engine="netcdf4", cache=False) as ds:
                 # Ensure row 0 = top
                 if 'y' in ds.coords and ds['y'].size > 1 and (ds['y'].values[0] < ds['y'].values[-1]):
                     ds = ds.sortby('y', ascending=False)
@@ -126,7 +146,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 times = ds['time'].values
                 rain_da = ds['rain']
                 gauges_da = ds['gauge_count']
-                logging.info(f"Basin {basin_id}: {os.path.basename(nc_path)} timesteps={len(times)}")
+                logging.info(f"Basin {basin_id}: {year} timesteps={len(times)}")
 
                 # Build affine and basin mask once per file
                 import rasterio
@@ -189,6 +209,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                         logging.info(f"Basin {basin_id}: wrote {take} rows ({processed}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
                         del pending[:take]
 
+            logging.info(f"Basin {basin_id}: finished {year}")
         except Exception as e:
             logging.exception(f"Basin {basin_id}: failed processing {nc_path}: {e}")
 
