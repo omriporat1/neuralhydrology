@@ -2,8 +2,8 @@
 
 #SBATCH --job-name=basin_rain
 #SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=100
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=95
+#SBATCH --mem=512G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --account=efratmorin
@@ -72,7 +72,7 @@ echo "OUT_DIR: $OUT_DIR"
   --log_file "$LOG_FILE" \
   --chunk_size 2000 \
   --log_every 2000 \
-  --time_block 2000 \
+  --time_block 500 \
   --parallel \
   --workers "${SLURM_CPUS_PER_TASK}"
 
