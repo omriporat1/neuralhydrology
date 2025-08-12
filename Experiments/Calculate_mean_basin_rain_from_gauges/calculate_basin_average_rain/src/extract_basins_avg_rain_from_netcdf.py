@@ -195,8 +195,10 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                         logging.info(f"Basin {basin_id}: processed {processed}/{len(times)} timesteps in {os.path.basename(nc_path)}")
 
                     # Write if we’ve collected at least chunk_size rows or at file end
-                    while len(pending) >= chunk_size or processed == len(times):
-                        take = min(len(pending), chunk_size) if processed != len(times) else len(pending)
+                    while (len(pending) >= chunk_size) or (processed == len(times) and len(pending) > 0):
+                        take = min(len(pending), chunk_size)
+                        if take <= 0:
+                            break
                         df = pd.DataFrame(pending[:take])
                         df.to_csv(
                             csv_path,
