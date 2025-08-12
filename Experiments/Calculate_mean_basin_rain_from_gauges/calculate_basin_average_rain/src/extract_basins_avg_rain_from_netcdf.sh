@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=basin_rain
 #SBATCH --time=48:00:00
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=100
 #SBATCH --mem=64G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
