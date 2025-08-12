@@ -72,7 +72,7 @@ echo "OUT_DIR: $OUT_DIR"
   --log_file "$LOG_FILE" \
   --chunk_size 2000 \
   --log_every 5000 \
-  --time_block 500 \
+  --time_block 2000 \
   --parallel \
   --workers "${SLURM_CPUS_PER_TASK}"
 

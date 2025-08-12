@@ -227,7 +227,7 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                             header=first_write
                         )
                         first_write = False
-                        logging.info(f"Basin {basin_id}: wrote {take} rows ({processed}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
+                        # logging.info(f"Basin {basin_id}: wrote {take} rows ({processed}/{len(times)}) from {os.path.basename(nc_path)} to {csv_path}")
                         del pending[:take]
 
             logging.info(f"Basin {basin_id}: finished {year}")
