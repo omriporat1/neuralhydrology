@@ -158,24 +158,43 @@ def process_basin_over_files(basin_idx, basin_row, nc_files, log_dir, out_dir,
                 mask = geometry_mask([basin_geom], transform=affine, invert=True,
                                      out_shape=(height, width), all_touched=True)
                 mask_flat = mask.ravel()
+                inside_ix = np.flatnonzero(mask_flat)
 
                 pending = []
                 processed = 0
                 # Process in blocks of timesteps (vectorized)
                 for t0 in range(0, len(times), time_block):
                     t1 = min(t0 + time_block, len(times))
-                    # Read 3D blocks (t, y, x)
+                    nblk = t1 - t0
+
                     r_blk = rain_da.isel(time=slice(t0, t1)).values.astype(np.float32, copy=False)
                     g_blk = gauges_da.isel(time=slice(t0, t1)).values.astype(np.float32, copy=False)
-                    # Flatten spatial dims and mask once
-                    r2 = r_blk.reshape((t1 - t0), -1)[:, mask_flat]
-                    g2 = g_blk.reshape((t1 - t0), -1)[:, mask_flat]
-                    # Vectorized stats across spatial axis
-                    mean_r = np.nanmean(r2, axis=1)
-                    max_r = np.nanmax(r2, axis=1)
-                    # Gauge counts are non-NaN; use nanmin/nanmax for safety
-                    min_g = np.nanmin(g2, axis=1)
-                    max_g = np.nanmax(g2, axis=1)
+
+                    r_flat = r_blk.reshape(nblk, -1)
+                    g_flat = g_blk.reshape(nblk, -1)
+
+                    mean_r = np.full(nblk, np.nan, dtype=np.float32)
+                    max_r  = np.full(nblk, np.nan, dtype=np.float32)
+                    min_g  = np.full(nblk, np.nan, dtype=np.float32)
+                    max_g  = np.full(nblk, np.nan, dtype=np.float32)
+
+                    if inside_ix.size == 0:
+                        logging.warning(f"Basin {basin_id}: mask has zero cells in {os.path.basename(nc_path)}")
+                    else:
+                        r2 = r_flat[:, inside_ix]
+                        g2 = g_flat[:, inside_ix]
+
+                        valid_r = ~np.all(np.isnan(r2), axis=1)
+                        valid_g = ~np.all(np.isnan(g2), axis=1)
+
+                        # Suppress “empty/all-NaN slice” warnings only here
+                        with np.errstate(invalid='ignore'):
+                            if valid_r.any():
+                                mean_r[valid_r] = np.nanmean(r2[valid_r], axis=1)
+                                max_r[valid_r]  = np.nanmax(r2[valid_r], axis=1)
+                            if valid_g.any():
+                                min_g[valid_g]  = np.nanmin(g2[valid_g], axis=1)
+                                max_g[valid_g]  = np.nanmax(g2[valid_g], axis=1)
 
                     # Build rows for this block
                     block_times = times[t0:t1]
