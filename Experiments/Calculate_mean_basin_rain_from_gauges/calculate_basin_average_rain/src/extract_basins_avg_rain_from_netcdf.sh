@@ -74,7 +74,7 @@ echo "OUT_DIR: $OUT_DIR"
   --log_every 2000 \
   --time_block 2000 \
   --parallel \
-  --workers 4
+  --workers "${SLURM_CPUS_PER_TASK}"
 
 # Copy logs back to final location
 mkdir -p "$OUT_DIR/logs"
