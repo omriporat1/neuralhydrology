@@ -24,7 +24,7 @@ Experiments/HPC_random_search/outputs/*
 Experiments/HPC_random_search/plots/*
 Experiments/Calculate_mean_basin_rain_from_gauges/Train_single_model/logs/
 Experiments/Calculate_mean_basin_rain_from_gauges/Train_single_model/plots/
-Experiments/Calculate_mean_basin_rain_from_gauges/Train_single_model/plots/*
+Experiments/Calculate_mean_basin_rain_from_gauges/Train_single_model/results/*
 
 
 slurm-scripts/*.out
