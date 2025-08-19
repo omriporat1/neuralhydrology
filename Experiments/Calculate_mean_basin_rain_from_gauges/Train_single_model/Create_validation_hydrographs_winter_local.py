@@ -15,12 +15,12 @@ import yaml
 
 
 def main():
-    job_dir = Path("C:/PhD/Python/neuralhydrology/Experiments/HPC_random_search/results/job_0")
+    job_dir = Path(r"C:\PhD\Python\neuralhydrology\Experiments\Calculate_mean_basin_rain_from_gauges\Train_single_model\results\job_0")
     # Iterate run_000 to run_059
     # for i in range(60):
     for i in [0,1]:
         # run_dir = job_dir / f"run_{i:03d}"
-        run_dir = job_dir / f"run_014_a"
+        run_dir = job_dir / f"run_014_av_rain"
         print(f"\nProcessing run directory: {run_dir}")
         if not run_dir.exists():
             print(f"Run directory does not exist: {run_dir}")
