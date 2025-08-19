@@ -34,16 +34,17 @@ def main():
     template_config = Config(Path("template.yml")).as_dict()
 
     # Modify hyperparameters
-    template_config["batch_size"] = int(params["batch_size"])
+    template_config["batch_size"] = 512
     template_config["hidden_size"] = int(params["hidden_size"])
-    template_config["learning_rate"] = float(params["learning_rate"])
+    template_config["learning_rate"] = 0.00005
     template_config["output_dropout"] = float(params["output_dropout"])
     template_config["seq_length"] = int(params["seq_length"])
     template_config["statics_embedding"] = {
         "hiddens": [int(params["statics_embedding"])]
     }
+    template_config["num_workers"] = 4
     template_config["run_dir"] = str(run_dir)
-    template_config["data_dir"] = "/sci/labs/efratmorin/omripo/PhD/Data/Caravan/Caravan_winter"  # Change to this for cluster
+    template_config["data_dir"] = "/sci/labs/efratmorin/omripo/PhD/Data/Caravan"  # Change to this for cluster
 
     safe_config_dict = make_yaml_safe(template_config)
 
