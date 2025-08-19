@@ -42,7 +42,7 @@ def main():
     template_config["statics_embedding"] = {
         "hiddens": [int(params["statics_embedding"])]
     }
-    template_config["num_workers"] = 4
+    template_config["num_workers"] = 16
     template_config["run_dir"] = str(run_dir)
     template_config["data_dir"] = "/sci/labs/efratmorin/omripo/PhD/Data/Caravan"  # Change to this for cluster
 

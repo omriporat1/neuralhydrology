@@ -2,8 +2,8 @@
 
 #SBATCH --job-name=lstm_avg_rain
 #SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=256G
 #SBATCH --time=36:00:00
 #SBATCH --output=logs/output_avg_rain.log
 #SBATCH --error=logs/error_avg_rain.log
