@@ -68,6 +68,7 @@ class Objective:
 		data_dir_override: Path | None = None,
 		delay: int = 18,
 		objective_metric: str = "mse",
+		model_seed: int = 42,
 	) -> None:
 		self.template_config_path = template_config_path
 		self.results_root = results_root
@@ -78,6 +79,7 @@ class Objective:
 		self.data_dir_override = data_dir_override
 		self.delay = delay
 		self.objective_metric = objective_metric  # 'mse' or 'neg_nse'
+		self.model_seed = int(model_seed)
 
 		# Preload events table
 		try:
@@ -123,6 +125,7 @@ class Objective:
 		cfg_dict["statics_embedding"] = {"hiddens": [int(params["statics_embedding"])]}  # type: ignore[index]
 		cfg_dict["run_dir"] = str(run_dir)
 		cfg_dict["device"] = self.device
+		cfg_dict["seed"] = int(self.model_seed)
 		if self.epochs is not None:
 			cfg_dict["epochs"] = int(self.epochs)
 		if self.data_dir_override is not None:
@@ -317,12 +320,7 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument(
 		"--template-config",
 		type=str,
-		default=str(
-			Path(__file__).resolve().parent.parent
-			/ "Calculate_mean_basin_rain_from_gauges"
-			/ "Train_single_model"
-			/ "template.yml"
-		),
+		default=str(Path(__file__).resolve().parent / "template.yml"),
 		help="Path to the base YAML template config",
 	)
 	p.add_argument(
@@ -354,6 +352,12 @@ def parse_args() -> argparse.Namespace:
 		type=int,
 		default=42,
 		help="Random seed for Optuna sampler",
+	)
+	p.add_argument(
+		"--model-seed",
+		type=int,
+		default=42,
+		help="Random seed for the NeuralHydrology run (written to config as 'seed')",
 	)
 	p.add_argument(
 		"--objective",
@@ -406,6 +410,7 @@ def main() -> None:
 		device=args.device,
 		data_dir_override=Path(args.data_dir) if args.data_dir else None,
 		objective_metric=args.objective,
+		model_seed=args.model_seed,
 	)
 
 	try:
@@ -436,6 +441,11 @@ def main() -> None:
 if __name__ == "__main__":
 	try:
 		main()
+	except Exception as e:
+		# Last resort logging if setup failed
+		print(f"Fatal error in Bayesian search script: {e}")
+		traceback.print_exc()
+		sys.exit(1)
 	except Exception as e:
 		# Last resort logging if setup failed
 		print(f"Fatal error in Bayesian search script: {e}")
