@@ -6,6 +6,12 @@
 *.swp
 .coverage
 *.log
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.err
+*.out
 
 # folder
 build/*
