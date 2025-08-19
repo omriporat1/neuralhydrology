@@ -26,7 +26,7 @@ def main():
     # Create a directory for the job
     job_dir = Path(f"results/job_{job_id}")
     job_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = job_dir / f"run_{job_sub_id:03d}_av_rain"  # Note the _a suffix
+    run_dir = job_dir / f"run_{job_sub_id:03d}_av_rain_all_year"  # Note the _a suffix
 
     run_dir.mkdir(parents=True, exist_ok=False)
 
