@@ -55,7 +55,7 @@ def main():
     # Create a directory for the job
     job_dir = Path(f"results/job_{job_id}")
     job_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = job_dir / f"run_{job_sub_id:03d}_av_rain_all_year"
+    run_dir = job_dir / f"run_{job_sub_id:03d}_av_rain_all_year_parallel"  # Note the _a suffix
     run_dir.mkdir(parents=True, exist_ok=False)
 
     # Load and copy config as dict
@@ -70,7 +70,7 @@ def main():
     # Modify hyperparameters
     template_config["batch_size"] = batch_size
     template_config["hidden_size"] = int(params["hidden_size"])
-    template_config["learning_rate"] = learning_rate
+    template_config["learning_rate"] = 0.00005
     template_config["output_dropout"] = float(params["output_dropout"])
     template_config["seq_length"] = int(params["seq_length"])
     template_config["statics_embedding"] = {
@@ -79,10 +79,7 @@ def main():
     template_config["num_workers"] = num_workers
     template_config["save_weights_every"] = save_every
     template_config["run_dir"] = str(run_dir)
-    template_config["data_dir"] = "/sci/labs/efratmorin/omripo/PhD/Data/Caravan"
-
-    print(f"[CONFIG] batch_size={batch_size}, num_workers={num_workers}, "
-          f"learning_rate={learning_rate}, save_weights_every={save_every}")
+    template_config["data_dir"] = "/sci/labs/efratmorin/omripo/PhD/Data/Caravan"  # Change to this for cluster
 
     safe_config_dict = make_yaml_safe(template_config)
 

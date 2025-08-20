@@ -1,3 +1,4 @@
+seed: 42
 autoregressive_inputs:
 - Flow_m3_sec_shift18
 batch_size: 512
@@ -40,7 +41,7 @@ optimizer: Adam
 output_activation: linear
 output_dropout: 0.4
 predict_last_n: 1
-save_weights_every: 5
+save_weights_every: 1
 seq_length: 36
 target_variables:
 - Flow_m3_sec
