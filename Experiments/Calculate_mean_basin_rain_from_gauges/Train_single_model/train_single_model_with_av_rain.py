@@ -5,6 +5,7 @@ from neuralhydrology.nh_run import start_run
 import yaml
 import os
 import torch
+from datetime import datetime
 
 def make_yaml_safe(obj):
     if isinstance(obj, dict):
@@ -43,6 +44,23 @@ def _auto_num_workers(default=8):
     except Exception:
         return default
 
+# --- new: safe run-dir creation ---
+def _make_unique_dir(base_dir: Path) -> Path:
+    if not base_dir.exists():
+        base_dir.mkdir(parents=True, exist_ok=False)
+        return base_dir
+    # Try numeric suffixes
+    for i in range(1, 1000):
+        cand = base_dir.with_name(f"{base_dir.name}_{i:02d}")
+        if not cand.exists():
+            cand.mkdir(parents=True, exist_ok=False)
+            return cand
+    # Fallback to timestamp
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    cand = base_dir.with_name(f"{base_dir.name}_{ts}")
+    cand.mkdir(parents=True, exist_ok=False)
+    return cand
+
 def main():
     _enable_gpu_fastpaths()
 
@@ -55,8 +73,21 @@ def main():
     # Create a directory for the job
     job_dir = Path(f"results/job_{job_id}")
     job_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = job_dir / f"run_{job_sub_id:03d}_av_rain_all_year_parallel"  # Note the _a suffix
-    run_dir.mkdir(parents=True, exist_ok=False)
+
+    # Base run dir name + optional suffix
+    base_name = f"run_{job_sub_id:03d}_av_rain_all_year_parallel"
+    run_suffix = os.getenv("RUN_SUFFIX", "").strip()
+    if run_suffix:
+        base_name = f"{base_name}_{run_suffix}"
+    run_dir = job_dir / base_name
+
+    # Allow overwrite or create a unique directory
+    if os.getenv("ALLOW_OVERWRITE", "0") == "1":
+        run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = _make_unique_dir(run_dir)
+
+    print(f"[RUN] Using run_dir: {run_dir}")
 
     # Load and copy config as dict
     template_config = Config(Path("template.yml")).as_dict()
