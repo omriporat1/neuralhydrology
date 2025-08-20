@@ -17,6 +17,12 @@ conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
 
 mkdir -p logs results
 
+# Accept optional batch size as first CLI arg; otherwise honor env BATCH_SIZE or fall back to CSV default in Python.
+if [[ "${1-}" != "" ]]; then
+  export BATCH_SIZE="$1"
+fi
+echo "Using BATCH_SIZE=${BATCH_SIZE:-<CSV default>}"
+
 nvidia-smi
 
 start=$(date +%s)
