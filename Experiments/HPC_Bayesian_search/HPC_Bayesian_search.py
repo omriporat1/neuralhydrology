@@ -51,6 +51,41 @@ def make_yaml_safe(obj):
 		return obj
 
 
+# --- Aligned metrics with Create_validation_hydrographs_winter_local ---
+def _nse(obs: np.ndarray, sim: np.ndarray) -> float:
+	obs = np.asarray(obs)
+	sim = np.asarray(sim)
+	mean_obs = np.nanmean(obs)
+	num = np.nansum((obs - sim) ** 2)
+	den = np.nansum((obs - mean_obs) ** 2)
+	return float(1 - (num / den if den != 0 else np.nan))
+
+def _persistent_nse(obs: np.ndarray, sim: np.ndarray, lag_steps: int = 18) -> float:
+	obs = np.asarray(obs)
+	sim = np.asarray(sim)
+	if obs.size == 0:
+		return float("nan")
+	persistence = np.roll(obs, lag_steps)
+	persistence[:lag_steps] = obs[0]
+	num = np.nansum((obs - sim) ** 2)
+	den = np.nansum((obs - persistence) ** 2)
+	return float(1 - (num / den if den != 0 else np.nan))
+
+def _peak_flow_error(obs: np.ndarray, sim: np.ndarray) -> float:
+	obs = np.asarray(obs)
+	sim = np.asarray(sim)
+	if obs.size == 0:
+		return float("nan")
+	peak_obs = np.nanmax(obs)
+	return float((np.nanmax(sim) - peak_obs) / peak_obs) if peak_obs not in [0, np.nan] else float("nan")
+
+def _volume_error(obs: np.ndarray, sim: np.ndarray) -> float:
+	obs = np.asarray(obs)
+	sim = np.asarray(sim)
+	vol_obs = np.nansum(obs)
+	return float((np.nansum(sim) - vol_obs) / vol_obs) if vol_obs != 0 else float("nan")
+
+
 class Objective:
 	"""Optuna objective that trains a model and evaluates event-averaged metrics.
 
@@ -169,13 +204,12 @@ class Objective:
 			self.logger.exception(f"[Trial {trial_id}] Evaluation failed: {e}")
 			return float("inf")
 
-		# --- Compute event-averaged metrics across all basins ---
+		# --- Compute event-averaged metrics across all basins (aligned with Create_validation_hydrographs_winter_local) ---
 		time_scale_cache: dict[str, str] = {}
 		event_rows: list[dict] = []
 
 		for basin in results.keys():
 			try:
-				# Choose timescale: prefer '10min', else first available
 				basin_scale_dict = results[basin]
 				if basin not in time_scale_cache:
 					ts_key = "10min" if "10min" in basin_scale_dict else next(iter(basin_scale_dict.keys()))
@@ -198,25 +232,13 @@ class Objective:
 					elif "time" in qsim.coords:
 						qsim = qsim.swap_dims({"time_step": "time"}).rename({"time": "date"})
 
-				# Shift observed by delay to account for AR inputs alignment if needed
-				if "date" in qobs.dims:
-					try:
-						fill_value = float(qobs.isel(date=0).values)
-					except Exception:
-						fill_value = float(np.asarray(qobs).flatten()[0])
-					qobs_shift = qobs.shift(date=self.delay, fill_value=fill_value)
-				else:
-					qobs_shift = qobs
-
-				# Events for this basin
+				# Events for this basin (no shifting for metric calc)
 				if basin in self.events_df.index:
 					basin_events = self.events_df.loc[basin]
+				elif str(basin) in self.events_df.index:
+					basin_events = self.events_df.loc[str(basin)]
 				else:
-					# If not found, try str casting fallback
-					if str(basin) in self.events_df.index:
-						basin_events = self.events_df.loc[str(basin)]
-					else:
-						continue
+					continue
 
 				if isinstance(basin_events, pd.Series):
 					basin_events = basin_events.to_frame().T
@@ -225,27 +247,25 @@ class Objective:
 					s = pd.to_datetime(ev["start_date"])  # type: ignore[index]
 					e = pd.to_datetime(ev["end_date"])    # type: ignore[index]
 					try:
-						qo_seg = qobs_shift.sel(date=slice(s, e))
+						qo_seg = qobs.sel(date=slice(s, e))
 						qs_seg = qsim.sel(date=slice(s, e))
 						obs = np.asarray(qo_seg, dtype=float).flatten()
 						sim = np.asarray(qs_seg, dtype=float).flatten()
 						if obs.size == 0 or sim.size == 0:
+							event_rows.append({"basin": str(basin), "start": s, "end": e, "MSE": np.nan, "NSE": np.nan, "pNSE": np.nan, "PeakFlowError": np.nan, "VolumeError": np.nan})
 							continue
-						mask = ~np.isnan(obs) & ~np.isnan(sim)
-						if mask.sum() == 0:
-							continue
-						mse = float(np.mean((obs[mask] - sim[mask]) ** 2))
-						denom = float(np.mean((obs[mask] - np.mean(obs[mask])) ** 2))
-						nse = float(1.0 - (np.mean((obs[mask] - sim[mask]) ** 2) / denom)) if denom > 0 else np.nan
-						event_rows.append(
-							{
-								"basin": str(basin),
-								"start": s,
-								"end": e,
-								"mse": mse,
-								"nse": nse,
-							}
-						)
+
+						row = {
+							"basin": str(basin),
+							"start": s,
+							"end": e,
+							"MSE": float(np.nanmean((obs - sim) ** 2)),
+							"NSE": _nse(obs, sim),
+							"pNSE": _persistent_nse(obs, sim, lag_steps=self.delay),
+							"PeakFlowError": _peak_flow_error(obs, sim),
+							"VolumeError": _volume_error(obs, sim),
+						}
+						event_rows.append(row)
 					except Exception as ex:
 						self.logger.warning(f"[Trial {trial_id}] Event slice failed for basin={basin}: {ex}")
 						continue
@@ -257,28 +277,31 @@ class Objective:
 		events_df = pd.DataFrame(event_rows)
 		events_csv = trial_dir / "event_metrics.csv"
 		events_df.to_csv(events_csv, index=False)
-		self.logger.info(
-			f"[Trial {trial_id}] Computed event metrics for {len(events_df)} events. Saved to {events_csv}"
-		)
+		self.logger.info(f"[Trial {trial_id}] Computed event metrics for {len(events_df)} events. Saved to {events_csv}")
 
 		if events_df.empty:
 			self.logger.warning(f"[Trial {trial_id}] No events found across basins; returning inf loss")
 			return float("inf")
 
+		# --- Objective selection aligned with available metrics ---
+		def _safe_mean(series: pd.Series) -> float:
+			s = series.dropna()
+			return float(s.mean()) if not s.empty else float("inf")
+
 		if self.objective_metric == "mse":
-			objective_value = float(events_df["mse"].mean())
+			objective_value = _safe_mean(events_df["MSE"])
 		elif self.objective_metric == "neg_nse":
-			# Maximize mean NSE -> minimize negative mean NSE
-			# Filter NaNs first
-			nse_vals = events_df["nse"].dropna()
-			if nse_vals.empty:
-				objective_value = float("inf")
-			else:
-				objective_value = float(-nse_vals.mean())
+			objective_value = -_safe_mean(events_df["NSE"])
+		elif self.objective_metric == "neg_pnse":
+			objective_value = -_safe_mean(events_df["pNSE"])
+		elif self.objective_metric == "abs_peak_error":
+			objective_value = _safe_mean(events_df["PeakFlowError"].abs())
+		elif self.objective_metric == "abs_volume_error":
+			objective_value = _safe_mean(events_df["VolumeError"].abs())
 		else:
 			raise ValueError(f"Unsupported objective metric: {self.objective_metric}")
 
-		# Persist trial summary
+		# Persist trial summary (include aggregated aligned metrics)
 		with open(trial_dir / "trial_summary.yaml", "w", encoding="utf-8") as f:
 			yaml.safe_dump(
 				{
@@ -286,13 +309,18 @@ class Objective:
 					"objective": objective_value,
 					"objective_metric": self.objective_metric,
 					"n_events": int(len(events_df)),
+					"means": {
+						"MSE": _safe_mean(events_df["MSE"]),
+						"NSE": _safe_mean(events_df["NSE"]) if np.isfinite(_safe_mean(events_df["NSE"])) else None,
+						"pNSE": _safe_mean(events_df["pNSE"]) if np.isfinite(_safe_mean(events_df["pNSE"])) else None,
+						"abs_PeakFlowError": _safe_mean(events_df["PeakFlowError"].abs()),
+						"abs_VolumeError": _safe_mean(events_df["VolumeError"].abs()),
+					},
 				},
 				f,
 			)
 
-		self.logger.info(
-			f"[Trial {trial_id}] Objective (mean MSE across events) = {objective_value:.6f}"
-		)
+		self.logger.info(f"[Trial {trial_id}] Objective ({self.objective_metric}) = {objective_value:.6f}")
 		return objective_value
 
 
@@ -362,9 +390,15 @@ def parse_args() -> argparse.Namespace:
 	p.add_argument(
 		"--objective",
 		type=str,
-		choices=["mse", "neg_nse"],
+		choices=["mse", "neg_nse", "neg_pnse", "abs_peak_error", "abs_volume_error"],
 		default="mse",
-		help="Optimization objective: mean MSE (minimize) or negative mean NSE (minimize)",
+		help="Optimization objective over event windows: mse, negative NSE/pNSE (to maximize), or mean absolute peak/volume error.",
+	)
+	p.add_argument(
+		"--n-jobs",
+		type=int,
+		default=1,
+		help="Number of parallel Optuna worker processes/threads. Use >1 only if you have resources (e.g., multiple GPUs).",
 	)
 	return p.parse_args()
 
@@ -414,7 +448,8 @@ def main() -> None:
 	)
 
 	try:
-		study.optimize(objective, n_trials=args.n_trials)
+		# Allow optional parallel trials
+		study.optimize(objective, n_trials=args.n_trials, n_jobs=args.n_jobs)
 	except Exception:
 		logger.exception("Optuna optimization failed with an unexpected exception")
 		raise

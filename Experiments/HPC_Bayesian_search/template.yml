@@ -1,3 +1,4 @@
+seed: 42
 autoregressive_inputs:
 - Flow_m3_sec_shift18
 batch_size: 512
