@@ -131,7 +131,7 @@ def main():
             config_dict = yaml.safe_load(f)
         
         # Modify paths in the dictionary
-        config_dict['data_dir'] = str(Path("C:/PhD/Data/Caravan/Caravan_winter"))
+        config_dict['data_dir'] = str(Path("C:/PhD/Data/Caravan"))
         config_dict['device'] = 'cpu'
         
         # IMPORTANT: Set the run_dir to the absolute local path
