@@ -416,7 +416,7 @@ def main():
     # plot a map with the basins, gauges, and grid edges - in a function
     # plot_map(basins, gauges, grid_edges)
 
-    output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output'
+    output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output_with_dec_31'
     # Determine year range from data
     years = np.arange(gauges_data['datetime'].dt.year.min(), gauges_data['datetime'].dt.year.max() + 1)
     yearly_files = []
@@ -472,7 +472,12 @@ def main():
                         end = end.tz_localize(gauges_data['datetime'].dt.tz)
                     else:
                         end = end.tz_convert(gauges_data['datetime'].dt.tz)
-                mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] <= end)
+                # If end is a date-only boundary (00:00), use half-open interval to include the whole last day
+                if end == end.normalize():
+                    end_exclusive = end + pd.Timedelta(days=1)
+                    mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] < end_exclusive)
+                else:
+                    mask = (gauges_data['datetime'] >= start) & (gauges_data['datetime'] <= end)
                 gauges_data = gauges_data[mask]
             times = np.sort(gauges_data['datetime'].unique())
             times = np.array(times, dtype='datetime64[ns]')
@@ -522,7 +527,8 @@ def main():
         idw_ds = idw_interpolation_grid_with_global(
             gauges_data_year, grid_edges, power=2, max_radius=50000,
             output_dir=year_output_dir, grid_resolution=grid_resolution,
-            date_range=(str(year_start.date()), str(year_end.date())),
+            # Pass full timestamps to avoid truncating end to 00:00
+            date_range=(year_start, year_end),
             year_idx=i, total_years=len(years), year=year
         )
         # Always use the correct saved file path (rain_grid.nc in each year folder)
@@ -531,6 +537,7 @@ def main():
         global_chunk_offset += all_chunk_counts[i]
 
     # Merge all yearly NetCDFs into one
+    """
     if yearly_files:
         # Filter to only files that exist
         existing_files = [f for f in yearly_files if os.path.isfile(f)]
@@ -549,6 +556,7 @@ def main():
             print("No existing yearly files to merge!", flush=True)
     else:
         print("No yearly files to merge!", flush=True)
+    """
 
 if __name__ == '__main__':
     main()
