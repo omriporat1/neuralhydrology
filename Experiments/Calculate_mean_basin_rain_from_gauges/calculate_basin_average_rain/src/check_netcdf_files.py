@@ -33,6 +33,10 @@ REPORT_DIR_DEFAULT = r"C:\PhD\Data\Caravan\timeseries\reports\il"
 FREQ = "10min"
 FLOAT_ATOL = 1e-6
 
+# Add: default CSV datetime format (ISO) and a configurable global
+CSV_TIME_FORMAT_DEFAULT = "%Y-%m-%d %H:%M:%S"
+CSV_TIME_FORMAT: Optional[str] = CSV_TIME_FORMAT_DEFAULT
+
 # canonical column names used for comparison/validation
 COL_SYNONYMS = {
     # gauges summary
@@ -172,37 +176,35 @@ def _coerce_numeric(series: pd.Series, kind: str) -> pd.Series:
 
 
 def standardize_dataframe(df: pd.DataFrame, source: str) -> Tuple[pd.DataFrame, List[pd.Timestamp]]:
-    """
-    - Renames columns to canonical names.
-    - Parses 'date' as datetime (dayfirst) and sorts.
-    - Coerces numeric types.
-    - Returns standardized df (indexed by 'date') and a list of rows with invalid dates (NaT).
-    """
     # rename
     df = df.rename(columns=rename_by_synonyms(df.columns))
     invalid_date_rows: List[pd.Timestamp] = []
 
     # parse/clean dates
     if "date" not in df.columns:
-        # try to find a likely single datetime column
         for candidate in ["time", "datetime", "timestamp"]:
             if candidate in df.columns:
                 df["date"] = df[candidate]
                 break
     if "date" in df.columns:
-        dates, nonstd = parse_datetime_mixed(df["date"])
+        if source == "csv" and CSV_TIME_FORMAT:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                dates = pd.to_datetime(df["date"].astype("string"), format=CSV_TIME_FORMAT, errors="coerce")
+            # when enforcing a format, no per-row "nonstandard" — failures remain NaT
+            nonstd = pd.Series(False, index=df.index)
+        else:
+            # fallback/mixed parsing for non-CSV sources or when auto-detecting
+            dates, nonstd = parse_datetime_mixed(df["date"])
     else:
         dates, nonstd = pd.Series(pd.NaT, index=df.index), pd.Series(False, index=df.index)
 
     invalid_mask = dates.isna()
     if invalid_mask.any():
-        # collect invalids; they have no timestamp we can align to
         invalid_date_rows = [pd.NaT] * int(invalid_mask.sum())
 
-    # keep only rows with a valid timestamp
     keep = ~invalid_mask
     df = df.loc[keep].copy()
-    # assign parsed datetime and the nonstandard flag for kept rows
     df["date"] = dates.loc[keep]
     df["_nonstandard_time"] = nonstd.loc[keep].astype("boolean")
 
@@ -221,7 +223,6 @@ def standardize_dataframe(df: pd.DataFrame, source: str) -> Tuple[pd.DataFrame, 
     # drop exact dup row/timestamp pairs but keep duplicates info for gap report later
     df = df.sort_values("date").drop_duplicates(subset=["date"], keep="first")
     df = df.set_index("date").sort_index()
-
     return df, invalid_date_rows
 
 
@@ -540,6 +541,151 @@ def write_gaps_report(
     return out_path
 
 
+def _is_number(x) -> bool:
+    try:
+        # treat pandas NA as not a number for our tolerant compare
+        if pd.isna(x):
+            return False
+        float(x)
+        return True
+    except Exception:
+        return False
+
+
+def _cells_equal(a, b) -> bool:
+    # numeric tolerant compare with NaN-equality
+    if pd.isna(a) and pd.isna(b):
+        return True
+    if _is_number(a) and _is_number(b):
+        try:
+            return bool(np.isclose(float(a), float(b), atol=FLOAT_ATOL))
+        except Exception:
+            pass
+    # if only one is NA -> not equal
+    if pd.isna(a) or pd.isna(b):
+        return False
+    # fallback exact compare as strings (force plain strings to avoid pd.NA tri-state)
+    sa = "<NA>" if pd.isna(a) else str(a)
+    sb = "<NA>" if pd.isna(b) else str(b)
+    return sa == sb
+
+
+def _summarize_mismatch(ts: pd.Timestamp, cols: List[str], row_nc: pd.Series, row_csv: pd.Series) -> Tuple[List[str], str]:
+    diff_cols: List[str] = []
+    snippets: List[str] = []
+    for c in cols:
+        a = row_nc.get(c, pd.NA)
+        b = row_csv.get(c, pd.NA)
+        if not _cells_equal(a, b):
+            diff_cols.append(c)
+            # short printable values
+            va = "NaN" if pd.isna(a) else f"{a}"
+            vb = "NaN" if pd.isna(b) else f"{b}"
+            snippets.append(f"{c}: nc={va}, csv={vb}")
+    # keep detail string concise
+    detail = " | ".join(snippets)
+    if len(detail) > 1000:
+        detail = detail[:997] + "..."
+    return diff_cols, detail
+
+
+def write_diff_examples(
+    basin_id: str,
+    out_dir: Path,
+    idx: pd.DatetimeIndex,
+    df_nc_al: pd.DataFrame,
+    df_csv_al: pd.DataFrame,
+    max_examples: int = 100,
+) -> Path:
+    # columns considered for presence and comparison
+    cols_nc_all = [c for c in df_nc_al.columns if not str(c).startswith("_")]
+    cols_csv_all = [c for c in df_csv_al.columns if not str(c).startswith("_")]
+    cols_compare = sorted(list(set(cols_nc_all) & set(cols_csv_all)))
+    cols_union = sorted(list(set(cols_nc_all) | set(cols_csv_all)))
+
+    # presence by any non-NA among that df's own data columns
+    present_nc = df_nc_al[cols_nc_all].notna().any(axis=1) if cols_nc_all else pd.Series(False, index=idx)
+    present_csv = df_csv_al[cols_csv_all].notna().any(axis=1) if cols_csv_all else pd.Series(False, index=idx)
+
+    missing_in_csv_mask = present_nc & ~present_csv
+    missing_in_nc_mask = present_csv & ~present_nc
+    overlap_mask = present_nc & present_csv
+
+    # find value mismatches on overlap
+    differs_mask = pd.Series(False, index=idx)
+    if overlap_mask.any() and cols_compare:
+        for c in cols_compare:
+            eq = series_equal(df_nc_al.loc[overlap_mask, c], df_csv_al.loc[overlap_mask, c])
+            differs_mask.loc[overlap_mask] |= ~eq
+
+    # helper: first timestamp of each contiguous run
+    def run_starts(mask: pd.Series) -> List[pd.Timestamp]:
+        return [first for (first, _last, _L) in group_runs(mask)]
+
+    # helper: map run start -> (run_end, run_length)
+    def run_map(mask: pd.Series) -> Dict[pd.Timestamp, Tuple[pd.Timestamp, int]]:
+        return {first: (last, length) for (first, last, length) in group_runs(mask)}
+
+    # one example per run (start) for each type
+    starts_missing_csv = [(ts, "missing_in_csv") for ts in run_starts(missing_in_csv_mask)]
+    starts_missing_nc  = [(ts, "missing_in_nc")  for ts in run_starts(missing_in_nc_mask)]
+    starts_mismatch    = [(ts, "value_mismatch") for ts in run_starts(differs_mask)]
+
+    # run metadata for sequence info
+    runs_missing_csv = run_map(missing_in_csv_mask)
+    runs_missing_nc  = run_map(missing_in_nc_mask)
+    runs_mismatch    = run_map(differs_mask)
+
+    # merge all run starts chronologically and cap to max_examples
+    selected = starts_missing_csv + starts_missing_nc + starts_mismatch
+    selected.sort(key=lambda x: (x[0], x[1]))
+    selected = selected[:max_examples]
+
+    rows = []
+    for ts, kind in selected:
+        row_nc = df_nc_al.loc[ts] if ts in df_nc_al.index else pd.Series(dtype="object")
+        row_csv = df_csv_al.loc[ts] if ts in df_csv_al.index else pd.Series(dtype="object")
+
+        mismatch_columns = ""
+        mismatch_details = ""
+        if kind == "value_mismatch":
+            diff_cols, detail = _summarize_mismatch(ts, cols_compare, row_nc, row_csv)
+            mismatch_columns = ";".join(diff_cols)
+            mismatch_details = detail
+            seq_last, seq_len = runs_mismatch.get(ts, (ts, 1))
+        elif kind == "missing_in_csv":
+            mismatch_details = "timestamp present in NC, missing in CSV"
+            seq_last, seq_len = runs_missing_csv.get(ts, (ts, 1))
+        elif kind == "missing_in_nc":
+            mismatch_details = "timestamp present in CSV, missing in NC"
+            seq_last, seq_len = runs_missing_nc.get(ts, (ts, 1))
+        else:
+            seq_last, seq_len = (ts, 1)
+
+        record = {
+            "basin_id": basin_id,
+            "timestamp": ts,
+            "difference_type": kind,
+            "mismatch_columns": mismatch_columns,
+            "mismatch_details": mismatch_details,
+            "sequence_last_ts": seq_last,
+            "sequence_length_timesteps": int(seq_len),
+        }
+        # include all union columns, with both sources
+        for c in cols_union:
+            record[f"{c}_nc"] = row_nc.get(c, pd.NA)
+            record[f"{c}_csv"] = row_csv.get(c, pd.NA)
+        rows.append(record)
+
+    ensure_report_dir(out_dir)
+    out_path = out_dir / f"diffs_il_{basin_id}.csv"
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["timestamp", "difference_type"]).reset_index(drop=True)
+    df_out.to_csv(out_path, index=False)
+    return out_path
+
+
 def process_basin(
     basin_id: str,
     nc_path: Path,
@@ -594,6 +740,16 @@ def process_basin(
             source_tag="csv",
         )
 
+    # Also produce per-basin examples of differing lines (max 100)
+    write_diff_examples(
+        basin_id=basin_id,
+        out_dir=out_dir,
+        idx=idx,
+        df_nc_al=df_nc_al,
+        df_csv_al=df_csv_al,
+        max_examples=100,
+    )
+
     # Build the result row
     res: Dict[str, object] = {
         "basin_id": basin_id,
@@ -637,6 +793,11 @@ def main():
         action="store_true",
         help="Disable progress bars.",
     )
+    p.add_argument(
+        "--csv-time-format",
+        default=CSV_TIME_FORMAT_DEFAULT,
+        help='Datetime format for CSV "date" column (default: %Y-%m-%d %H:%M:%S). Use "auto" to auto-detect.',
+    )
     args = p.parse_args()
 
     nc_dir = Path(args.nc_dir)
@@ -645,6 +806,10 @@ def main():
 
     start = pd.to_datetime(args.start, dayfirst=True) if args.start else None
     end = pd.to_datetime(args.end, dayfirst=True) if args.end else None
+
+    # Apply CSV time format preference
+    global CSV_TIME_FORMAT
+    CSV_TIME_FORMAT = None if (args.csv_time_format or "").lower() == "auto" else args.csv_time_format
 
     # discover basins from NC files
     basins = []
