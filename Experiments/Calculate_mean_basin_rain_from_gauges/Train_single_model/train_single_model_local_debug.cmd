@@ -44,6 +44,7 @@ set ARGS=".\train_single_model_with_av_rain_local_debug.py" ^
  --cpu-only ^
  --num-workers %NUM_WORKERS% ^
  --template "%TEMPLATE%"
+ --caravan-filetype csv
 
 if "%DEBUG%"=="1" set ARGS=%ARGS% --debug
 if not "%RUN_SUFFIX%"=="" set ARGS=%ARGS% --run-suffix "%RUN_SUFFIX%"

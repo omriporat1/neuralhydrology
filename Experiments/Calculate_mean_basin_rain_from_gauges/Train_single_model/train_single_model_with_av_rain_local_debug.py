@@ -69,6 +69,54 @@ def _fix_windows_validation_basin_path(cfg: dict):
             logging.warning(f"Overriding invalid validation_basin_file '{v}' with '{tb}'")
             cfg["validation_basin_file"] = tb
 
+def _make_unique_dir(base: Path) -> Path:
+    """Return a unique directory path based on 'base'. Create it on disk."""
+    if not base.exists():
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    # Try timestamped name first
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = base.parent / f"{base.name}_{ts}"
+    if not candidate.exists():
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+    # Fallback to incremental suffix
+    i = 1
+    while True:
+        candidate = base.parent / f"{base.name}_{i:02d}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        i += 1
+
+def _auto_num_workers(default: int = 8) -> int:
+    """Heuristic for DataLoader workers (non-debug). Keep modest on Windows."""
+    try:
+        cpu = os.cpu_count() or default
+        # leave some headroom; cap to default
+        w = max(1, min(default, cpu - 2))
+        # Windows file IO often benefits little from many workers
+        if os.name == "nt":
+            w = min(w, 4)
+        return int(w)
+    except Exception:
+        return int(default)
+
+def _force_caravan_filetype(filetype: str = "csv"):
+    """Monkey-patch Caravan timeseries loader to use a specific filetype ('csv' or 'netcdf')."""
+    try:
+        from neuralhydrology.datasetzoo import caravan as _caravan
+        _orig = _caravan.load_caravan_timeseries
+
+        def _patched(data_dir, basin, filetype_arg="netcdf"):
+            # Ignore caller's filetype_arg and enforce ours
+            return _orig(data_dir=data_dir, basin=basin, filetype=filetype)
+
+        _caravan.load_caravan_timeseries = _patched
+        logging.info(f"Caravan loader patched to filetype='{filetype}'.")
+    except Exception:
+        logging.exception("Failed to patch Caravan filetype")
+
 def main():
     parser = argparse.ArgumentParser(description="Train single NH model (local CPU debug).")
     parser.add_argument("--job-sub-id", type=int, default=14)
@@ -89,6 +137,8 @@ def main():
     parser.add_argument("--test-basin-file", type=str, default=None)
     parser.add_argument("--debug", action="store_true", help="Turn on step-through friendly settings")
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU (default).")
+    parser.add_argument("--caravan-filetype", type=str, choices=["csv", "netcdf"], default="csv",
+                        help="Force Caravan timeseries loader to read this filetype")
     args = parser.parse_args()
 
     # Force CPU by default
@@ -161,6 +211,9 @@ def main():
     if args.test_basin_file:
         template_config["test_basin_file"] = args.test_basin_file
 
+    # Record preferred Caravan filetype in config (harmless if unused by NH version)
+    template_config["caravan_filetype"] = args.caravan_filetype
+
     # Throughput / determinism knobs
     if args.num_workers is not None:
         num_workers = int(args.num_workers)
@@ -215,6 +268,10 @@ def main():
     logging.info(f"Config written to: {config_path}")
     logging.info(f"Device: {template_config['device']}, Data dir: {template_config['data_dir']}")
     logging.info(f"Batch size: {batch_size}, Num workers: {num_workers}, LR: {learning_rate}, Save every: {save_every}")
+    logging.info(f"Caravan filetype: {args.caravan_filetype}")
+
+    # Patch Caravan loader to enforce filetype
+    _force_caravan_filetype(args.caravan_filetype)
 
     # Launch training
     try:
