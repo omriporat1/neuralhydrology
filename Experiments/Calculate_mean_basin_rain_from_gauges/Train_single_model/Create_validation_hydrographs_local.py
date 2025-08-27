@@ -7,6 +7,7 @@ from neuralhydrology.utils.config import Config
 import xarray
 from datetime import datetime
 import yaml
+import matplotlib.dates as mdates  # NEW
 
 # --- Added helper metrics (Multiple-epochs compatible) ---
 def nse(obs, sim):
@@ -75,6 +76,226 @@ def _save_results_to_cache(results: dict, cache_dir: Path):
 		except Exception as e:
 			print(f"[WARN] Could not cache results for basin {basin}: {e}")
 
+# --- New: raw data loading and availability helpers ---
+def _guess_basin_id_str(basin: str) -> str:
+	# Try to extract a numeric basin id if the key is like "..._<id>"
+	try:
+		tok = basin.split('_')[-1]
+		return tok if tok.isdigit() else basin
+	except Exception:
+		return str(basin)
+
+def _find_raw_files(data_dir: Path, basin_id_str: str) -> list[Path]:
+	if not data_dir or not Path(data_dir).exists():
+		return []
+	# Prefer NetCDF first, then fall back to Parquet/CSV
+	exts = (".nc", ".nc4", ".netcdf", ".parquet", ".csv")
+	cands = []
+	search_roots = [Path(data_dir)]
+	for root in search_roots:
+		try:
+			for ext in exts:
+				cands.extend(root.rglob(f"*{basin_id_str}*{ext}"))
+		except Exception:
+			continue
+	# Stable preference order: NetCDF group first
+	order = {".nc": 0, ".nc4": 0, ".netcdf": 0, ".parquet": 1, ".csv": 2}
+	cands = sorted(set(cands), key=lambda p: (order.get(p.suffix.lower(), 99), len(str(p)), str(p).lower()))
+	return cands
+
+def _load_raw_df(path: Path) -> pd.DataFrame | None:
+	try:
+		suf = path.suffix.lower()
+		if suf == ".parquet":
+			df = pd.read_parquet(path)
+		elif suf == ".csv":
+			# Read first, then parse datetime
+			df = pd.read_csv(path)
+		elif suf in (".nc", ".nc4", ".netcdf"):
+			ds = xarray.load_dataset(path)
+			# Try to pick a sensible time coordinate
+			time_key = "date" if "date" in ds.coords else ("time" if "time" in ds.coords else None)
+			if time_key is None:
+				# Fall back to any 1D coord with datetime dtype
+				for k, v in ds.coords.items():
+					if np.issubdtype(v.dtype, np.datetime64):
+						time_key = k
+						break
+			df = ds.to_dataframe().reset_index()
+		else:
+			return None
+
+		# Normalize datetime index
+		dt_cols = [c for c in df.columns if c.lower() in ("date", "time", "datetime")]
+		if dt_cols:
+			col = dt_cols[0]
+			# Prefer dayfirst for 'date' like in your CSV head
+			if col.lower() == "date":
+				df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True, utc=False).dt.tz_localize(None)
+			else:
+				df[col] = pd.to_datetime(df[col], errors="coerce", utc=False).dt.tz_localize(None)
+			df = df.set_index(col).sort_index()
+		elif isinstance(df.index, pd.DatetimeIndex):
+			df = df.sort_index()
+		else:
+			# Try to find any datetime-like column
+			cand = None
+			for c in df.columns:
+				try:
+					tmp = pd.to_datetime(df[c], errors="coerce")
+					if tmp.notna().sum() > 0:
+						cand = c
+						break
+				except Exception:
+					continue
+			if cand is None:
+				return None
+			if str(cand).lower() == "date":
+				df[cand] = pd.to_datetime(df[cand], errors="coerce", dayfirst=True, utc=False).dt.tz_localize(None)
+			else:
+				df[cand] = pd.to_datetime(df[cand], errors="coerce", utc=False).dt.tz_localize(None)
+			df = df.set_index(cand).sort_index()
+
+		# Drop duplicated index if present (keep first)
+		if df.index.has_duplicates:
+			df = df[~df.index.duplicated(keep="first")]
+		return df
+	except Exception as e:
+		print(f"[WARN] Failed to load raw file {path}: {e}")
+		return None
+
+def _pick_columns_for_availability(df: pd.DataFrame, config: Config) -> tuple[list[str], list[str]]:
+	cols = [c for c in df.columns if isinstance(c, str)]
+	low = [c.lower() for c in cols]
+
+	# Explicit preference for your schema
+	precip_cols = []
+	if "mean_rain" in low:
+		precip_cols = [cols[low.index("mean_rain")]]
+	else:
+		# Fall back to individual rain gauges if present
+		gauge_names = {"rain_gauge_1", "rain_gauge_2", "rain_gauge_3"}
+		precip_cols = [cols[i] for i, c in enumerate(low) if c in gauge_names]
+
+	flow_cols = []
+	if "flow_m3_sec" in low:
+		flow_cols = [cols[low.index("flow_m3_sec")]]
+	# If not found, fall back to config hints and heuristics
+	if not precip_cols or not flow_cols:
+		# Candidates from config when available
+		cfg_precip, cfg_flow = [], []
+		for key in ("dynamic_inputs", "inputs", "forcings"):
+			if hasattr(config, key):
+				cfg_precip.extend([v for v in getattr(config, key) if isinstance(v, str)])
+		for key in ("target_variables", "targets"):
+			if hasattr(config, key):
+				cfg_flow.extend([v for v in getattr(config, key) if isinstance(v, str)])
+		if not precip_cols:
+			precip_cols = [c for c in cols if any(k in c.lower() for k in ["mean_rain", "rain", "precip", "prcp", "pr"])]
+		if not flow_cols:
+			flow_cols = [c for c in cols if any(k in c.lower() for k in ["flow_m3_sec", "flow", "discharge", "qobs", "q"])]
+
+	return precip_cols, flow_cols
+
+def _build_raw_availability(df: pd.DataFrame | None, eval_index: pd.DatetimeIndex, config: Config,
+							station_id: str | int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	# Returns raw_rain_mask, raw_flow_mask, raw_both_mask aligned to eval_index
+	if df is None or df.empty or eval_index.size == 0:
+		n = len(eval_index)
+		return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+
+	try:
+		# If the file contains multiple stations, filter the matching Station_ID
+		if station_id is not None and "Station_ID" in df.columns:
+			try:
+				df = df[df["Station_ID"].astype(str) == str(int(station_id))]
+			except Exception:
+				df = df[df["Station_ID"].astype(str) == str(station_id)]
+		if df.empty:
+			n = len(eval_index)
+			return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+
+		precip_cols, flow_cols = _pick_columns_for_availability(df, config)
+		rain_series = None
+		flow_series = None
+		if precip_cols:
+			rain_series = df[precip_cols].mean(axis=1, skipna=True)
+		if flow_cols:
+			flow_series = df[flow_cols[0]] if len(flow_cols) == 1 else df[flow_cols].mean(axis=1, skipna=True)
+
+		# Align to eval index (exact timestamps)
+		def align_mask(series: pd.Series | None) -> np.ndarray:
+			if series is None or series.empty:
+				return np.zeros(len(eval_index), dtype=bool)
+			ser = series.copy()
+			ser.index = pd.to_datetime(ser.index).tz_localize(None)
+			al = ser.reindex(eval_index)
+			return al.notna().to_numpy()
+
+		raw_rain = align_mask(rain_series)
+		raw_flow = align_mask(flow_series)
+		raw_both = np.logical_and(raw_rain, raw_flow)
+		return raw_rain, raw_flow, raw_both
+	except Exception as e:
+		print(f"[WARN] Failed to build raw availability: {e}")
+		n = len(eval_index)
+		return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+
+def _mask_to_segments(dates: np.ndarray, mask: np.ndarray) -> list[tuple[float, float]]:
+	# Convert a boolean mask to broken_barh segments
+	if dates is None or len(dates) == 0 or mask is None or len(mask) == 0:
+		return []
+	dnums = mdates.date2num(pd.to_datetime(dates))
+	if len(dnums) > 1:
+		dt = float(np.median(np.diff(dnums)))
+	else:
+		dt = 1.0 / (24 * 6)  # 10 minutes default
+	segments = []
+	in_run = False
+	start = None
+	for i, flag in enumerate(mask):
+		if flag and not in_run:
+			in_run = True
+			start = dnums[i]
+		# close the run when flag turns false or at the last point
+		if in_run and ((not flag) or i == len(mask) - 1):
+			end = dnums[i] + (dt if flag and i == len(mask) - 1 else 0.0)
+			segments.append((start, end - start))
+			in_run = False
+	return segments
+
+def _plot_availability_timeline(out_png: Path, basin: str, dates: np.ndarray,
+								raw_both: np.ndarray, qobs_mask: np.ndarray, qsim_mask: np.ndarray):
+	try:
+		if dates is None or len(dates) == 0:
+			return
+		fig, ax = plt.subplots(figsize=(14, 3.5))
+		yh = 0.8
+		tracks = [
+			("Raw avg rain+flow", raw_both, 2.2, "tab:green"),
+			("Qobs (eval)", qobs_mask, 1.1, "tab:blue"),
+			("Qsim (eval)", qsim_mask, 0.0, "tab:orange"),
+		]
+		for label, mask, y0, color in tracks:
+			segs = _mask_to_segments(dates, mask)
+			if segs:
+				ax.broken_barh(segs, (y0, yh), facecolors=color, edgecolors=color, linewidth=0.5, alpha=0.9)
+			ax.text(mdates.date2num(pd.to_datetime(dates[0])) if len(dates) else 0, y0 + yh/2, label,
+					va="center", ha="left", fontsize=9)
+
+		ax.set_ylim(-0.2, 3.2)
+		ax.set_yticks([])
+		ax.set_xlim(mdates.date2num(pd.to_datetime(dates.min())), mdates.date2num(pd.to_datetime(dates.max())))
+		ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+		ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+		ax.set_title(f"Data availability timeline - Basin {basin}")
+		ax.grid(True, axis="x", linestyle=":", alpha=0.3)
+		plt.tight_layout()
+		plt.savefig(out_png, dpi=150)
+		plt.close(fig)
+	except Exception as e:
+		print(f"[WARN] Failed to plot availability timeline for {basin}: {e}")
+
 def main():
     job_dir = Path(r"C:\PhD\Python\neuralhydrology\Experiments\Calculate_mean_basin_rain_from_gauges\Train_single_model\results\job_0")
     
@@ -84,12 +305,13 @@ def main():
         print(f"Run directory does not exist: {run_dir}")
         return
     
-    run_subdirs = [d for d in run_dir.iterdir() if d.is_dir()]
-    if not run_subdirs:
-        print(f"No run subdirectories found in {run_dir}")
-        return
+    # run_subdirs = [d for d in run_dir.iterdir() if d.is_dir()]
+    # if not run_subdirs:
+    #     print(f"No run subdirectories found in {run_dir}")
+    #     return
     
-    run_dir = run_subdirs[0]
+    # run_dir = run_subdirs[0]
+    run_dir = run_dir / f"av_rain_config_14_1908_172129"
     print(f"Using run directory: {run_dir}")
     
     max_events_path = Path("C:/PhD/Python/neuralhydrology/Experiments/extract_extreme_events/from_daily_max/annual_max_discharge_dates.csv")
@@ -171,7 +393,7 @@ def main():
           f"test: {getattr(config, 'test_start_date', None)}..{getattr(config, 'test_end_date', None)}")
 
     # --- New: cache-aware evaluation ---
-    USE_CACHE = True
+    USE_CACHE = False
     cache_dir = run_dir / "cached_evaluation_10min"
 
     results = None
@@ -239,6 +461,56 @@ def main():
             print(f"[DEBUG] {basin}: obs_n={obs_stats['n']} sim_n={sim_stats['n']} "
                   f"obs_nan={obs_stats['n_nan']} sim_nan={sim_stats['n_nan']} "
                   f"date_range=[{obs_stats['date_min']}..{obs_stats['date_max']}]")
+
+            # --- NEW: availability timeline (raw vs eval Qobs/Qsim) ---
+            try:
+                if 'date' in qobs.dims:
+                    eval_dates = qobs['date'].values
+                else:
+                    eval_dates = None
+
+                if eval_dates is not None and len(eval_dates) > 0:
+                    # Masks for evaluation period
+                    obs_array = np.asarray(qobs).flatten()
+                    sim_array = np.asarray(qsim).flatten()
+                    qobs_mask = ~np.isnan(obs_array)
+                    qsim_mask = ~np.isnan(sim_array)
+
+                    # Load raw data (best-effort) and build availability
+                    basin_id_str = _guess_basin_id_str(basin)
+                    station_id = basin_id_str if str(basin_id_str).isdigit() else None
+                    raw_df = None
+                    for cand in _find_raw_files(Path(config.data_dir), basin_id_str):
+                        raw_df = _load_raw_df(cand)
+                        if raw_df is not None:
+                            break
+                    raw_rain_mask, raw_flow_mask, raw_both_mask = _build_raw_availability(
+                        df=raw_df,  # renamed parameter
+                        eval_index=pd.to_datetime(eval_dates).tz_localize(None),
+                        config=config,
+                        station_id=station_id
+                    )
+
+                    # Save availability CSV
+                    timeline_df = pd.DataFrame({
+                        "date": pd.to_datetime(eval_dates),
+                        "raw_rain_avail": raw_rain_mask.astype(int),
+                        "raw_flow_avail": raw_flow_mask.astype(int),
+                        "raw_both_avail": raw_both_mask.astype(int),
+                        "qobs_eval_avail": qobs_mask.astype(int),
+                        "qsim_eval_avail": qsim_mask.astype(int),
+                    })
+                    avail_csv = validation_hydrographs_dir / f"{basin}_availability_timeline.csv"
+                    timeline_df.to_csv(avail_csv, index=False)
+                    # Plot timeline
+                    avail_png = validation_hydrographs_dir / f"{basin}_availability_timeline.png"
+                    _plot_availability_timeline(avail_png, basin, eval_dates, raw_both_mask, qobs_mask, qsim_mask)
+                    print(f"Saved availability timeline for basin {basin} to {avail_csv} and {avail_png}")
+                else:
+                    print(f"[WARN] {basin}: No date coordinate found for evaluation; skipping availability timeline.")
+            except Exception as e:
+                print(f"[WARN] {basin}: Failed to build/plot availability timeline: {e}")
+            # --- END NEW ---
 
             # If there is no data, skip creating empty outputs
             if obs_stats["n"] == 0 or sim_stats["n"] == 0:
