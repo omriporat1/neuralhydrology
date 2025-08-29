@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=basin_rain
+#SBATCH --job-name=basin_rain_31_dec
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=95
 #SBATCH --mem=512G
@@ -29,8 +29,8 @@ export HDF5_USE_FILE_LOCKING=FALSE
 
 # Final locations
 SRC_BASINS=/sci/labs/efratmorin/omripo/PhD/Data/Caravan/Caravan_winter/shapefiles/il/il_basin_shapes.shp
-SRC_NETCDF_ROOT=/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output/
-OUT_DIR=/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output/basin_average_rain/
+SRC_NETCDF_ROOT=/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output_with_dec_31/
+OUT_DIR=/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output_with_dec_31/basin_average_rain_31dec/
 
 # Stage inputs to node-local scratch
 SCRATCH="${SLURM_TMPDIR:-/tmp}/basin_rain_${SLURM_JOB_ID:-$$}"
