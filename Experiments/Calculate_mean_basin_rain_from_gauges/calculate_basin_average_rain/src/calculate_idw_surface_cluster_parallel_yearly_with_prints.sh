@@ -17,6 +17,10 @@ conda activate /sci/labs/efratmorin/omripo/condaenvs/neuralhydrology
 
 mkdir -p logs
 
+# Resume from 2009 and skip years that already have rain_grid.nc
+export NHY_START_YEAR=2009
+export NHY_SKIP_IF_EXISTS=1
+
 /usr/bin/time -v python calculate_idw_surface_cluster_parallel_yearly_with_prints.py
 
 conda deactivate

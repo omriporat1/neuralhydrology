@@ -419,9 +419,17 @@ def main():
     output_dir = '/sci/labs/efratmorin/omripo/PhD/Data/IMS/Data_by_station/Data_by_station_formatted/output_with_dec_31'
     # Determine year range from data
     years = np.arange(gauges_data['datetime'].dt.year.min(), gauges_data['datetime'].dt.year.max() + 1)
+
+    # NEW: resume controls
+    start_year = int(os.environ.get("NHY_START_YEAR", 2009))  # default: 2009 included
+    skip_if_exists = os.environ.get("NHY_SKIP_IF_EXISTS", "0") == "1"  # set to "1" to skip years that already have output
+
+    # Filter years to process
+    years = years[years >= start_year]
+    print(f"Processing years (from {start_year}): {years}", flush=True)
+
     yearly_files = []
-    print(f"Processing years: {years}", flush=True)
-    # --- Calculate all chunk indices for global progress ---
+    # --- Calculate all chunk indices for global progress (only for filtered years) ---
     all_chunk_counts = []
     year_chunk_indices = []
     for year in years:
@@ -440,8 +448,10 @@ def main():
         chunk_indices = [np.where(chunk_keys == day)[0] for day in unique_days]
         all_chunk_counts.append(len(chunk_indices))
         year_chunk_indices.append(chunk_indices)
+
     global_total_chunks = sum(all_chunk_counts)
     global_chunk_offset = 0
+
     for i, year in enumerate(years):
         year_start = pd.Timestamp(f"{year}-01-01")
         year_end = pd.Timestamp(f"{year}-12-31 23:59:59")
@@ -450,10 +460,21 @@ def main():
         if gauges_data_year.empty:
             print(f"No data for year {year}, skipping.", flush=True)
             continue
-        print(f"Processing year {year}: {len(gauges_data_year)} rows", flush=True)
+
         year_output_dir = os.path.join(output_dir, f"year_{year}")
         os.makedirs(year_output_dir, exist_ok=True)
-        # Patch idw_interpolation_grid to accept global_chunk_offset/global_total_chunks
+        existing_nc = os.path.join(year_output_dir, "rain_grid.nc")
+
+        # NEW: optionally skip if output already exists
+        if skip_if_exists and os.path.isfile(existing_nc):
+            print(f"Year {year}: found existing {existing_nc}, skipping as NHY_SKIP_IF_EXISTS=1", flush=True)
+            yearly_files.append(existing_nc)
+            global_chunk_offset += all_chunk_counts[i]
+            continue
+
+        print(f"Processing year {year}: {len(gauges_data_year)} rows", flush=True)
+
+        # ...existing code...
         def idw_interpolation_grid_with_global(gauges_data, grid_edges, power=2, max_radius=50000, output_dir="output", date_range=None, grid_resolution=1000, year_idx=None, total_years=None, year=None):
             import time
             os.makedirs(output_dir, exist_ok=True)
@@ -527,11 +548,9 @@ def main():
         idw_ds = idw_interpolation_grid_with_global(
             gauges_data_year, grid_edges, power=2, max_radius=50000,
             output_dir=year_output_dir, grid_resolution=grid_resolution,
-            # Pass full timestamps to avoid truncating end to 00:00
             date_range=(year_start, year_end),
             year_idx=i, total_years=len(years), year=year
         )
-        # Always use the correct saved file path (rain_grid.nc in each year folder)
         yearly_files.append(os.path.join(year_output_dir, "rain_grid.nc"))
         print(f"Finished year {year}, saved to {os.path.join(year_output_dir, 'rain_grid.nc')}", flush=True)
         global_chunk_offset += all_chunk_counts[i]
