@@ -15,7 +15,8 @@ from matplotlib.lines import Line2D
 IV_CSV_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\iv_scan_results.csv"
 ATTR_DIR_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\attributes"
 OUT_FIG_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_climate_histograms.png"
-OUT_DESC_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_attribute_descriptions.csv"  # NEW
+OUT_DESC_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_attribute_descriptions.csv"
+OUT_DATA_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_attribute_values_filtered.csv"  # NEW
 
 ID_CANDIDATES = ["site_id", "STAID", "staid", "gage_id", "usgs_id", "site_no", "site_no_txt", "gageid", "station_id"]
 
@@ -428,12 +429,22 @@ def _grid_dims(n: int):
     nrows = int(math.ceil(n / ncols))
     return nrows, ncols
 
+def write_filtered_values_csv(attrs_sel: pd.DataFrame, labels: List[str], out_csv: str) -> None:
+    """Write per-basin values (filtered set) for all attributes shown in the plots."""
+    cols = ["site_id"] + [c for c in labels if c in attrs_sel.columns]
+    df_out = attrs_sel[cols].copy()
+    df_out = df_out.sort_values("site_id")
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_csv(out_csv, index=False)
+    print(f"[saved] filtered basin values -> {out_csv}")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iv-csv", default=IV_CSV_DEFAULT)
     ap.add_argument("--attr-dir", default=ATTR_DIR_DEFAULT)
     ap.add_argument("--out-fig", default=OUT_FIG_DEFAULT)
-    ap.add_argument("--out-desc", default=OUT_DESC_DEFAULT)  # NEW
+    ap.add_argument("--out-desc", default=OUT_DESC_DEFAULT)
+    ap.add_argument("--out-data", default=OUT_DATA_DEFAULT, help="CSV with per-basin values for plotted attributes (filtered)")  # NEW
     ap.add_argument("--min-area", type=float)
     ap.add_argument("--max-area", type=float)
     ap.add_argument("--list-cols", action="store_true", help="List all available attribute columns and exit")
@@ -482,9 +493,11 @@ def main():
         n_samples_all=len(all_ids),
     )
 
+    # NEW: write per-basin values (filtered set)
+    write_filtered_values_csv(attrs_sel, labels_used, args.out_data)
+
     # Build and save descriptions CSV
     desc_map = load_var_descriptions(args.attr_dir)
-    # unify source maps (prefer sel, fallback to all)
     src_all_combined = {**src_all, **src_sel, **src_all}
     write_description_csv(labels_used, src_all_combined, desc_map, args.out_desc)
 
