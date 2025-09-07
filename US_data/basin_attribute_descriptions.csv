@@ -1,0 +1,24 @@
+plot_name,source_file,source_column,description
+area_km2,iv_scan_results.csv,drainage_km2,Drainage area (km^2) from CAMELSH IV scan results.
+p-mean,attributes_nldas2_climate.csv,p_mean,(description not found)
+pet-mean,attributes_nldas2_climate.csv,pet_mean,(description not found)
+aridity-index,attributes_nldas2_climate.csv,aridity_index,(description not found)
+frac-snow,attributes_gageii_Climate.csv,snow_pct_precip,"Snow percent of total precipitation estimate, mean for period 1901-2000.  From McCabe and Wolock (submitted, 2008), 1km grid."
+high-prec-freq,attributes_nldas2_climate.csv,high_prec_freq,(description not found)
+high-prec-dur,attributes_nldas2_climate.csv,high_prec_dur,(description not found)
+low-prec-freq,attributes_nldas2_climate.csv,low_prec_freq,(description not found)
+low-prec-dur,attributes_nldas2_climate.csv,low_prec_dur,(description not found)
+elev_mean_m_basin,attributes_gageii_Topo.csv,elev_mean_m_basin,Mean watershed elevation (meters) from 100m National Elevation Dataset
+bas_compactness,attributes_gageii_Bas_Morph.csv,bas_compactness,"Watershed compactness ratio, = area/perimeter^2 * 100; higher number = more compact shape."
+slope_pct,attributes_gageii_Topo.csv,slope_pct,"Mean watershed slope, percent. Derived from 100m resolution National Elevation Dataset, so slope values may differ from those calculated from data of other resolutions."
+pptavg_basin,attributes_gageii_Climate.csv,pptavg_basin,"Mean annual precip (cm) for the watershed, from 800m PRISM data.  30 years period of record 1971-2000."
+t_avg_basin,attributes_gageii_Climate.csv,t_avg_basin,"Average annual air temperature for the watershed, degrees C, from 2km PRISM data. 30 years period of record 1971-2000."
+pet_mm,attributes_gageii_Climate.csv,pet,"Mean-annual potential evapotranspiration (PET), estimated using the Hamon (1961) equation."
+snow_pct_precip,attributes_gageii_Climate.csv,snow_pct_precip,"Snow percent of total precipitation estimate, mean for period 1901-2000.  From McCabe and Wolock (submitted, 2008), 1km grid."
+precip_seas_ind,attributes_gageii_Climate.csv,precip_seas_ind,"Precipitation seasonality index (Markham, 1970; Dingman, 2002).  Index of how much annual precipitation falls seasonally (high values) or spread out over the year (low values).  Based on monthly precip values from 30 year (1971-2000) PRISM.  Range is 0 (precip spread out exactly evenly in each month) to 1 (all precip falls in a single month)."
+DEVNLCD06,attributes_gageii_LC06_Basin.csv,devnlcd06,"Watershed percent ""developed"" (urban), 2006 era (2001 for AK-HI-PR).  Sum of classes 21, 22, 23, and 24"
+FORESTNLCD06,attributes_gageii_LC06_Basin.csv,forestnlcd06,"Watershed percent ""forest"", 2006 era (2001 for AK-HI-PR).  Sum of classes 41, 42, and 43"
+PLANTNLCD06,attributes_gageii_LC06_Basin.csv,plantnlcd06,"Watershed percent ""planted/cultivated"" (agriculture), 2006 era (2001 for AK-HI-PR).  Sum of classes 81 and 82"
+PERMAVE,attributes_gageii_Soils.csv,permave,Average permeability (inches/hour)
+CLAYAVE,attributes_gageii_Soils.csv,clayave,Average value of clay content (percentage)
+hydro_disturb_indx,attributes_gageii_Bas_Classif.csv,hydro_disturb_indx,"Hydrologic ""disturbance index"" score, based on 7 variables: 1) MAJ_DDENS_2009, 2) WATER_WITHDR, 3) change in dam storage 1950-2009, 4) CANALS_PCT, 5) RAW_DIS_NEAREST_MAJ_NPDES, 6) ROADS_KM_SQ_KM, and 7) FRAGUN_BASIN.  Low values = low anthropogenic hydrologic modification in the watershed, high values = high anthropogenic hydologic modification"
