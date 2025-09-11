@@ -83,3 +83,6 @@ US_data/attributes/Var description_gageii.xlsx
 US_data/attributes.7z
 US_data/iv_scan_results.csv
 US_data/basin_attribute_values_filtered.csv
+US_data/mrms_coverage_by_basin.csv
+US_data/mrms_unmatched_site_ids.csv
+US_data/mrms_coverage_by_basin.csv
