@@ -12,6 +12,7 @@
 *.gif
 *.err
 *.out
+*.xlsx
 
 # folder
 build/*
