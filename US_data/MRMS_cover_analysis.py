@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
+from datetime import datetime, timedelta
+import json
 
 import pandas as pd
 import geopandas as gpd
@@ -15,6 +17,8 @@ from shapely.ops import unary_union
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 import numpy as np
+import time
+from functools import lru_cache
 
 # Optional AWS access
 try:
@@ -43,6 +47,20 @@ MRMS_FILL_COLOR = "#fdae6b"
 BASIN_COVER_COLOR = "#1b9e77"
 BASIN_NOCOV_COLOR = "#e41a1c"
 EXACT_MRMS_DOMAIN = True  # set True to derive polygon from one MRMS GRIB2 (slow first run)
+
+MAP_DPI = 240  # increased resolution (was 160)
+
+MAX_S3_LIST_DAYS = 7          # look back this many day folders for a sample file
+S3_RETRY = 3                  # retries for listing / file
+S3_SLEEP = 1.5                # backoff seconds
+FALLBACK_TILE_PROVIDERS = [
+    "CartoDB.Positron",
+    "OpenStreetMap.Mapnik",
+    "Stamen.TerrainBackground"
+]
+
+EXACT_DOMAIN_CACHE = r"C:\PhD\Python\neuralhydrology\US_data\mrms_exact_domain.geojson"
+MAX_LOOKBACK_DAYS = 10   # how many past days to attempt when searching for a sample GRIB2 (if user enables exact)
 # ----------------------------------------------------------------
 
 # Candidate ID columns that might appear in the CAMELS shapefiles
@@ -159,96 +177,166 @@ def mrms_polygon_from_bbox() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame({"name": ["MRMS_CONUS_bbox"]}, geometry=[poly], crs=CRS_WGS84)
 
 
-def mrms_polygon_exact(product: str, sample_date: str = "20240101", sample_hour: str = "00") -> Optional[gpd.GeoDataFrame]:
-    """Download one GRIB2, build convex hull of valid precip points."""
+def _locate_product_base(product: str) -> Optional[str]:
+    """Return s3 prefix to product directory (noaa-mrms-pds/CONUS/... or root)."""
+    if s3fs is None:
+        return None
+    fs = s3fs.S3FileSystem(anon=True)
+    candidates = [
+        f"noaa-mrms-pds/CONUS/{product}",
+        f"noaa-mrms-pds/CONUS/{product}_00.00",
+        f"noaa-mrms-pds/{product}",
+        f"noaa-mrms-pds/{product}_00.00",
+    ]
+    for c in candidates:
+        try:
+            if fs.exists(c):
+                print(f"[info] MRMS product base: s3://{c}")
+                return c
+        except Exception as e:
+            print(f"[warn] exists check failed for {c}: {e}")
+    return None
+
+
+def _list_mrms_day_dirs(base: str) -> List[str]:
+    fs = s3fs.S3FileSystem(anon=True)
+    try:
+        # children are YYYYMMDD directories (and maybe other artifacts)
+        dirs = [p for p in fs.ls(base) if p.split("/")[-1].isdigit()]
+        return sorted(dirs, reverse=True)
+    except Exception as e:
+        print(f"[warn] listing days under {base} failed: {e}")
+        return []
+
+
+def _list_files(fs, prefix: str) -> List[str]:
+    try:
+        return fs.ls(prefix)
+    except Exception:
+        return []
+
+
+def _find_sample_grib2_hier(base: str, lookback_days: int) -> Optional[str]:
+    """Search recent days for a GRIB2 file traversing multiple directory layouts."""
+    if s3fs is None:
+        return None
+    fs = s3fs.S3FileSystem(anon=True)
+    today_utc = datetime.utcnow()
+    for delta in range(lookback_days):
+        day = today_utc - timedelta(days=delta)
+        for date_path in _possible_date_paths(base, day):
+            # Two possibilities: files directly in date_path or under hour subfolders
+            if not fs.exists(date_path):
+                continue
+            direct_files = _list_files(fs, date_path)
+            # gather GRIB2 directly
+            gribs_direct = [f for f in direct_files if f.lower().endswith(".grib2")]
+            if gribs_direct:
+                gribs_direct.sort()
+                print(f"[info] Using sample GRIB2 (direct): s3://{gribs_direct[0]}")
+                return gribs_direct[0]
+            # hour subfolders (00..23)
+            hour_dirs = [f for f in direct_files if f.split("/")[-1].isdigit() and len(f.split("/")[-1]) in (2,)]
+            for hdir in hour_dirs:
+                hour_files = _list_files(fs, hdir)
+                gribs_hour = [f for f in hour_files if f.lower().endswith(".grib2")]
+                if gribs_hour:
+                    gribs_hour.sort()
+                    print(f"[info] Using sample GRIB2 (hour): s3://{gribs_hour[0]}")
+                    return gribs_hour[0]
+    return None
+
+
+def mrms_polygon_exact(product: str, force_refresh: bool = False) -> Optional[gpd.GeoDataFrame]:
+    """Derive exact MRMS convex hull polygon from one recent GRIB2 file; cache result."""
+    if not force_refresh and Path(EXACT_DOMAIN_CACHE).is_file():
+        try:
+            gdf = gpd.read_file(EXACT_DOMAIN_CACHE)
+            if not gdf.empty:
+                print(f"[info] Loaded cached MRMS exact domain: {EXACT_DOMAIN_CACHE}")
+                return gdf.to_crs(CRS_WGS84)
+        except Exception:
+            pass
+
     if s3fs is None:
         print("[warn] s3fs not installed for exact MRMS domain.")
         return None
     try:
         import xarray as xr  # type: ignore
     except Exception:
-        print("[warn] xarray not installed for exact MRMS domain.")
+        print("[warn] xarray/cfgrib not installed for exact MRMS domain.")
         return None
-    # Attempt several path patterns
-    patterns = [
-        f"noaa-mrms-pds/{product}/{sample_date}/{sample_hour}/MRMS_{product}_00.00_{sample_date}-{sample_hour}0000.grib2",
-        f"noaa-mrms-pds/CONUS/{product}/{sample_date}/{sample_hour}/MRMS_{product}_00.00_{sample_date}-{sample_hour}0000.grib2",
-    ]
-    fs = s3fs.S3FileSystem(anon=True)
-    key = None
-    for p in patterns:
-        if fs.exists(p):
-            key = p
-            break
+    base = _locate_product_base(product)
+    if base is None:
+        print("[warn] product base not found for exact domain.")
+        return None
+
+    key = _find_sample_grib2_hier(base, MAX_LOOKBACK_DAYS)
     if key is None:
-        print("[warn] Could not locate sample GRIB2 for exact domain.")
+        print("[warn] No GRIB2 found in last", MAX_LOOKBACK_DAYS, "days for exact domain.")
         return None
-    print(f"[info] Downloading sample MRMS file: s3://{key}")
-    with fs.open(key, "rb") as f:
+
+    fs = s3fs.S3FileSystem(anon=True)
+    succeeded = False
+    for attempt in range(1, S3_RETRY + 1):
         try:
-            ds = xr.open_dataset(f, engine="cfgrib")
+            with fs.open(key, "rb") as f:
+                ds = xr.open_dataset(f, engine="cfgrib")
+            succeeded = True
+            break
         except Exception as e:
-            print(f"[warn] cfgrib open failed: {e}")
-            return None
-    # lat/lon variable names vary; pick first 2D lat/lon
-    lat_name = next((v for v in ds.data_vars if "latitude" in v.lower() or v.lower() == "lat"), None)
-    lon_name = next((v for v in ds.data_vars if "longitude" in v.lower() or v.lower() == "lon"), None)
-    if lat_name is None or lon_name is None:
-        # try coordinates
-        lat_name = next((c for c in ds.coords if "lat" in c.lower()), None)
-        lon_name = next((c for c in ds.coords if "lon" in c.lower()), None)
-    if lat_name is None or lon_name is None:
-        print("[warn] Could not identify lat/lon in MRMS file.")
+            if attempt == S3_RETRY:
+                print(f"[warn] final attempt opening GRIB2 failed: {e}")
+                return None
+            time.sleep(S3_SLEEP * attempt)
+    if not succeeded:
         return None
-    lat = ds[lat_name].values
-    lon = ds[lon_name].values
+
+    # Identify lat/lon (support common names)
+    lat_candidates = [n for n in ds.variables if "lat" == n.lower() or "latitude" in n.lower()]
+    lon_candidates = [n for n in ds.variables if "lon" == n.lower() or "longitude" in n.lower()]
+    if not lat_candidates or not lon_candidates:
+        print("[warn] Could not find lat/lon variables.")
+        return None
+    lat = ds[lat_candidates[0]].values
+    lon = ds[lon_candidates[0]].values
     if lat.ndim == 1 and lon.ndim == 1:
-        # meshgrid
         lon, lat = np.meshgrid(lon, lat)
-    pts = np.column_stack([lon.ravel(), lat.ravel()])
-    # subsample for speed
-    if pts.shape[0] > 200000:
-        pts = pts[::10]
-    hull_poly = MultiPoint([tuple(p) for p in pts]).convex_hull
-    gdf = gpd.GeoDataFrame({"name": ["MRMS_exact"]}, geometry=[hull_poly], crs=CRS_WGS84)
+
+    valid = ~np.isnan(lat) & ~np.isnan(lon)
+    lonv, latv = lon[valid], lat[valid]
+    if lonv.size == 0:
+        print("[warn] No valid coordinates.")
+        return None
+    # Subsample if huge
+    if lonv.size > 500000:
+        step = int(lonv.size / 500000) + 1
+        lonv = lonv[::step]; latv = latv[::step]
+    hull = MultiPoint([tuple(p) for p in np.column_stack([lonv, latv])]).convex_hull
+    gdf = gpd.GeoDataFrame({"name": ["MRMS_exact"]}, geometry=[hull], crs=CRS_WGS84)
+    try:
+        gdf.to_file(EXACT_DOMAIN_CACHE, driver="GeoJSON")
+        print(f"[info] Cached exact MRMS polygon -> {EXACT_DOMAIN_CACHE}")
+    except Exception as e:
+        print(f"[warn] could not cache polygon: {e}")
+    print("[info] Derived exact MRMS convex hull polygon.")
     return gdf
 
 
-def mrms_polygon_from_aws(product: str = MRMS_PRODUCT) -> Optional[gpd.GeoDataFrame]:
-    if EXACT_MRMS_DOMAIN:
-        exact = mrms_polygon_exact(product)
-        if exact is not None:
-            return exact
-    # fallback original (bbox probe)
+def mrms_polygon_from_aws(product: str = MRMS_PRODUCT, exact: bool = False, force_refresh: bool = False) -> Optional[gpd.GeoDataFrame]:
+    if exact:
+        exact_poly = mrms_polygon_exact(product, force_refresh=force_refresh)
+        if exact_poly is not None:
+            return exact_poly
     if s3fs is None:
         print("[warn] s3fs is not installed. Falling back to bbox.")
         return None
-    try:
-        fs = s3fs.S3FileSystem(anon=True)
-        # List top-level keys to hint structure (does not download data)
-        # NOTE: The PDS layout can change; we only probe a few known prefixes and pick the first that exists.
-        prefixes = [
-            f"noaa-mrms-pds/{product}",
-            f"noaa-mrms-pds/CONUS/{product}",
-            f"noaa-mrms-pds/{product}_00.00",  # some products include sampling resolution in dir name
-            f"noaa-mrms-pds/CONUS/{product}_00.00",
-        ]
-        chosen = None
-        for p in prefixes:
-            if fs.exists(p):
-                chosen = p
-                break
-        if chosen is None:
-            print(f"[warn] Could not locate product directory for {product} in noaa-mrms-pds. Falling back to bbox.")
-            return None
-
-        # We won’t download full data. Instead, return a very rough, known domain polygon (same result as bbox).
-        # If you want exact outline from a grid’s valid-mask, we can add a netCDF/GRIB read here.
-        print(f"[info] Found AWS path: s3://{chosen}. Using standard CONUS bbox as coverage for now.")
-        return mrms_polygon_from_bbox()
-    except Exception as e:
-        print(f"[warn] AWS probe failed: {e}. Falling back to bbox.")
+    base = _locate_product_base(product)
+    if base is None:
+        print(f"[warn] Could not find product directory for {product}.")
         return None
+    print(f"[info] Using product base: s3://{base} (bbox fallback).")
+    return mrms_polygon_from_bbox()
 
 
 def compute_coverage(basins_wgs84: gpd.GeoDataFrame, mrms_poly_wgs84: gpd.GeoDataFrame) -> pd.DataFrame:
@@ -296,6 +384,23 @@ def report_unmatched(site_ids: List[str], basins: gpd.GeoDataFrame, out_csv: str
     print(f"[warn] Saved unmatched list -> {out_csv}")
 
 
+def _add_basemap_with_fallback(ax, crs):
+    try:
+        import contextily as ctx  # type: ignore
+    except Exception:
+        print("[info] contextily not installed; skipping basemap.")
+        return
+    for prov in FALLBACK_TILE_PROVIDERS:
+        try:
+            provider = eval(f"ctx.providers.{prov}") if "." in prov else getattr(ctx.providers, prov)
+            ctx.add_basemap(ax, crs=crs, source=provider, attribution=False)
+            print(f"[info] basemap OK: {prov}")
+            return
+        except Exception as e:
+            print(f"[warn] basemap provider {prov} failed: {e}")
+    print("[warn] all basemap providers failed; continuing without tiles.")
+
+
 def make_map(basins: gpd.GeoDataFrame,
              mrms_poly: gpd.GeoDataFrame,
              coverage_df: pd.DataFrame,
@@ -335,7 +440,7 @@ def make_map(basins: gpd.GeoDataFrame,
         # transform extent
         tmp = gpd.GeoSeries([box(minx, miny, maxx, maxy)], crs=CRS_WGS84).to_crs(3857).total_bounds
         minx_m, miny_m, maxx_m, maxy_m = tmp
-        fig, ax = plt.subplots(figsize=(11, 8), dpi=160)
+        fig, ax = plt.subplots(figsize=(11, 8), dpi=MAP_DPI)
         if states_merc is not None:
             states_merc.boundary.plot(ax=ax, linewidth=0.4, color="#555555", zorder=1)
         mrms_merc.boundary.plot(ax=ax, color=MRMS_EDGE_COLOR, linewidth=1.2, zorder=2)
@@ -357,7 +462,7 @@ def make_map(basins: gpd.GeoDataFrame,
         ax.set_ylim(miny_m, maxy_m)
         ax.set_axis_off()
     else:
-        fig, ax = plt.subplots(figsize=(11, 8), dpi=160)
+        fig, ax = plt.subplots(figsize=(11, 8), dpi=MAP_DPI)
         if states is not None and not states.empty:
             states.boundary.plot(ax=ax, linewidth=0.4, color="#777777", zorder=1)
         mrms_poly.boundary.plot(ax=ax, color=MRMS_EDGE_COLOR, linewidth=1.2, zorder=2)
@@ -392,12 +497,30 @@ def make_map(basins: gpd.GeoDataFrame,
     plt.close(fig)
 
 
+def _parse_cli():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--product", default=MRMS_PRODUCT, help="MRMS product name (e.g., RadarOnly_QPE_01H)")
+    ap.add_argument("--exact-domain", action="store_true", help="Derive exact MRMS domain from a recent GRIB2")
+    ap.add_argument("--refresh-exact", action="store_true", help="Force re-download even if cached polygon exists")
+    ap.add_argument("--no-basemap", action="store_true", help="Disable basemap even if contextily installed")
+    ap.add_argument("--dpi", type=int, default=MAP_DPI, help="Figure DPI")
+    ap.add_argument("--lookback-days", type=int, default=MAX_LOOKBACK_DAYS, help="Look back this many days for sample GRIB2")
+    return ap.parse_args()
+
 def main():
+    global ADD_BASEMAP, MAP_DPI, MRMS_PRODUCT, MAX_LOOKBACK_DAYS
+    args = _parse_cli()
+    MRMS_PRODUCT = args.product
+    ADD_BASEMAP = not args.no_basemap
+    MAP_DPI = args.dpi
+    MAX_LOOKBACK_DAYS = args.lookback_days
+
     ids = read_filtered_site_ids(FILTERED_CSV)
     print(f"[info] Filtered site_id count: {len(ids)} (from {FILTERED_CSV})")
     basins = load_camels_basins(CAMELS_SHP_DIR, ids)
-    report_unmatched(ids, basins, UNMATCHED_IDS_CSV)  # NEW
-    mrms_poly = mrms_polygon_from_aws(MRMS_PRODUCT) if USE_AWS_FOR_COVERAGE else None
+    report_unmatched(ids, basins, UNMATCHED_IDS_CSV)
+    mrms_poly = mrms_polygon_from_aws(MRMS_PRODUCT, exact=args.exact_domain, force_refresh=args.refresh_exact)
     if mrms_poly is None:
         mrms_poly = mrms_polygon_from_bbox()
     df_cov = compute_coverage(basins, mrms_poly)
