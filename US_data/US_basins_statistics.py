@@ -17,6 +17,8 @@ ATTR_DIR_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\attributes"
 OUT_FIG_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_climate_histograms.png"
 OUT_DESC_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_attribute_descriptions.csv"
 OUT_DATA_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_attribute_values_filtered.csv"  # NEW
+OUT_STATES_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_state_pies.png"  # NEW
+OUT_STATES_TABLE_DEFAULT = r"C:\PhD\Python\neuralhydrology\US_data\basin_state_distribution.csv"  # NEW
 
 ID_CANDIDATES = ["site_id", "STAID", "staid", "gage_id", "usgs_id", "site_no", "site_no_txt", "gageid", "station_id"]
 
@@ -438,6 +440,221 @@ def write_filtered_values_csv(attrs_sel: pd.DataFrame, labels: List[str], out_cs
     df_out.to_csv(out_csv, index=False)
     print(f"[saved] filtered basin values -> {out_csv}")
 
+# NEW -------------------------------------------------------------------------
+def extract_state_mapping(dfs: Dict[str, pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Return DataFrame(site_id, state) if a 'state' column exists in any attribute CSV."""
+    for fname, df in dfs.items():
+        if "state" in df.columns:
+            out = df[["site_id", "state"]].copy()
+            out["state"] = out["state"].astype(str).str.upper().str.strip()
+            print(f"[info] Using state data from {fname}")
+            return out
+    print("[WARN] No 'STATE' column found in attribute CSVs; skipping state pie chart.")
+    return None
+
+def plot_state_pies(state_sel: pd.Series,
+                    state_all: pd.Series,
+                    out_path: str,
+                    min_area: float,
+                    max_area: float):
+    """(Legacy) side-by-side pie charts (kept for optional use)."""
+    if state_sel.empty or state_all.empty:
+        print("[WARN] No state data to plot.")
+        return
+    # counts
+    cnt_all = state_all.value_counts().sort_values(ascending=False)
+    cnt_sel = state_sel.value_counts().sort_values(ascending=False)
+
+    # To keep pies readable, optionally aggregate very small slices
+    def aggregate(series: pd.Series, max_slices=15):
+        if len(series) <= max_slices:
+            return series
+        top = series.iloc[:max_slices-1]
+        other_sum = series.iloc[max_slices-1:].sum()
+        top.loc["OTHER"] = other_sum
+        return top
+
+    cnt_all_plot = aggregate(cnt_all)
+    cnt_sel_plot = aggregate(cnt_sel)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    colors_all = plt.cm.tab20(np.linspace(0, 1, len(cnt_all_plot)))
+    colors_sel = plt.cm.tab20c(np.linspace(0, 1, len(cnt_sel_plot)))
+
+    axes[0].pie(cnt_all_plot.values,
+                labels=cnt_all_plot.index,
+                autopct=lambda p: f"{p:.1f}%" if p >= 2 else "",
+                startangle=90,
+                colors=colors_all,
+                textprops={"fontsize": 8})
+    axes[0].set_title(f"All basins (N={cnt_all.sum()})")
+
+    axes[1].pie(cnt_sel_plot.values,
+                labels=cnt_sel_plot.index,
+                autopct=lambda p: f"{p:.1f}%" if p >= 2 else "",
+                startangle=90,
+                colors=colors_sel,
+                textprops={"fontsize": 8})
+    axes[1].set_title(f"Filtered basins (N={cnt_sel.sum()}, area {min_area:g}-{max_area:g} km²)")
+
+    fig.suptitle("Basin counts per US state (All vs Filtered)")
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200)
+    print(f"[saved] {out_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
+
+# NEW -------------------------------------------------------------------------
+def plot_state_rose(state_sel: pd.Series,
+                    state_all: pd.Series,
+                    out_path: str,
+                    min_area: float,
+                    max_area: float,
+                    top_k: int = 20):
+    """Single rose (radial bar) chart with FRACTIONS.
+    Shows top_k states by (all) basin count.
+    Outer light bars = fraction of all basins in each state.
+    Inner bold bars  = fraction of filtered basins in each state.
+    """
+    if state_sel.empty or state_all.empty:
+        print("[WARN] No state data to plot.")
+        return
+
+    cnt_all = state_all.value_counts().sort_values(ascending=False)
+    cnt_sel = state_sel.value_counts()
+
+    # Determine top_k states from ALL distribution for consistent ordering
+    top_k = max(1, top_k)
+    states = cnt_all.index[:top_k].tolist()
+    if len(states) < len(cnt_all):
+        print(f"[info] Using top {len(states)} states (of {len(cnt_all)}) for rose chart.")
+
+    # Fractions (probabilities) per dataset
+    frac_all = (cnt_all.loc[states] / cnt_all.sum()).astype(float)
+    # reindex to include missing states in filtered set
+    frac_sel = (cnt_sel.reindex(states).fillna(0) / cnt_sel.sum()).astype(float)
+
+    n = len(states)
+    if n == 0:
+        print("[WARN] No states to plot.")
+        return
+
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    width = (2 * np.pi / n) * 0.9
+
+    # Heights now fractions (0..1)
+    r_all = frac_all.values
+    r_sel = frac_sel.values
+
+    max_frac = float(max(r_all.max(), r_sel.max()))
+    ylim = max(0.05, max_frac * 1.15)
+
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, polar=True)
+
+    # Outer (all) bars
+    ax.bar(theta,
+           r_all,
+           width=width,
+           color="#999999",
+           alpha=0.35,
+           edgecolor="none",
+           label=f"All basins (N={cnt_all.sum()})")
+
+    # Inner (filtered) bars
+    ax.bar(theta,
+           r_sel,
+           width=width * 0.55,
+           color="#1f77b4",
+           alpha=0.85,
+           edgecolor="white",
+           linewidth=0.5,
+           label=f"Filtered (N={cnt_sel.sum()}, area {min_area:g}-{max_area:g} km²)")
+
+    # Labels (state codes) just outside outer bars
+    for ang, st, rv in zip(theta, states, r_all):
+        ax.text(ang,
+                rv + ylim * 0.03,
+                st,
+                rotation=np.degrees(ang),
+                rotation_mode="anchor",
+                ha="center",
+                va="center",
+                fontsize=8)
+
+    ax.set_ylim(0, ylim)
+    # Radial ticks as percentages (nice steps ~5%)
+    step = 0.05
+    if max_frac > 0.25:
+        step = 0.1
+    ticks = np.arange(0, ylim + 1e-9, step)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t*100:.0f}%" for t in ticks], fontsize=8)
+
+    ax.set_theta_direction(-1)
+    ax.set_theta_offset(np.pi / 2.0)
+    ax.grid(alpha=0.25)
+    ax.set_xticks([])
+
+    fig.suptitle("Basins per US State (Fractions) — All (outer light) vs Filtered (inner bold)", y=0.97)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.12), ncol=2, frameon=True, fontsize=9)
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    print(f"[saved] {out_path}")
+    try:
+        plt.show()
+    except Exception:
+        pass
+# -----------------------------------------------------------------------------
+
+
+# NEW -------------------------------------------------------------------------
+def write_state_distribution_csv(state_sel: pd.Series,
+                                 state_all: pd.Series,
+                                 out_csv: str):
+    """Write table with counts (N) and percentages per state for all vs filtered datasets.
+    Columns: state, N_all, pct_all, N_filtered, pct_filtered
+    Percent values are numeric (0–100).
+    """
+    if state_all.empty or state_sel.empty:
+        print("[WARN] Cannot write state distribution CSV (missing data).")
+        return
+    cnt_all = state_all.value_counts()
+    cnt_sel = state_sel.value_counts()
+    states = sorted(set(cnt_all.index).union(cnt_sel.index))
+    total_all = cnt_all.sum()
+    total_sel = cnt_sel.sum()
+
+    rows = []
+    for st in states:
+        Na = int(cnt_all.get(st, 0))
+        Nf = int(cnt_sel.get(st, 0))
+        pct_a = (Na / total_all * 100.0) if total_all else 0.0
+        pct_f = (Nf / total_sel * 100.0) if total_sel else 0.0
+        rows.append({
+            "state": st,
+            "N_all": Na,
+            "pct_all": pct_a,
+            "N_filtered": Nf,
+            "pct_filtered": pct_f
+        })
+    df = pd.DataFrame(rows)
+    df = df.sort_values(["N_all", "state"], ascending=[False, True])
+
+    # Optional: round percentages (adjust decimals if desired)
+    df["pct_all"] = df["pct_all"].round(2)
+    df["pct_filtered"] = df["pct_filtered"].round(2)
+
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    print(f"[saved] state distribution table -> {out_csv}")
+# -----------------------------------------------------------------------------
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iv-csv", default=IV_CSV_DEFAULT)
@@ -445,6 +662,14 @@ def main():
     ap.add_argument("--out-fig", default=OUT_FIG_DEFAULT)
     ap.add_argument("--out-desc", default=OUT_DESC_DEFAULT)
     ap.add_argument("--out-data", default=OUT_DATA_DEFAULT, help="CSV with per-basin values for plotted attributes (filtered)")  # NEW
+    ap.add_argument("--out-states", default=OUT_STATES_DEFAULT,
+                    help="Image for state distribution chart (pie or rose)")  # updated help
+    ap.add_argument("--out-states-csv", default=OUT_STATES_TABLE_DEFAULT,
+                    help="CSV with per-state counts and fractions (all vs filtered)")  # NEW
+    ap.add_argument("--state-chart", choices=["pie", "rose"], default="rose",
+                    help="Type of state comparison chart (default: rose)")
+    ap.add_argument("--state-top-k", type=int, default=20,
+                    help="Top K states (by all-basin count) to show in rose chart (default 20)")  # NEW
     ap.add_argument("--min-area", type=float)
     ap.add_argument("--max-area", type=float)
     ap.add_argument("--list-cols", action="store_true", help="List all available attribute columns and exit")
@@ -492,6 +717,20 @@ def main():
         min_area=min_a, max_area=max_a,
         n_samples_all=len(all_ids),
     )
+
+    # NEW: State chart selection
+    state_map = extract_state_mapping(dfs)
+    if state_map is not None:
+        state_all = state_map[state_map["site_id"].isin(all_ids)]["state"]
+        state_sel = state_map[state_map["site_id"].isin(filt["site_id"])]["state"]
+        if not state_sel.empty and not state_all.empty:
+            # Chart
+            if args.state_chart == "pie":
+                plot_state_pies(state_sel, state_all, args.out_states, min_a, max_a)
+            else:
+                plot_state_rose(state_sel, state_all, args.out_states, min_a, max_a, top_k=args.state_top_k)
+            # CSV export
+            write_state_distribution_csv(state_sel, state_all, args.out_states_csv)
 
     # NEW: write per-basin values (filtered set)
     write_filtered_values_csv(attrs_sel, labels_used, args.out_data)
