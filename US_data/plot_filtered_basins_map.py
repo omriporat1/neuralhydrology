@@ -369,9 +369,9 @@ def main():
         # Generate combined horizontal figure with 3 subplots
         print("\n[combined] Generating 3-panel horizontal figure")
         combined_attrs = [
-            ("Drainage Area (km²)", "area_km2", "viridis", "km²"),
-            ("Mean Annual Precipitation", "p-mean", "Blues", "mm/year"),
-            ("Basin Slope (%)", "slope_pct", "copper", "%"),
+            ("Drainage Area", "area_km2", "viridis", "km²"),
+            ("Mean Annual Precipitation", "p-mean", "YlGnBu", "mm/year"),
+            ("Basin Slope", "slope_pct", "copper", "%"),
         ]
         
         # A4 width is ~8.27 inches, third of height is ~3.9 inches
@@ -401,11 +401,12 @@ def main():
             # Adjust color scales for better visualization
             if attr_col == "area_km2":
                 # Use log scale for drainage area (wide range)
-                vmin, vmax = np.log10(gdf_sub[attr_col].quantile(0.01)), np.log10(gdf_sub[attr_col].quantile(0.99))
-                gdf_sub_plot = gdf_sub.copy()
-                gdf_sub_plot["area_log"] = np.log10(gdf_sub[attr_col])
-                gdf_sub_plot.plot(ax=ax, column="area_log", cmap=cmap, edgecolor="none", 
-                                linewidth=0, alpha=0.9, vmin=vmin, vmax=vmax, legend=False)
+                vmin_orig = gdf_sub[attr_col].quantile(0.01)
+                vmax_orig = max(gdf_sub[attr_col].quantile(0.99), 1000)  # Ensure vmax is at least 1000
+                gdf_sub.plot(ax=ax, column=attr_col, cmap=cmap, edgecolor="none", 
+                           linewidth=0, alpha=0.9, vmin=vmin_orig, vmax=vmax_orig, 
+                           legend=False, norm=plt.matplotlib.colors.LogNorm(vmin=vmin_orig, vmax=vmax_orig))
+                vmin, vmax = vmin_orig, vmax_orig  # Store for colorbar
             elif attr_col == "p-mean":
                 # Clip extremes for precipitation (saturate top 1%)
                 vmin, vmax = gdf_sub[attr_col].quantile(0.01), gdf_sub[attr_col].quantile(0.99)
@@ -423,12 +424,14 @@ def main():
             
             # Add colorbar
             if attr_col == "area_km2":
-                sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
+                # Use LogNorm for drainage area colorbar
+                from matplotlib.colors import LogNorm
+                from matplotlib.ticker import FixedLocator
+                sm = plt.cm.ScalarMappable(cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
                 sm.set_array([])
                 cbar = plt.colorbar(sm, ax=ax, pad=0.02, fraction=0.046)
-                # Convert log ticks back to original scale
-                tick_locs = cbar.get_ticks()
-                cbar.set_ticklabels([f"{10**t:.0f}" for t in tick_locs])
+                # Set explicit ticks at 10, 100, 1000
+                cbar.ax.yaxis.set_major_locator(FixedLocator([10, 100, 1000]))
                 cbar.ax.tick_params(labelsize=8)
                 cbar.set_label(units, fontsize=9, fontweight="bold")
             else:
@@ -444,13 +447,10 @@ def main():
                 conus_boundary = gdf_states.dissolve()
                 conus_boundary.plot(ax=ax, facecolor="none", edgecolor="#000000", linewidth=0.3, zorder=10)
             
-            # Add subplot label (a), (b), (c)
+            # Add subplot label (a), (b), (c) to left of title
             subplot_labels = ['(a)', '(b)', '(c)']
-            ax.text(0.02, 0.98, subplot_labels[idx], transform=ax.transAxes, 
-                   fontsize=11, fontweight='bold', va='top', ha='left',
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='none', alpha=0.8))
-            
-            ax.set_title(attr_label, fontsize=10, fontweight="bold", pad=8)
+            title_with_label = f"{subplot_labels[idx]} {attr_label}"
+            ax.set_title(title_with_label, fontsize=10, fontweight="bold", pad=8, loc='left')
             ax.set_xlabel("Longitude", fontsize=8)
             ax.set_ylabel("Latitude", fontsize=8)
             ax.tick_params(labelsize=7)
@@ -463,7 +463,7 @@ def main():
         
         plt.tight_layout()
         combined_path = out_dir / f"{out_stem}_combined_3panel.png"
-        plt.savefig(combined_path, dpi=300, bbox_inches="tight")
+        plt.savefig(combined_path, dpi=600, bbox_inches="tight")
         print(f"[saved] {combined_path}")
         plt.close()
 
