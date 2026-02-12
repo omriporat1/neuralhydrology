@@ -13,43 +13,27 @@ from src.flash_metrics import event_peak_comparison
 
 
 def summarize_events(df: pd.DataFrame) -> dict[str, float]:
-    """Summarize per-event comparison table into a few robust stats."""
     if df.empty:
-        return {
-            "recall": np.nan,
-            "med_rel_err": np.nan,
-            "p90_rel_err": np.nan,
-            "p10_rel_err": np.nan,
-            "med_dt_min": np.nan,
-            "p90_abs_dt_min": np.nan,
-        }
+        return {}
 
     detected = df["detected"].astype(bool)
-    recall = float(detected.mean())
+    extreme = df["extreme_preserved"].astype(bool)
 
     rel = df.loc[detected, "rel_peak_error"].dropna()
     dt = df.loc[detected, "dt_minutes"].dropna()
+    slope = df.loc[detected, "slope_ratio"].dropna()
 
-    out = {"recall": recall}
+    return {
+        "recall": float(detected.mean()),
+        "extreme_recall": float(extreme.mean()),
+        "med_rel_err": float(rel.median()) if len(rel) else np.nan,
+        "p90_rel_err": float(rel.quantile(0.9)) if len(rel) else np.nan,
+        "med_dt_min": float(dt.median()) if len(dt) else np.nan,
+        "p90_abs_dt_min": float(dt.abs().quantile(0.9)) if len(dt) else np.nan,
+        "med_slope_ratio": float(slope.median()) if len(slope) else np.nan,
+        "p10_slope_ratio": float(slope.quantile(0.1)) if len(slope) else np.nan,
+    }
 
-    if len(rel):
-        out.update({
-            "med_rel_err": float(rel.median()),
-            "p90_rel_err": float(rel.quantile(0.90)),
-            "p10_rel_err": float(rel.quantile(0.10)),
-        })
-    else:
-        out.update({"med_rel_err": np.nan, "p90_rel_err": np.nan, "p10_rel_err": np.nan})
-
-    if len(dt):
-        out.update({
-            "med_dt_min": float(dt.median()),
-            "p90_abs_dt_min": float(dt.abs().quantile(0.90)),
-        })
-    else:
-        out.update({"med_dt_min": np.nan, "p90_abs_dt_min": np.nan})
-
-    return out
 
 
 def main():
@@ -58,7 +42,7 @@ def main():
     max_tries = 200
     seed = 123
 
-    pot_quantile = 0.95
+    pot_quantile = 0.99
     min_separation = "12h"
 
     # hourly definitions
@@ -108,8 +92,17 @@ def main():
                 raise RuntimeError(f"Too few events detected (n={n_events})")
 
             # Compare event peaks
-            comp_nearest = event_peak_comparison(q_hi, q_hourly_nearest, events, search_window=search_window)
-            comp_mean = event_peak_comparison(q_hi, q_hourly_mean, events, search_window=search_window)
+            comp_nearest = event_peak_comparison(
+                q_hi, q_hourly_nearest, events,
+                search_window=search_window,
+                hourly_quantile=pot_quantile
+            )
+
+            comp_mean = event_peak_comparison(
+                q_hi, q_hourly_mean, events,
+                search_window=search_window,
+                hourly_quantile=pot_quantile
+            )
 
             s_near = summarize_events(comp_nearest)
             s_mean = summarize_events(comp_mean)
@@ -129,20 +122,26 @@ def main():
                 "iv_dt_mode_min": dt_mode_min,
 
                 # nearest hourly
-                "recall_nearest": s_near["recall"],
-                "med_rel_err_nearest": s_near["med_rel_err"],
-                "p10_rel_err_nearest": s_near["p10_rel_err"],
-                "p90_rel_err_nearest": s_near["p90_rel_err"],
-                "med_dt_min_nearest": s_near["med_dt_min"],
-                "p90_abs_dt_min_nearest": s_near["p90_abs_dt_min"],
+                "recall_nearest": s_near.get("recall"),
+                "extreme_recall_nearest": s_near.get("extreme_recall"),
+                "med_rel_err_nearest": s_near.get("med_rel_err"),
+                "p90_rel_err_nearest": s_near.get("p90_rel_err"),
+                "med_dt_min_nearest": s_near.get("med_dt_min"),
+                "p90_abs_dt_min_nearest": s_near.get("p90_abs_dt_min"),
+                "med_slope_ratio_nearest": s_near.get("med_slope_ratio"),
+                "p10_slope_ratio_nearest": s_near.get("p10_slope_ratio"),
+
 
                 # mean hourly
-                "recall_mean": s_mean["recall"],
-                "med_rel_err_mean": s_mean["med_rel_err"],
-                "p10_rel_err_mean": s_mean["p10_rel_err"],
-                "p90_rel_err_mean": s_mean["p90_rel_err"],
-                "med_dt_min_mean": s_mean["med_dt_min"],
-                "p90_abs_dt_min_mean": s_mean["p90_abs_dt_min"],
+                "recall_mean": s_mean.get("recall"),
+                "extreme_recall_mean": s_mean.get("extreme_recall"),
+                "med_rel_err_mean": s_mean.get("med_rel_err"),
+                "p90_rel_err_mean": s_mean.get("p90_rel_err"),
+                "med_dt_min_mean": s_mean.get("med_dt_min"),
+                "p90_abs_dt_min_mean": s_mean.get("p90_abs_dt_min"),
+                "med_slope_ratio_mean": s_mean.get("med_slope_ratio"),
+                "p10_slope_ratio_mean": s_mean.get("p10_slope_ratio"),
+
 
                 "status": "ok",
                 "error": None,
@@ -191,10 +190,36 @@ def main():
     ok = df[df["status"] == "ok"].copy()
     if len(ok):
         print("\n=== Summary across successful gauges ===")
-        for col in ["recall_nearest", "med_rel_err_nearest", "p90_rel_err_nearest", "p90_abs_dt_min_nearest",
-                    "recall_mean", "med_rel_err_mean", "p90_rel_err_mean", "p90_abs_dt_min_mean"]:
-            s = ok[col].astype(float)
-            print(f"{col}: median={s.median():.4f}  p10={s.quantile(0.10):.4f}  p90={s.quantile(0.90):.4f}")
+
+        summary_cols = [
+            # Detection
+            "recall_nearest",
+            "extreme_recall_nearest",
+            "recall_mean",
+            "extreme_recall_mean",
+
+            # Peak magnitude
+            "med_rel_err_nearest",
+            "p90_rel_err_nearest",
+            "med_rel_err_mean",
+            "p90_rel_err_mean",
+
+            # Timing
+            "p90_abs_dt_min_nearest",
+            "p90_abs_dt_min_mean",
+
+            # Flashiness
+            "med_slope_ratio_nearest",
+            "p10_slope_ratio_nearest",
+            "med_slope_ratio_mean",
+            "p10_slope_ratio_mean",
+        ]
+
+        for col in summary_cols:
+            if col in ok.columns:
+                s = ok[col].astype(float)
+                print(f"{col}: median={s.median():.4f}  p10={s.quantile(0.10):.4f}  p90={s.quantile(0.90):.4f}")
+
 
 
 if __name__ == "__main__":

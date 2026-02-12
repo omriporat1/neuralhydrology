@@ -12,7 +12,10 @@ def to_hourly_candidates(q_iv: pd.Series, nearest_tolerance: str = "10min") -> d
       - can be irregular (missing 15-min points)
       - may be tz-aware (recommended)
 
-    Returns dict: name -> hourly pd.Series with hourly timestamps at the start of each hour.
+    Returns dict: name -> hourly pd.Series.
+    - Aggregates (median/max/min/first/last) are labeled at the start of each hour [t, t+1h).
+    - mean is centered: timestamp t represents ~[t-30min, t+30min).
+    - nearest_* is sampled at exact hour stamps (t).
     """
     if not isinstance(q_iv.index, pd.DatetimeIndex):
         raise TypeError("q_iv must have a DatetimeIndex")
@@ -24,7 +27,15 @@ def to_hourly_candidates(q_iv: pd.Series, nearest_tolerance: str = "10min") -> d
     r = q.resample("1h", label="left", closed="left")
 
     candidates: dict[str, pd.Series] = {}
-    candidates["mean"] = r.mean()
+    
+    # Centered 1-hour mean: timestamp t represents approximately [t-30min, t+30min)
+    mean_centered = (
+        q.resample("1h", label="right", closed="right")
+        .mean()
+    )
+    mean_centered.index = mean_centered.index - pd.Timedelta("30min")
+    
+    candidates["mean"] = mean_centered
     candidates["median"] = r.median()
     candidates["max"] = r.max()
     candidates["min"] = r.min()
