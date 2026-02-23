@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-02-23T12:16:27.185063Z",
+  "metadata": {
+    "config": {
+      "sample_start": "2023-01-01T00:00:00",
+      "sample_end": "2023-01-01T23:59:59.999999",
+      "full_start": "2014-01-01T00:00:00",
+      "full_end": "2025-12-31T23:59:59.999999",
+      "region": "conus_bbox",
+      "out_dir": "data\\sample",
+      "report_dir": "reports",
+      "variables": [
+        "precip",
+        "temp_2m",
+        "humidity",
+        "wind_10m",
+        "surface_pressure",
+        "shortwave_down",
+        "soil_moisture_top",
+        "swe_or_snow_depth"
+      ],
+      "include_longwave_stage2": true,
+      "derived_dtype": "float32",
+      "derived_format": "parquet",
+      "scratch_multiplier": 1.5,
+      "n_basins": 9000,
+      "concurrency": 1,
+      "dry_run": false,
+      "mrms_backend": "aws",
+      "mrms_debug_listing": false
+    },
+    "ratio_info": {
+      "parquet_ratio_by_source": {
+        "mrms_qpe_1h_pass1": 3.0
+      }
+    }
+  },
+  "sources": [
+    {
+      "source": "mrms_qpe_1h_pass1",
+      "sample_range": "2023-01-01 to 2023-01-01",
+      "sample_files": 24,
+      "raw_sample_bytes": 15273171,
+      "raw_hot_bytes": 29095390755,
+      "derived_hot_bytes": 11360736000,
+      "raw_cold_bytes": 29095390755,
+      "peak_local_bytes": 43643086132,
+      "notes": "OK",
+      "assumptions": {
+        "region": "CONUS bbox only",
+        "cadence": "hourly",
+        "variables": [
+          "precip"
+        ],
+        "server_side_subset": true,
+        "notes": "AWS MRMS CONUS product; listing filtered by timestamp in keys."
+      }
+    }
+  ]
+}

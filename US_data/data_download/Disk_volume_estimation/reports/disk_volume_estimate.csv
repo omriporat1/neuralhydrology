@@ -1,0 +1,2 @@
+source,sample_range,sample_files,raw_sample_bytes,raw_hot_bytes,derived_hot_bytes,raw_cold_bytes,peak_local_bytes,notes,assumptions
+mrms_qpe_1h_pass1,2023-01-01 to 2023-01-01,24,15273171,29095390755,11360736000,29095390755,43643086132,OK,"{'region': 'CONUS bbox only', 'cadence': 'hourly', 'variables': ['precip'], 'server_side_subset': True, 'notes': 'AWS MRMS CONUS product; listing filtered by timestamp in keys.'}"
