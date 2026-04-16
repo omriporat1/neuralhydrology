@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--mrms-debug-listing", action="store_true")
 	parser.add_argument("--range-mode", default="mrms_aligned", choices=["mrms_aligned", "source_full"])
 	parser.add_argument("--make-preview", default="false", choices=["true", "false"])
+	parser.add_argument(
+		"--gfs-max-lead",
+		type=int,
+		default=24,
+		help="Maximum GFS forecast lead hour per cycle (default: 24).",
+	)
 	parser.add_argument("--benchmark-concurrency", default="")
 	return parser
 
@@ -110,6 +116,7 @@ def main() -> None:
 		mrms_debug_listing=args.mrms_debug_listing,
 		range_mode=args.range_mode,
 		make_preview=str(args.make_preview).lower() == "true",
+		gfs_max_lead=args.gfs_max_lead,
 	)
 
 	benchmark_levels = _parse_benchmark_concurrency(args.benchmark_concurrency)

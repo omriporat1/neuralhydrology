@@ -12,6 +12,7 @@ import time
 import numpy as np
 
 from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region
+from src.datasources.gfs import GfsAwsConusDataSource
 from src.datasources.mrms import MrmsAwsQpe1hPass1, MrmsDataSource
 from src.datasources.rtma import RtmaAwsConusDataSource
 from src.derived_size import calibrate_parquet_ratio
@@ -41,6 +42,7 @@ class Config:
 	mrms_debug_listing: bool
 	range_mode: str
 	make_preview: bool
+	gfs_max_lead: int
 
 
 @dataclass
@@ -51,9 +53,11 @@ class EstimateResult:
 	raw_sample_bytes: Optional[int]
 	raw_sample_full_file_bytes: Optional[int]
 	raw_sample_selected_bytes: Optional[int]
+	raw_sample_selected_conus_bytes: Optional[int]
 	raw_hot_bytes: Optional[int]
 	raw_hot_full_file_bytes: Optional[int]
 	raw_hot_selected_bytes: Optional[int]
+	raw_hot_selected_conus_bytes: Optional[int]
 	derived_hot_bytes: Optional[int]
 	raw_cold_bytes: Optional[int]
 	peak_local_bytes: Optional[int]
@@ -85,14 +89,19 @@ class BenchmarkResult:
 
 def get_enabled_sources(config: Config) -> list[DataSource]:
 	if config.mrms_backend == "planetary":
-		return [MrmsDataSource(), RtmaAwsConusDataSource(download_concurrency=config.concurrency)]
+		return [
+			MrmsDataSource(),
+			RtmaAwsConusDataSource(download_concurrency=config.concurrency),
+			GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
+		]
 	return [
 		MrmsAwsQpe1hPass1(
 			debug_listing=config.mrms_debug_listing,
 			download_concurrency=config.concurrency,
 		)
 		,
-		RtmaAwsConusDataSource(download_concurrency=config.concurrency)
+		RtmaAwsConusDataSource(download_concurrency=config.concurrency),
+		GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
 	]
 
 
@@ -171,6 +180,8 @@ def _generate_mrms_preview(sample_files: list[Path], report_dir: Path, source_na
 		return
 
 	try:
+		import matplotlib
+		matplotlib.use("Agg")
 		import matplotlib.pyplot as plt
 	except Exception as exc:  # noqa: BLE001
 		LOGGER.warning("MRMS preview skipped (matplotlib unavailable): %s", exc)
@@ -257,6 +268,8 @@ def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_na
 		return {}
 
 	try:
+		import matplotlib
+		matplotlib.use("Agg")
 		import matplotlib.pyplot as plt
 	except Exception as exc:  # noqa: BLE001
 		LOGGER.warning("RTMA preview skipped (matplotlib unavailable): %s", exc)
@@ -304,6 +317,122 @@ def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_na
 		return {}
 
 
+def _crop_gfs_to_conus(arr: np.ndarray, coords) -> np.ndarray:
+	lat = coords.get("latitude") if "latitude" in coords else coords.get("lat")
+	lon = coords.get("longitude") if "longitude" in coords else coords.get("lon")
+	if lat is None or lon is None:
+		return arr
+
+	lat_arr = np.asarray(lat.values)
+	lon_arr = np.asarray(lon.values)
+	if lat_arr.ndim == 1 and lon_arr.ndim == 1:
+		lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
+	else:
+		lat_grid = lat_arr
+		lon_grid = lon_arr
+	lon_grid = np.where(lon_grid > 180.0, lon_grid - 360.0, lon_grid)
+	lon_min, lat_min, lon_max, lat_max = CONUS_BBOX.bbox
+	mask = (
+		(lat_grid >= lat_min)
+		& (lat_grid <= lat_max)
+		& (lon_grid >= lon_min)
+		& (lon_grid <= lon_max)
+	)
+	if mask.shape != arr.shape:
+		return arr
+	row_idx = np.where(mask.any(axis=1))[0]
+	col_idx = np.where(mask.any(axis=0))[0]
+	if row_idx.size == 0 or col_idx.size == 0:
+		return arr
+	return arr[row_idx.min():row_idx.max() + 1, col_idx.min():col_idx.max() + 1]
+
+
+def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
+	import cfgrib
+
+	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
+	var_map: dict[str, np.ndarray] = {}
+	timestamp_str = "unknown_time"
+	try:
+		for ds in datasets:
+			for var_name in ds.data_vars:
+				da = ds[var_name]
+				arr = np.asarray(da.values)
+				arr = np.squeeze(arr)
+				if arr.ndim != 2:
+					continue
+				arr = _crop_gfs_to_conus(arr, da.coords)
+				if arr.size == 0:
+					continue
+				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
+				if short_name in {"2t", "tmp", "t2m"} and "TMP" not in var_map:
+					var_map["TMP"] = arr
+				if short_name in {"10u", "ugrd", "u10"} and "UGRD" not in var_map:
+					var_map["UGRD"] = arr
+				if short_name in {"prate", "apcp"} and "PRATE" not in var_map:
+					var_map["PRATE"] = arr
+				if timestamp_str == "unknown_time":
+					time_coord = ds[var_name].coords.get("time")
+					if time_coord is not None:
+						time_item = np.asarray(time_coord.values).reshape(-1)[0]
+						timestamp_str = str(time_item)
+	finally:
+		for ds in datasets:
+			ds.close()
+	return var_map, timestamp_str
+
+
+def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
+	if not sample_files:
+		return {}
+
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("GFS preview skipped (matplotlib unavailable): %s", exc)
+		return {}
+
+	preview_dir = report_dir / "preview"
+	preview_dir.mkdir(parents=True, exist_ok=True)
+	preview_source = sample_files[0]
+
+	try:
+		var_map, timestamp_str = _read_gfs_variable_arrays(preview_source)
+		target_vars = ["TMP", "UGRD", "PRATE"]
+
+		qc_summary: dict[str, dict[str, float]] = {}
+		for var_name in target_vars:
+			if var_name not in var_map:
+				continue
+			arr = var_map[var_name]
+			stats = _qc_stats(arr)
+			qc_summary[var_name] = stats
+			print(
+				"GFS QC "
+				f"{var_name}: min={stats['min']:.6g}, max={stats['max']:.6g}, "
+				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+			)
+
+			fig, ax = plt.subplots(figsize=(8, 5))
+			image = ax.imshow(arr, origin="lower")
+			fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
+			ax.set_xlabel("x")
+			ax.set_ylabel("y")
+			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
+			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
+			fig.tight_layout()
+			fig.savefig(out_path, dpi=150)
+			plt.close(fig)
+
+		return qc_summary
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("GFS preview generation failed and was skipped: %s", exc)
+		return {}
+
+
 def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 	ratio_info: dict = {"parquet_ratio_by_source": {}, "preview_qc_by_source": {}}
 	results: list[EstimateResult] = []
@@ -318,6 +447,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["precip"]
 		if source.name == "rtma_conus_aws_2p5km":
 			source_variables = ["TMP", "SPFH_or_DPT", "UGRD", "VGRD", "PRES"]
+		if source.name == "gfs_conus_aws_0p25":
+			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
 		objects = source.list_sample_objects(
 			start=config.sample_start,
 			end=config.sample_end,
@@ -335,6 +466,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["precip"]
 		if source.name == "rtma_conus_aws_2p5km":
 			source_variables = ["TMP", "SPFH_or_DPT", "UGRD", "VGRD", "PRES"]
+		if source.name == "gfs_conus_aws_0p25":
+			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
 		if config.derived_format == "parquet":
 			ratio_info["parquet_ratio_by_source"][source.name] = calibrate_parquet_ratio(
 				n_vars=len(source_variables),
@@ -397,9 +530,11 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					raw_sample_bytes=None,
 					raw_sample_full_file_bytes=None,
 					raw_sample_selected_bytes=None,
+					raw_sample_selected_conus_bytes=None,
 					raw_hot_bytes=None,
 					raw_hot_full_file_bytes=None,
 					raw_hot_selected_bytes=None,
+					raw_hot_selected_conus_bytes=None,
 					derived_hot_bytes=None,
 					raw_cold_bytes=None,
 					peak_local_bytes=None,
@@ -429,9 +564,11 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					raw_sample_bytes=None,
 					raw_sample_full_file_bytes=None,
 					raw_sample_selected_bytes=None,
+					raw_sample_selected_conus_bytes=None,
 					raw_hot_bytes=None,
 					raw_hot_full_file_bytes=None,
 					raw_hot_selected_bytes=None,
+					raw_hot_selected_conus_bytes=None,
 					derived_hot_bytes=None,
 					raw_cold_bytes=None,
 					peak_local_bytes=None,
@@ -459,6 +596,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			else:
 				full_sample_bytes = None
 			selected_sample_bytes = None
+			selected_conus_sample_bytes = None
 		else:
 			files = source.download_sample(config.out_dir / source.name, objects)
 			if config.make_preview and source.name == "mrms_qpe_1h_pass1":
@@ -469,12 +607,29 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					config.report_dir,
 					source.name,
 				)
+			if config.make_preview and source.name == "gfs_conus_aws_0p25":
+				ratio_info["preview_qc_by_source"][source.name] = _generate_gfs_preview(
+					files,
+					config.report_dir,
+					source.name,
+				)
 			full_sample_bytes = source.measure_bytes(files)
+			if hasattr(source, "measure_full_file_sample_bytes"):
+				full_candidate = source.measure_full_file_sample_bytes(objects)
+				if full_candidate is not None:
+					full_sample_bytes = full_candidate
 			selected_sample_bytes = None
-			if source.name == "rtma_conus_aws_2p5km" and hasattr(source, "measure_selected_variable_bytes"):
+			if hasattr(source, "measure_selected_variable_bytes"):
 				selected_sample_bytes, _ = source.measure_selected_variable_bytes(files, objects)
+			selected_conus_sample_bytes = None
+			if hasattr(source, "measure_selected_conus_bytes"):
+				selected_conus_sample_bytes, _ = source.measure_selected_conus_bytes(files, config.region)
 
-		sample_bytes = selected_sample_bytes if selected_sample_bytes is not None else full_sample_bytes
+		sample_bytes = (
+			selected_conus_sample_bytes
+			if selected_conus_sample_bytes is not None
+			else (selected_sample_bytes if selected_sample_bytes is not None else full_sample_bytes)
+		)
 
 		raw_hot_full = (
 			source.estimate_raw_total(
@@ -500,8 +655,22 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			else None
 		)
 
+		raw_hot_selected_conus = (
+			source.estimate_raw_total(
+				sample_bytes=selected_conus_sample_bytes,
+				sample_start=config.sample_start,
+				sample_end=config.sample_end,
+				full_start=effective_start,
+				full_end=effective_end,
+			)
+			if selected_conus_sample_bytes is not None
+			else None
+		)
+
 		raw_hot = (
-			raw_hot_selected if raw_hot_selected is not None else raw_hot_full
+			raw_hot_selected_conus
+			if raw_hot_selected_conus is not None
+			else (raw_hot_selected if raw_hot_selected is not None else raw_hot_full)
 		)
 
 		derived_spec = DerivedSpec(
@@ -529,9 +698,11 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				raw_sample_bytes=sample_bytes,
 				raw_sample_full_file_bytes=full_sample_bytes,
 				raw_sample_selected_bytes=selected_sample_bytes,
+				raw_sample_selected_conus_bytes=selected_conus_sample_bytes,
 				raw_hot_bytes=raw_hot,
 				raw_hot_full_file_bytes=raw_hot_full,
 				raw_hot_selected_bytes=raw_hot_selected,
+				raw_hot_selected_conus_bytes=raw_hot_selected_conus,
 				derived_hot_bytes=derived_hot,
 				raw_cold_bytes=raw_cold,
 				peak_local_bytes=peak_local,
@@ -546,8 +717,17 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				notes=(
 					("OK" if sample_bytes is not None else "Missing sample bytes (dry-run without file:size).")
 					+ (
-						" Using RTMA selected-variable raw estimate."
-						if source.name == "rtma_conus_aws_2p5km" and raw_hot_selected is not None
+						" Using selected-CONUS raw estimate."
+						if raw_hot_selected_conus is not None
+						else (
+							" Using selected-variable raw estimate."
+							if raw_hot_selected is not None
+							else ""
+						)
+					)
+					+ (
+						" CONUS crop is local."
+						if source.name == "gfs_conus_aws_0p25" and raw_hot_selected_conus is not None
 						else ""
 					)
 					+ f" Totals based on {config.range_mode} range."

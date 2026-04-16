@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-04-16T10:17:19.007239Z",
+  "generated_at": "2026-04-16T12:52:43.311245Z",
   "metadata": {
     "config": {
       "sample_start": "2023-01-01T00:00:00",
-      "sample_end": "2023-01-01T23:59:59.999999",
+      "sample_end": "2023-01-01T00:00:00",
       "full_start": "2014-01-01T00:00:00",
       "full_end": "2025-12-31T23:59:59.999999",
       "region": "conus_bbox",
@@ -24,35 +24,80 @@
       "derived_format": "parquet",
       "scratch_multiplier": 1.5,
       "n_basins": 9000,
-      "concurrency": 16,
+      "concurrency": 8,
       "dry_run": false,
       "mrms_backend": "aws",
       "mrms_debug_listing": false,
       "range_mode": "mrms_aligned",
-      "make_preview": false
+      "make_preview": true,
+      "gfs_max_lead": 24
     },
     "ratio_info": {
       "parquet_ratio_by_source": {
         "mrms_qpe_1h_pass1": 1.0,
-        "rtma_conus_aws_2p5km": 1.0
+        "rtma_conus_aws_2p5km": 1.0,
+        "gfs_conus_aws_0p25": 1.0
       },
-      "preview_qc_by_source": {}
+      "preview_qc_by_source": {
+        "rtma_conus_aws_2p5km": {
+          "TMP": {
+            "min": 251.1699981689453,
+            "max": 302.2300109863281,
+            "mean": 280.95419222240963,
+            "nan_pct": 0.0
+          },
+          "UGRD": {
+            "min": -12.430000305175781,
+            "max": 27.31999969482422,
+            "mean": 1.0472634795807234,
+            "nan_pct": 0.0
+          },
+          "SPFH": {
+            "min": 0.0005460000247694552,
+            "max": 0.021081000566482544,
+            "mean": 0.006965709102991109,
+            "nan_pct": 0.0
+          }
+        },
+        "gfs_conus_aws_0p25": {
+          "TMP": {
+            "min": 255.77804565429688,
+            "max": 299.8580322265625,
+            "mean": 282.99812073827235,
+            "nan_pct": 0.0
+          },
+          "UGRD": {
+            "min": -8.330536842346191,
+            "max": 17.249462127685547,
+            "mean": 1.1104939117328667,
+            "nan_pct": 0.0
+          },
+          "PRATE": {
+            "min": 0.0,
+            "max": 0.004393999930471182,
+            "mean": 4.998115781734755e-05,
+            "nan_pct": 0.0
+          }
+        }
+      }
     }
   },
   "sources": [
     {
       "source": "mrms_qpe_1h_pass1",
       "sample_range": "2023-01-01 to 2023-01-01",
-      "sample_files": 24,
-      "raw_sample_bytes": 15273171,
-      "raw_sample_full_file_bytes": 15273171,
+      "sample_files": 1,
+      "raw_sample_bytes": 782377,
+      "raw_sample_full_file_bytes": 782377,
       "raw_sample_selected_bytes": null,
-      "raw_hot_bytes": 29095390755,
-      "raw_hot_full_file_bytes": 29095390755,
+      "raw_sample_selected_conus_bytes": null,
+      "raw_hot_bytes": 35770276440,
+      "raw_hot_full_file_bytes": 35770276440,
       "raw_hot_selected_bytes": null,
+      "raw_hot_selected_conus_bytes": null,
       "derived_hot_bytes": 1645920000,
-      "raw_cold_bytes": 29095390755,
-      "peak_local_bytes": 43643086132,
+      "raw_cold_bytes": 35770276440,
+      "peak_local_bytes": 53655414660,
       "source_available_start": "2020-10-14T00:00:00",
       "source_available_end": "2026-04-16T23:59:59",
       "mrms_available_start": "2020-10-14T00:00:00",
@@ -75,16 +120,18 @@
     {
       "source": "rtma_conus_aws_2p5km",
       "sample_range": "2023-01-01 to 2023-01-01",
-      "sample_files": 24,
-      "raw_sample_bytes": 927374101,
-      "raw_sample_full_file_bytes": 2017190581,
-      "raw_sample_selected_bytes": 927374101,
-      "raw_hot_bytes": 1766647662405,
-      "raw_hot_full_file_bytes": 3842748056805,
-      "raw_hot_selected_bytes": 1766647662405,
+      "sample_files": 1,
+      "raw_sample_bytes": 38855143,
+      "raw_sample_full_file_bytes": 84264163,
+      "raw_sample_selected_bytes": 38855143,
+      "raw_sample_selected_conus_bytes": null,
+      "raw_hot_bytes": 1776457137960,
+      "raw_hot_full_file_bytes": 3852557532360,
+      "raw_hot_selected_bytes": 1776457137960,
+      "raw_hot_selected_conus_bytes": null,
       "derived_hot_bytes": 8229600000,
-      "raw_cold_bytes": 1766647662405,
-      "peak_local_bytes": 2649971493607,
+      "raw_cold_bytes": 1776457137960,
+      "peak_local_bytes": 2664685706940,
       "source_available_start": "2013-03-19T00:00:00",
       "source_available_end": "2026-04-16T23:59:59",
       "mrms_available_start": "2020-10-14T00:00:00",
@@ -93,7 +140,7 @@
       "effective_end": "2025-12-31T23:59:59.999999",
       "range_mode": "mrms_aligned",
       "covers_effective_range": true,
-      "notes": "OK Using RTMA selected-variable raw estimate. Totals based on mrms_aligned range.",
+      "notes": "OK Using selected-variable raw estimate. Totals based on mrms_aligned range.",
       "assumptions": {
         "backend": "AWS noaa-rtma-pds",
         "region": "CONUS rtma2p5 archive",
@@ -116,6 +163,55 @@
           "unavailable": "Could not derive selected message bytes."
         },
         "notes": "Using rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp analysis files."
+      }
+    },
+    {
+      "source": "gfs_conus_aws_0p25",
+      "sample_range": "2023-01-01 to 2023-01-01",
+      "sample_files": 25,
+      "raw_sample_bytes": 20041560,
+      "raw_sample_full_file_bytes": 13251319282,
+      "raw_sample_selected_bytes": 163232804,
+      "raw_sample_selected_conus_bytes": 20041560,
+      "raw_hot_bytes": 146383554240,
+      "raw_hot_full_file_bytes": 96787636035728,
+      "raw_hot_selected_bytes": 1192252400416,
+      "raw_hot_selected_conus_bytes": 146383554240,
+      "derived_hot_bytes": 11043648000,
+      "raw_cold_bytes": 146383554240,
+      "peak_local_bytes": 219575331360,
+      "source_available_start": "2021-01-01T00:00:00",
+      "source_available_end": "2026-04-16T23:59:59",
+      "mrms_available_start": "2020-10-14T00:00:00",
+      "mrms_available_end": "2026-04-16T23:59:59",
+      "effective_start": "2021-01-01T00:00:00",
+      "effective_end": "2025-12-31T23:59:59.999999",
+      "range_mode": "mrms_aligned",
+      "covers_effective_range": true,
+      "notes": "OK Using selected-CONUS raw estimate. CONUS crop is local. Totals based on mrms_aligned range.",
+      "assumptions": {
+        "backend": "AWS noaa-gfs-bdp-pds",
+        "region": "CONUS forcing workflow",
+        "cadence": "forecast cycles 00/06/12/18 with hourly leads",
+        "max_lead_h": 24,
+        "variables_included": [
+          "PRATE_surface",
+          "TMP_2m",
+          "RH_2m",
+          "UGRD_10m",
+          "VGRD_10m",
+          "PRMSL_msl",
+          "DSWRF_surface"
+        ],
+        "subsetting": "message-level selected-variable extraction via .idx + S3 Range",
+        "selected_raw_bytes_mode": "server_side_range",
+        "selected_conus_raw_bytes_mode": "local_spatial_crop",
+        "spatial_crop": {
+          "server_side": false,
+          "local": true,
+          "method": "Local bbox crop on selected-variable grids before byte accounting."
+        },
+        "notes": "Selected-variable bytes are server-side range extracted; CONUS crop accounting is local."
       }
     }
   ]

@@ -49,7 +49,9 @@ def print_table(results: Iterable[EstimateResult]) -> None:
 	console = Console()
 	rows = list(results)
 	show_split_raw = any(
-		result.raw_hot_full_file_bytes is not None or result.raw_hot_selected_bytes is not None
+		result.raw_hot_full_file_bytes is not None
+		or result.raw_hot_selected_bytes is not None
+		or getattr(result, "raw_hot_selected_conus_bytes", None) is not None
 		for result in rows
 	)
 	table = Table(title="Disk Volume Estimate")
@@ -66,9 +68,14 @@ def print_table(results: Iterable[EstimateResult]) -> None:
 
 	for result in rows:
 		if show_split_raw:
+			selected_value = (
+				getattr(result, "raw_hot_selected_conus_bytes", None)
+				or result.raw_hot_selected_bytes
+				or result.raw_hot_bytes
+			)
 			table.add_row(
 				result.source,
-				humanize_bytes(result.raw_hot_selected_bytes or result.raw_hot_bytes),
+				humanize_bytes(selected_value),
 				humanize_bytes(result.raw_hot_full_file_bytes),
 				humanize_bytes(result.derived_hot_bytes),
 				humanize_bytes(result.raw_cold_bytes),
