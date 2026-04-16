@@ -47,23 +47,43 @@ def write_json(results: Iterable[EstimateResult], report_dir: Path, metadata: di
 
 def print_table(results: Iterable[EstimateResult]) -> None:
 	console = Console()
+	rows = list(results)
+	show_split_raw = any(
+		result.raw_hot_full_file_bytes is not None or result.raw_hot_selected_bytes is not None
+		for result in rows
+	)
 	table = Table(title="Disk Volume Estimate")
 	table.add_column("Source")
-	table.add_column("RAW-HOT")
+	if show_split_raw:
+		table.add_column("RAW-HOT(selected)")
+		table.add_column("RAW-HOT(full)")
+	else:
+		table.add_column("RAW-HOT")
 	table.add_column("DERIVED-HOT")
 	table.add_column("RAW-COLD")
 	table.add_column("PEAK-LOCAL")
 	table.add_column("Notes")
 
-	for result in results:
-		table.add_row(
-			result.source,
-			humanize_bytes(result.raw_hot_bytes),
-			humanize_bytes(result.derived_hot_bytes),
-			humanize_bytes(result.raw_cold_bytes),
-			humanize_bytes(result.peak_local_bytes),
-			result.notes,
-		)
+	for result in rows:
+		if show_split_raw:
+			table.add_row(
+				result.source,
+				humanize_bytes(result.raw_hot_selected_bytes or result.raw_hot_bytes),
+				humanize_bytes(result.raw_hot_full_file_bytes),
+				humanize_bytes(result.derived_hot_bytes),
+				humanize_bytes(result.raw_cold_bytes),
+				humanize_bytes(result.peak_local_bytes),
+				result.notes,
+			)
+		else:
+			table.add_row(
+				result.source,
+				humanize_bytes(result.raw_hot_bytes),
+				humanize_bytes(result.derived_hot_bytes),
+				humanize_bytes(result.raw_cold_bytes),
+				humanize_bytes(result.peak_local_bytes),
+				result.notes,
+			)
 
 	console.print(table)
 

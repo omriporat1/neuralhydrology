@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-16T07:25:45.526402Z",
+  "generated_at": "2026-04-16T10:17:19.007239Z",
   "metadata": {
     "config": {
       "sample_start": "2023-01-01T00:00:00",
@@ -24,17 +24,19 @@
       "derived_format": "parquet",
       "scratch_multiplier": 1.5,
       "n_basins": 9000,
-      "concurrency": 8,
+      "concurrency": 16,
       "dry_run": false,
       "mrms_backend": "aws",
       "mrms_debug_listing": false,
       "range_mode": "mrms_aligned",
-      "make_preview": true
+      "make_preview": false
     },
     "ratio_info": {
       "parquet_ratio_by_source": {
-        "mrms_qpe_1h_pass1": 1.0
-      }
+        "mrms_qpe_1h_pass1": 1.0,
+        "rtma_conus_aws_2p5km": 1.0
+      },
+      "preview_qc_by_source": {}
     }
   },
   "sources": [
@@ -43,7 +45,11 @@
       "sample_range": "2023-01-01 to 2023-01-01",
       "sample_files": 24,
       "raw_sample_bytes": 15273171,
+      "raw_sample_full_file_bytes": 15273171,
+      "raw_sample_selected_bytes": null,
       "raw_hot_bytes": 29095390755,
+      "raw_hot_full_file_bytes": 29095390755,
+      "raw_hot_selected_bytes": null,
       "derived_hot_bytes": 1645920000,
       "raw_cold_bytes": 29095390755,
       "peak_local_bytes": 43643086132,
@@ -64,6 +70,52 @@
         ],
         "server_side_subset": true,
         "notes": "AWS MRMS CONUS product; listing filtered by timestamp in keys."
+      }
+    },
+    {
+      "source": "rtma_conus_aws_2p5km",
+      "sample_range": "2023-01-01 to 2023-01-01",
+      "sample_files": 24,
+      "raw_sample_bytes": 927374101,
+      "raw_sample_full_file_bytes": 2017190581,
+      "raw_sample_selected_bytes": 927374101,
+      "raw_hot_bytes": 1766647662405,
+      "raw_hot_full_file_bytes": 3842748056805,
+      "raw_hot_selected_bytes": 1766647662405,
+      "derived_hot_bytes": 8229600000,
+      "raw_cold_bytes": 1766647662405,
+      "peak_local_bytes": 2649971493607,
+      "source_available_start": "2013-03-19T00:00:00",
+      "source_available_end": "2026-04-16T23:59:59",
+      "mrms_available_start": "2020-10-14T00:00:00",
+      "mrms_available_end": "2026-04-16T23:59:59",
+      "effective_start": "2020-10-14T00:00:00",
+      "effective_end": "2025-12-31T23:59:59.999999",
+      "range_mode": "mrms_aligned",
+      "covers_effective_range": true,
+      "notes": "OK Using RTMA selected-variable raw estimate. Totals based on mrms_aligned range.",
+      "assumptions": {
+        "backend": "AWS noaa-rtma-pds",
+        "region": "CONUS rtma2p5 archive",
+        "cadence": "hourly",
+        "variables_included": [
+          "TMP",
+          "SPFH_or_DPT",
+          "UGRD",
+          "VGRD",
+          "PRES"
+        ],
+        "optional_variable_if_available": [
+          "TCDC"
+        ],
+        "subsetting": "message-level byte accounting enabled",
+        "selected_raw_bytes_mode": "server_side_range",
+        "selected_raw_bytes_mode_notes": {
+          "server_side_range": "Computed from .idx offsets and S3 Range byte windows.",
+          "local_message_scan": "Computed from local GRIB message totalLength values.",
+          "unavailable": "Could not derive selected message bytes."
+        },
+        "notes": "Using rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp analysis files."
       }
     }
   ]
