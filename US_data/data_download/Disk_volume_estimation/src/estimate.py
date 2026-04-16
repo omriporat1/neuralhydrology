@@ -8,17 +8,31 @@ from pathlib import Path
 import tempfile
 from typing import Optional
 import time
+import warnings
 
 import numpy as np
 
 from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region
 from src.datasources.gfs import GfsAwsConusDataSource
+from src.datasources.ifs import IfsMarsDataSource
 from src.datasources.mrms import MrmsAwsQpe1hPass1, MrmsDataSource
 from src.datasources.rtma import RtmaAwsConusDataSource
 from src.derived_size import calibrate_parquet_ratio
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _suppress_cfgrib_merge_futurewarning() -> None:
+	warnings.filterwarnings(
+		"ignore",
+		message=(
+			r"In a future version of xarray the default value for compat will change "
+			r"from compat='no_conflicts' to compat='override'.*"
+		),
+		category=FutureWarning,
+		module=r"cfgrib\.xarray_store",
+	)
 
 
 @dataclass(frozen=True)
@@ -43,6 +57,7 @@ class Config:
 	range_mode: str
 	make_preview: bool
 	gfs_max_lead: int
+	ifs_max_lead: int
 
 
 @dataclass
@@ -93,6 +108,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 			MrmsDataSource(),
 			RtmaAwsConusDataSource(download_concurrency=config.concurrency),
 			GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
+			IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
 		]
 	return [
 		MrmsAwsQpe1hPass1(
@@ -102,6 +118,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 		,
 		RtmaAwsConusDataSource(download_concurrency=config.concurrency),
 		GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
+		IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
 	]
 
 
@@ -150,6 +167,7 @@ def _extract_precip_grid(file_path: Path) -> tuple[np.ndarray, str, str]:
 			) from exc
 
 		try:
+			_suppress_cfgrib_merge_futurewarning()
 			ds = xr.open_dataset(work_path, engine="cfgrib", backend_kwargs={"indexpath": ""})
 			try:
 				var_name = next(iter(ds.data_vars))
@@ -215,6 +233,7 @@ def _generate_mrms_preview(sample_files: list[Path], report_dir: Path, source_na
 def _read_rtma_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
 	import cfgrib
 
+	_suppress_cfgrib_merge_futurewarning()
 	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
@@ -350,6 +369,7 @@ def _crop_gfs_to_conus(arr: np.ndarray, coords) -> np.ndarray:
 def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
 	import cfgrib
 
+	_suppress_cfgrib_merge_futurewarning()
 	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
@@ -433,6 +453,92 @@ def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_nam
 		return {}
 
 
+def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
+	import cfgrib
+
+	_suppress_cfgrib_merge_futurewarning()
+	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
+	var_map: dict[str, np.ndarray] = {}
+	timestamp_str = "unknown_time"
+	try:
+		for ds in datasets:
+			for var_name in ds.data_vars:
+				arr = np.asarray(ds[var_name].values)
+				arr = np.squeeze(arr)
+				if arr.ndim == 3:
+					# IFS cycle files contain multiple lead times; use first lead for quick-look preview.
+					arr = arr[0, :, :]
+				if arr.ndim != 2:
+					continue
+				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
+				if short_name in {"2t", "t2m", "tmp"} and "TMP" not in var_map:
+					var_map["TMP"] = arr
+				if short_name in {"10u", "u10", "ugrd"} and "UGRD" not in var_map:
+					var_map["UGRD"] = arr
+				if short_name in {"tp", "prate", "apcp"} and "TP" not in var_map:
+					var_map["TP"] = arr
+				if timestamp_str == "unknown_time":
+					time_coord = ds[var_name].coords.get("time")
+					if time_coord is not None:
+						time_item = np.asarray(time_coord.values).reshape(-1)[0]
+						timestamp_str = str(time_item)
+	finally:
+		for ds in datasets:
+			ds.close()
+	return var_map, timestamp_str
+
+
+def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
+	if not sample_files:
+		return {}
+
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("IFS preview skipped (matplotlib unavailable): %s", exc)
+		return {}
+
+	preview_dir = report_dir / "preview"
+	preview_dir.mkdir(parents=True, exist_ok=True)
+	preview_source = sample_files[0]
+
+	try:
+		var_map, timestamp_str = _read_ifs_variable_arrays(preview_source)
+		target_vars = ["TMP", "UGRD", "TP"]
+
+		qc_summary: dict[str, dict[str, float]] = {}
+		for var_name in target_vars:
+			if var_name not in var_map:
+				continue
+			arr = var_map[var_name]
+			stats = _qc_stats(arr)
+			qc_summary[var_name] = stats
+			print(
+				"IFS QC "
+				f"{var_name}: min={stats['min']:.6g}, max={stats['max']:.6g}, "
+				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+			)
+
+			fig, ax = plt.subplots(figsize=(8, 5))
+			image = ax.imshow(arr, origin="lower")
+			fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
+			ax.set_xlabel("x")
+			ax.set_ylabel("y")
+			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
+			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
+			fig.tight_layout()
+			fig.savefig(out_path, dpi=150)
+			plt.close(fig)
+
+		return qc_summary
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("IFS preview generation failed and was skipped: %s", exc)
+		return {}
+
+
 def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 	ratio_info: dict = {"parquet_ratio_by_source": {}, "preview_qc_by_source": {}}
 	results: list[EstimateResult] = []
@@ -449,6 +555,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["TMP", "SPFH_or_DPT", "UGRD", "VGRD", "PRES"]
 		if source.name == "gfs_conus_aws_0p25":
 			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
+		if source.name == "ifs_mars_conus":
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
 		objects = source.list_sample_objects(
 			start=config.sample_start,
 			end=config.sample_end,
@@ -468,6 +576,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["TMP", "SPFH_or_DPT", "UGRD", "VGRD", "PRES"]
 		if source.name == "gfs_conus_aws_0p25":
 			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
+		if source.name == "ifs_mars_conus":
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
 		if config.derived_format == "parquet":
 			ratio_info["parquet_ratio_by_source"][source.name] = calibrate_parquet_ratio(
 				n_vars=len(source_variables),
@@ -609,6 +719,12 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				)
 			if config.make_preview and source.name == "gfs_conus_aws_0p25":
 				ratio_info["preview_qc_by_source"][source.name] = _generate_gfs_preview(
+					files,
+					config.report_dir,
+					source.name,
+				)
+			if config.make_preview and source.name == "ifs_mars_conus":
+				ratio_info["preview_qc_by_source"][source.name] = _generate_ifs_preview(
 					files,
 					config.report_dir,
 					source.name,

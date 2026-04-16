@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
 		default=24,
 		help="Maximum GFS forecast lead hour per cycle (default: 24).",
 	)
+	parser.add_argument(
+		"--ifs-max-lead",
+		type=int,
+		default=24,
+		help="Maximum IFS forecast lead hour per cycle (default: 24).",
+	)
 	parser.add_argument("--benchmark-concurrency", default="")
 	return parser
 
@@ -117,6 +123,7 @@ def main() -> None:
 		range_mode=args.range_mode,
 		make_preview=str(args.make_preview).lower() == "true",
 		gfs_max_lead=args.gfs_max_lead,
+		ifs_max_lead=args.ifs_max_lead,
 	)
 
 	benchmark_levels = _parse_benchmark_concurrency(args.benchmark_concurrency)

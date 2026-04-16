@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-16T12:52:43.311245Z",
+  "generated_at": "2026-04-16T14:21:44.553545Z",
   "metadata": {
     "config": {
       "sample_start": "2023-01-01T00:00:00",
@@ -24,19 +24,21 @@
       "derived_format": "parquet",
       "scratch_multiplier": 1.5,
       "n_basins": 9000,
-      "concurrency": 8,
+      "concurrency": 4,
       "dry_run": false,
       "mrms_backend": "aws",
       "mrms_debug_listing": false,
       "range_mode": "mrms_aligned",
       "make_preview": true,
-      "gfs_max_lead": 24
+      "gfs_max_lead": 24,
+      "ifs_max_lead": 24
     },
     "ratio_info": {
       "parquet_ratio_by_source": {
         "mrms_qpe_1h_pass1": 1.0,
         "rtma_conus_aws_2p5km": 1.0,
-        "gfs_conus_aws_0p25": 1.0
+        "gfs_conus_aws_0p25": 1.0,
+        "ifs_mars_conus": 1.0
       },
       "preview_qc_by_source": {
         "rtma_conus_aws_2p5km": {
@@ -78,7 +80,8 @@
             "mean": 4.998115781734755e-05,
             "nan_pct": 0.0
           }
-        }
+        },
+        "ifs_mars_conus": {}
       }
     }
   },
@@ -212,6 +215,66 @@
           "method": "Local bbox crop on selected-variable grids before byte accounting."
         },
         "notes": "Selected-variable bytes are server-side range extracted; CONUS crop accounting is local."
+      }
+    },
+    {
+      "source": "ifs_mars_conus",
+      "sample_range": "2023-01-01 to 2023-01-01",
+      "sample_files": 1,
+      "raw_sample_bytes": 8875650,
+      "raw_sample_full_file_bytes": 8875650,
+      "raw_sample_selected_bytes": 8875650,
+      "raw_sample_selected_conus_bytes": 8875650,
+      "raw_hot_bytes": 67632453000,
+      "raw_hot_full_file_bytes": 67632453000,
+      "raw_hot_selected_bytes": 67632453000,
+      "raw_hot_selected_conus_bytes": 67632453000,
+      "derived_hot_bytes": 11521440000,
+      "raw_cold_bytes": 67632453000,
+      "peak_local_bytes": 101448679500,
+      "source_available_start": null,
+      "source_available_end": null,
+      "mrms_available_start": "2020-10-14T00:00:00",
+      "mrms_available_end": "2026-04-16T23:59:59",
+      "effective_start": "2020-10-14T00:00:00",
+      "effective_end": "2025-12-31T23:59:59.999999",
+      "range_mode": "mrms_aligned",
+      "covers_effective_range": true,
+      "notes": "OK Using selected-CONUS raw estimate. Totals based on mrms_aligned range.",
+      "assumptions": {
+        "backend": "ECMWF MARS via ecmwfapi",
+        "region": "CONUS bbox server-side area crop",
+        "cadence": "forecast cycles 00/06/12/18 with hourly leads",
+        "max_lead_h": 24,
+        "variables_included": [
+          "TP",
+          "2T",
+          "2D",
+          "10U",
+          "10V",
+          "SP",
+          "SSRD"
+        ],
+        "subsetting": "server-side variable + spatial subset in MARS request",
+        "selected_raw_bytes_mode": "server_side_variable_and_spatial_subset",
+        "selected_conus_raw_bytes_mode": "server_side_spatial_subset",
+        "mars_area": "50/-126/24/-66",
+        "mars_grid": "0.25/0.25",
+        "mars_param": "228.128/167.128/168.128/165.128/166.128/134.128/169.128",
+        "request_example": {
+          "class": "od",
+          "stream": "oper",
+          "type": "fc",
+          "levtype": "sfc",
+          "date": "2023-01-01",
+          "time": "00:00:00",
+          "step": "0/to/24/by/1",
+          "param": "228.128/167.128/168.128/165.128/166.128/134.128/169.128",
+          "area": "50/-126/24/-66",
+          "grid": "0.25/0.25",
+          "target": "data\\sample\\ifs_mars_conus\\ifs_20230101_00.grib"
+        },
+        "notes": "Sample object listing is simulated because MARS has no listing API in this workflow."
       }
     }
   ]
