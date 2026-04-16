@@ -4,8 +4,8 @@ import argparse
 from datetime import datetime, time
 from pathlib import Path
 
-from src.estimate import Config, config_to_dict, default_region, run_estimation
-from src.report import print_table, write_csv, write_json
+from src.estimate import Config, benchmark_mrms_aws_concurrency, config_to_dict, default_region, run_estimation
+from src.report import print_benchmark_table, print_table, write_benchmark_csv, write_csv, write_json
 
 
 def _parse_datetime(value: str, end_of_day: bool = False) -> datetime:
@@ -30,11 +30,27 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--derived-format", default="parquet")
 	parser.add_argument("--scratch-multiplier", type=float, default=1.5)
 	parser.add_argument("--n-basins", type=int, default=9000)
-	parser.add_argument("--concurrency", type=int, default=1)
+	parser.add_argument(
+		"--concurrency",
+		type=int,
+		default=16,
+		help="Download worker count (default: 16). For MRMS AWS bulk downloads, current recommended setting is 32.",
+	)
 	parser.add_argument("--dry-run", action="store_true")
 	parser.add_argument("--mrms-backend", default="aws", choices=["aws", "planetary"])
 	parser.add_argument("--mrms-debug-listing", action="store_true")
+	parser.add_argument("--range-mode", default="mrms_aligned", choices=["mrms_aligned", "source_full"])
+	parser.add_argument("--make-preview", default="false", choices=["true", "false"])
+	parser.add_argument("--benchmark-concurrency", default="")
 	return parser
+
+
+def _parse_benchmark_concurrency(value: str) -> list[int]:
+	if not value.strip():
+		return []
+	levels = [int(v.strip()) for v in value.split(",") if v.strip()]
+	levels = [v for v in levels if v > 0]
+	return sorted(set(levels))
 
 
 def _parse_vars(value: str) -> list[str]:
@@ -92,7 +108,18 @@ def main() -> None:
 		dry_run=args.dry_run,
 		mrms_backend=args.mrms_backend,
 		mrms_debug_listing=args.mrms_debug_listing,
+		range_mode=args.range_mode,
+		make_preview=str(args.make_preview).lower() == "true",
 	)
+
+	benchmark_levels = _parse_benchmark_concurrency(args.benchmark_concurrency)
+	if benchmark_levels:
+		results, recommended = benchmark_mrms_aws_concurrency(config, benchmark_levels)
+		print_benchmark_table(results)
+		csv_path = write_benchmark_csv(results, config.report_dir)
+		print(f"Benchmark CSV saved: {csv_path}")
+		print(f"Recommended default concurrency based on best MB/s: {recommended}")
+		return
 
 	results, ratio_info = run_estimation(config)
 	print_table(results)

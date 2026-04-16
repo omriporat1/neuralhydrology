@@ -10,7 +10,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from src.estimate import EstimateResult
+from src.estimate import BenchmarkResult, EstimateResult
 
 
 def humanize_bytes(value: int | None) -> str:
@@ -63,6 +63,45 @@ def print_table(results: Iterable[EstimateResult]) -> None:
 			humanize_bytes(result.raw_cold_bytes),
 			humanize_bytes(result.peak_local_bytes),
 			result.notes,
+		)
+
+	console.print(table)
+
+
+def write_benchmark_csv(results: Iterable[BenchmarkResult], report_dir: Path) -> Path:
+	report_dir.mkdir(parents=True, exist_ok=True)
+	rows = [asdict(result) for result in results]
+	path = report_dir / "mrms_aws_concurrency_benchmark.csv"
+	pd.DataFrame(rows).to_csv(path, index=False)
+	return path
+
+
+def print_benchmark_table(results: Iterable[BenchmarkResult]) -> None:
+	console = Console()
+	table = Table(title="MRMS AWS Concurrency Benchmark")
+	table.add_column("Concurrency")
+	table.add_column("Wall Time (s)")
+	table.add_column("Files")
+	table.add_column("Bytes")
+	table.add_column("Files/s")
+	table.add_column("MB/s")
+	table.add_column("Retries")
+	table.add_column("Warnings")
+	table.add_column("Avg File (s)")
+	table.add_column("P90 File (s)")
+
+	for result in results:
+		table.add_row(
+			str(result.concurrency),
+			f"{result.total_wall_time_s:.2f}",
+			str(result.files_downloaded),
+			str(result.total_bytes),
+			f"{result.files_per_s:.3f}",
+			f"{result.mb_per_s:.3f}",
+			str(result.retry_count),
+			str(result.warning_count),
+			f"{result.avg_file_time_s:.3f}",
+			f"{result.p90_file_time_s:.3f}",
 		)
 
 	console.print(table)

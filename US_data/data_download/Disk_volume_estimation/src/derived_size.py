@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import tempfile
 from typing import Dict, Tuple
 
@@ -24,6 +25,7 @@ class DerivedSpec:
 
 
 _PARQUET_RATIO_CACHE: Dict[Tuple[int, str], float] = {}
+LOGGER = logging.getLogger(__name__)
 
 
 def _timesteps_inclusive(start: datetime, end: datetime, temporal_resolution: str) -> int:
@@ -60,8 +62,18 @@ def calibrate_parquet_ratio(n_vars: int, dtype: str) -> float:
 		pq.write_table(table, tmp_path, compression="snappy")
 		parquet_bytes = tmp_path.stat().st_size
 
-	raw_bytes = n_rows * n_vars * _dtype_bytes(dtype)
+	n_columns = len(df.columns)
+	bytes_per_value = _dtype_bytes(dtype)
+	raw_bytes = n_rows * n_columns * bytes_per_value
 	ratio = parquet_bytes / raw_bytes if raw_bytes else 1.0
+	if ratio > 1.0:
+		LOGGER.warning(
+			"Parquet ratio > 1 detected (parquet_bytes=%s, raw_bytes=%s, ratio=%.4f). Clamping to 1.0.",
+			parquet_bytes,
+			raw_bytes,
+			ratio,
+		)
+		ratio = 1.0
 	_PARQUET_RATIO_CACHE[cache_key] = ratio
 	return ratio
 

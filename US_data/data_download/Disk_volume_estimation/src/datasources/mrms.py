@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+import time
 
 import boto3
 import httpx
@@ -153,13 +155,25 @@ class MrmsAwsQpe1hPass1(DataSource):
 	name = "mrms_qpe_1h_pass1"
 	temporal_resolution = "hourly"
 
-	def __init__(self, config: Optional[MrmsAwsConfig] = None, debug_listing: bool = False) -> None:
+	def __init__(
+		self,
+		config: Optional[MrmsAwsConfig] = None,
+		debug_listing: bool = False,
+		download_concurrency: int = 4,
+	) -> None:
 		self.config = config or MrmsAwsConfig()
 		self.debug_listing = debug_listing
+		self.download_concurrency = max(1, download_concurrency)
 		self._product_prefix: Optional[str] = None
 		self._available_start: Optional[datetime] = None
 		self._available_end: Optional[datetime] = None
 		self._date_prefix_format: Optional[str] = None
+		self._s3_client_cached = None
+		self._retry_count: int = 0
+		self._warning_count: int = 0
+		self._last_file_times: list[float] = []
+		self._last_total_download_time: float = 0.0
+		self._last_listing_time: float = 0.0
 
 	def list_sample_objects(
 		self,
@@ -172,6 +186,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 		if region.name != CONUS_BBOX.name:
 			raise ValueError("MRMS AWS implementation currently supports only CONUS bbox.")
 
+		listing_started = time.perf_counter()
 		s3 = self._s3_client()
 		try:
 			product_prefix = self._discover_product_prefix(s3)
@@ -200,18 +215,46 @@ class MrmsAwsQpe1hPass1(DataSource):
 					)
 				)
 
-		return sorted(objects, key=lambda obj: obj.datetime)
+		objects = sorted(objects, key=lambda obj: obj.datetime)
+		listing_seconds = time.perf_counter() - listing_started
+		self._last_listing_time = listing_seconds
+		print(
+			"MRMS AWS timing: "
+			f"listing_time={listing_seconds:.2f}s, sample_objects={len(objects)}"
+		)
+		return objects
 
 	def download_sample(self, out_dir: Path, objects: list[RemoteObject]) -> list[Path]:
 		s3 = self._s3_client()
 		out_dir.mkdir(parents=True, exist_ok=True)
+		if not objects:
+			return []
+
+		total_started = time.perf_counter()
+		self._retry_count = 0
+		self._warning_count = 0
 		paths: list[Path] = []
-		for obj in tqdm(objects, desc="Downloading MRMS AWS sample", unit="file"):
-			bucket, key = self._parse_s3_url(obj.url)
-			out_path = out_dir / obj.key
-			out_path.parent.mkdir(parents=True, exist_ok=True)
-			self._download_s3_object(s3, bucket, key, out_path)
-			paths.append(out_path)
+		file_times: list[float] = []
+		with ThreadPoolExecutor(max_workers=self.download_concurrency) as executor:
+			futures = [
+				executor.submit(self._download_one_object_timed, s3, out_dir, obj)
+				for obj in objects
+			]
+			for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading MRMS AWS sample", unit="file"):
+				out_path, file_seconds = future.result()
+				paths.append(out_path)
+				file_times.append(file_seconds)
+				print(f"MRMS AWS timing: file={out_path.name} download_time={file_seconds:.3f}s")
+
+		total_seconds = time.perf_counter() - total_started
+		self._last_file_times = list(file_times)
+		self._last_total_download_time = total_seconds
+		avg_seconds = sum(file_times) / len(file_times) if file_times else 0.0
+		print(
+			"MRMS AWS timing summary: "
+			f"files={len(paths)}, total_download_time={total_seconds:.2f}s, "
+			f"avg_file_download_time={avg_seconds:.3f}s, concurrency={self.download_concurrency}"
+		)
 		return paths
 
 	def measure_bytes(self, files: Iterable[Path]) -> int:
@@ -258,7 +301,47 @@ class MrmsAwsQpe1hPass1(DataSource):
 		}
 
 	def _s3_client(self):
-		return boto3.client("s3", config=BotoConfig(signature_version=UNSIGNED))
+		if self._s3_client_cached is None:
+			self._s3_client_cached = boto3.client("s3", config=BotoConfig(signature_version=UNSIGNED))
+		return self._s3_client_cached
+
+	@staticmethod
+	def _log_retry_attempt(retry_state) -> None:
+		instance = retry_state.args[0] if retry_state.args else None
+		if isinstance(instance, MrmsAwsQpe1hPass1):
+			instance._retry_count += 1
+			instance._warning_count += 1
+		attempt = retry_state.attempt_number
+		next_sleep = retry_state.next_action.sleep if retry_state.next_action else None
+		exc = retry_state.outcome.exception() if retry_state.outcome else None
+		print(
+			"MRMS AWS retry: "
+			f"attempt={attempt}, backoff_s={next_sleep}, error={exc}"
+		)
+
+	@retry(
+		stop=stop_after_attempt(3),
+		wait=wait_exponential(multiplier=1, min=1, max=10),
+		before_sleep=_log_retry_attempt,
+	)
+	def _download_s3_object(self, s3, bucket: str, key: str, out_path: Path) -> None:
+		response = s3.get_object(Bucket=bucket, Key=key)
+		body = response["Body"]
+		with out_path.open("wb") as f:
+			while True:
+				chunk = body.read(8 * 1024 * 1024)
+				if not chunk:
+					break
+				f.write(chunk)
+
+	def _download_one_object_timed(self, s3, out_dir: Path, obj: RemoteObject) -> tuple[Path, float]:
+		bucket, key = self._parse_s3_url(obj.url)
+		out_path = out_dir / obj.key
+		out_path.parent.mkdir(parents=True, exist_ok=True)
+		started = time.perf_counter()
+		self._download_s3_object(s3, bucket, key, out_path)
+		elapsed = time.perf_counter() - started
+		return out_path, elapsed
 
 	def _discover_product_prefix(self, s3) -> str:
 		if self._product_prefix is not None:
@@ -477,16 +560,6 @@ class MrmsAwsQpe1hPass1(DataSource):
 			return datetime.strptime(stamp, "%Y%m%d%H%M%S")
 		except ValueError:
 			return None
-
-	def _download_s3_object(self, s3, bucket: str, key: str, out_path: Path) -> None:
-		response = s3.get_object(Bucket=bucket, Key=key)
-		body = response["Body"]
-		with out_path.open("wb") as f:
-			while True:
-				chunk = body.read(1024 * 1024)
-				if not chunk:
-					break
-				f.write(chunk)
 
 	@staticmethod
 	def _parse_s3_url(url: str) -> tuple[str, str]:
