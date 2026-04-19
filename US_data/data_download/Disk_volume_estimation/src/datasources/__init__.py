@@ -1,10 +1,11 @@
 """Datasources.
 
-TODO: Implement USGS, IMERG, GDAS datasources.
+TODO: Implement USGS, IMERG datasources.
 """
 
 from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
 from src.datasources.era5_landt import Era5LandTDataSource
+from src.datasources.gdas import GdasAwsAntecedentDataSource
 from src.datasources.gfs import GfsAwsConusDataSource
 from src.datasources.ifs import IfsMarsDataSource
 from src.datasources.mrms import MrmsAwsQpe1hPass1, MrmsDataSource
@@ -22,4 +23,5 @@ __all__ = [
 	"GfsAwsConusDataSource",
 	"IfsMarsDataSource",
 	"Era5LandTDataSource",
+	"GdasAwsAntecedentDataSource",
 ]
