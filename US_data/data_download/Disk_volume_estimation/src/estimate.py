@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 import gzip
 import logging
 from pathlib import Path
@@ -13,6 +13,7 @@ import warnings
 import numpy as np
 
 from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region
+from src.datasources.era5_landt import Era5LandTDataSource
 from src.datasources.gfs import GfsAwsConusDataSource
 from src.datasources.ifs import IfsMarsDataSource
 from src.datasources.mrms import MrmsAwsQpe1hPass1, MrmsDataSource
@@ -33,7 +34,6 @@ def _suppress_cfgrib_merge_futurewarning() -> None:
 		category=FutureWarning,
 		module=r"cfgrib\.xarray_store",
 	)
-
 
 @dataclass(frozen=True)
 class Config:
@@ -82,6 +82,10 @@ class EstimateResult:
 	mrms_available_end: Optional[str]
 	effective_start: Optional[str]
 	effective_end: Optional[str]
+	effective_prediction_start: Optional[str]
+	effective_prediction_end: Optional[str]
+	era5_land_required_data_start: Optional[str]
+	era5_land_required_data_end: Optional[str]
 	range_mode: str
 	covers_effective_range: bool
 	notes: str
@@ -109,6 +113,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 			RtmaAwsConusDataSource(download_concurrency=config.concurrency),
 			GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
 			IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
+			Era5LandTDataSource(download_concurrency=config.concurrency),
 		]
 	return [
 		MrmsAwsQpe1hPass1(
@@ -119,6 +124,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 		RtmaAwsConusDataSource(download_concurrency=config.concurrency),
 		GfsAwsConusDataSource(max_lead_h=config.gfs_max_lead, download_concurrency=config.concurrency),
 		IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
+		Era5LandTDataSource(download_concurrency=config.concurrency),
 	]
 
 
@@ -145,6 +151,58 @@ def _intersect_ranges(
 
 def _to_iso(value: Optional[datetime]) -> Optional[str]:
 	return value.isoformat() if value is not None else None
+
+
+def _compute_era5_landt_windows(
+	mrms_effective_start: Optional[datetime],
+	mrms_effective_end: Optional[datetime],
+	source_available_start: Optional[datetime],
+	source_available_end: Optional[datetime],
+	latency_days: int,
+	lookback_days: int,
+) -> dict[str, Optional[datetime]]:
+	if (
+		mrms_effective_start is None
+		or mrms_effective_end is None
+		or source_available_start is None
+		or source_available_end is None
+	):
+		return {
+			"effective_prediction_start": None,
+			"effective_prediction_end": None,
+			"required_data_start": None,
+			"required_data_end": None,
+		}
+
+	lag = timedelta(days=latency_days)
+	lookback = timedelta(days=lookback_days)
+
+	pred_start = max(mrms_effective_start, source_available_start + lookback)
+	pred_end = min(mrms_effective_end, source_available_end + lag)
+	if pred_start > pred_end:
+		return {
+			"effective_prediction_start": None,
+			"effective_prediction_end": None,
+			"required_data_start": None,
+			"required_data_end": None,
+		}
+
+	required_start = pred_start - lookback
+	required_end = pred_end - lag
+	if required_start > required_end:
+		return {
+			"effective_prediction_start": None,
+			"effective_prediction_end": None,
+			"required_data_start": None,
+			"required_data_end": None,
+		}
+
+	return {
+		"effective_prediction_start": pred_start,
+		"effective_prediction_end": pred_end,
+		"required_data_start": required_start,
+		"required_data_end": required_end,
+	}
 
 
 def _extract_precip_grid(file_path: Path) -> tuple[np.ndarray, str, str]:
@@ -539,6 +597,106 @@ def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_nam
 		return {}
 
 
+def _read_era5_landt_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
+	import cfgrib
+
+	_suppress_cfgrib_merge_futurewarning()
+	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
+	var_map: dict[str, np.ndarray] = {}
+	timestamp_str = "unknown_time"
+	try:
+		for ds in datasets:
+			for var_name in ds.data_vars:
+				arr = np.asarray(ds[var_name].values)
+				arr = np.squeeze(arr)
+				while arr.ndim > 2:
+					if arr.shape[0] == 0:
+						break
+					chosen = arr[0]
+					for idx in range(arr.shape[0]):
+						candidate = arr[idx]
+						if np.isfinite(candidate).any():
+							chosen = candidate
+							break
+					arr = chosen
+				if arr.ndim != 2:
+					continue
+				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
+				if short_name in {"2t", "t2m", "tmp"} and "TMP" not in var_map:
+					var_map["TMP"] = arr
+				if short_name in {"swvl1", "swvl"} and "SWVL1" not in var_map:
+					var_map["SWVL1"] = arr
+				if short_name in {"ssrd", "dswrf"} and "SSRD" not in var_map:
+					var_map["SSRD"] = arr
+				if short_name in {"sd", "sde"} and "SD" not in var_map:
+					var_map["SD"] = arr
+				if timestamp_str == "unknown_time":
+					time_coord = ds[var_name].coords.get("time")
+					if time_coord is not None:
+						time_item = np.asarray(time_coord.values).reshape(-1)[0]
+						timestamp_str = str(time_item)
+	finally:
+		for ds in datasets:
+			ds.close()
+	return var_map, timestamp_str
+
+
+def _generate_era5_landt_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
+	if not sample_files:
+		return {}
+
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("ERA5-Land-T preview skipped (matplotlib unavailable): %s", exc)
+		return {}
+
+	preview_dir = report_dir / "preview"
+	preview_dir.mkdir(parents=True, exist_ok=True)
+	preview_source = sample_files[0]
+
+	try:
+		var_map, timestamp_str = _read_era5_landt_variable_arrays(preview_source)
+		moisture_var = "SWVL1" if "SWVL1" in var_map else ("SD" if "SD" in var_map else None)
+		target_vars = ["TMP"]
+		if moisture_var is not None:
+			target_vars.append(moisture_var)
+		if "SSRD" in var_map:
+			target_vars.append("SSRD")
+
+		qc_summary: dict[str, dict[str, float]] = {}
+		for var_name in target_vars:
+			if var_name not in var_map:
+				continue
+			arr = var_map[var_name]
+			stats = _qc_stats(arr)
+			qc_summary[var_name] = stats
+			print(
+				"ERA5-Land-T QC "
+				f"{var_name}: min={stats['min']:.6g}, max={stats['max']:.6g}, "
+				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+			)
+
+			fig, ax = plt.subplots(figsize=(8, 5))
+			image = ax.imshow(arr, origin="lower")
+			fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
+			ax.set_xlabel("x")
+			ax.set_ylabel("y")
+			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
+			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
+			fig.tight_layout()
+			fig.savefig(out_path, dpi=150)
+			plt.close(fig)
+
+		return qc_summary
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("ERA5-Land-T preview generation failed and was skipped: %s", exc)
+		return {}
+
+
 def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 	ratio_info: dict = {"parquet_ratio_by_source": {}, "preview_qc_by_source": {}}
 	results: list[EstimateResult] = []
@@ -546,6 +704,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 	object_cache: dict[str, list] = {}
 	mrms_available_start: Optional[datetime] = None
 	mrms_available_end: Optional[datetime] = None
+	mrms_effective_start: Optional[datetime] = None
+	mrms_effective_end: Optional[datetime] = None
 
 	for source in sources:
 		source_variables = config.variables
@@ -557,6 +717,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
 		if source.name == "ifs_mars_conus":
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
+		if source.name == "era5_land_t_conus":
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
 		objects = source.list_sample_objects(
 			start=config.sample_start,
 			end=config.sample_end,
@@ -568,6 +730,21 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			mrms_available_start, mrms_available_end = _read_available_extent(source)
 			break
 
+	if config.range_mode == "source_full":
+		mrms_effective_start, mrms_effective_end = _intersect_ranges(
+			config.full_start,
+			config.full_end,
+			mrms_available_start,
+			mrms_available_end,
+		)
+	else:
+		mrms_effective_start, mrms_effective_end = _intersect_ranges(
+			config.full_start,
+			config.full_end,
+			mrms_available_start,
+			mrms_available_end,
+		)
+
 	for source in sources:
 		source_variables = config.variables
 		if source.name == "mrms_qpe_1h_pass1":
@@ -578,6 +755,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["PRATE", "TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF"]
 		if source.name == "ifs_mars_conus":
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
+		if source.name == "era5_land_t_conus":
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
 		if config.derived_format == "parquet":
 			ratio_info["parquet_ratio_by_source"][source.name] = calibrate_parquet_ratio(
 				n_vars=len(source_variables),
@@ -594,6 +773,10 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			)
 
 		source_available_start, source_available_end = _read_available_extent(source)
+		effective_prediction_start: Optional[datetime] = None
+		effective_prediction_end: Optional[datetime] = None
+		era5_required_data_start: Optional[datetime] = None
+		era5_required_data_end: Optional[datetime] = None
 		if config.range_mode == "source_full":
 			effective_start, effective_end = _intersect_ranges(
 				config.full_start,
@@ -617,6 +800,24 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					source_available_start,
 					source_available_end,
 				)
+
+		if source.name == "era5_land_t_conus":
+			windows = _compute_era5_landt_windows(
+				mrms_effective_start=mrms_effective_start,
+				mrms_effective_end=mrms_effective_end,
+				source_available_start=source_available_start,
+				source_available_end=source_available_end,
+				latency_days=getattr(source, "LATENCY_DAYS", 5),
+				lookback_days=getattr(source, "LOOKBACK_DAYS", 365),
+			)
+			effective_prediction_start = windows["effective_prediction_start"]
+			effective_prediction_end = windows["effective_prediction_end"]
+			era5_required_data_start = windows["required_data_start"]
+			era5_required_data_end = windows["required_data_end"]
+			effective_start = era5_required_data_start
+			effective_end = era5_required_data_end
+			if hasattr(source, "set_required_window"):
+				source.set_required_window(era5_required_data_start, era5_required_data_end)
 
 		covers_effective_range = (
 			effective_start is not None
@@ -654,6 +855,10 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					mrms_available_end=_to_iso(mrms_available_end),
 					effective_start=_to_iso(effective_start),
 					effective_end=_to_iso(effective_end),
+					effective_prediction_start=_to_iso(effective_prediction_start),
+					effective_prediction_end=_to_iso(effective_prediction_end),
+					era5_land_required_data_start=_to_iso(era5_required_data_start),
+					era5_land_required_data_end=_to_iso(era5_required_data_end),
 					range_mode=config.range_mode,
 					covers_effective_range=covers_effective_range,
 					notes=(
@@ -688,6 +893,10 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					mrms_available_end=_to_iso(mrms_available_end),
 					effective_start=None,
 					effective_end=None,
+					effective_prediction_start=_to_iso(effective_prediction_start),
+					effective_prediction_end=_to_iso(effective_prediction_end),
+					era5_land_required_data_start=_to_iso(era5_required_data_start),
+					era5_land_required_data_end=_to_iso(era5_required_data_end),
 					range_mode=config.range_mode,
 					covers_effective_range=False,
 					notes=(
@@ -725,6 +934,12 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				)
 			if config.make_preview and source.name == "ifs_mars_conus":
 				ratio_info["preview_qc_by_source"][source.name] = _generate_ifs_preview(
+					files,
+					config.report_dir,
+					source.name,
+				)
+			if config.make_preview and source.name == "era5_land_t_conus":
+				ratio_info["preview_qc_by_source"][source.name] = _generate_era5_landt_preview(
 					files,
 					config.report_dir,
 					source.name,
@@ -828,6 +1043,10 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				mrms_available_end=_to_iso(mrms_available_end),
 				effective_start=_to_iso(effective_start),
 				effective_end=_to_iso(effective_end),
+				effective_prediction_start=_to_iso(effective_prediction_start),
+				effective_prediction_end=_to_iso(effective_prediction_end),
+				era5_land_required_data_start=_to_iso(era5_required_data_start),
+				era5_land_required_data_end=_to_iso(era5_required_data_end),
 				range_mode=config.range_mode,
 				covers_effective_range=covers_effective_range,
 				notes=(
