@@ -16,6 +16,7 @@ from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region
 from src.datasources.era5_landt import Era5LandTDataSource
 from src.datasources.gdas import GdasAwsAntecedentDataSource
 from src.datasources.gfs import GfsAwsConusDataSource
+from src.datasources.imerg import ImergLateDailyDataSource
 from src.datasources.ifs import IfsMarsDataSource
 from src.datasources.mrms import MrmsAwsQpe1hPass1, MrmsDataSource
 from src.datasources.rtma import RtmaAwsConusDataSource
@@ -89,6 +90,8 @@ class EstimateResult:
 	era5_land_required_data_end: Optional[str]
 	gdas_required_data_start: Optional[str]
 	gdas_required_data_end: Optional[str]
+	imerg_required_data_start: Optional[str]
+	imerg_required_data_end: Optional[str]
 	range_mode: str
 	covers_effective_range: bool
 	notes: str
@@ -118,6 +121,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 			IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
 			Era5LandTDataSource(download_concurrency=config.concurrency),
 			GdasAwsAntecedentDataSource(download_concurrency=config.concurrency),
+			ImergLateDailyDataSource(download_concurrency=config.concurrency),
 		]
 	return [
 		MrmsAwsQpe1hPass1(
@@ -130,6 +134,7 @@ def get_enabled_sources(config: Config) -> list[DataSource]:
 		IfsMarsDataSource(max_lead_h=config.ifs_max_lead, download_concurrency=config.concurrency),
 		Era5LandTDataSource(download_concurrency=config.concurrency),
 		GdasAwsAntecedentDataSource(download_concurrency=config.concurrency),
+		ImergLateDailyDataSource(download_concurrency=config.concurrency),
 	]
 
 
@@ -822,6 +827,152 @@ def _generate_gdas_preview(sample_files: list[Path], report_dir: Path, source_na
 		return {}
 
 
+def _read_imerg_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str, Optional[dict[str, float]]]:
+	try:
+		import xarray as xr
+	except Exception as exc:  # noqa: BLE001
+		raise RuntimeError("IMERG preview requires xarray and netcdf support.") from exc
+
+	ds = xr.open_dataset(file_path)
+	var_map: dict[str, np.ndarray] = {}
+	timestamp_str = "unknown_time"
+	crop_info: Optional[dict[str, float]] = None
+	try:
+		if "precipitation" in ds.data_vars:
+			da = ds["precipitation"]
+		else:
+			first_var = next(iter(ds.data_vars), None)
+			if first_var is None:
+				return var_map, timestamp_str, crop_info
+			da = ds[first_var]
+
+		arr = np.asarray(da.values)
+		arr = np.squeeze(arr)
+		while arr.ndim > 2:
+			arr = arr[0]
+		lat_name = "lat" if "lat" in da.coords else ("latitude" if "latitude" in da.coords else None)
+		lon_name = "lon" if "lon" in da.coords else ("longitude" if "longitude" in da.coords else None)
+		if lat_name is not None and lon_name is not None:
+			lon_min, lat_min, lon_max, lat_max = CONUS_BBOX.bbox
+			da, crop_info = _subset_imerg_to_bbox(da, lat_name, lon_name, lon_min, lat_min, lon_max, lat_max)
+			arr = np.asarray(da.values)
+			arr = np.squeeze(arr)
+			while arr.ndim > 2:
+				arr = arr[0]
+			if crop_info is not None:
+				crop_info = dict(crop_info)
+				crop_info["shape"] = tuple(int(v) for v in arr.shape)
+
+		if arr.ndim == 2 and arr.size > 0:
+			var_map["PRECIP"] = arr
+
+		time_coord = da.coords.get("time")
+		if time_coord is not None:
+			time_item = np.asarray(time_coord.values).reshape(-1)[0]
+			timestamp_str = str(time_item)
+	finally:
+		ds.close()
+
+	return var_map, timestamp_str, crop_info
+
+
+def _subset_imerg_to_bbox(da, lat_name: str, lon_name: str, lon_min: float, lat_min: float, lon_max: float, lat_max: float):
+	lat_vals = np.asarray(da[lat_name].values)
+	lon_vals = np.asarray(da[lon_name].values)
+
+	if lat_vals.ndim != 1 or lon_vals.ndim != 1:
+		return da, None
+
+	lon_vals_norm = np.where(lon_vals > 180.0, lon_vals - 360.0, lon_vals)
+	lon_order = np.argsort(lon_vals_norm)
+	if not np.array_equal(lon_order, np.arange(lon_vals_norm.size)):
+		da = da.isel({lon_name: lon_order})
+		lon_vals_norm = lon_vals_norm[lon_order]
+
+	da = da.assign_coords({lon_name: lon_vals_norm})
+
+	lat_ascending = bool(lat_vals[0] <= lat_vals[-1])
+	lon_ascending = bool(lon_vals_norm[0] <= lon_vals_norm[-1])
+	lat_slice = slice(lat_min, lat_max) if lat_ascending else slice(lat_max, lat_min)
+	lon_slice = slice(lon_min, lon_max) if lon_ascending else slice(lon_max, lon_min)
+	subset = da.sel({lat_name: lat_slice, lon_name: lon_slice})
+	sub_lat = np.asarray(subset[lat_name].values)
+	sub_lon = np.asarray(subset[lon_name].values)
+	if sub_lat.size == 0 or sub_lon.size == 0:
+		return subset, None
+	crop_info = {
+		"lon_min": float(np.min(sub_lon)),
+		"lon_max": float(np.max(sub_lon)),
+		"lat_min": float(np.min(sub_lat)),
+		"lat_max": float(np.max(sub_lat)),
+	}
+	return subset, crop_info
+
+
+def _generate_imerg_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
+	if not sample_files:
+		return {}
+
+	try:
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("IMERG preview skipped (matplotlib unavailable): %s", exc)
+		return {}
+
+	preview_dir = report_dir / "preview"
+	preview_dir.mkdir(parents=True, exist_ok=True)
+	preview_source = sample_files[0]
+
+	try:
+		var_map, timestamp_str, crop_info = _read_imerg_variable_arrays(preview_source)
+		if "PRECIP" not in var_map:
+			return {}
+
+		arr = var_map["PRECIP"]
+		if crop_info is not None:
+			print(
+				"IMERG preview crop bounds: "
+				f"lon=[{crop_info['lon_min']:.3f}, {crop_info['lon_max']:.3f}], "
+				f"lat=[{crop_info['lat_min']:.3f}, {crop_info['lat_max']:.3f}], "
+				f"shape={crop_info.get('shape', tuple(arr.shape))}"
+			)
+		stats = _qc_stats(arr)
+		qc_summary = {"PRECIP": stats}
+		print(
+			"IMERG QC "
+			f"PRECIP: min={stats['min']:.6g}, max={stats['max']:.6g}, "
+			f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+		)
+
+		fig, ax = plt.subplots(figsize=(8, 5))
+		if crop_info is not None:
+			image = ax.imshow(
+				arr,
+				origin="lower",
+				extent=[crop_info["lon_min"], crop_info["lon_max"], crop_info["lat_min"], crop_info["lat_max"]],
+				aspect="auto",
+			)
+			ax.set_xlabel("longitude")
+			ax.set_ylabel("latitude")
+		else:
+			image = ax.imshow(arr, origin="lower")
+			ax.set_xlabel("x")
+			ax.set_ylabel("y")
+		fig.colorbar(image, ax=ax, label="PRECIP")
+		ax.set_title(f"{source_name} | PRECIP | {timestamp_str}")
+		safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
+		out_path = preview_dir / f"{source_name}_PRECIP_{safe_ts}.png"
+		fig.tight_layout()
+		fig.savefig(out_path, dpi=150)
+		plt.close(fig)
+		return qc_summary
+	except Exception as exc:  # noqa: BLE001
+		LOGGER.warning("IMERG preview generation failed and was skipped: %s", exc)
+		return {}
+
+
 def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 	ratio_info: dict = {"parquet_ratio_by_source": {}, "preview_qc_by_source": {}}
 	results: list[EstimateResult] = []
@@ -846,6 +997,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
 		if source.name == "gdas_conus_aws_0p25":
 			source_variables = ["TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF", "PRATE"]
+		if source.name == "imerg_late_daily_conus":
+			source_variables = ["PRECIP"]
 		objects = source.list_sample_objects(
 			start=config.sample_start,
 			end=config.sample_end,
@@ -886,6 +1039,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
 		if source.name == "gdas_conus_aws_0p25":
 			source_variables = ["TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF", "PRATE"]
+		if source.name == "imerg_late_daily_conus":
+			source_variables = ["PRECIP"]
 		if config.derived_format == "parquet":
 			ratio_info["parquet_ratio_by_source"][source.name] = calibrate_parquet_ratio(
 				n_vars=len(source_variables),
@@ -908,6 +1063,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 		era5_required_data_end: Optional[datetime] = None
 		gdas_required_data_start: Optional[datetime] = None
 		gdas_required_data_end: Optional[datetime] = None
+		imerg_required_data_start: Optional[datetime] = None
+		imerg_required_data_end: Optional[datetime] = None
 		if config.range_mode == "source_full":
 			effective_start, effective_end = _intersect_ranges(
 				config.full_start,
@@ -968,6 +1125,24 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			if hasattr(source, "set_required_window"):
 				source.set_required_window(gdas_required_data_start, gdas_required_data_end)
 
+		if source.name == "imerg_late_daily_conus":
+			windows = _compute_antecedent_windows(
+				mrms_effective_start=mrms_effective_start,
+				mrms_effective_end=mrms_effective_end,
+				source_available_start=source_available_start,
+				source_available_end=source_available_end,
+				latency_days=getattr(source, "LATENCY_DAYS", 1),
+				lookback_days=getattr(source, "LOOKBACK_DAYS", 365),
+			)
+			effective_prediction_start = windows["effective_prediction_start"]
+			effective_prediction_end = windows["effective_prediction_end"]
+			imerg_required_data_start = windows["required_data_start"]
+			imerg_required_data_end = windows["required_data_end"]
+			effective_start = imerg_required_data_start
+			effective_end = imerg_required_data_end
+			if hasattr(source, "set_required_window"):
+				source.set_required_window(imerg_required_data_start, imerg_required_data_end)
+
 		covers_effective_range = (
 			effective_start is not None
 			and effective_end is not None
@@ -1010,6 +1185,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					era5_land_required_data_end=_to_iso(era5_required_data_end),
 					gdas_required_data_start=_to_iso(gdas_required_data_start),
 					gdas_required_data_end=_to_iso(gdas_required_data_end),
+					imerg_required_data_start=_to_iso(imerg_required_data_start),
+					imerg_required_data_end=_to_iso(imerg_required_data_end),
 					range_mode=config.range_mode,
 					covers_effective_range=covers_effective_range,
 					notes=(
@@ -1050,6 +1227,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					era5_land_required_data_end=_to_iso(era5_required_data_end),
 					gdas_required_data_start=_to_iso(gdas_required_data_start),
 					gdas_required_data_end=_to_iso(gdas_required_data_end),
+					imerg_required_data_start=_to_iso(imerg_required_data_start),
+					imerg_required_data_end=_to_iso(imerg_required_data_end),
 					range_mode=config.range_mode,
 					covers_effective_range=False,
 					notes=(
@@ -1099,6 +1278,12 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				)
 			if config.make_preview and source.name == "gdas_conus_aws_0p25":
 				ratio_info["preview_qc_by_source"][source.name] = _generate_gdas_preview(
+					files,
+					config.report_dir,
+					source.name,
+				)
+			if config.make_preview and source.name == "imerg_late_daily_conus":
+				ratio_info["preview_qc_by_source"][source.name] = _generate_imerg_preview(
 					files,
 					config.report_dir,
 					source.name,
@@ -1208,6 +1393,8 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				era5_land_required_data_end=_to_iso(era5_required_data_end),
 				gdas_required_data_start=_to_iso(gdas_required_data_start),
 				gdas_required_data_end=_to_iso(gdas_required_data_end),
+				imerg_required_data_start=_to_iso(imerg_required_data_start),
+				imerg_required_data_end=_to_iso(imerg_required_data_end),
 				range_mode=config.range_mode,
 				covers_effective_range=covers_effective_range,
 				notes=(
@@ -1223,7 +1410,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					)
 					+ (
 						" CONUS crop is local."
-						if source.name in {"gfs_conus_aws_0p25", "gdas_conus_aws_0p25"} and raw_hot_selected_conus is not None
+						if source.name in {"gfs_conus_aws_0p25", "gdas_conus_aws_0p25", "imerg_late_daily_conus"} and raw_hot_selected_conus is not None
 						else ""
 					)
 					+ f" Totals based on {config.range_mode} range."

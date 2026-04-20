@@ -28,3 +28,6 @@ build/
 # Data downloads and generated outputs
 data/
 reports/
+
+
+.netrc
