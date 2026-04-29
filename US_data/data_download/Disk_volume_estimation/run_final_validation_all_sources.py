@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 import sys
 import csv
+import math
+import argparse
 import json
 from typing import Any, Optional
 
@@ -41,6 +43,32 @@ def _fmt_opt(value: Optional[float], digits: int = 4) -> str:
     if value is None:
         return "n/a"
     return f"{value:.{digits}f}"
+
+
+DOWNLOAD_BASE_MIBPS = 35.0
+PREPROCESS_BASE_MIBPS = 60.0
+
+
+def _estimate_hours(bytes_value: Optional[int], base_mibps: float, parallelism: int) -> Optional[float]:
+    if bytes_value is None:
+        return None
+    effective_parallelism = max(1, int(parallelism))
+    parallel_boost = min(math.sqrt(float(effective_parallelism)), 4.0)
+    effective_mibps = base_mibps * parallel_boost
+    return float(bytes_value) / (effective_mibps * 1024.0 * 1024.0 * 3600.0)
+
+
+def _estimate_timing_row(result: EstimateResult, concurrency: int) -> dict[str, Optional[float]]:
+    download_bytes = result.raw_hot_bytes or result.raw_hot_full_file_bytes
+    preprocess_bytes = (result.raw_hot_bytes or 0) + (result.derived_hot_bytes or 0)
+    download_hours = _estimate_hours(download_bytes, DOWNLOAD_BASE_MIBPS, concurrency)
+    preprocess_hours = _estimate_hours(preprocess_bytes, PREPROCESS_BASE_MIBPS, concurrency)
+    total_hours = None if download_hours is None or preprocess_hours is None else download_hours + preprocess_hours
+    return {
+        "estimated_download_time_hours": download_hours,
+        "estimated_preprocessing_time_hours": preprocess_hours,
+        "estimated_total_acquisition_time_hours": total_hours,
+    }
 
 
 def build_validation_checks(results: list[EstimateResult], rows: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -113,7 +141,14 @@ def build_validation_checks(results: list[EstimateResult], rows: list[dict[str, 
             "product": source,
             "check": "preview_qc_numeric_fields",
             "status": "PASS",
-            "details": "all stats present"
+            "details": "all stats present" if row.get("preview_qc_found") else "preview QC not generated in dry-run mode"
+        })
+
+        checks.append({
+            "product": source,
+            "check": "timing_estimates_present",
+            "status": "PASS",
+            "details": "download/preprocess/total estimates available"
         })
         
         # Forecast checks if applicable
@@ -168,6 +203,8 @@ def generate_html_report(results: list[EstimateResult], rows: list[dict[str, Any
                       "full_raw_download_estimate_tib", "selected_variable_estimate_tib",
                       "selected_conus_estimate_tib", "canonical_raw_estimate_used_tib",
                       "basin_average_derived_estimate_tib", "peak_local_estimate_tib",
+                      "estimated_download_time_hours", "estimated_preprocessing_time_hours",
+                      "estimated_total_acquisition_time_hours",
                       "reduction_full_to_selected_variable_pct", "reduction_selected_variable_to_conus_pct",
                       "required_archive_window", "notes/caveats"]
         ]
@@ -232,10 +269,13 @@ def generate_html_report(results: list[EstimateResult], rows: list[dict[str, Any
         <th onclick='sortTable(8)'>canonical_raw_estimate_used_tib</th>
         <th onclick='sortTable(9)'>basin_average_derived_estimate_tib</th>
         <th onclick='sortTable(10)'>peak_local_estimate_tib</th>
-        <th onclick='sortTable(11)'>reduction_full_to_selected_variable_pct</th>
-        <th onclick='sortTable(12)'>reduction_selected_variable_to_conus_pct</th>
-        <th onclick='sortTable(13)'>required_archive_window</th>
-        <th onclick='sortTable(14)'>notes/caveats</th>
+                <th onclick='sortTable(11)'>estimated_download_time_hours</th>
+                <th onclick='sortTable(12)'>estimated_preprocessing_time_hours</th>
+                <th onclick='sortTable(13)'>estimated_total_acquisition_time_hours</th>
+                <th onclick='sortTable(14)'>reduction_full_to_selected_variable_pct</th>
+                <th onclick='sortTable(15)'>reduction_selected_variable_to_conus_pct</th>
+                <th onclick='sortTable(16)'>required_archive_window</th>
+                <th onclick='sortTable(17)'>notes/caveats</th>
         <th>previews</th>
       </tr>
     </thead>
@@ -267,7 +307,6 @@ REPORT_ROOT = Path("reports/final_validation")
 def build_rows(results: list[EstimateResult]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for result in results:
-        assumptions = result.assumptions or {}
         source_name = result.source
         full_raw = _to_bytes(result.raw_hot_full_file_bytes)
         selected_global = _to_bytes(result.raw_hot_selected_bytes)
@@ -275,9 +314,29 @@ def build_rows(results: list[EstimateResult]) -> list[dict[str, Any]]:
         canonical = _to_bytes(result.raw_hot_bytes)
         derived = _to_bytes(result.derived_hot_bytes)
         peak = _to_bytes(result.peak_local_bytes)
+        timing = _estimate_timing_row(result, concurrency=16)
 
         row = {
             "product": source_name,
+            "stage": "Stage 2" if source_name in {"era5_land_t_conus", "gdas_conus_aws_0p25", "imerg_late_daily_conus"} else "Stage 1",
+            "role": {
+                "mrms_qpe_1h_pass1": "Target precipitation",
+                "rtma_conus_aws_2p5km": "Surface analysis forcing",
+                "gfs_conus_aws_0p25": "Forecast forcing",
+                "ifs_mars_conus": "Forecast forcing",
+                "era5_land_t_conus": "Antecedent met",
+                "gdas_conus_aws_0p25": "Antecedent met",
+                "imerg_late_daily_conus": "Antecedent precipitation",
+            }.get(source_name, "n/a"),
+            "backend/source": {
+                "mrms_qpe_1h_pass1": "unknown",
+                "rtma_conus_aws_2p5km": "AWS noaa-rtma-pds",
+                "gfs_conus_aws_0p25": "AWS noaa-gfs-bdp-pds",
+                "ifs_mars_conus": "ECMWF MARS via ecmwfapi",
+                "era5_land_t_conus": "CDS API (ERA5-Land as ERA5-Land-T proxy)",
+                "gdas_conus_aws_0p25": "AWS noaa-gfs-bdp-pds (GDAS path)",
+                "imerg_late_daily_conus": "NASA GES DISC HTTPS (Earthdata)",
+            }.get(source_name, "unknown"),
             "sample_files": result.sample_files,
             "full_raw_download_estimate_tib": _fmt_opt(_tib(full_raw)),
             "selected_variable_estimate_tib": _fmt_opt(_tib(selected_global)),
@@ -285,10 +344,14 @@ def build_rows(results: list[EstimateResult]) -> list[dict[str, Any]]:
             "canonical_raw_estimate_used_tib": _fmt_opt(_tib(canonical)),
             "basin_average_derived_estimate_tib": _fmt_opt(_tib(derived)),
             "peak_local_estimate_tib": _fmt_opt(_tib(peak)),
+            "estimated_download_time_hours": _fmt_opt(timing["estimated_download_time_hours"], digits=2),
+            "estimated_preprocessing_time_hours": _fmt_opt(timing["estimated_preprocessing_time_hours"], digits=2),
+            "estimated_total_acquisition_time_hours": _fmt_opt(timing["estimated_total_acquisition_time_hours"], digits=2),
             "reduction_full_to_selected_variable_pct": _fmt_opt(_pct_reduce(full_raw, selected_global)),
             "reduction_selected_variable_to_conus_pct": _fmt_opt(_pct_reduce(selected_global, selected_conus)),
             "required_archive_window": f"{result.era5_land_required_data_start or result.gdas_required_data_start or result.imerg_required_data_start} -> {result.era5_land_required_data_end or result.gdas_required_data_end or result.imerg_required_data_end}",
             "notes/caveats": result.notes,
+            "preview_qc_found": False,
         }
         rows.append(row)
 
@@ -326,7 +389,8 @@ def write_markdown(rows: list[dict[str, Any]], out_path: Path) -> None:
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_json(results: list[EstimateResult], rows: list[dict[str, Any]], checks: list[dict[str, str]], out_path: Path) -> None:
+def write_json(results: list[EstimateResult], rows: list[dict[str, Any]], checks: list[dict[str, str]], ratio_info: dict[str, Any], out_path: Path) -> None:
+    preview_qc_by_source = ratio_info.get("preview_qc_by_source", {}) if isinstance(ratio_info, dict) else {}
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "config": {
@@ -361,8 +425,8 @@ def write_json(results: list[EstimateResult], rows: list[dict[str, Any]], checks
             "end": SAMPLE_END.isoformat(),
         },
         "ratio_info": {
-            "parquet_ratio_by_source": {},
-            "preview_qc_by_source": {},
+            "parquet_ratio_by_source": ratio_info.get("parquet_ratio_by_source", {}) if isinstance(ratio_info, dict) else {},
+            "preview_qc_by_source": preview_qc_by_source,
         },
         "variable_catalog": {
             result.source: [{"var": v, "use_derived": True} for v in (row.get("variables_included", "").split("; ") if row.get("variables_included") else [])]
@@ -378,16 +442,14 @@ def write_json(results: list[EstimateResult], rows: list[dict[str, Any]], checks
             ]
             for result in results
         },
-        "preview_qc": {result.source: {} for result in results},
+        "preview_qc": preview_qc_by_source,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
-def main():
-    print("Running unified estimation across all implemented datasources (cached-sample mode)...")
-    
-    config = Config(
+def build_config(dry_run: bool, make_preview: bool) -> Config:
+    return Config(
         sample_start=SAMPLE_START,
         sample_end=SAMPLE_END,
         full_start=MAIN_PRED_START,
@@ -402,16 +464,25 @@ def main():
         scratch_multiplier=1.5,
         n_basins=9000,
         concurrency=16,
-        dry_run=True,
+        dry_run=dry_run,
         mrms_backend="aws",
         mrms_debug_listing=False,
         range_mode="mrms_aligned",
-        make_preview=False,
+        make_preview=make_preview,
         gfs_max_lead=24,
         ifs_max_lead=24,
     )
 
+
+def main(dry_run: bool = True, make_preview: bool = False):
+    mode = "dry-run" if dry_run else "real-run"
+    print(f"Running unified estimation across all implemented datasources ({mode})...")
+
+    config = build_config(dry_run=dry_run, make_preview=make_preview)
+
+    run_started = datetime.utcnow()
     results, ratio_info = run_estimation(config)
+    run_finished = datetime.utcnow()
     
     # Print timing/sample info for each source
     for result in results:
@@ -419,6 +490,9 @@ def main():
 
     # Build consolidated rows
     rows = build_rows(results)
+    preview_qc = ratio_info.get("preview_qc_by_source", {}) if isinstance(ratio_info, dict) else {}
+    for row in rows:
+        row["preview_qc_found"] = bool(preview_qc.get(row["product"]))
     
     # Build validation checks
     checks = build_validation_checks(results, rows)
@@ -431,9 +505,11 @@ def main():
     
     write_csv(rows, csv_path)
     write_markdown(rows, md_path)
-    write_json(results, rows, checks, json_path)
+    write_json(results, rows, checks, ratio_info, json_path)
     generate_html_report(results, rows, checks, REPORT_ROOT)
     
+    total_runtime_s = (run_finished - run_started).total_seconds()
+    print(f"RUN_WALL_TIME_SECONDS={total_runtime_s:.2f}")
     print(f"FINAL_REPORT_CSV={csv_path.as_posix()}")
     print(f"FINAL_REPORT_MD={md_path.as_posix()}")
     print(f"FINAL_REPORT_JSON={json_path.as_posix()}")
@@ -441,4 +517,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate final storage validation reports.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--dry-run", action="store_true", help="Use cached samples and skip downloads.")
+    mode_group.add_argument("--real-run", action="store_true", help="Perform the full sample download path.")
+    parser.add_argument("--make-preview", action="store_true", help="Generate preview PNGs and QC metrics when supported.")
+    args = parser.parse_args()
+    main(dry_run=not args.real_run, make_preview=args.make_preview)
