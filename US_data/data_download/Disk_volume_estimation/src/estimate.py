@@ -1250,7 +1250,51 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			selected_sample_bytes = None
 			selected_conus_sample_bytes = None
 		else:
-			files = source.download_sample(config.out_dir / source.name, objects)
+			try:
+				files = source.download_sample(config.out_dir / source.name, objects)
+			except Exception as exc:  # noqa: BLE001
+				LOGGER.warning("%s download failed; continuing with placeholder result: %s", source.name, exc)
+				results.append(
+					EstimateResult(
+						source=source.name,
+						sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
+						sample_files=len(objects),
+						raw_sample_bytes=None,
+						raw_sample_full_file_bytes=None,
+						raw_sample_selected_bytes=None,
+						raw_sample_selected_conus_bytes=None,
+						raw_hot_bytes=None,
+						raw_hot_full_file_bytes=None,
+						raw_hot_selected_bytes=None,
+						raw_hot_selected_conus_bytes=None,
+						derived_hot_bytes=None,
+						raw_cold_bytes=None,
+						peak_local_bytes=None,
+						source_available_start=_to_iso(source_available_start),
+						source_available_end=_to_iso(source_available_end),
+						mrms_available_start=_to_iso(mrms_available_start),
+						mrms_available_end=_to_iso(mrms_available_end),
+						effective_start=_to_iso(effective_start),
+						effective_end=_to_iso(effective_end),
+						effective_prediction_start=_to_iso(effective_prediction_start),
+						effective_prediction_end=_to_iso(effective_prediction_end),
+						era5_land_required_data_start=_to_iso(era5_required_data_start),
+						era5_land_required_data_end=_to_iso(era5_required_data_end),
+						gdas_required_data_start=_to_iso(gdas_required_data_start),
+						gdas_required_data_end=_to_iso(gdas_required_data_end),
+						imerg_required_data_start=_to_iso(imerg_required_data_start),
+						imerg_required_data_end=_to_iso(imerg_required_data_end),
+						range_mode=config.range_mode,
+						covers_effective_range=covers_effective_range,
+						notes=(
+							f"Download failed: {exc}. "
+							f"Totals based on {config.range_mode} range."
+						),
+						assumptions=source.assumptions(),
+					)
+				)
+				continue
+
 			if config.make_preview and source.name == "mrms_qpe_1h_pass1":
 				_generate_mrms_preview(files, config.report_dir, source.name)
 			if config.make_preview and source.name == "rtma_conus_aws_2p5km":
