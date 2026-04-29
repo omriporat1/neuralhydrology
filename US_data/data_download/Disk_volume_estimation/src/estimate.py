@@ -654,6 +654,12 @@ def _read_era5_landt_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndar
 					var_map["TMP"] = arr
 				if short_name in {"swvl1", "swvl"} and "SWVL1" not in var_map:
 					var_map["SWVL1"] = arr
+				if short_name in {"swvl2"} and "SWVL2" not in var_map:
+					var_map["SWVL2"] = arr
+				if short_name in {"swvl3"} and "SWVL3" not in var_map:
+					var_map["SWVL3"] = arr
+				if short_name in {"swvl4"} and "SWVL4" not in var_map:
+					var_map["SWVL4"] = arr
 				if short_name in {"ssrd", "dswrf"} and "SSRD" not in var_map:
 					var_map["SSRD"] = arr
 				if short_name in {"sd", "sde"} and "SD" not in var_map:
@@ -687,12 +693,7 @@ def _generate_era5_landt_preview(sample_files: list[Path], report_dir: Path, sou
 
 	try:
 		var_map, timestamp_str = _read_era5_landt_variable_arrays(preview_source)
-		moisture_var = "SWVL1" if "SWVL1" in var_map else ("SD" if "SD" in var_map else None)
-		target_vars = ["TMP"]
-		if moisture_var is not None:
-			target_vars.append(moisture_var)
-		if "SSRD" in var_map:
-			target_vars.append("SSRD")
+		target_vars = ["TMP", "SSRD", "SWVL1", "SWVL2", "SWVL3", "SWVL4", "SD"]
 
 		qc_summary: dict[str, dict[str, float]] = {}
 		for var_name in target_vars:
@@ -994,7 +995,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 		if source.name == "ifs_mars_conus":
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
 		if source.name == "era5_land_t_conus":
-			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SWVL2", "SWVL3", "SWVL4", "SD"]
 		if source.name == "gdas_conus_aws_0p25":
 			source_variables = ["TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF", "PRATE"]
 		if source.name == "imerg_late_daily_conus":
@@ -1036,7 +1037,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 		if source.name == "ifs_mars_conus":
 			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD"]
 		if source.name == "era5_land_t_conus":
-			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SD"]
+			source_variables = ["TP", "2T", "2D", "10U", "10V", "SP", "SSRD", "SWVL1", "SWVL2", "SWVL3", "SWVL4", "SD"]
 		if source.name == "gdas_conus_aws_0p25":
 			source_variables = ["TMP", "RH", "UGRD", "VGRD", "PRMSL", "DSWRF", "PRATE"]
 		if source.name == "imerg_late_daily_conus":

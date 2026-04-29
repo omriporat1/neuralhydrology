@@ -42,6 +42,9 @@ class Era5LandTDataSource(DataSource):
         "SP": "surface_pressure",
         "SSRD": "surface_solar_radiation_downwards",
         "SWVL1": "volumetric_soil_water_layer_1",
+        "SWVL2": "volumetric_soil_water_layer_2",
+        "SWVL3": "volumetric_soil_water_layer_3",
+        "SWVL4": "volumetric_soil_water_layer_4",
         "SD": "snow_depth",
     }
 
@@ -182,6 +185,9 @@ class Era5LandTDataSource(DataSource):
                 "surface_pressure",
                 "surface_solar_radiation_downwards",
                 "volumetric_soil_water_layer_1",
+                "volumetric_soil_water_layer_2",
+                "volumetric_soil_water_layer_3",
+                "volumetric_soil_water_layer_4",
                 "snow_depth",
             ],
             "latency_days": self.LATENCY_DAYS,
