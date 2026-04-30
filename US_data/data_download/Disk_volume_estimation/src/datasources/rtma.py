@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -16,8 +17,11 @@ from botocore.config import Config as BotoConfig
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -238,6 +242,7 @@ class RtmaAwsConusDataSource(DataSource):
 		before_sleep=_log_retry_attempt,
 	)
 	def _download_s3_object(self, s3, bucket: str, key: str, out_path: Path) -> None:
+		log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{key}", params={"Bucket": bucket, "Key": key})
 		response = s3.get_object(Bucket=bucket, Key=key)
 		body = response["Body"]
 		with out_path.open("wb") as f:
@@ -259,6 +264,7 @@ class RtmaAwsConusDataSource(DataSource):
 	def _measure_selected_from_index_and_ranges(self, s3, obj: RemoteObject) -> tuple[int, bool]:
 		bucket, key = self._parse_s3_url(obj.url)
 		idx_key = f"{key}.idx"
+		log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{idx_key}", params={"Bucket": bucket, "Key": idx_key})
 		idx_response = s3.get_object(Bucket=bucket, Key=idx_key)
 		idx_text = idx_response["Body"].read().decode("utf-8", errors="replace")
 		entries = self._parse_idx_entries(idx_text)
@@ -273,6 +279,7 @@ class RtmaAwsConusDataSource(DataSource):
 		selected_bytes = 0
 		for start, end in ranges:
 			range_header = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+			log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{key}", params={"Bucket": bucket, "Key": key, "Range": range_header})
 			resp = s3.get_object(Bucket=bucket, Key=key, Range=range_header)
 			content_len = resp.get("ContentLength")
 			if content_len is None:
@@ -408,6 +415,7 @@ class RtmaAwsConusDataSource(DataSource):
 		return merged
 
 	def _discover_available_extent(self, s3) -> None:
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{self.config.prefix_root}", params={"Bucket": self.config.bucket, "Prefix": self.config.prefix_root, "Delimiter": "/"})
 		prefixes = list(self._iter_common_prefixes(s3, self.config.prefix_root))
 		days: list[str] = []
 		for prefix in prefixes:
@@ -444,6 +452,7 @@ class RtmaAwsConusDataSource(DataSource):
 			}
 			if continuation:
 				kwargs["ContinuationToken"] = continuation
+			log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{prefix}", params=kwargs)
 			response = s3.list_objects_v2(**kwargs)
 			for obj in response.get("Contents", []):
 				key = obj.get("Key", "")

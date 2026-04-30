@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from pathlib import Path
 import time
 from typing import Iterable, Optional
@@ -10,8 +11,11 @@ from typing import Iterable, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -242,6 +246,7 @@ class IfsMarsDataSource(DataSource):
 
         request = self._build_request(obj.datetime, out_path)
         mars_request = {k: v for k, v in request.items() if k != "target"}
+        log_request(LOGGER, self.name, "mars.retrieve", url=f"mars://{obj.key}", params=mars_request)
         print(f"IFS MARS request: {mars_request}")
         print(f"IFS MARS target: {out_path}")
         print(f"IFS MARS variables: {mars_request['param']}")

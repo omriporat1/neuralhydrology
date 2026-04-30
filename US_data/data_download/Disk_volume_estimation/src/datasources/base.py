@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+from json import dumps
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -132,6 +133,25 @@ def validate_conus_crop(
 		return ConusCropValidation(cropped[:0, :0], crop_bounds, False, reason)
 
 	return ConusCropValidation(cropped, crop_bounds, True, None)
+
+
+def log_request(
+	logger: logging.Logger,
+	source_name: str,
+	request_type: str,
+	url: Optional[str] = None,
+	params: Optional[dict] = None,
+) -> None:
+	payload = {
+		"timestamp": datetime.utcnow().isoformat() + "Z",
+		"source": source_name,
+		"request_type": request_type,
+	}
+	if url is not None:
+		payload["url"] = url
+	if params is not None:
+		payload["params"] = params
+	logger.info("REQUEST %s", dumps(payload, default=str, sort_keys=True))
 
 class DataSource(ABC):
 	name: str

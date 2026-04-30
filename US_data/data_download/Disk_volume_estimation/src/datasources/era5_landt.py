@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import importlib
+import logging
 from pathlib import Path
 import time
 from typing import Iterable, Optional
@@ -10,8 +11,11 @@ import zipfile
 
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,7 @@ class Era5LandTDataSource(DataSource):
             out_path = out_dir / f"{obj.key}.grib"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             request = self._build_request(obj)
+            log_request(LOGGER, self.name, "cds.retrieve", url=f"cds://{self.config.dataset}/{obj.key}", params={"dataset": self.config.dataset, "request": request})
             client.retrieve(self.config.dataset, request, str(out_path))
             self._maybe_extract_wrapped_grib(out_path)
             paths.append(out_path)

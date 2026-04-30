@@ -11,7 +11,7 @@ from typing import Iterable, Optional
 import requests
 import numpy as np
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, validate_conus_crop
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request, validate_conus_crop
 from src.derived_size import compute_derived_bytes
 
 
@@ -262,6 +262,7 @@ class ImergLateDailyDataSource(DataSource):
         ymd = f"{day.year:04d}{day.month:02d}{day.day:02d}"
         month_url = f"{self.config.base_url}/{day.year:04d}/{day.month:02d}/"
         try:
+            log_request(LOGGER, self.name, "http.get", url=month_url, params={"timeout_s": 30, "allow_redirects": True})
             resp = session.get(month_url, timeout=30)
             resp.raise_for_status()
         except Exception:
@@ -277,6 +278,7 @@ class ImergLateDailyDataSource(DataSource):
 
     def _head_size(self, session: requests.Session, url: str) -> Optional[int]:
         try:
+            log_request(LOGGER, self.name, "http.head", url=url, params={"timeout_s": 30, "allow_redirects": True})
             resp = session.head(url, timeout=30, allow_redirects=True)
             if resp.status_code >= 400:
                 return None
@@ -287,6 +289,7 @@ class ImergLateDailyDataSource(DataSource):
 
     def _download_file(self, session: requests.Session, url: str, out_path: Path) -> None:
         try:
+            log_request(LOGGER, self.name, "http.get", url=url, params={"stream": True, "timeout_s": 120, "allow_redirects": True})
             with session.get(url, stream=True, timeout=120, allow_redirects=True) as resp:
                 if resp.status_code == 401 or "urs.earthdata.nasa.gov" in str(resp.url):
                     raise RuntimeError(self._setup_error_message())

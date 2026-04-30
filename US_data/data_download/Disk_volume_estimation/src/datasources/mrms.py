@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 import re
 import time
 
@@ -18,8 +19,11 @@ from botocore.config import Config as BotoConfig
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,11 +54,12 @@ class MrmsDataSource(DataSource):
 		start_iso = start.replace(microsecond=0).isoformat() + "Z"
 		end_iso = end.replace(microsecond=0).isoformat() + "Z"
 		datetime_range = f"{start_iso}/{end_iso}"
-		print(
-			"MRMS STAC search: "
-			f"collection={self.config.collection}, "
-			f"datetime={datetime_range}, "
-			f"bbox={list(region.bbox)}"
+		log_request(
+			LOGGER,
+			self.name,
+			"stac.search",
+			url=self.config.stac_url,
+			params={"collections": [self.config.collection], "bbox": list(region.bbox), "datetime": datetime_range},
 		)
 		search = client.search(
 			collections=[self.config.collection],
@@ -83,6 +88,7 @@ class MrmsDataSource(DataSource):
 	@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 	def _download_one(self, url: str, out_path: Path) -> None:
 		out_path.parent.mkdir(parents=True, exist_ok=True)
+		log_request(LOGGER, self.name, "http.get", url=url, params={"timeout_s": 60})
 		with httpx.stream("GET", url, timeout=60) as response:
 			response.raise_for_status()
 			with out_path.open("wb") as f:
@@ -325,6 +331,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 		before_sleep=_log_retry_attempt,
 	)
 	def _download_s3_object(self, s3, bucket: str, key: str, out_path: Path) -> None:
+		log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{key}", params={"Bucket": bucket, "Key": key})
 		response = s3.get_object(Bucket=bucket, Key=key)
 		body = response["Body"]
 		with out_path.open("wb") as f:
@@ -346,6 +353,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 	def _discover_product_prefix(self, s3) -> str:
 		if self._product_prefix is not None:
 			return self._product_prefix
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{self.config.conus_prefix}", params={"Bucket": self.config.bucket, "Prefix": self.config.conus_prefix, "Delimiter": "/"})
 		response = s3.list_objects_v2(
 			Bucket=self.config.bucket,
 			Prefix=self.config.conus_prefix,
@@ -375,6 +383,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 		return self._product_prefix
 
 	def _discover_available_extent(self, s3, product_prefix: str) -> None:
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{product_prefix}", params={"Bucket": self.config.bucket, "Prefix": product_prefix, "Delimiter": "/"})
 		day_min, day_max, year_min, year_max = self._scan_date_prefixes(s3, product_prefix)
 		if day_min and day_max:
 			self._date_prefix_format = "day"
@@ -480,6 +489,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 			}
 			if continuation:
 				kwargs["ContinuationToken"] = continuation
+			log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{prefix}", params=kwargs)
 			response = s3.list_objects_v2(**kwargs)
 			objects.extend(response.get("Contents", []))
 			if not response.get("IsTruncated"):
@@ -488,6 +498,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 		return objects
 
 	def _list_objects_with_prefix_limited(self, s3, prefix: str, max_keys: int) -> list[dict]:
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{prefix}", params={"Bucket": self.config.bucket, "Prefix": prefix, "MaxKeys": max_keys})
 		response = s3.list_objects_v2(
 			Bucket=self.config.bucket,
 			Prefix=prefix,
@@ -509,9 +520,11 @@ class MrmsAwsQpe1hPass1(DataSource):
 	def _debug_listings(self, s3, product_prefix: Optional[str]) -> None:
 		bucket = self.config.bucket
 		print("MRMS AWS debug listing: top-level prefixes")
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{bucket}/", params={"Bucket": bucket, "Delimiter": "/"})
 		top = s3.list_objects_v2(Bucket=bucket, Delimiter="/")
 		print([p["Prefix"] for p in top.get("CommonPrefixes", [])])
 		print("MRMS AWS debug listing: CONUS/ prefixes")
+		log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{bucket}/{self.config.conus_prefix}", params={"Bucket": bucket, "Prefix": self.config.conus_prefix, "Delimiter": "/"})
 		conus = s3.list_objects_v2(Bucket=bucket, Prefix=self.config.conus_prefix, Delimiter="/")
 		conus_prefixes = [p["Prefix"] for p in conus.get("CommonPrefixes", [])]
 		print(conus_prefixes)
@@ -522,6 +535,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 				candidate = prefix
 				break
 		if candidate is None and conus_prefixes:
+			log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{bucket}/{conus_prefixes[0]}", params={"Bucket": bucket, "Prefix": conus_prefixes[0], "Delimiter": "/"})
 			child = s3.list_objects_v2(Bucket=bucket, Prefix=conus_prefixes[0], Delimiter="/")
 			child_prefixes = [p["Prefix"] for p in child.get("CommonPrefixes", [])]
 			print("MRMS AWS debug listing: next-level prefixes under", conus_prefixes[0])
@@ -532,6 +546,7 @@ class MrmsAwsQpe1hPass1(DataSource):
 					break
 		best = best or candidate
 		if best:
+			log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{bucket}/{best}", params={"Bucket": bucket, "Prefix": best, "Delimiter": "/"})
 			child = s3.list_objects_v2(Bucket=bucket, Prefix=best, Delimiter="/")
 			child_prefixes = [p["Prefix"] for p in child.get("CommonPrefixes", [])]
 			if child_prefixes:

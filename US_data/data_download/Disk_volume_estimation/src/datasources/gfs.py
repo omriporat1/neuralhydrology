@@ -16,7 +16,7 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, validate_conus_crop
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request, validate_conus_crop
 from src.derived_size import compute_derived_bytes
 
 
@@ -275,6 +275,7 @@ class GfsAwsConusDataSource(DataSource):
         print(f"GFS AWS retry: attempt={attempt}, backoff_s={next_sleep}, error={exc}")
 
     def _discover_available_extent(self, s3) -> None:
+        log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{self.config.day_prefix_root}", params={"Bucket": self.config.bucket, "Prefix": self.config.day_prefix_root, "Delimiter": "/"})
         prefixes = list(self._iter_common_prefixes(s3, self.config.day_prefix_root))
         days: list[str] = []
         for prefix in prefixes:
@@ -297,6 +298,7 @@ class GfsAwsConusDataSource(DataSource):
     def _iter_common_prefixes(self, s3, prefix: str) -> Iterable[str]:
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.config.bucket, Prefix=prefix, Delimiter="/"):
+            log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{prefix}", params={"Bucket": self.config.bucket, "Prefix": prefix, "Delimiter": "/"})
             for entry in page.get("CommonPrefixes", []):
                 yield entry.get("Prefix")
 
@@ -325,6 +327,7 @@ class GfsAwsConusDataSource(DataSource):
             kwargs = {"Bucket": self.config.bucket, "Prefix": prefix}
             if continuation:
                 kwargs["ContinuationToken"] = continuation
+            log_request(LOGGER, self.name, "s3.list_objects_v2", url=f"s3://{self.config.bucket}/{prefix}", params=kwargs)
             resp = s3.list_objects_v2(**kwargs)
             for obj in resp.get("Contents", []):
                 key = obj.get("Key", "")
@@ -359,12 +362,14 @@ class GfsAwsConusDataSource(DataSource):
         before_sleep=_log_retry_attempt,
     )
     def _download_s3_range(self, s3, bucket: str, key: str, byte_range: str) -> bytes:
+        log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{key}", params={"Bucket": bucket, "Key": key, "Range": byte_range})
         resp = s3.get_object(Bucket=bucket, Key=key, Range=byte_range)
         return resp["Body"].read()
 
     def _download_one_selected_subset(self, s3, out_dir: Path, obj: RemoteObject) -> Path:
         bucket, key = self._parse_s3_url(obj.url)
         idx_key = f"{key}.idx"
+        log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{idx_key}", params={"Bucket": bucket, "Key": idx_key})
         idx_resp = s3.get_object(Bucket=bucket, Key=idx_key)
         idx_text = idx_resp["Body"].read().decode("utf-8", errors="replace")
 
