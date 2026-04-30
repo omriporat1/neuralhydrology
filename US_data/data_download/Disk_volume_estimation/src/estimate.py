@@ -67,6 +67,9 @@ class EstimateResult:
 	source: str
 	sample_range: str
 	sample_files: int
+	full_file_bytes: Optional[int]
+	selected_variable_bytes: Optional[int]
+	selected_conus_bytes: Optional[int]
 	raw_sample_bytes: Optional[int]
 	raw_sample_full_file_bytes: Optional[int]
 	raw_sample_selected_bytes: Optional[int]
@@ -1152,6 +1155,9 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					source=source.name,
 					sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 					sample_files=0,
+					full_file_bytes=None,
+					selected_variable_bytes=None,
+					selected_conus_bytes=None,
 					raw_sample_bytes=None,
 					raw_sample_full_file_bytes=None,
 					raw_sample_selected_bytes=None,
@@ -1194,6 +1200,9 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 					source=source.name,
 					sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 					sample_files=len(objects),
+					full_file_bytes=None,
+					selected_variable_bytes=None,
+					selected_conus_bytes=None,
 					raw_sample_bytes=None,
 					raw_sample_full_file_bytes=None,
 					raw_sample_selected_bytes=None,
@@ -1248,6 +1257,9 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 						source=source.name,
 						sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 						sample_files=len(objects),
+						full_file_bytes=None,
+						selected_variable_bytes=None,
+						selected_conus_bytes=None,
 						raw_sample_bytes=None,
 						raw_sample_full_file_bytes=None,
 						raw_sample_selected_bytes=None,
@@ -1404,6 +1416,9 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				source=source.name,
 				sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 				sample_files=len(objects),
+				full_file_bytes=full_sample_bytes,
+				selected_variable_bytes=selected_sample_bytes,
+				selected_conus_bytes=selected_conus_sample_bytes,
 				raw_sample_bytes=sample_bytes,
 				raw_sample_full_file_bytes=full_sample_bytes,
 				raw_sample_selected_bytes=selected_sample_bytes,
