@@ -65,6 +65,7 @@ class Config:
 @dataclass
 class EstimateResult:
 	source: str
+	status: str
 	sample_range: str
 	sample_files: int
 	full_file_bytes: Optional[int]
@@ -99,6 +100,13 @@ class EstimateResult:
 	covers_effective_range: bool
 	notes: str
 	assumptions: dict
+
+
+def _derive_status(source: DataSource) -> str:
+	notes = str(source.assumptions().get("notes", "")).lower()
+	if "simulated" in notes:
+		return "UNVERIFIED"
+	return "VERIFIED"
 
 
 @dataclass
@@ -1153,6 +1161,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			results.append(
 				EstimateResult(
 					source=source.name,
+					status=_derive_status(source),
 					sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 					sample_files=0,
 					full_file_bytes=None,
@@ -1198,6 +1207,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 			results.append(
 				EstimateResult(
 					source=source.name,
+					status=_derive_status(source),
 					sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 					sample_files=len(objects),
 					full_file_bytes=None,
@@ -1255,6 +1265,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 				results.append(
 					EstimateResult(
 						source=source.name,
+						status=_derive_status(source),
 						sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 						sample_files=len(objects),
 						full_file_bytes=None,
@@ -1414,6 +1425,7 @@ def run_estimation(config: Config) -> tuple[list[EstimateResult], dict]:
 		results.append(
 			EstimateResult(
 				source=source.name,
+				status=("UNVERIFIED" if _derive_status(source) == "UNVERIFIED" else "VERIFIED"),
 				sample_range=f"{config.sample_start.date()} to {config.sample_end.date()}",
 				sample_files=len(objects),
 				full_file_bytes=full_sample_bytes,

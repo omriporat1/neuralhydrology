@@ -50,6 +50,7 @@ def print_table(results: Iterable[EstimateResult]) -> None:
 	rows = list(results)
 	table = Table(title="Disk Volume Estimate")
 	table.add_column("Source")
+	table.add_column("STATUS")
 	table.add_column("FULL_FILE_BYTES")
 	table.add_column("SELECTED_VARIABLE_BYTES")
 	table.add_column("SELECTED_CONUS_BYTES")
@@ -62,6 +63,7 @@ def print_table(results: Iterable[EstimateResult]) -> None:
 	for result in rows:
 		table.add_row(
 			result.source,
+			result.status,
 			humanize_bytes(result.full_file_bytes),
 			humanize_bytes(result.selected_variable_bytes),
 			humanize_bytes(result.selected_conus_bytes),
