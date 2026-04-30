@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 import re
 import time
@@ -15,8 +16,11 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, validate_conus_crop
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,12 @@ class GfsAwsConusDataSource(DataSource):
         self._last_selected_conus_sample_bytes: Optional[int] = None
         self._last_selected_accounting_mode: str = "server_side_range"
         self._last_conus_accounting_mode: str = "local_spatial_crop"
+        self._validation_status: str = "VALID"
+        self._validation_reason: Optional[str] = None
+
+    def _mark_invalid(self, reason: str) -> None:
+        self._validation_status = "INVALID"
+        self._validation_reason = reason
 
     def list_sample_objects(
         self,
@@ -162,10 +172,18 @@ class GfsAwsConusDataSource(DataSource):
                         arr = np.squeeze(arr)
                         if arr.ndim != 2:
                             continue
-                        cropped = self._crop_array_to_bbox(arr, da.coords, region.bbox)
-                        if cropped.size == 0:
+                        crop = validate_conus_crop(
+                            arr,
+                            da.coords,
+                            region.bbox,
+                            source_name=self.name,
+                            crop_kind="GFS CONUS crop",
+                            logger=LOGGER,
+                            mark_invalid=self._mark_invalid,
+                        )
+                        if crop.cropped_array.size == 0:
                             continue
-                        total_bytes += int(cropped.size * cropped.dtype.itemsize)
+                        total_bytes += int(crop.cropped_array.size * crop.cropped_array.dtype.itemsize)
             finally:
                 for ds in datasets:
                     ds.close()
@@ -223,6 +241,8 @@ class GfsAwsConusDataSource(DataSource):
             "subsetting": "message-level selected-variable extraction via .idx + S3 Range",
             "selected_raw_bytes_mode": self._last_selected_accounting_mode,
             "selected_conus_raw_bytes_mode": self._last_conus_accounting_mode,
+            "validation_status": self._validation_status,
+            "validation_reason": self._validation_reason,
             "spatial_crop": {
                 "server_side": False,
                 "local": True,

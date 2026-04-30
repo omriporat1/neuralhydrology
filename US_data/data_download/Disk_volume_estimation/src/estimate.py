@@ -12,7 +12,7 @@ import warnings
 
 import numpy as np
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, validate_conus_crop
 from src.datasources.era5_landt import Era5LandTDataSource
 from src.datasources.gdas import GdasAwsAntecedentDataSource
 from src.datasources.gfs import GfsAwsConusDataSource
@@ -423,33 +423,15 @@ def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_na
 
 
 def _crop_gfs_to_conus(arr: np.ndarray, coords) -> np.ndarray:
-	lat = coords.get("latitude") if "latitude" in coords else coords.get("lat")
-	lon = coords.get("longitude") if "longitude" in coords else coords.get("lon")
-	if lat is None or lon is None:
-		return arr
-
-	lat_arr = np.asarray(lat.values)
-	lon_arr = np.asarray(lon.values)
-	if lat_arr.ndim == 1 and lon_arr.ndim == 1:
-		lon_grid, lat_grid = np.meshgrid(lon_arr, lat_arr)
-	else:
-		lat_grid = lat_arr
-		lon_grid = lon_arr
-	lon_grid = np.where(lon_grid > 180.0, lon_grid - 360.0, lon_grid)
-	lon_min, lat_min, lon_max, lat_max = CONUS_BBOX.bbox
-	mask = (
-		(lat_grid >= lat_min)
-		& (lat_grid <= lat_max)
-		& (lon_grid >= lon_min)
-		& (lon_grid <= lon_max)
+	validation = validate_conus_crop(
+		arr,
+		coords,
+		CONUS_BBOX.bbox,
+		source_name="estimate_preview",
+		crop_kind="GFS/GDAS CONUS crop",
+		logger=LOGGER,
 	)
-	if mask.shape != arr.shape:
-		return arr
-	row_idx = np.where(mask.any(axis=1))[0]
-	col_idx = np.where(mask.any(axis=0))[0]
-	if row_idx.size == 0 or col_idx.size == 0:
-		return arr
-	return arr[row_idx.min():row_idx.max() + 1, col_idx.min():col_idx.max() + 1]
+	return validation.cropped_array
 
 
 def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
@@ -897,15 +879,22 @@ def _subset_imerg_to_bbox(da, lat_name: str, lon_name: str, lon_min: float, lat_
 	lat_slice = slice(lat_min, lat_max) if lat_ascending else slice(lat_max, lat_min)
 	lon_slice = slice(lon_min, lon_max) if lon_ascending else slice(lon_max, lon_min)
 	subset = da.sel({lat_name: lat_slice, lon_name: lon_slice})
-	sub_lat = np.asarray(subset[lat_name].values)
-	sub_lon = np.asarray(subset[lon_name].values)
-	if sub_lat.size == 0 or sub_lon.size == 0:
-		return subset, None
+	arr = np.asarray(subset.values)
+	validation = validate_conus_crop(
+		arr,
+		subset.coords,
+		CONUS_BBOX.bbox,
+		source_name="estimate_preview",
+		crop_kind="IMERG CONUS crop",
+		logger=LOGGER,
+	)
+	if validation.crop_bounds is None or validation.cropped_array.size == 0:
+		return subset.isel({lat_name: slice(0, 0), lon_name: slice(0, 0)}), None
 	crop_info = {
-		"lon_min": float(np.min(sub_lon)),
-		"lon_max": float(np.max(sub_lon)),
-		"lat_min": float(np.min(sub_lat)),
-		"lat_max": float(np.max(sub_lat)),
+		"lon_min": validation.crop_bounds[0],
+		"lon_max": validation.crop_bounds[2],
+		"lat_min": validation.crop_bounds[1],
+		"lat_max": validation.crop_bounds[3],
 	}
 	return subset, crop_info
 

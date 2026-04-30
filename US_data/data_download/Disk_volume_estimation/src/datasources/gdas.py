@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 import re
 import time
@@ -15,8 +16,11 @@ import numpy as np
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, validate_conus_crop
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,12 @@ class GdasAwsAntecedentDataSource(DataSource):
         self._last_selected_conus_accounting_mode: str = "local_spatial_crop"
         self._last_required_data_start: Optional[datetime] = None
         self._last_required_data_end: Optional[datetime] = None
+        self._validation_status: str = "VALID"
+        self._validation_reason: Optional[str] = None
+
+    def _mark_invalid(self, reason: str) -> None:
+        self._validation_status = "INVALID"
+        self._validation_reason = reason
 
     def list_sample_objects(
         self,
@@ -155,10 +165,18 @@ class GdasAwsAntecedentDataSource(DataSource):
                         arr = np.squeeze(arr)
                         if arr.ndim != 2:
                             continue
-                        cropped = self._crop_array_to_bbox(arr, da.coords, region.bbox)
-                        if cropped.size == 0:
+                        crop = validate_conus_crop(
+                            arr,
+                            da.coords,
+                            region.bbox,
+                            source_name=self.name,
+                            crop_kind="GDAS CONUS crop",
+                            logger=LOGGER,
+                            mark_invalid=self._mark_invalid,
+                        )
+                        if crop.cropped_array.size == 0:
                             continue
-                        total_bytes += int(cropped.size * cropped.dtype.itemsize)
+                        total_bytes += int(crop.cropped_array.size * crop.cropped_array.dtype.itemsize)
             finally:
                 for ds in datasets:
                     ds.close()
@@ -214,6 +232,8 @@ class GdasAwsAntecedentDataSource(DataSource):
             "server_side_spatial_subset": False,
             "selected_raw_bytes_mode": self._last_selected_accounting_mode,
             "selected_conus_raw_bytes_mode": self._last_selected_conus_accounting_mode,
+            "validation_status": self._validation_status,
+            "validation_reason": self._validation_reason,
             "required_historical_archive_window": {
                 "start": self._last_required_data_start.isoformat() if self._last_required_data_start else None,
                 "end": self._last_required_data_end.isoformat() if self._last_required_data_end else None,

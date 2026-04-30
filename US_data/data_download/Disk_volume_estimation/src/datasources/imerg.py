@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 import re
 import time
@@ -10,8 +11,11 @@ from typing import Iterable, Optional
 import requests
 import numpy as np
 
-from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject
+from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, validate_conus_crop
 from src.derived_size import compute_derived_bytes
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,12 @@ class ImergLateDailyDataSource(DataSource):
         self._last_selected_conus_crop_info: Optional[dict] = None
         self._last_required_data_start: Optional[datetime] = None
         self._last_required_data_end: Optional[datetime] = None
+        self._validation_status: str = "VALID"
+        self._validation_reason: Optional[str] = None
+
+    def _mark_invalid(self, reason: str) -> None:
+        self._validation_status = "INVALID"
+        self._validation_reason = reason
 
     def list_sample_objects(
         self,
@@ -145,17 +155,33 @@ class ImergLateDailyDataSource(DataSource):
                 if lat_name is None or lon_name is None:
                     continue
                 subset, crop_info = _subset_to_conus(da, lat_name, lon_name, lon_min, lat_min, lon_max, lat_max)
-                arr = np.asarray(subset.values)
-                if self._last_selected_conus_crop_info is None and crop_info is not None:
-                    crop_info = dict(crop_info)
-                    crop_info["shape"] = tuple(int(v) for v in arr.shape)
-                    self._last_selected_conus_crop_info = crop_info
+                validation = validate_conus_crop(
+                    np.asarray(subset.values),
+                    subset.coords,
+                    region.bbox,
+                    source_name=self.name,
+                    crop_kind="IMERG CONUS crop",
+                    logger=LOGGER,
+                    mark_invalid=self._mark_invalid,
+                )
+                arr = validation.cropped_array
+                if validation.valid and self._last_selected_conus_crop_info is None and validation.crop_bounds is not None:
+                    validated_crop_info = {
+                        "lon_min": validation.crop_bounds[0],
+                        "lon_max": validation.crop_bounds[2],
+                        "lat_min": validation.crop_bounds[1],
+                        "lat_max": validation.crop_bounds[3],
+                        "shape": tuple(int(v) for v in arr.shape),
+                    }
+                    self._last_selected_conus_crop_info = validated_crop_info
                     print(
                         "IMERG selected_conus crop bounds: "
-                        f"lon=[{crop_info['lon_min']:.3f}, {crop_info['lon_max']:.3f}], "
-                        f"lat=[{crop_info['lat_min']:.3f}, {crop_info['lat_max']:.3f}], "
-                        f"shape={crop_info['shape']}"
+                        f"lon=[{validated_crop_info['lon_min']:.3f}, {validated_crop_info['lon_max']:.3f}], "
+                        f"lat=[{validated_crop_info['lat_min']:.3f}, {validated_crop_info['lat_max']:.3f}], "
+                        f"shape={validated_crop_info['shape']}"
                     )
+                if arr.size == 0:
+                    continue
                 total_bytes += int(arr.size * arr.dtype.itemsize)
             finally:
                 ds.close()
@@ -207,6 +233,8 @@ class ImergLateDailyDataSource(DataSource):
             "server_side_spatial_subset": False,
             "selected_raw_bytes_mode": self._last_selected_accounting_mode,
             "selected_conus_raw_bytes_mode": self._last_selected_conus_accounting_mode,
+            "validation_status": self._validation_status,
+            "validation_reason": self._validation_reason,
             "required_historical_archive_window": {
                 "start": self._last_required_data_start.isoformat() if self._last_required_data_start else None,
                 "end": self._last_required_data_end.isoformat() if self._last_required_data_end else None,
