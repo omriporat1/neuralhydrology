@@ -24,12 +24,18 @@ build/
 
 # Local environment files
 .env
+.netrc
+.cdsapirc
+.ecmwfapirc
 
 # Data downloads and generated outputs
 data/
 reports/
+tmp/
+**/sample_downloads/
 
-
-.netrc
-.cdsapirc
-.ecmwfapirc
+# Raw science data files
+*.grib
+*.grib2
+*.nc
+*.nc4
