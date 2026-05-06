@@ -155,8 +155,12 @@ class ImergLateDailyDataSource(DataSource):
                 if lat_name is None or lon_name is None:
                     continue
                 subset, crop_info = _subset_to_conus(da, lat_name, lon_name, lon_min, lat_min, lon_max, lat_max)
+                arr = np.asarray(subset.values)
+                arr = np.squeeze(arr)
+                while arr.ndim > 2:
+                    arr = arr[0]
                 validation = validate_conus_crop(
-                    np.asarray(subset.values),
+                    arr,
                     subset.coords,
                     region.bbox,
                     source_name=self.name,
@@ -165,6 +169,16 @@ class ImergLateDailyDataSource(DataSource):
                     mark_invalid=self._mark_invalid,
                 )
                 arr = validation.cropped_array
+                stats = {
+                    "min": float(np.nanmin(arr)) if arr.size else float("nan"),
+                    "max": float(np.nanmax(arr)) if arr.size else float("nan"),
+                    "mean": float(np.nanmean(arr)) if arr.size else float("nan"),
+                    "nan_pct": float(np.isnan(arr).mean() * 100.0) if arr.size else float("nan"),
+                }
+                print(
+                    "IMERG selected_conus stats: "
+                    f"min={stats['min']:.6g}, max={stats['max']:.6g}, mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+                )
                 if validation.valid and self._last_selected_conus_crop_info is None and validation.crop_bounds is not None:
                     validated_crop_info = {
                         "lon_min": validation.crop_bounds[0],
@@ -305,13 +319,25 @@ class ImergLateDailyDataSource(DataSource):
 
 
 def _subset_to_conus(da, lat_name: str, lon_name: str, lon_min: float, lat_min: float, lon_max: float, lat_max: float):
+    """Robustly subset IMERG data to CONUS bbox with dynamic coordinate handling.
+    
+    Handles:
+    - Multiple coordinate name variants (lat/latitude, lon/longitude)
+    - Any dimension order and orientation
+    - Ascending/descending latitude
+    
+    Raises ValueError if crop result is empty.
+    """
     lat_vals = np.asarray(da[lat_name].values)
     lon_vals = np.asarray(da[lon_name].values)
 
     if lat_vals.ndim != 1 or lon_vals.ndim != 1:
         return da, None
 
+    # Normalize longitude to [-180, 180]
     lon_vals_norm = np.where(lon_vals > 180.0, lon_vals - 360.0, lon_vals)
+    
+    # Ensure longitude is sorted ascending
     lon_order = np.argsort(lon_vals_norm)
     if not np.array_equal(lon_order, np.arange(lon_vals_norm.size)):
         da = da.isel({lon_name: lon_order})
@@ -319,15 +345,27 @@ def _subset_to_conus(da, lat_name: str, lon_name: str, lon_min: float, lat_min: 
 
     da = da.assign_coords({lon_name: lon_vals_norm})
 
+    # Detect ascending/descending for latitude
     lat_ascending = bool(lat_vals[0] <= lat_vals[-1])
     lon_ascending = bool(lon_vals_norm[0] <= lon_vals_norm[-1])
+    
+    # Select based on orientation
     lat_slice = slice(lat_min, lat_max) if lat_ascending else slice(lat_max, lat_min)
     lon_slice = slice(lon_min, lon_max) if lon_ascending else slice(lon_max, lon_min)
     subset = da.sel({lat_name: lat_slice, lon_name: lon_slice})
+    
     sub_lat = np.asarray(subset[lat_name].values)
     sub_lon = np.asarray(subset[lon_name].values)
+    
     if sub_lat.size == 0 or sub_lon.size == 0:
-        return subset, None
+        raise ValueError(
+            f"IMERG crop result is empty. "
+            f"lat_name={lat_name}, lon_name={lon_name}, "
+            f"lat_range=[{lat_min}, {lat_max}], lon_range=[{lon_min}, {lon_max}], "
+            f"data_lat_range=[{lat_vals.min():.3f}, {lat_vals.max():.3f}], "
+            f"data_lon_range=[{lon_vals_norm.min():.3f}, {lon_vals_norm.max():.3f}]"
+        )
+    
     crop_info = {
         "lon_min": float(np.min(sub_lon)),
         "lon_max": float(np.max(sub_lon)),

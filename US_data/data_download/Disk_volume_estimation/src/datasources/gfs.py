@@ -372,23 +372,57 @@ class GfsAwsConusDataSource(DataSource):
         log_request(LOGGER, self.name, "s3.get_object", url=f"s3://{bucket}/{idx_key}", params={"Bucket": bucket, "Key": idx_key})
         idx_resp = s3.get_object(Bucket=bucket, Key=idx_key)
         idx_text = idx_resp["Body"].read().decode("utf-8", errors="replace")
+        full_object_size = int(s3.head_object(Bucket=bucket, Key=key)["ContentLength"])
 
         entries = self._parse_idx_entries(idx_text)
         ranges = self._selected_ranges(entries)
+
+        # Audit logging: byte-range verification
+        total_messages = len(entries)
+        selected_messages = sum(1 for e in entries if self._is_selected_message(e["var"], e["level"]))
+        theoretical_full_file_bytes = full_object_size
 
         rel_dir = Path(obj.key).parent
         lead_part = f"f{(obj.lead_time_h or 0):03d}"
         out_path = out_dir / rel_dir / f"selected_{lead_part}.grib2"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with out_path.open("wb") as f:
-            for start, end in ranges:
-                if end is None:
-                    hdr = f"bytes={start}-"
-                else:
-                    hdr = f"bytes={start}-{end}"
-                chunk = self._download_s3_range(s3, bucket, key, hdr)
+        total_bytes_transferred = 0
+        for start, end in ranges:
+            if end is None:
+                hdr = f"bytes={start}-"
+                estimated_size = theoretical_full_file_bytes - start if theoretical_full_file_bytes > start else 0
+            else:
+                hdr = f"bytes={start}-{end}"
+                estimated_size = (end - start + 1)
+            total_bytes_transferred += estimated_size
+            chunk = self._download_s3_range(s3, bucket, key, hdr)
+            with out_path.open("ab" if out_path.exists() else "wb") as f:
                 f.write(chunk)
+
+        # Log audit results
+        actual_file_bytes = out_path.stat().st_size
+        selected_var_names = set(e["var"] for e in entries if self._is_selected_message(e["var"], e["level"]))
+        selected_levels = set(e["level"] for e in entries if self._is_selected_message(e["var"], e["level"]))
+        validation_pass = (
+            actual_file_bytes == total_bytes_transferred
+            and total_bytes_transferred > 0
+            and total_bytes_transferred < theoretical_full_file_bytes
+        )
+        
+        LOGGER.info(
+            "GFS idx audit: "
+            f"idx_file=s3://{bucket}/{idx_key}, "
+            f"total_messages={total_messages}, "
+            f"selected_messages={selected_messages}, "
+            f"selected_vars={sorted(selected_var_names)}, "
+            f"selected_levels={sorted(selected_levels)}, "
+            f"byte_ranges_merged={len(ranges)}, "
+            f"theoretical_full_file_bytes={theoretical_full_file_bytes}, "
+            f"total_bytes_transferred={total_bytes_transferred}, "
+            f"actual_output_bytes={actual_file_bytes}, "
+            f"validation={'PASS' if validation_pass else 'FAIL'}"
+        )
 
         return out_path
 

@@ -246,7 +246,24 @@ class IfsMarsDataSource(DataSource):
 
         request = self._build_request(obj.datetime, out_path)
         mars_request = {k: v for k, v in request.items() if k != "target"}
+        
+        # Enhanced cycle-level audit logging
+        cycle_hour = obj.datetime.hour
         log_request(LOGGER, self.name, "mars.retrieve", url=f"mars://{obj.key}", params=mars_request)
+        LOGGER.info(
+            f"IFS MARS cycle audit: "
+            f"cycle={obj.datetime.isoformat()}Z (hour={cycle_hour}), "
+            f"date={mars_request.get('date')}, "
+            f"time={mars_request.get('time')}, "
+            f"step={mars_request.get('step')}, "
+            f"param={mars_request.get('param')}, "
+            f"class={mars_request.get('class')}, "
+            f"stream={mars_request.get('stream')}, "
+            f"type={mars_request.get('type')}, "
+            f"levtype={mars_request.get('levtype')}, "
+            f"area={mars_request.get('area')}, "
+            f"grid={mars_request.get('grid')}"
+        )
         print(f"IFS MARS request: {mars_request}")
         print(f"IFS MARS target: {out_path}")
         print(f"IFS MARS variables: {mars_request['param']}")
@@ -256,12 +273,19 @@ class IfsMarsDataSource(DataSource):
             server = ECMWFService("mars")
             server.execute(mars_request, str(out_path))
         except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                f"IFS MARS request failed for cycle {obj.datetime.isoformat()}Z (hour={cycle_hour}): {exc}"
+            )
             raise RuntimeError(
                 "IFS MARS request failed. Verify credentials and MARS permissions.\n"
                 + self._setup_error_message()
             ) from exc
 
         if not out_path.exists() or out_path.stat().st_size == 0:
-            raise RuntimeError("IFS MARS returned no output file. Check request permissions and parameters.")
+            error_msg = f"IFS MARS returned no output file for {obj.datetime.isoformat()}Z. Check request permissions and parameters."
+            LOGGER.error(error_msg)
+            raise RuntimeError(error_msg)
 
+        output_size = out_path.stat().st_size
+        LOGGER.info(f"IFS MARS cycle {obj.datetime.isoformat()}Z downloaded: {output_size} bytes")
         return out_path

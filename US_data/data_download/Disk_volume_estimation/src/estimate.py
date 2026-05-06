@@ -312,12 +312,25 @@ def _generate_mrms_preview(sample_files: list[Path], report_dir: Path, source_na
 			LOGGER.warning("MRMS preview skipped (unexpected grid shape %s).", arr.shape)
 			return
 
-		fig, ax = plt.subplots(figsize=(8, 5))
-		image = ax.imshow(arr, origin="lower")
-		fig.colorbar(image, ax=ax, label="precip")
-		ax.set_title(f"{source_name} | {product_name} | {timestamp_str}")
-		ax.set_xlabel("x")
-		ax.set_ylabel("y")
+		stats = _qc_stats(arr)
+		print(
+			"MRMS QC "
+			f"{product_name}: min={stats['min']:.6g}, max={stats['max']:.6g}, "
+			f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
+		)
+
+		fig, ax = plt.subplots(figsize=(10, 6))
+		image = ax.imshow(arr, origin="upper", cmap="Blues")
+		fig.colorbar(image, ax=ax, label="precip (mm)")
+		ax.set_xlabel("Longitude index (west →)")
+		ax.set_ylabel("Latitude index (north →)")
+		ax.set_title(f"{source_name} | {product_name} | {timestamp_str} | 1km CONUS")
+		from matplotlib.patches import Rectangle
+		# MRMS grid is approximately 7000x4000 pixels for 1km CONUS
+		# This is illustrative; actual extent would need MRMS metadata
+		ax.text(0.02, 0.98, "North-up. See grid docs for precise lon/lat mapping.",
+		        transform=ax.transAxes, fontsize=8, verticalalignment="top",
+		        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
 		safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 		out_path = preview_dir / f"{source_name}_{safe_ts}.png"
 		fig.tight_layout()
@@ -415,12 +428,12 @@ def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_na
 				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 			)
 
-			fig, ax = plt.subplots(figsize=(8, 5))
-			image = ax.imshow(arr, origin="lower")
-			fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
+			fig, ax = plt.subplots(figsize=(10, 6))
+			image = ax.imshow(arr, origin="upper", cmap="viridis")
+			cbar = fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_xlabel("Longitude (west →)")
+			ax.set_ylabel("Latitude (north →)")
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | 2.5km CONUS grid")
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -514,12 +527,13 @@ def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_nam
 				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 			)
 
-			fig, ax = plt.subplots(figsize=(8, 5))
-			image = ax.imshow(arr, origin="lower")
-			fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
+			fig, ax = plt.subplots(figsize=(10, 6))
+			# Use origin="upper" for north-up display (latitude decreases downward)
+			image = ax.imshow(arr, origin="upper", cmap="viridis")
+			cbar = fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_xlabel("Longitude (west →)")
+			ax.set_ylabel("Latitude (north →)")
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | CONUS-relevant global field")
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -600,12 +614,12 @@ def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_nam
 				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 			)
 
-			fig, ax = plt.subplots(figsize=(8, 5))
-			image = ax.imshow(arr, origin="lower")
-			fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
+			fig, ax = plt.subplots(figsize=(10, 6))
+			image = ax.imshow(arr, origin="upper", cmap="viridis")
+			cbar = fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_xlabel("Longitude (west →)")
+			ax.set_ylabel("Latitude (north →)")
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | 0.25° global field")
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -701,12 +715,12 @@ def _generate_era5_landt_preview(sample_files: list[Path], report_dir: Path, sou
 				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 			)
 
-			fig, ax = plt.subplots(figsize=(8, 5))
-			image = ax.imshow(arr, origin="lower")
-			fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
+			fig, ax = plt.subplots(figsize=(10, 6))
+			image = ax.imshow(arr, origin="upper", cmap="viridis")
+			cbar = fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_xlabel("Longitude (west →)")
+			ax.set_ylabel("Latitude (north →)")
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | 0.1° global grid")
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -803,12 +817,12 @@ def _generate_gdas_preview(sample_files: list[Path], report_dir: Path, source_na
 				f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 			)
 
-			fig, ax = plt.subplots(figsize=(8, 5))
-			image = ax.imshow(arr, origin="lower")
-			fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str}")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
+			fig, ax = plt.subplots(figsize=(10, 6))
+			image = ax.imshow(arr, origin="upper", cmap="viridis")
+			cbar = fig.colorbar(image, ax=ax, label=var_name)
+			ax.set_xlabel("Longitude (west →)")
+			ax.set_ylabel("Latitude (north →)")
+			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | 0.25° global field")
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -947,22 +961,26 @@ def _generate_imerg_preview(sample_files: list[Path], report_dir: Path, source_n
 			f"mean={stats['mean']:.6g}, nan_pct={stats['nan_pct']:.3f}"
 		)
 
-		fig, ax = plt.subplots(figsize=(8, 5))
+		fig, ax = plt.subplots(figsize=(10, 6))
 		if crop_info is not None:
 			image = ax.imshow(
 				arr,
-				origin="lower",
+				origin="upper",
 				extent=[crop_info["lon_min"], crop_info["lon_max"], crop_info["lat_min"], crop_info["lat_max"]],
 				aspect="auto",
+				cmap="Blues",
 			)
-			ax.set_xlabel("longitude")
-			ax.set_ylabel("latitude")
+			from matplotlib.patches import Rectangle
+			conus_bbox = Rectangle((-126, 24), 60, 26, linewidth=2, edgecolor="red", facecolor="none", linestyle="--", label="CONUS bbox")
+			ax.add_patch(conus_bbox)
+			ax.set_xlabel("Longitude")
+			ax.set_ylabel("Latitude")
 		else:
-			image = ax.imshow(arr, origin="lower")
-			ax.set_xlabel("x")
-			ax.set_ylabel("y")
-		fig.colorbar(image, ax=ax, label="PRECIP")
-		ax.set_title(f"{source_name} | PRECIP | {timestamp_str}")
+			image = ax.imshow(arr, origin="upper", cmap="Blues")
+			ax.set_xlabel("x (grid indices)")
+			ax.set_ylabel("y (grid indices)")
+		fig.colorbar(image, ax=ax, label="PRECIP (mm/day)")
+		ax.set_title(f"{source_name} | PRECIP | {timestamp_str} | Daily accumulated (CONUS cropped)")
 		safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 		out_path = preview_dir / f"{source_name}_PRECIP_{safe_ts}.png"
 		fig.tight_layout()
