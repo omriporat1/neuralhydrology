@@ -37,7 +37,12 @@ Target:
 - MRMS is retained for Stage 1 basin-average hourly precipitation and remains part of the intended research pipeline.
 - RTMA is retained for Stage 1 basin-average hourly meteorology despite its size/time cost because it is scientifically important.
 - GFS byte-range extraction is validated and should be frozen except for plotting changes.
-- IFS is important and should not be downgraded or dropped; the current `oper/fc` historical path still only retrieves 00 and 12 UTC, while 06 and 18 UTC remain unresolved on that path. A deterministic `scda` fallback was found for 06/18, so the issue is not "only two cycles exist".
+- **IFS (ECMWF MARS)** is operationally improved:
+  - Stream logic: 00/12 UTC use `oper/fc`, 06/18 UTC use `scda/fc` (deterministic fallback).
+  - Grid resolution: upgraded to `0.1/0.1` to leverage higher spatial resolution relative to GFS (6.2 KB per point vs 25 km per point).
+  - All four cycles (00, 06, 12, 18 UTC) now accessible and validated.
+  - Area subset `50/-126/24/-66` supported.
+  - Estimated data volume: ~80 GB/year (vs ~13 GB/year for 0.25/0.25).
 - ERA5-Land is retained as a Stage 2 long-term daily antecedent input.
 - GDAS is retained as a Stage 2 long-term daily antecedent input.
 - IMERG download works, but crop validation still needs final nonzero selected-CONUS confirmation.

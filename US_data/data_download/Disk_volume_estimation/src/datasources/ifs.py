@@ -24,7 +24,7 @@ class IfsMarsConfig:
     stream: str = "oper"
     type: str = "fc"
     levtype: str = "sfc"
-    grid: str = "0.25/0.25"
+    grid: str = "0.1/0.1"  # High resolution: ~11 km over CONUS
     area: str = "50/-126/24/-66"  # North/West/South/East (CONUS)
     param: str = "228.128/167.128/168.128/165.128/166.128/134.128/169.128"
     target_ext: str = "grib"
@@ -214,10 +214,21 @@ class IfsMarsDataSource(DataSource):
         return f"0/to/{int(max_lead_h)}/by/1"
 
     def _build_request(self, cycle_dt: datetime, target_path: Path) -> dict:
+        # Use appropriate stream/type based on cycle hour
+        # 00/12 UTC: use operational forecast stream (oper/fc)
+        # 06/18 UTC: use deterministic scda stream (scda/fc)
+        cycle_hour = cycle_dt.hour
+        if cycle_hour in (6, 18):
+            stream = "scda"
+            type_ = "fc"
+        else:
+            stream = self.config.stream
+            type_ = self.config.type
+        
         req = {
             "class": self.config.mars_class,
-            "stream": self.config.stream,
-            "type": self.config.type,
+            "stream": stream,
+            "type": type_,
             "levtype": self.config.levtype,
             "date": cycle_dt.strftime("%Y-%m-%d"),
             "time": f"{cycle_dt.hour:02d}:00:00",
