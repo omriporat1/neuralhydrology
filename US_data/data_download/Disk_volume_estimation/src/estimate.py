@@ -663,20 +663,62 @@ def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], s
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
 	geo_info: Optional[dict] = None
+
+	def _select_preview_slice(da, arr3d: np.ndarray, short_name: str) -> np.ndarray:
+		# For accumulated forecast precipitation, prefer a nonzero lead for more meaningful QC previews.
+		if short_name in {"tp", "apcp", "acpcp"}:
+			step_dim = None
+			for dim_name in da.dims:
+				if str(dim_name).lower() in {"step", "leadtime", "forecast_hour", "forecast_time"}:
+					step_dim = dim_name
+					break
+			axis = da.dims.index(step_dim) if step_dim is not None else 0
+			step_vals = None
+			if step_dim is not None and step_dim in da.coords:
+				try:
+					step_vals = np.asarray(da.coords[step_dim].values).astype("float64")
+				except Exception:  # noqa: BLE001
+					step_vals = None
+
+			selected_idx = None
+			selected_step = None
+			if step_vals is not None and step_vals.ndim == 1 and step_vals.size == arr3d.shape[axis]:
+				for preferred in (6.0, 24.0):
+					matches = np.where(np.isclose(step_vals, preferred))[0]
+					if matches.size > 0:
+						selected_idx = int(matches[0])
+						selected_step = float(step_vals[selected_idx])
+						break
+				if selected_idx is None:
+					nonzero = np.where(step_vals > 0)[0]
+					if nonzero.size > 0:
+						selected_idx = int(nonzero[0])
+						selected_step = float(step_vals[selected_idx])
+
+			if selected_idx is None:
+				selected_idx = min(1, arr3d.shape[axis] - 1) if arr3d.shape[axis] > 1 else 0
+			print(
+				"IFS preview lead selection: "
+				f"short_name={short_name}, axis={axis}, selected_index={selected_idx}, selected_step={selected_step}"
+			)
+			return np.take(arr3d, selected_idx, axis=axis)
+
+		# For non-accumulated variables keep existing quick-look behavior.
+		return np.take(arr3d, 0, axis=0)
+
 	try:
 		for ds in datasets:
 			for var_name in ds.data_vars:
+				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
 				arr = np.asarray(ds[var_name].values)
 				arr = np.squeeze(arr)
 				if arr.ndim == 3:
-					# IFS cycle files contain multiple lead times; use first lead for quick-look preview.
-					arr = arr[0, :, :]
+					arr = _select_preview_slice(ds[var_name], arr, short_name)
 				if arr.ndim != 2:
 					continue
 				maybe_geo_info = _geo_preview_info_from_coords(ds[var_name].coords)
 				if geo_info is None and maybe_geo_info is not None:
 					geo_info = maybe_geo_info
-				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
 				if short_name in {"2t", "t2m", "tmp"} and "TMP" not in var_map:
 					var_map["TMP"] = arr
 				if short_name in {"10u", "u10", "ugrd"} and "UGRD" not in var_map:
