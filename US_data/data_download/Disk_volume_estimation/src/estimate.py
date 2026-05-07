@@ -392,6 +392,100 @@ def _qc_stats(arr: np.ndarray) -> dict[str, float]:
 	}
 
 
+def _geo_preview_info_from_coords(coords, fallback_bounds: Optional[dict] = None) -> Optional[dict]:
+	lat_name = "latitude" if "latitude" in coords else ("lat" if "lat" in coords else None)
+	lon_name = "longitude" if "longitude" in coords else ("lon" if "lon" in coords else None)
+	if lat_name is None or lon_name is None:
+		return fallback_bounds
+	lat_vals = np.asarray(coords[lat_name].values)
+	lon_vals = np.asarray(coords[lon_name].values)
+	if lat_vals.ndim != 1 or lon_vals.ndim != 1:
+		return fallback_bounds
+	lon_vals_norm = np.where(lon_vals > 180.0, lon_vals - 360.0, lon_vals)
+	return {
+		"lon_min": float(np.nanmin(lon_vals_norm)),
+		"lon_max": float(np.nanmax(lon_vals_norm)),
+		"lat_min": float(np.nanmin(lat_vals)),
+		"lat_max": float(np.nanmax(lat_vals)),
+		"lat_descending": bool(lat_vals[0] > lat_vals[-1]),
+		"coord_names": {"lat": lat_name, "lon": lon_name},
+	}
+
+
+def _preview_bounds_validation_status(bounds: Optional[dict]) -> dict[str, object]:
+	if bounds is None:
+		return {"status": "FAIL", "lon_min": None, "lon_max": None, "lat_min": None, "lat_max": None}
+	lon_min = float(bounds["lon_min"])
+	lon_max = float(bounds["lon_max"])
+	lat_min = float(bounds["lat_min"])
+	lat_max = float(bounds["lat_max"])
+	status = "PASS" if lon_min < lon_max and lat_min < lat_max else "FAIL"
+	return {
+		"status": status,
+		"lon_min": lon_min,
+		"lon_max": lon_max,
+		"lat_min": lat_min,
+		"lat_max": lat_max,
+	}
+
+
+def _plot_geo_field(
+	ax,
+	arr: np.ndarray,
+	bounds: Optional[dict],
+	*,
+	cmap: str,
+	var_label: str,
+	title: str,
+	conus_outline: bool = True,
+):
+	if bounds is not None:
+		lon_min = float(bounds["lon_min"])
+		lon_max = float(bounds["lon_max"])
+		lat_min = float(bounds["lat_min"])
+		lat_max = float(bounds["lat_max"])
+		lat_descending = bool(bounds.get("lat_descending", False))
+		origin = "upper" if lat_descending else "lower"
+		image = ax.imshow(
+			arr,
+			origin=origin,
+			extent=[lon_min, lon_max, lat_min, lat_max],
+			aspect="auto",
+			cmap=cmap,
+		)
+		if conus_outline:
+			from matplotlib.patches import Rectangle
+
+			ax.add_patch(
+				Rectangle(
+					(-126, 24),
+					60,
+					26,
+					linewidth=2,
+					edgecolor="red",
+					facecolor="none",
+					linestyle="--",
+					label="CONUS bbox",
+				)
+			)
+		ax.set_xlabel("Longitude")
+		ax.set_ylabel("Latitude")
+		preview_validation = "PASS" if lon_min < lon_max and lat_min < lat_max else "FAIL"
+		print(
+			"preview_bounds_validation="
+			f"{preview_validation} lon=[{lon_min:.3f}, {lon_max:.3f}] lat=[{lat_min:.3f}, {lat_max:.3f}]"
+		)
+	else:
+		image = ax.imshow(arr, origin="upper", cmap=cmap)
+		ax.set_xlabel("x (grid indices)")
+		ax.set_ylabel("y (grid indices)")
+		print("preview_bounds_validation=FAIL lon=[unknown] lat=[unknown]")
+	fig = ax.figure
+	fig.colorbar(image, ax=ax, label=var_label)
+	ax.set_title(title)
+	return image
+
+
 def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
 	if not sample_files:
 		return {}
@@ -446,7 +540,7 @@ def _generate_rtma_preview(sample_files: list[Path], report_dir: Path, source_na
 		return {}
 
 
-def _crop_gfs_to_conus(arr: np.ndarray, coords) -> np.ndarray:
+def _crop_gfs_to_conus(arr: np.ndarray, coords) -> tuple[np.ndarray, Optional[dict]]:
 	validation = validate_conus_crop(
 		arr,
 		coords,
@@ -455,16 +549,26 @@ def _crop_gfs_to_conus(arr: np.ndarray, coords) -> np.ndarray:
 		crop_kind="GFS/GDAS CONUS crop",
 		logger=LOGGER,
 	)
-	return validation.cropped_array
+	geo_info = _geo_preview_info_from_coords(coords)
+	if geo_info is not None and validation.crop_bounds is not None:
+		geo_info = {
+			**geo_info,
+			"lon_min": validation.crop_bounds[0],
+			"lat_min": validation.crop_bounds[1],
+			"lon_max": validation.crop_bounds[2],
+			"lat_max": validation.crop_bounds[3],
+		}
+	return validation.cropped_array, geo_info
 
 
-def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
+def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str, Optional[dict]]:
 	import cfgrib
 
 	_suppress_cfgrib_merge_futurewarning()
 	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
+	geo_info: Optional[dict] = None
 	try:
 		for ds in datasets:
 			for var_name in ds.data_vars:
@@ -473,7 +577,9 @@ def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], s
 				arr = np.squeeze(arr)
 				if arr.ndim != 2:
 					continue
-				arr = _crop_gfs_to_conus(arr, da.coords)
+				arr, maybe_geo_info = _crop_gfs_to_conus(arr, da.coords)
+				if geo_info is None and maybe_geo_info is not None:
+					geo_info = maybe_geo_info
 				if arr.size == 0:
 					continue
 				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
@@ -491,7 +597,7 @@ def _read_gfs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], s
 	finally:
 		for ds in datasets:
 			ds.close()
-	return var_map, timestamp_str
+	return var_map, timestamp_str, geo_info
 
 
 def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
@@ -511,10 +617,11 @@ def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_nam
 	preview_source = sample_files[0]
 
 	try:
-		var_map, timestamp_str = _read_gfs_variable_arrays(preview_source)
+		var_map, timestamp_str, geo_info = _read_gfs_variable_arrays(preview_source)
 		target_vars = ["TMP", "UGRD", "PRATE"]
 
 		qc_summary: dict[str, dict[str, float]] = {}
+		qc_summary["_preview_bounds_validation"] = _preview_bounds_validation_status(geo_info)
 		for var_name in target_vars:
 			if var_name not in var_map:
 				continue
@@ -528,12 +635,14 @@ def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_nam
 			)
 
 			fig, ax = plt.subplots(figsize=(10, 6))
-			# Use origin="upper" for north-up display (latitude decreases downward)
-			image = ax.imshow(arr, origin="upper", cmap="viridis")
-			cbar = fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_xlabel("Longitude (west →)")
-			ax.set_ylabel("Latitude (north →)")
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | CONUS-relevant global field")
+			_plot_geo_field(
+				ax,
+				arr,
+				geo_info,
+				cmap="viridis",
+				var_label=var_name,
+				title=f"{source_name} | {var_name} | {timestamp_str} | CONUS-relevant global field",
+			)
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -546,13 +655,14 @@ def _generate_gfs_preview(sample_files: list[Path], report_dir: Path, source_nam
 		return {}
 
 
-def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str]:
+def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str, Optional[dict]]:
 	import cfgrib
 
 	_suppress_cfgrib_merge_futurewarning()
 	datasets = cfgrib.open_datasets(str(file_path), backend_kwargs={"indexpath": ""})
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
+	geo_info: Optional[dict] = None
 	try:
 		for ds in datasets:
 			for var_name in ds.data_vars:
@@ -563,6 +673,9 @@ def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], s
 					arr = arr[0, :, :]
 				if arr.ndim != 2:
 					continue
+				maybe_geo_info = _geo_preview_info_from_coords(ds[var_name].coords)
+				if geo_info is None and maybe_geo_info is not None:
+					geo_info = maybe_geo_info
 				short_name = str(ds[var_name].attrs.get("GRIB_shortName", "")).lower()
 				if short_name in {"2t", "t2m", "tmp"} and "TMP" not in var_map:
 					var_map["TMP"] = arr
@@ -578,7 +691,7 @@ def _read_ifs_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], s
 	finally:
 		for ds in datasets:
 			ds.close()
-	return var_map, timestamp_str
+	return var_map, timestamp_str, geo_info
 
 
 def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_name: str) -> dict:
@@ -598,10 +711,11 @@ def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_nam
 	preview_source = sample_files[0]
 
 	try:
-		var_map, timestamp_str = _read_ifs_variable_arrays(preview_source)
+		var_map, timestamp_str, geo_info = _read_ifs_variable_arrays(preview_source)
 		target_vars = ["TMP", "UGRD", "TP"]
 
 		qc_summary: dict[str, dict[str, float]] = {}
+		qc_summary["_preview_bounds_validation"] = _preview_bounds_validation_status(geo_info)
 		for var_name in target_vars:
 			if var_name not in var_map:
 				continue
@@ -615,11 +729,14 @@ def _generate_ifs_preview(sample_files: list[Path], report_dir: Path, source_nam
 			)
 
 			fig, ax = plt.subplots(figsize=(10, 6))
-			image = ax.imshow(arr, origin="upper", cmap="viridis")
-			cbar = fig.colorbar(image, ax=ax, label=var_name)
-			ax.set_xlabel("Longitude (west →)")
-			ax.set_ylabel("Latitude (north →)")
-			ax.set_title(f"{source_name} | {var_name} | {timestamp_str} | 0.25° global field")
+			_plot_geo_field(
+				ax,
+				arr,
+				geo_info,
+				cmap="viridis",
+				var_label=var_name,
+				title=f"{source_name} | {var_name} | {timestamp_str} | 0.25° global field",
+			)
 			safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 			out_path = preview_dir / f"{source_name}_{var_name}_{safe_ts}.png"
 			fig.tight_layout()
@@ -835,7 +952,7 @@ def _generate_gdas_preview(sample_files: list[Path], report_dir: Path, source_na
 		return {}
 
 
-def _read_imerg_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str, Optional[dict[str, float]]]:
+def _read_imerg_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray], str, Optional[dict]]:
 	try:
 		import xarray as xr
 	except Exception as exc:  # noqa: BLE001
@@ -844,7 +961,7 @@ def _read_imerg_variable_arrays(file_path: Path) -> tuple[dict[str, np.ndarray],
 	ds = xr.open_dataset(file_path)
 	var_map: dict[str, np.ndarray] = {}
 	timestamp_str = "unknown_time"
-	crop_info: Optional[dict[str, float]] = None
+	crop_info: Optional[dict] = None
 	try:
 		if "precipitation" in ds.data_vars:
 			da = ds["precipitation"]
@@ -905,6 +1022,9 @@ def _subset_imerg_to_bbox(da, lat_name: str, lon_name: str, lon_min: float, lat_
 	lon_slice = slice(lon_min, lon_max) if lon_ascending else slice(lon_max, lon_min)
 	subset = da.sel({lat_name: lat_slice, lon_name: lon_slice})
 	arr = np.asarray(subset.values)
+	arr = np.squeeze(arr)
+	while arr.ndim > 2:
+		arr = arr[0]
 	validation = validate_conus_crop(
 		arr,
 		subset.coords,
@@ -946,6 +1066,8 @@ def _generate_imerg_preview(sample_files: list[Path], report_dir: Path, source_n
 			return {}
 
 		arr = var_map["PRECIP"]
+		qc_summary = {"PRECIP": _qc_stats(arr)}
+		qc_summary["_preview_bounds_validation"] = _preview_bounds_validation_status(crop_info)
 		if crop_info is not None:
 			print(
 				"IMERG preview crop bounds: "
@@ -953,8 +1075,7 @@ def _generate_imerg_preview(sample_files: list[Path], report_dir: Path, source_n
 				f"lat=[{crop_info['lat_min']:.3f}, {crop_info['lat_max']:.3f}], "
 				f"shape={crop_info.get('shape', tuple(arr.shape))}"
 			)
-		stats = _qc_stats(arr)
-		qc_summary = {"PRECIP": stats}
+		stats = qc_summary["PRECIP"]
 		print(
 			"IMERG QC "
 			f"PRECIP: min={stats['min']:.6g}, max={stats['max']:.6g}, "
@@ -962,25 +1083,14 @@ def _generate_imerg_preview(sample_files: list[Path], report_dir: Path, source_n
 		)
 
 		fig, ax = plt.subplots(figsize=(10, 6))
-		if crop_info is not None:
-			image = ax.imshow(
-				arr,
-				origin="upper",
-				extent=[crop_info["lon_min"], crop_info["lon_max"], crop_info["lat_min"], crop_info["lat_max"]],
-				aspect="auto",
-				cmap="Blues",
-			)
-			from matplotlib.patches import Rectangle
-			conus_bbox = Rectangle((-126, 24), 60, 26, linewidth=2, edgecolor="red", facecolor="none", linestyle="--", label="CONUS bbox")
-			ax.add_patch(conus_bbox)
-			ax.set_xlabel("Longitude")
-			ax.set_ylabel("Latitude")
-		else:
-			image = ax.imshow(arr, origin="upper", cmap="Blues")
-			ax.set_xlabel("x (grid indices)")
-			ax.set_ylabel("y (grid indices)")
-		fig.colorbar(image, ax=ax, label="PRECIP (mm/day)")
-		ax.set_title(f"{source_name} | PRECIP | {timestamp_str} | Daily accumulated (CONUS cropped)")
+		_plot_geo_field(
+			ax,
+			arr,
+			crop_info,
+			cmap="Blues",
+			var_label="PRECIP (mm/day)",
+			title=f"{source_name} | PRECIP | {timestamp_str} | Daily accumulated (CONUS cropped)",
+		)
 		safe_ts = timestamp_str.replace(":", "-").replace(" ", "_")
 		out_path = preview_dir / f"{source_name}_PRECIP_{safe_ts}.png"
 		fig.tight_layout()

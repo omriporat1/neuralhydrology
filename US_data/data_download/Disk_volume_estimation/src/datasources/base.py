@@ -82,7 +82,10 @@ def validate_conus_crop(
 		& (lon_grid >= lon_min)
 		& (lon_grid <= lon_max)
 	)
-	if mask.shape != arr.shape:
+	arr_work = arr
+	if mask.shape != arr.shape and arr.ndim >= 2 and mask.T.shape == arr.shape:
+		arr_work = arr.T
+	if mask.shape != arr_work.shape:
 		reason = f"mask shape {mask.shape} does not match array shape {arr.shape}"
 		empty = arr[:0, :0] if arr.ndim >= 2 else arr[:0]
 		message = f"{source_name} {crop_kind}: {reason}; marking datasource INVALID"
@@ -106,7 +109,7 @@ def validate_conus_crop(
 			mark_invalid(reason)
 		return ConusCropValidation(empty, None, False, reason)
 
-	cropped = arr[row_idx.min():row_idx.max() + 1, col_idx.min():col_idx.max() + 1]
+	cropped = arr_work[row_idx.min():row_idx.max() + 1, col_idx.min():col_idx.max() + 1]
 	selected_lat = lat_grid[mask]
 	selected_lon = lon_grid[mask]
 	crop_bounds = (

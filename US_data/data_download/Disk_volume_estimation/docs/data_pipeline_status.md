@@ -52,7 +52,13 @@ Target:
   - Prior wording check: "~80 GB/year" was approximately correct in decimal units, but imprecise.
 - ERA5-Land is retained as a Stage 2 long-term daily antecedent input.
 - GDAS is retained as a Stage 2 long-term daily antecedent input.
-- IMERG download works, but crop validation still needs final nonzero selected-CONUS confirmation.
+- IMERG Late Daily NC4 download and CONUS crop validation are now verified:
+  - Dynamic coordinate/dimension handling supports `time,lat,lon`, `time,lon,lat`, `lat,lon`, and `lon,lat` forms.
+  - Verified selected-CONUS bytes are nonzero on target sample (2023-01-01): `624000` bytes.
+  - Verified crop bounds and shape are within expected CONUS envelope: lon ~[-125.95, -66.05], lat ~[24.05, 49.95], shape `(260, 600)`.
+- Preview plotting validation is now repaired and validated for IMERG, GFS, and IFS:
+  - Uses lon/lat extents on axes and north-up orientation logic.
+  - `preview_bounds_validation`: PASS for IMERG, GFS, and IFS.
 
 ## Notes
 

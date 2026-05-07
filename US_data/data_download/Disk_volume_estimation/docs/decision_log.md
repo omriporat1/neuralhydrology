@@ -52,3 +52,24 @@
   - ~368,655.6s total (~102.40 h, ~4.27 days) if executed sequentially.
 - Validation of prior wording: **"~80 GB/year" is approximately correct in decimal units**.
   - Recomputed value: **80.184 GB/year** (or **74.677 GiB/year** binary).
+
+## 2026-05-07 IMERG Crop And Preview Plot Repair
+
+- Repaired IMERG CONUS crop handling for dynamic coordinate layouts and dimension order, including `time,lat,lon`, `time,lon,lat`, `lat,lon`, and `lon,lat` forms.
+- Added robust crop logging for IMERG:
+  - original dims and coordinate names
+  - original lon/lat bounds
+  - cropped lon/lat bounds
+  - cropped shape and min/max/mean/nan_pct
+- Added hard failure when IMERG crop result is empty and when `selected_conus_bytes` is zero.
+- Verified targeted IMERG validation on 2023-01-01 (`3B-DAY-L.MS.MRG.3IMERG.20230101-S000000-E235959.V07B.nc4`):
+  - `selected_conus_bytes=624000` (nonzero)
+  - crop bounds `lon=[-125.950, -66.050]`, `lat=[24.050, 49.950]`
+  - crop shape `(260, 600)`
+- Repaired preview plotting axes/orientation to use true lon/lat extent and north-up orientation logic.
+- Added preview bounds validation logging (`preview_bounds_validation=PASS/FAIL`) and summary payloads.
+- Verified preview bounds validation passed for:
+  - IMERG: PASS
+  - GFS: PASS
+  - IFS: PASS
+- Generated run artifacts under `reports/audit_2026_04_29/run_07_imerg_plot_repair/` with lightweight review bundle (no raw NC4/GRIB files).

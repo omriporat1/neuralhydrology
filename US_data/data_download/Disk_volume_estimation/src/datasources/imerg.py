@@ -154,6 +154,17 @@ class ImergLateDailyDataSource(DataSource):
                 lon_name = "lon" if "lon" in da.coords else ("longitude" if "longitude" in da.coords else None)
                 if lat_name is None or lon_name is None:
                     continue
+                lat_vals = np.asarray(da[lat_name].values)
+                lon_vals = np.asarray(da[lon_name].values)
+                lon_vals_norm = np.where(lon_vals > 180.0, lon_vals - 360.0, lon_vals)
+                print(
+                    "IMERG selected_conus input: "
+                    f"dims={tuple(str(dim) for dim in da.dims)}, "
+                    f"coords={tuple(str(name) for name in da.coords.keys())}, "
+                    f"lat_name={lat_name}, lon_name={lon_name}, "
+                    f"orig_lon_bounds=[{float(np.nanmin(lon_vals_norm)):.3f}, {float(np.nanmax(lon_vals_norm)):.3f}], "
+                    f"orig_lat_bounds=[{float(np.nanmin(lat_vals)):.3f}, {float(np.nanmax(lat_vals)):.3f}]"
+                )
                 subset, crop_info = _subset_to_conus(da, lat_name, lon_name, lon_min, lat_min, lon_max, lat_max)
                 arr = np.asarray(subset.values)
                 arr = np.squeeze(arr)
@@ -169,6 +180,11 @@ class ImergLateDailyDataSource(DataSource):
                     mark_invalid=self._mark_invalid,
                 )
                 arr = validation.cropped_array
+                if arr.size == 0:
+                    raise RuntimeError(
+                        f"IMERG CONUS crop produced an empty array for {file_path.name}; "
+                        f"dims={tuple(str(dim) for dim in subset.dims)}, coords={tuple(str(name) for name in subset.coords.keys())}"
+                    )
                 stats = {
                     "min": float(np.nanmin(arr)) if arr.size else float("nan"),
                     "max": float(np.nanmax(arr)) if arr.size else float("nan"),
@@ -186,6 +202,8 @@ class ImergLateDailyDataSource(DataSource):
                         "lat_min": validation.crop_bounds[1],
                         "lat_max": validation.crop_bounds[3],
                         "shape": tuple(int(v) for v in arr.shape),
+                        "lat_descending": bool(lat_vals[0] > lat_vals[-1]),
+                        "coord_names": {"lat": lat_name, "lon": lon_name},
                     }
                     self._last_selected_conus_crop_info = validated_crop_info
                     print(
@@ -194,13 +212,13 @@ class ImergLateDailyDataSource(DataSource):
                         f"lat=[{validated_crop_info['lat_min']:.3f}, {validated_crop_info['lat_max']:.3f}], "
                         f"shape={validated_crop_info['shape']}"
                     )
-                if arr.size == 0:
-                    continue
                 total_bytes += int(arr.size * arr.dtype.itemsize)
             finally:
                 ds.close()
 
         self._last_selected_conus_accounting_mode = "local_spatial_crop"
+        if total_bytes <= 0:
+            raise RuntimeError("IMERG CONUS crop produced zero selected_conus_bytes")
         return int(total_bytes), self._last_selected_conus_accounting_mode
 
     def get_last_selected_conus_crop_info(self) -> Optional[dict]:
@@ -371,5 +389,7 @@ def _subset_to_conus(da, lat_name: str, lon_name: str, lon_min: float, lat_min: 
         "lon_max": float(np.max(sub_lon)),
         "lat_min": float(np.min(sub_lat)),
         "lat_max": float(np.max(sub_lat)),
+        "lat_descending": bool(sub_lat[0] > sub_lat[-1]),
+        "coord_names": {"lat": lat_name, "lon": lon_name},
     }
     return subset, crop_info
