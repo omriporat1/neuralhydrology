@@ -39,10 +39,17 @@ Target:
 - GFS byte-range extraction is validated and should be frozen except for plotting changes.
 - **IFS (ECMWF MARS)** is operationally improved:
   - Stream logic: 00/12 UTC use `oper/fc`, 06/18 UTC use `scda/fc` (deterministic fallback).
-  - Grid resolution: upgraded to `0.1/0.1` to leverage higher spatial resolution relative to GFS (6.2 KB per point vs 25 km per point).
+  - Grid resolution: `0.1/0.1` to leverage higher spatial resolution relative to GFS.
   - All four cycles (00, 06, 12, 18 UTC) now accessible and validated.
   - Area subset `50/-126/24/-66` supported.
-  - Estimated data volume: ~80 GB/year (vs ~13 GB/year for 0.25/0.25).
+  - Verified 0.1-degree storage/time estimates:
+    - Sample bytes per cycle (full request): 54,920,250 bytes.
+    - Bytes per day (4 cycles): 219,681,000 bytes.
+    - Annual raw volume: 80.184 GB/year (74.677 GiB/year).
+    - Prediction-period raw volume (2020-10-14 to 2025-12-31): 418.492 GB (389.751 GiB).
+    - Prediction-period derived basin-average volume (9,000 basins): 11.521 GB (10.730 GiB).
+    - Estimated sequential acquisition time for full period: ~102.40 hours (~4.27 days).
+  - Prior wording check: "~80 GB/year" was approximately correct in decimal units, but imprecise.
 - ERA5-Land is retained as a Stage 2 long-term daily antecedent input.
 - GDAS is retained as a Stage 2 long-term daily antecedent input.
 - IMERG download works, but crop validation still needs final nonzero selected-CONUS confirmation.

@@ -34,3 +34,21 @@
   - Justification: Estimated annual burden ~80 GB (acceptable for 2-year window); retrieval time penalty negligible; area subset remains supported.
   - Contingency: Revert to 0.25/0.25 requires single config change if burden becomes untenable.
 - **Decision**: Update `IfsMarsConfig.grid` to `0.1/0.1` and document stream logic in code comments.
+
+## 2026-05-07 IFS 0.1-Degree Estimate Verification
+
+- Verified estimate inputs without changing IFS retrieval logic:
+  - 00/12 UTC: `oper/fc`
+  - 06/18 UTC: `scda/fc`
+  - `grid=0.1/0.1`, `area=50/-126/24/-66`, 7 variables, `step=0..24`, 4 cycles/day.
+- Recomputed period: 2020-10-14T00:00:00 to 2025-12-31T23:59:59 (inclusive, 1,905 days; 7,620 cycles).
+- Empirical sample bytes per cycle (full request, from resolution test): **54,920,250 bytes**.
+- Bytes per day (4 cycles): **219,681,000 bytes** (~219.681 MB/day, ~209.505 MiB/day).
+- Full-period raw download estimate: **418,492,305,000 bytes** (~418.492 GB, ~389.751 GiB).
+- Full-period retained raw estimate: **418,492,305,000 bytes** (same as download estimate under current workflow assumptions).
+- Derived basin-average estimate (9,000 basins; hourly; 7 vars; float32 parquet): **11,521,440,000 bytes** (~11.521 GB, ~10.730 GiB).
+- Estimated acquisition time (using measured full-request mean cycle time: (54.40s + 42.36s)/2 = 48.38s):
+  - ~193.52s/day (~3.23 min/day)
+  - ~368,655.6s total (~102.40 h, ~4.27 days) if executed sequentially.
+- Validation of prior wording: **"~80 GB/year" is approximately correct in decimal units**.
+  - Recomputed value: **80.184 GB/year** (or **74.677 GiB/year** binary).
