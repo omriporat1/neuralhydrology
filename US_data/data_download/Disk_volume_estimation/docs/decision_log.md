@@ -73,3 +73,20 @@
   - GFS: PASS
   - IFS: PASS
 - Generated run artifacts under `reports/audit_2026_04_29/run_07_imerg_plot_repair/` with lightweight review bundle (no raw NC4/GRIB files).
+
+## 2026-05-09 Final All-Source Acquisition Audit
+
+- Executed unified 24-hour acquisition audit (2023-01-01) in dry-run mode to validate all 7 implemented datasources without large downloads.
+- Orchestration script: [scripts/run_final_all_source_audit.py](../scripts/run_final_all_source_audit.py).
+- Audit outputs under `reports/final_all_source_audit_2026_05/`:
+  - **24-hour summaries**: `final_audit_summary.{json,csv,md,html}` + `datasource_matrix.{csv,md}`
+  - **Decision-support plots**: `storage_breakdown_by_source.png`, `reduction_waterfall_by_source.png`, `download_time_vs_size.png`, `availability_timeline.png`, `crop_validation_overview.png`
+  - **Previews & request specs**: organized by source in `previews/` and `request_specs/` directories
+  - **Lightweight review bundle**: `review_bundle/` with representative artifacts, logs (truncated), manifests, and docs
+- Validation status: All sources validated with current request logic; no architecture changes applied.
+- 7-day stability audit attempted for subset (MRMS, RTMA, GFS, IFS, IMERG) but dry-run unable to cache full 7-day sample; logic implemented and ready for real-run.
+- Final recommendation sections added to summary markdown with operational stack priorities:
+  - **Stage 1**: MRMS + RTMA (high-priority, smallest acquisition burden)
+  - **Stage 2**: ERA5-Land + GDAS + IMERG Late Daily (medium-priority, moderate burden)
+  - **Stage 3**: GFS + IFS (low-priority, highest burden; IFS uses 0.1/0.1 grid with stream split logic)
+- Caveats: External data provider availability, credential lifecycle, and throughput variance remain operational (not logic) issues.

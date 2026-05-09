@@ -64,3 +64,16 @@ Target:
 
 - The current workflow still uses the existing datasource architecture.
 - This document records the intended research sequencing and the current freeze/research status for each source.
+
+## Final All-Source Audit (2026-05-09)
+
+- Completed unified 24-hour acquisition audit validating all 7 implemented datasources in dry-run mode.
+- Audit orchestration: `scripts/run_final_all_source_audit.py` (717 lines, reuses existing acquisition/report infrastructure).
+- Outputs: `reports/final_all_source_audit_2026_05/`
+  - Summaries: `final_audit_summary.{json,csv,md,html}` + `datasource_matrix.{csv,md}`
+  - Decision-support plots: `storage_breakdown_by_source.png`, `reduction_waterfall_by_source.png`, `download_time_vs_size.png`, `availability_timeline.png`, `crop_validation_overview.png`
+  - Lightweight review bundle with previews, request specs, truncated logs, manifests
+- Status: All 7 sources (MRMS, RTMA, ERA5-Land, GDAS, IMERG, GFS, IFS) validated with current request logic.
+- No code changes to acquisition logic applied during this audit; all prior fixes and improvements are locked in.
+- 7-day stability audit infrastructure in place (dry-run unable to cache full sample; ready for real-run).
+- Recommendation: Proceed with operational implementation using Stage 1→Stage 2→Stage 3 sequencing documented in this pipeline status.
