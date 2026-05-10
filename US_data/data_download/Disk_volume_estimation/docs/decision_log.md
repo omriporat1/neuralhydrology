@@ -1,5 +1,7 @@
 # Decision Log
 
+Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
+
 ## 2026-05-06
 
 - Confirmed GFS `.idx` byte-range extraction end-to-end; the acquisition path is validated and frozen except for plotting.

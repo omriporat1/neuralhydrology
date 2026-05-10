@@ -1,4 +1,6 @@
-# Data Pipeline Status
+# Flash-NH — Data Pipeline Status
+
+Flash-NH is the project name for the near-real-time and forecast-aware hydrological modeling pipeline built around basin-average forcing, CAMELSH streamflow/static attributes, NeuralHydrology-based modeling, and staged Stage 1/2/3 experiments.
 
 ## Intended Research Pipeline
 

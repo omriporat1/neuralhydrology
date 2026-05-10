@@ -1,5 +1,7 @@
 # Repository Policy
 
+Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
+
 - `src/` is for application and library code.
 - `scripts/` is for runnable helpers, audit runners, and one-off utilities.
 - `docs/` is for markdown documentation.
