@@ -1,0 +1,42 @@
+{
+  "total_area_filtered_basins": 5836,
+  "research_period": {
+    "start": "2020-10-14",
+    "end": "2025-12-31"
+  },
+  "screening_water_year": {
+    "start": "2023-10-01",
+    "end": "2024-09-30"
+  },
+  "status_counts": {
+    "AVAILABLE": 0,
+    "PARTIAL": 5693,
+    "NO_DATA": 143,
+    "ERROR": 0
+  },
+  "retrieval_path_counts": {
+    "hourly direct": 0,
+    "native/sub-hourly + resample": 1,
+    "unavailable": 5835,
+    "unknown/error": 0
+  },
+  "usgs_site_valid_count": 5704,
+  "has_00060_count": 5693,
+  "available_count": 0,
+  "partial_count": 5693,
+  "no_data_count": 143,
+  "error_count": 0,
+  "area_bin_counts": {
+    "1-10 km\u00b2": 201,
+    "10-100 km\u00b2": 1773,
+    "100-1000 km\u00b2": 3862
+  },
+  "bfi_bin_counts": {
+    "<=20": 384,
+    "20-30": 758,
+    "30-40": 988,
+    "40-50": 1098,
+    ">50": 2608
+  },
+  "generated_at": "2026-05-12T14:11:19Z"
+}

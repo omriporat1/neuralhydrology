@@ -1,0 +1,268 @@
+2026-05-12 17:06:05,856 | INFO | Logging to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001\logs\usgs_availability_audit.log
+2026-05-12 17:06:05,858 | INFO | Starting USGS availability audit
+2026-05-12 17:06:05,858 | INFO | Input parquet: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_basin_screening_v001\area_filtered_basins.parquet
+2026-05-12 17:06:05,858 | INFO | Output directory: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001
+2026-05-12 17:06:06,357 | INFO | Limited audit to 10 sites for testing
+2026-05-12 17:06:06,358 | INFO | Loaded 10 basins
+2026-05-12 17:06:06,358 | INFO | Resuming with 0 already-audited sites
+2026-05-12 17:06:06,358 | INFO | Processing 1 batches at batch size 50
+2026-05-12 17:06:06,358 | INFO | Fetching batch 1 with 10 sites
+2026-05-12 17:06:07,092 | WARNING | Batch request failed (attempt 1/5): [Errno 2] No such file or directory: 'C:\\PhD\\Python\\neuralhydrology\\US_data\\data_download\\Disk_volume_estimation\\reports\\flashnh_usgs_availability_v001\\cache\\site_catalog_batches\\site_catalog_batch_00001.rdb'
+2026-05-12 17:06:08,774 | WARNING | Batch request failed (attempt 2/5): [Errno 2] No such file or directory: 'C:\\PhD\\Python\\neuralhydrology\\US_data\\data_download\\Disk_volume_estimation\\reports\\flashnh_usgs_availability_v001\\cache\\site_catalog_batches\\site_catalog_batch_00001.rdb'
+2026-05-12 17:06:11,944 | WARNING | Batch request failed (attempt 3/5): [Errno 2] No such file or directory: 'C:\\PhD\\Python\\neuralhydrology\\US_data\\data_download\\Disk_volume_estimation\\reports\\flashnh_usgs_availability_v001\\cache\\site_catalog_batches\\site_catalog_batch_00001.rdb'
+2026-05-12 17:06:18,560 | WARNING | Batch request failed (attempt 4/5): [Errno 2] No such file or directory: 'C:\\PhD\\Python\\neuralhydrology\\US_data\\data_download\\Disk_volume_estimation\\reports\\flashnh_usgs_availability_v001\\cache\\site_catalog_batches\\site_catalog_batch_00001.rdb'
+2026-05-12 17:07:18,925 | INFO | Logging to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001\logs\usgs_availability_audit.log
+2026-05-12 17:07:18,926 | INFO | Starting USGS availability audit
+2026-05-12 17:07:18,926 | INFO | Input parquet: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_basin_screening_v001\area_filtered_basins.parquet
+2026-05-12 17:07:18,926 | INFO | Output directory: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001
+2026-05-12 17:07:18,972 | INFO | Limited audit to 10 sites for testing
+2026-05-12 17:07:18,973 | INFO | Loaded 10 basins
+2026-05-12 17:07:18,973 | INFO | Resuming with 0 already-audited sites
+2026-05-12 17:07:18,974 | INFO | Processing 1 batches at batch size 50
+2026-05-12 17:07:18,974 | INFO | Fetching batch 1 with 10 sites
+2026-05-12 17:08:58,509 | INFO | Logging to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001\logs\usgs_availability_audit.log
+2026-05-12 17:08:58,509 | INFO | Starting USGS availability audit
+2026-05-12 17:08:58,509 | INFO | Input parquet: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_basin_screening_v001\area_filtered_basins.parquet
+2026-05-12 17:08:58,509 | INFO | Output directory: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001
+2026-05-12 17:08:58,557 | INFO | Loaded 5836 basins
+2026-05-12 17:08:58,557 | INFO | Resuming with 0 already-audited sites
+2026-05-12 17:08:58,557 | INFO | Processing 117 batches at batch size 50
+2026-05-12 17:08:58,557 | INFO | Fetching batch 1 with 50 sites
+2026-05-12 17:08:58,993 | INFO | Fetching batch 2 with 50 sites
+2026-05-12 17:09:01,009 | INFO | Checkpointed 100 audited sites
+2026-05-12 17:09:01,009 | INFO | Progress: 100/5836 sites audited
+2026-05-12 17:09:01,009 | INFO | Fetching batch 3 with 50 sites
+2026-05-12 17:09:02,952 | INFO | Fetching batch 4 with 50 sites
+2026-05-12 17:09:04,850 | INFO | Checkpointed 200 audited sites
+2026-05-12 17:09:04,850 | INFO | Progress: 200/5836 sites audited
+2026-05-12 17:09:04,850 | INFO | Fetching batch 5 with 50 sites
+2026-05-12 17:09:06,135 | INFO | Fetching batch 6 with 50 sites
+2026-05-12 17:09:06,957 | INFO | Checkpointed 300 audited sites
+2026-05-12 17:09:06,957 | INFO | Progress: 300/5836 sites audited
+2026-05-12 17:09:06,957 | INFO | Fetching batch 7 with 50 sites
+2026-05-12 17:09:08,843 | INFO | Fetching batch 8 with 50 sites
+2026-05-12 17:09:09,913 | INFO | Checkpointed 400 audited sites
+2026-05-12 17:09:09,913 | INFO | Progress: 400/5836 sites audited
+2026-05-12 17:09:09,913 | INFO | Fetching batch 9 with 50 sites
+2026-05-12 17:09:10,957 | INFO | Fetching batch 10 with 50 sites
+2026-05-12 17:09:12,305 | INFO | Checkpointed 500 audited sites
+2026-05-12 17:09:12,305 | INFO | Progress: 500/5836 sites audited
+2026-05-12 17:09:12,305 | INFO | Fetching batch 11 with 50 sites
+2026-05-12 17:09:13,368 | INFO | Fetching batch 12 with 50 sites
+2026-05-12 17:09:14,658 | INFO | Checkpointed 600 audited sites
+2026-05-12 17:09:14,658 | INFO | Progress: 600/5836 sites audited
+2026-05-12 17:09:14,658 | INFO | Fetching batch 13 with 50 sites
+2026-05-12 17:09:15,675 | INFO | Fetching batch 14 with 50 sites
+2026-05-12 17:09:16,975 | INFO | Checkpointed 700 audited sites
+2026-05-12 17:09:16,975 | INFO | Progress: 700/5836 sites audited
+2026-05-12 17:09:16,975 | INFO | Fetching batch 15 with 50 sites
+2026-05-12 17:09:18,025 | INFO | Fetching batch 16 with 50 sites
+2026-05-12 17:09:19,091 | INFO | Checkpointed 800 audited sites
+2026-05-12 17:09:19,091 | INFO | Progress: 800/5836 sites audited
+2026-05-12 17:09:19,091 | INFO | Fetching batch 17 with 50 sites
+2026-05-12 17:09:20,131 | INFO | Fetching batch 18 with 50 sites
+2026-05-12 17:09:21,391 | INFO | Checkpointed 900 audited sites
+2026-05-12 17:09:21,391 | INFO | Progress: 900/5836 sites audited
+2026-05-12 17:09:21,391 | INFO | Fetching batch 19 with 50 sites
+2026-05-12 17:09:22,631 | INFO | Fetching batch 20 with 50 sites
+2026-05-12 17:09:23,674 | INFO | Checkpointed 1000 audited sites
+2026-05-12 17:09:23,674 | INFO | Progress: 1000/5836 sites audited
+2026-05-12 17:09:23,674 | INFO | Fetching batch 21 with 50 sites
+2026-05-12 17:09:24,701 | INFO | Fetching batch 22 with 50 sites
+2026-05-12 17:09:26,220 | INFO | Checkpointed 1100 audited sites
+2026-05-12 17:09:26,220 | INFO | Progress: 1100/5836 sites audited
+2026-05-12 17:09:26,220 | INFO | Fetching batch 23 with 50 sites
+2026-05-12 17:09:27,280 | INFO | Fetching batch 24 with 50 sites
+2026-05-12 17:09:28,608 | INFO | Checkpointed 1200 audited sites
+2026-05-12 17:09:28,608 | INFO | Progress: 1200/5836 sites audited
+2026-05-12 17:09:28,608 | INFO | Fetching batch 25 with 50 sites
+2026-05-12 17:09:29,877 | INFO | Fetching batch 26 with 50 sites
+2026-05-12 17:09:31,215 | INFO | Checkpointed 1300 audited sites
+2026-05-12 17:09:31,215 | INFO | Progress: 1300/5836 sites audited
+2026-05-12 17:09:31,215 | INFO | Fetching batch 27 with 50 sites
+2026-05-12 17:09:32,267 | INFO | Fetching batch 28 with 50 sites
+2026-05-12 17:09:33,347 | INFO | Checkpointed 1400 audited sites
+2026-05-12 17:09:33,347 | INFO | Progress: 1400/5836 sites audited
+2026-05-12 17:09:33,347 | INFO | Fetching batch 29 with 50 sites
+2026-05-12 17:09:34,601 | INFO | Fetching batch 30 with 50 sites
+2026-05-12 17:09:35,891 | INFO | Checkpointed 1500 audited sites
+2026-05-12 17:09:35,891 | INFO | Progress: 1500/5836 sites audited
+2026-05-12 17:09:35,891 | INFO | Fetching batch 31 with 50 sites
+2026-05-12 17:09:37,214 | INFO | Fetching batch 32 with 50 sites
+2026-05-12 17:09:38,289 | INFO | Checkpointed 1600 audited sites
+2026-05-12 17:09:38,289 | INFO | Progress: 1600/5836 sites audited
+2026-05-12 17:09:38,289 | INFO | Fetching batch 33 with 50 sites
+2026-05-12 17:09:39,319 | INFO | Fetching batch 34 with 50 sites
+2026-05-12 17:09:40,614 | INFO | Checkpointed 1700 audited sites
+2026-05-12 17:09:40,614 | INFO | Progress: 1700/5836 sites audited
+2026-05-12 17:09:40,614 | INFO | Fetching batch 35 with 50 sites
+2026-05-12 17:09:41,888 | INFO | Fetching batch 36 with 50 sites
+2026-05-12 17:09:43,224 | INFO | Checkpointed 1800 audited sites
+2026-05-12 17:09:43,224 | INFO | Progress: 1800/5836 sites audited
+2026-05-12 17:09:43,224 | INFO | Fetching batch 37 with 50 sites
+2026-05-12 17:09:44,269 | INFO | Fetching batch 38 with 50 sites
+2026-05-12 17:09:45,329 | INFO | Checkpointed 1900 audited sites
+2026-05-12 17:09:45,329 | INFO | Progress: 1900/5836 sites audited
+2026-05-12 17:09:45,329 | INFO | Fetching batch 39 with 50 sites
+2026-05-12 17:09:46,593 | INFO | Fetching batch 40 with 50 sites
+2026-05-12 17:09:47,884 | INFO | Checkpointed 2000 audited sites
+2026-05-12 17:09:47,884 | INFO | Progress: 2000/5836 sites audited
+2026-05-12 17:09:47,884 | INFO | Fetching batch 41 with 50 sites
+2026-05-12 17:09:48,859 | INFO | Fetching batch 42 with 50 sites
+2026-05-12 17:09:49,862 | INFO | Checkpointed 2100 audited sites
+2026-05-12 17:09:49,862 | INFO | Progress: 2100/5836 sites audited
+2026-05-12 17:09:49,862 | INFO | Fetching batch 43 with 50 sites
+2026-05-12 17:09:50,925 | INFO | Fetching batch 44 with 50 sites
+2026-05-12 17:09:52,258 | INFO | Checkpointed 2200 audited sites
+2026-05-12 17:09:52,258 | INFO | Progress: 2200/5836 sites audited
+2026-05-12 17:09:52,258 | INFO | Fetching batch 45 with 50 sites
+2026-05-12 17:09:53,641 | INFO | Fetching batch 46 with 50 sites
+2026-05-12 17:09:54,508 | INFO | Checkpointed 2300 audited sites
+2026-05-12 17:09:54,508 | INFO | Progress: 2300/5836 sites audited
+2026-05-12 17:09:54,508 | INFO | Fetching batch 47 with 50 sites
+2026-05-12 17:09:55,531 | INFO | Fetching batch 48 with 50 sites
+2026-05-12 17:09:56,591 | INFO | Checkpointed 2400 audited sites
+2026-05-12 17:09:56,591 | INFO | Progress: 2400/5836 sites audited
+2026-05-12 17:09:56,591 | INFO | Fetching batch 49 with 50 sites
+2026-05-12 17:09:57,620 | INFO | Fetching batch 50 with 50 sites
+2026-05-12 17:09:58,907 | INFO | Checkpointed 2500 audited sites
+2026-05-12 17:09:58,907 | INFO | Progress: 2500/5836 sites audited
+2026-05-12 17:09:58,907 | INFO | Fetching batch 51 with 50 sites
+2026-05-12 17:09:59,925 | INFO | Fetching batch 52 with 50 sites
+2026-05-12 17:10:01,041 | INFO | Checkpointed 2600 audited sites
+2026-05-12 17:10:01,041 | INFO | Progress: 2600/5836 sites audited
+2026-05-12 17:10:01,041 | INFO | Fetching batch 53 with 50 sites
+2026-05-12 17:10:02,142 | INFO | Fetching batch 54 with 50 sites
+2026-05-12 17:10:03,443 | INFO | Checkpointed 2700 audited sites
+2026-05-12 17:10:03,443 | INFO | Progress: 2700/5836 sites audited
+2026-05-12 17:10:03,443 | INFO | Fetching batch 55 with 50 sites
+2026-05-12 17:10:04,474 | INFO | Fetching batch 56 with 50 sites
+2026-05-12 17:10:05,563 | INFO | Checkpointed 2800 audited sites
+2026-05-12 17:10:05,565 | INFO | Progress: 2800/5836 sites audited
+2026-05-12 17:10:05,565 | INFO | Fetching batch 57 with 50 sites
+2026-05-12 17:10:06,825 | INFO | Fetching batch 58 with 50 sites
+2026-05-12 17:10:07,909 | INFO | Checkpointed 2900 audited sites
+2026-05-12 17:10:07,909 | INFO | Progress: 2900/5836 sites audited
+2026-05-12 17:10:07,909 | INFO | Fetching batch 59 with 50 sites
+2026-05-12 17:10:08,959 | INFO | Fetching batch 60 with 50 sites
+2026-05-12 17:10:10,040 | INFO | Checkpointed 3000 audited sites
+2026-05-12 17:10:10,040 | INFO | Progress: 3000/5836 sites audited
+2026-05-12 17:10:10,040 | INFO | Fetching batch 61 with 50 sites
+2026-05-12 17:10:11,292 | INFO | Fetching batch 62 with 50 sites
+2026-05-12 17:10:12,371 | INFO | Checkpointed 3100 audited sites
+2026-05-12 17:10:12,371 | INFO | Progress: 3100/5836 sites audited
+2026-05-12 17:10:12,371 | INFO | Fetching batch 63 with 50 sites
+2026-05-12 17:10:13,142 | INFO | Fetching batch 64 with 50 sites
+2026-05-12 17:10:13,990 | INFO | Checkpointed 3200 audited sites
+2026-05-12 17:10:13,990 | INFO | Progress: 3200/5836 sites audited
+2026-05-12 17:10:13,990 | INFO | Fetching batch 65 with 50 sites
+2026-05-12 17:10:14,999 | INFO | Fetching batch 66 with 50 sites
+2026-05-12 17:10:16,311 | INFO | Checkpointed 3300 audited sites
+2026-05-12 17:10:16,311 | INFO | Progress: 3300/5836 sites audited
+2026-05-12 17:10:16,311 | INFO | Fetching batch 67 with 50 sites
+2026-05-12 17:10:17,588 | INFO | Fetching batch 68 with 50 sites
+2026-05-12 17:10:18,683 | INFO | Checkpointed 3400 audited sites
+2026-05-12 17:10:18,683 | INFO | Progress: 3400/5836 sites audited
+2026-05-12 17:10:18,684 | INFO | Fetching batch 69 with 50 sites
+2026-05-12 17:10:19,687 | INFO | Fetching batch 70 with 50 sites
+2026-05-12 17:10:21,026 | INFO | Checkpointed 3500 audited sites
+2026-05-12 17:10:21,026 | INFO | Progress: 3500/5836 sites audited
+2026-05-12 17:10:21,026 | INFO | Fetching batch 71 with 50 sites
+2026-05-12 17:10:22,043 | INFO | Fetching batch 72 with 50 sites
+2026-05-12 17:10:23,127 | INFO | Checkpointed 3600 audited sites
+2026-05-12 17:10:23,127 | INFO | Progress: 3600/5836 sites audited
+2026-05-12 17:10:23,127 | INFO | Fetching batch 73 with 50 sites
+2026-05-12 17:10:24,158 | INFO | Fetching batch 74 with 50 sites
+2026-05-12 17:10:25,456 | INFO | Checkpointed 3700 audited sites
+2026-05-12 17:10:25,456 | INFO | Progress: 3700/5836 sites audited
+2026-05-12 17:10:25,456 | INFO | Fetching batch 75 with 50 sites
+2026-05-12 17:10:26,707 | INFO | Fetching batch 76 with 50 sites
+2026-05-12 17:10:28,271 | INFO | Checkpointed 3800 audited sites
+2026-05-12 17:10:28,273 | INFO | Progress: 3800/5836 sites audited
+2026-05-12 17:10:28,273 | INFO | Fetching batch 77 with 50 sites
+2026-05-12 17:10:29,315 | INFO | Fetching batch 78 with 50 sites
+2026-05-12 17:10:30,391 | INFO | Checkpointed 3900 audited sites
+2026-05-12 17:10:30,391 | INFO | Progress: 3900/5836 sites audited
+2026-05-12 17:10:30,391 | INFO | Fetching batch 79 with 50 sites
+2026-05-12 17:10:31,415 | INFO | Fetching batch 80 with 50 sites
+2026-05-12 17:10:32,486 | INFO | Checkpointed 4000 audited sites
+2026-05-12 17:10:32,486 | INFO | Progress: 4000/5836 sites audited
+2026-05-12 17:10:32,487 | INFO | Fetching batch 81 with 50 sites
+2026-05-12 17:10:33,748 | INFO | Fetching batch 82 with 50 sites
+2026-05-12 17:10:35,060 | INFO | Checkpointed 4100 audited sites
+2026-05-12 17:10:35,060 | INFO | Progress: 4100/5836 sites audited
+2026-05-12 17:10:35,060 | INFO | Fetching batch 83 with 50 sites
+2026-05-12 17:10:36,577 | INFO | Fetching batch 84 with 50 sites
+2026-05-12 17:10:37,641 | INFO | Checkpointed 4200 audited sites
+2026-05-12 17:10:37,641 | INFO | Progress: 4200/5836 sites audited
+2026-05-12 17:10:37,641 | INFO | Fetching batch 85 with 50 sites
+2026-05-12 17:10:38,925 | INFO | Fetching batch 86 with 50 sites
+2026-05-12 17:10:40,258 | INFO | Checkpointed 4300 audited sites
+2026-05-12 17:10:40,258 | INFO | Progress: 4300/5836 sites audited
+2026-05-12 17:10:40,258 | INFO | Fetching batch 87 with 50 sites
+2026-05-12 17:10:41,324 | INFO | Fetching batch 88 with 50 sites
+2026-05-12 17:10:42,408 | INFO | Checkpointed 4400 audited sites
+2026-05-12 17:10:42,408 | INFO | Progress: 4400/5836 sites audited
+2026-05-12 17:10:42,408 | INFO | Fetching batch 89 with 50 sites
+2026-05-12 17:10:43,447 | INFO | Fetching batch 90 with 50 sites
+2026-05-12 17:10:44,791 | INFO | Checkpointed 4500 audited sites
+2026-05-12 17:10:44,791 | INFO | Progress: 4500/5836 sites audited
+2026-05-12 17:10:44,791 | INFO | Fetching batch 91 with 50 sites
+2026-05-12 17:10:46,087 | INFO | Fetching batch 92 with 50 sites
+2026-05-12 17:10:47,187 | INFO | Checkpointed 4600 audited sites
+2026-05-12 17:10:47,187 | INFO | Progress: 4600/5836 sites audited
+2026-05-12 17:10:47,187 | INFO | Fetching batch 93 with 50 sites
+2026-05-12 17:10:48,447 | INFO | Fetching batch 94 with 50 sites
+2026-05-12 17:10:49,760 | INFO | Checkpointed 4700 audited sites
+2026-05-12 17:10:49,760 | INFO | Progress: 4700/5836 sites audited
+2026-05-12 17:10:49,760 | INFO | Fetching batch 95 with 50 sites
+2026-05-12 17:10:51,037 | INFO | Fetching batch 96 with 50 sites
+2026-05-12 17:10:52,147 | INFO | Checkpointed 4800 audited sites
+2026-05-12 17:10:52,147 | INFO | Progress: 4800/5836 sites audited
+2026-05-12 17:10:52,147 | INFO | Fetching batch 97 with 50 sites
+2026-05-12 17:10:53,175 | INFO | Fetching batch 98 with 50 sites
+2026-05-12 17:10:54,493 | INFO | Checkpointed 4900 audited sites
+2026-05-12 17:10:54,493 | INFO | Progress: 4900/5836 sites audited
+2026-05-12 17:10:54,493 | INFO | Fetching batch 99 with 50 sites
+2026-05-12 17:10:55,755 | INFO | Fetching batch 100 with 50 sites
+2026-05-12 17:10:56,854 | INFO | Checkpointed 5000 audited sites
+2026-05-12 17:10:56,854 | INFO | Progress: 5000/5836 sites audited
+2026-05-12 17:10:56,854 | INFO | Fetching batch 101 with 50 sites
+2026-05-12 17:10:58,108 | INFO | Fetching batch 102 with 50 sites
+2026-05-12 17:10:59,458 | INFO | Checkpointed 5100 audited sites
+2026-05-12 17:10:59,458 | INFO | Progress: 5100/5836 sites audited
+2026-05-12 17:10:59,458 | INFO | Fetching batch 103 with 50 sites
+2026-05-12 17:11:00,512 | INFO | Fetching batch 104 with 50 sites
+2026-05-12 17:11:01,840 | INFO | Checkpointed 5200 audited sites
+2026-05-12 17:11:01,840 | INFO | Progress: 5200/5836 sites audited
+2026-05-12 17:11:01,840 | INFO | Fetching batch 105 with 50 sites
+2026-05-12 17:11:03,109 | INFO | Fetching batch 106 with 50 sites
+2026-05-12 17:11:04,208 | INFO | Checkpointed 5300 audited sites
+2026-05-12 17:11:04,208 | INFO | Progress: 5300/5836 sites audited
+2026-05-12 17:11:04,208 | INFO | Fetching batch 107 with 50 sites
+2026-05-12 17:11:05,257 | INFO | Fetching batch 108 with 50 sites
+2026-05-12 17:11:06,814 | INFO | Checkpointed 5400 audited sites
+2026-05-12 17:11:06,814 | INFO | Progress: 5400/5836 sites audited
+2026-05-12 17:11:06,814 | INFO | Fetching batch 109 with 50 sites
+2026-05-12 17:11:07,749 | INFO | Fetching batch 110 with 50 sites
+2026-05-12 17:11:08,927 | INFO | Checkpointed 5500 audited sites
+2026-05-12 17:11:08,927 | INFO | Progress: 5500/5836 sites audited
+2026-05-12 17:11:08,927 | INFO | Fetching batch 111 with 50 sites
+2026-05-12 17:11:09,837 | INFO | Fetching batch 112 with 50 sites
+2026-05-12 17:11:11,006 | INFO | Checkpointed 5600 audited sites
+2026-05-12 17:11:11,007 | INFO | Progress: 5600/5836 sites audited
+2026-05-12 17:11:11,007 | INFO | Fetching batch 113 with 50 sites
+2026-05-12 17:11:11,915 | INFO | Fetching batch 114 with 50 sites
+2026-05-12 17:11:13,095 | INFO | Checkpointed 5700 audited sites
+2026-05-12 17:11:13,095 | INFO | Progress: 5700/5836 sites audited
+2026-05-12 17:11:13,096 | INFO | Fetching batch 115 with 50 sites
+2026-05-12 17:11:14,030 | INFO | Fetching batch 116 with 50 sites
+2026-05-12 17:11:15,010 | INFO | Checkpointed 5800 audited sites
+2026-05-12 17:11:15,010 | INFO | Progress: 5800/5836 sites audited
+2026-05-12 17:11:15,010 | INFO | Fetching batch 117 with 36 sites
+2026-05-12 17:11:15,953 | INFO | Checkpointed 5836 audited sites
+2026-05-12 17:11:15,953 | INFO | Progress: 5836/5836 sites audited
+2026-05-12 17:11:16,062 | INFO | Checkpointed 5836 audited sites
+2026-05-12 17:11:19,232 | INFO | Wrote outputs to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001
+2026-05-12 17:11:19,232 | INFO | USGS availability audit complete
+2026-05-12 17:11:19,232 | INFO | Results: C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_availability_v001
