@@ -1,0 +1,40 @@
+{
+  "probe_window": {
+    "start": "2023-10-01T00:00:00+00:00",
+    "end": "2024-09-30T23:00:00+00:00",
+    "expected_hourly_count": 8784
+  },
+  "sample_size": 75,
+  "status_counts": {
+    "RBI_READY": 39,
+    "PARTIAL_USABLE": 3,
+    "INSUFFICIENT": 3,
+    "NO_DATA": 30,
+    "ERROR": 0
+  },
+  "timestep_counts": {
+    "hourly": 0,
+    "sub-hourly": 45,
+    "daily": 0,
+    "irregular": 0,
+    "sparse": 30
+  },
+  "completeness_bins": {
+    "<70": 33,
+    "70-90": 3,
+    ">=90": 39
+  },
+  "rbi_ready_count": 39,
+  "partial_usable_count": 3,
+  "insufficient_count": 3,
+  "no_data_count": 30,
+  "error_count": 0,
+  "unit_conversion_count": 45,
+  "hourly_completeness_median": 94.558,
+  "hourly_completeness_mean": 56.31062666666667,
+  "rbi_count": 42,
+  "rbi_median": 0.04659511738209249,
+  "rbi_q75": 0.1457924376612625,
+  "rbi_q90": 0.3053513727722992,
+  "generated_at": "2026-05-12T14:37:09Z"
+}

@@ -1,0 +1,96 @@
+2026-05-12 17:30:18,775 | INFO | Starting Flash-NH USGS discharge probe
+2026-05-12 17:30:18,826 | INFO | Loaded 5693 probe candidates
+2026-05-12 17:30:18,855 | INFO | Selected new probe sample with 75 basins
+2026-05-12 17:30:18,863 | INFO | Restricted probe to 5 sites for testing
+2026-05-12 17:30:18,864 | INFO | Resuming with 0 already-probed sites
+2026-05-12 17:30:18,864 | INFO | Probing 11465690 | area=1-10 km² | BFI=20-30 | completeness so far: 0/5
+2026-05-12 17:30:22,054 | INFO | Probing 08158045 | area=1-10 km² | BFI=20-30 | completeness so far: 1/5
+2026-05-12 17:30:22,879 | INFO | Probing 07010090 | area=1-10 km² | BFI=20-30 | completeness so far: 2/5
+2026-05-12 17:30:28,340 | INFO | Probing 03288500 | area=1-10 km² | BFI=20-30 | completeness so far: 3/5
+2026-05-12 17:30:29,658 | INFO | Probing 01403535 | area=1-10 km² | BFI=20-30 | completeness so far: 4/5
+2026-05-12 17:30:30,413 | INFO | Checkpointed 5 probe rows
+2026-05-12 17:30:31,970 | INFO | Probe complete: 5 rows
+2026-05-12 17:30:31,970 | INFO | Outputs written to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_discharge_probe_v001
+2026-05-12 17:32:33,700 | INFO | Starting Flash-NH USGS discharge probe
+2026-05-12 17:32:33,748 | INFO | Loaded 5693 probe candidates
+2026-05-12 17:32:33,763 | INFO | Loaded existing probe sample with 75 basins
+2026-05-12 17:32:33,765 | INFO | Resuming with 5 already-probed sites
+2026-05-12 17:32:33,780 | INFO | Probing 11472160 | area=1-10 km² | BFI=30-40 | completeness so far: 5/75
+2026-05-12 17:32:35,740 | INFO | Probing 07048480 | area=1-10 km² | BFI=30-40 | completeness so far: 6/75
+2026-05-12 17:32:36,495 | INFO | Probing 02307668 | area=1-10 km² | BFI=30-40 | completeness so far: 7/75
+2026-05-12 17:32:40,499 | INFO | Probing 02094775 | area=1-10 km² | BFI=30-40 | completeness so far: 8/75
+2026-05-12 17:32:46,602 | INFO | Probing 01403150 | area=1-10 km² | BFI=30-40 | completeness so far: 9/75
+2026-05-12 17:32:53,275 | INFO | Probing 14303200 | area=1-10 km² | BFI=40-50 | completeness so far: 10/75
+2026-05-12 17:32:56,335 | INFO | Probing 03115973 | area=1-10 km² | BFI=40-50 | completeness so far: 11/75
+2026-05-12 17:32:57,088 | INFO | Probing 01589100 | area=1-10 km² | BFI=40-50 | completeness so far: 12/75
+2026-05-12 17:33:02,302 | INFO | Probing 01209761 | area=1-10 km² | BFI=40-50 | completeness so far: 13/75
+2026-05-12 17:33:05,330 | INFO | Probing 01093800 | area=1-10 km² | BFI=40-50 | completeness so far: 14/75
+2026-05-12 17:33:06,090 | INFO | Probing 11120520 | area=1-10 km² | BFI=<=20 | completeness so far: 15/75
+2026-05-12 17:33:08,782 | INFO | Probing 08365600 | area=1-10 km² | BFI=<=20 | completeness so far: 16/75
+2026-05-12 17:33:09,536 | INFO | Probing 05503000 | area=1-10 km² | BFI=<=20 | completeness so far: 17/75
+2026-05-12 17:33:10,285 | INFO | Probing 06935997 | area=1-10 km² | BFI=<=20 | completeness so far: 18/75
+2026-05-12 17:33:17,665 | INFO | Probing 03238772 | area=1-10 km² | BFI=<=20 | completeness so far: 19/75
+2026-05-12 17:33:21,857 | INFO | Probing 12065500 | area=1-10 km² | BFI=>50 | completeness so far: 20/75
+2026-05-12 17:33:22,619 | INFO | Probing 11298650 | area=1-10 km² | BFI=>50 | completeness so far: 21/75
+2026-05-12 17:33:23,371 | INFO | Probing 09058800 | area=1-10 km² | BFI=>50 | completeness so far: 22/75
+2026-05-12 17:33:24,125 | INFO | Probing 01644371 | area=1-10 km² | BFI=>50 | completeness so far: 23/75
+2026-05-12 17:33:29,698 | INFO | Probing 01104475 | area=1-10 km² | BFI=>50 | completeness so far: 24/75
+2026-05-12 17:33:33,734 | INFO | Checkpointed 25 probe rows
+2026-05-12 17:33:33,734 | INFO | Probing 11475560 | area=10-100 km² | BFI=20-30 | completeness so far: 25/75
+2026-05-12 17:33:36,781 | INFO | Probing 08133900 | area=10-100 km² | BFI=20-30 | completeness so far: 26/75
+2026-05-12 17:33:37,540 | INFO | Probing 07019220 | area=10-100 km² | BFI=20-30 | completeness so far: 27/75
+2026-05-12 17:33:43,462 | INFO | Probing 03302050 | area=10-100 km² | BFI=20-30 | completeness so far: 28/75
+2026-05-12 17:33:47,048 | INFO | Probing 01393500 | area=10-100 km² | BFI=20-30 | completeness so far: 29/75
+2026-05-12 17:33:47,798 | INFO | Probing 14324580 | area=10-100 km² | BFI=30-40 | completeness so far: 30/75
+2026-05-12 17:33:48,549 | INFO | Probing 06918493 | area=10-100 km² | BFI=30-40 | completeness so far: 31/75
+2026-05-12 17:33:51,393 | INFO | Probing 03350100 | area=10-100 km² | BFI=30-40 | completeness so far: 32/75
+2026-05-12 17:33:52,141 | INFO | Probing 03085213 | area=10-100 km² | BFI=30-40 | completeness so far: 33/75
+2026-05-12 17:33:52,965 | INFO | Probing 01394500 | area=10-100 km² | BFI=30-40 | completeness so far: 34/75
+2026-05-12 17:33:55,565 | INFO | Probing 14306340 | area=10-100 km² | BFI=40-50 | completeness so far: 35/75
+2026-05-12 17:33:58,432 | INFO | Probing 05426067 | area=10-100 km² | BFI=40-50 | completeness so far: 36/75
+2026-05-12 17:34:00,398 | INFO | Probing 02248000 | area=10-100 km² | BFI=40-50 | completeness so far: 37/75
+2026-05-12 17:34:03,433 | INFO | Probing 01383500 | area=10-100 km² | BFI=40-50 | completeness so far: 38/75
+2026-05-12 17:34:05,992 | INFO | Probing 01037380 | area=10-100 km² | BFI=40-50 | completeness so far: 39/75
+2026-05-12 17:34:09,066 | INFO | Probing 11120510 | area=10-100 km² | BFI=<=20 | completeness so far: 40/75
+2026-05-12 17:34:09,819 | INFO | Probing 07322500 | area=10-100 km² | BFI=<=20 | completeness so far: 41/75
+2026-05-12 17:34:10,571 | INFO | Probing 08074760 | area=10-100 km² | BFI=<=20 | completeness so far: 42/75
+2026-05-12 17:34:14,149 | INFO | Probing 05593600 | area=10-100 km² | BFI=<=20 | completeness so far: 43/75
+2026-05-12 17:34:14,904 | INFO | Probing 04197170 | area=10-100 km² | BFI=<=20 | completeness so far: 44/75
+2026-05-12 17:34:17,700 | INFO | Probing 12035450 | area=10-100 km² | BFI=>50 | completeness so far: 45/75
+2026-05-12 17:34:18,449 | INFO | Probing 10287900 | area=10-100 km² | BFI=>50 | completeness so far: 46/75
+2026-05-12 17:34:19,198 | INFO | Probing 09054000 | area=10-100 km² | BFI=>50 | completeness so far: 47/75
+2026-05-12 17:34:19,949 | INFO | Probing 01650500 | area=10-100 km² | BFI=>50 | completeness so far: 48/75
+2026-05-12 17:34:22,699 | INFO | Probing 01021470 | area=10-100 km² | BFI=>50 | completeness so far: 49/75
+2026-05-12 17:34:25,540 | INFO | Checkpointed 50 probe rows
+2026-05-12 17:34:25,540 | INFO | Probing 11468500 | area=100-1000 km² | BFI=20-30 | completeness so far: 50/75
+2026-05-12 17:34:28,532 | INFO | Probing 07329500 | area=100-1000 km² | BFI=20-30 | completeness so far: 51/75
+2026-05-12 17:34:29,279 | INFO | Probing 07366200 | area=100-1000 km² | BFI=20-30 | completeness so far: 52/75
+2026-05-12 17:34:32,173 | INFO | Probing 03302500 | area=100-1000 km² | BFI=20-30 | completeness so far: 53/75
+2026-05-12 17:34:32,924 | INFO | Probing 01395000 | area=100-1000 km² | BFI=20-30 | completeness so far: 54/75
+2026-05-12 17:34:36,401 | INFO | Probing 11469000 | area=100-1000 km² | BFI=30-40 | completeness so far: 55/75
+2026-05-12 17:34:39,406 | INFO | Probing 08155240 | area=100-1000 km² | BFI=30-40 | completeness so far: 56/75
+2026-05-12 17:34:45,561 | INFO | Probing 03586500 | area=100-1000 km² | BFI=30-40 | completeness so far: 57/75
+2026-05-12 17:34:48,782 | INFO | Probing 03127500 | area=100-1000 km² | BFI=30-40 | completeness so far: 58/75
+2026-05-12 17:34:51,172 | INFO | Probing 01361500 | area=100-1000 km² | BFI=30-40 | completeness so far: 59/75
+2026-05-12 17:34:51,936 | INFO | Probing 12043300 | area=100-1000 km² | BFI=40-50 | completeness so far: 60/75
+2026-05-12 17:34:54,732 | INFO | Probing 05420680 | area=100-1000 km² | BFI=40-50 | completeness so far: 61/75
+2026-05-12 17:34:57,332 | INFO | Probing 02244420 | area=100-1000 km² | BFI=40-50 | completeness so far: 62/75
+2026-05-12 17:34:58,092 | INFO | Probing 01427500 | area=100-1000 km² | BFI=40-50 | completeness so far: 63/75
+2026-05-12 17:35:00,727 | INFO | Probing 01022330 | area=100-1000 km² | BFI=40-50 | completeness so far: 64/75
+2026-05-12 17:35:01,475 | INFO | Probing 11048500 | area=100-1000 km² | BFI=<=20 | completeness so far: 65/75
+2026-05-12 17:35:02,229 | INFO | Probing 08044000 | area=100-1000 km² | BFI=<=20 | completeness so far: 66/75
+2026-05-12 17:35:04,924 | INFO | Probing 06889160 | area=100-1000 km² | BFI=<=20 | completeness so far: 67/75
+2026-05-12 17:35:08,347 | INFO | Probing 08023400 | area=100-1000 km² | BFI=<=20 | completeness so far: 68/75
+2026-05-12 17:35:11,514 | INFO | Probing 04188496 | area=100-1000 km² | BFI=<=20 | completeness so far: 69/75
+2026-05-12 17:35:14,813 | INFO | Probing 12043000 | area=100-1000 km² | BFI=>50 | completeness so far: 70/75
+2026-05-12 17:35:17,594 | INFO | Probing 13329770 | area=100-1000 km² | BFI=>50 | completeness so far: 71/75
+2026-05-12 17:35:18,366 | INFO | Probing 09063000 | area=100-1000 km² | BFI=>50 | completeness so far: 72/75
+2026-05-12 17:35:22,064 | INFO | Probing 02331600 | area=100-1000 km² | BFI=>50 | completeness so far: 73/75
+2026-05-12 17:35:24,937 | INFO | Probing 01021200 | area=100-1000 km² | BFI=>50 | completeness so far: 74/75
+2026-05-12 17:35:25,697 | INFO | Checkpointed 75 probe rows
+2026-05-12 17:37:08,824 | INFO | Starting Flash-NH USGS discharge probe
+2026-05-12 17:37:09,381 | INFO | Loaded 5693 probe candidates
+2026-05-12 17:37:09,402 | INFO | Loaded existing probe sample with 75 basins
+2026-05-12 17:37:09,404 | INFO | Resuming with 75 already-probed sites
+2026-05-12 17:37:11,043 | INFO | Probe complete: 75 rows
+2026-05-12 17:37:11,043 | INFO | Outputs written to C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation\reports\flashnh_usgs_discharge_probe_v001
