@@ -1,0 +1,31 @@
+{
+  "total_basins": 9008,
+  "basins_with_valid_drain_sqkm": 9008,
+  "basins_with_valid_bfi_ave": 9008,
+  "area_filter_min_sqkm": 1.0,
+  "area_filter_max_sqkm": 1000.0,
+  "basins_after_area_filter": 5836,
+  "bfi_threshold_primary": 40,
+  "basins_after_area_bfi_filter": 2130,
+  "bfi_statistics": {
+    "min": 1.9751,
+    "q10": 23.0,
+    "q25": 33.4360675,
+    "median": 47.560685,
+    "q75": 59.731247499999995,
+    "q90": 68.28389,
+    "q95": 72.7380825,
+    "max": 87.60903
+  },
+  "candidate_counts": {
+    "BFI<=20": 384,
+    "BFI<=30": 1142,
+    "BFI<=40": 2130,
+    "BFI<=50": 3228
+  },
+  "area_bin_counts": {
+    "1-10 km\u00b2": 201,
+    "10-100 km\u00b2": 1773,
+    "100-1000 km\u00b2": 3862
+  }
+}
