@@ -27,12 +27,34 @@ build/
 .netrc
 .cdsapirc
 .ecmwfapirc
+*.pem
+*.key
 
 # Data downloads and generated outputs
 data/
-reports/
+reports/**
 tmp/
-**/sample_downloads/
+
+# Allow small curated report summaries when explicitly committed
+!reports/**/README.md
+!reports/**/summary.md
+!reports/**/manifest.json
+
+# Generated artifacts and caches
+**/*.parquet
+**/*.grib
+**/*.grib2
+**/*.nc
+**/*.nc4
+**/*.h5
+**/*.hdf
+**/*.log
+**/cache/**
+**/cached/**
+**/raw/**
+**/sample_downloads/**
+reports/**/hourly_probe_series/**
+reports/**/cached_*
 
 # Raw science data files
 *.grib

@@ -69,6 +69,8 @@ If hourly IV data are not returned directly, the probe will fall back to native 
 
 The probe does not download full long-horizon discharge archives. It only retrieves the one-water-year window needed to validate the method.
 
+The 75-basin probe confirmed the scalable path is native or sub-hourly USGS IV retrieval followed by hourly resampling. Direct hourly retrieval should not be assumed.
+
 ## Why this is useful for scaling
 
 The probe will tell us whether the discharge workflow is practical enough to scale to all area-filtered basins.
