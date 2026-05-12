@@ -179,18 +179,30 @@ def overlap_days(start: pd.Timestamp, end: pd.Timestamp, window_start: pd.Timest
 
 
 def classify_no_data(row: pd.Series) -> str:
-    if not bool(row.get("request_success_y", False)):
-        return "request/service issue"
+    """Refine NO_DATA diagnosis with clearer labels based on metadata overlap."""
+    # Check basic site/parameter validity
+    if not bool(row.get("usgs_site_valid", False)):
+        return "invalid_site_or_no_00060"
+    
     if not bool(row.get("has_parameter_00060", False)):
-        return "site-id issue"
+        return "invalid_site_or_no_00060"
+    
+    # Check research and screening period overlap
     research_overlap = int(row.get("research_overlap_days", 0) or 0)
     screening_overlap = int(row.get("screening_overlap_days", 0) or 0)
-    likely_path = str(row.get("likely_retrieval_path", "")).lower()
-    likely_resolution = str(row.get("likely_data_resolution", "")).lower()
-    if research_overlap == 0 and screening_overlap == 0:
-        return "no recent IV data / inactive legacy gage"
-    if "unavailable" in likely_path and ("daily" in likely_resolution or "sparse" in likely_resolution):
-        return "parameter metadata exists but no observations in water year"
+    
+    # Historical-only: has 00060 but no research period overlap
+    if research_overlap == 0:
+        return "historical_only_no_research_overlap"
+    
+    # Has research overlap but no screening water year overlap
+    if research_overlap > 0 and screening_overlap == 0:
+        return "has_research_overlap_but_no_screening_wy_observations"
+    
+    # Has screening metadata but IV returned empty (shouldn't happen if request succeeded)
+    if screening_overlap > 0:
+        return "has_screening_metadata_but_iv_empty"
+    
     return "unknown"
 
 
@@ -570,14 +582,17 @@ def main() -> None:
         OUTPUT_DIR / "rbi_formula_audit.md",
     ]
 
+    # Build review bundle with only plots that actually exist
     review_selected_files = []
-    review_selected_files.extend(sorted(QC_DIR.glob("rbi_low_*_full_year.png"))[:2])
-    review_selected_files.extend(sorted(QC_DIR.glob("rbi_high_*_full_year.png"))[:2])
-    review_selected_files.extend(sorted(QC_DIR.glob("partial_*_full_year.png"))[:2])
-    review_selected_files.extend(sorted(QC_DIR.glob("insufficient_*_full_year.png"))[:2])
+    
+    # Collect all plots from QC directory (generated for RBI_READY, PARTIAL, INSUFFICIENT)
+    if QC_DIR.exists():
+        all_qc_plots = sorted(QC_DIR.glob("*_full_year.png"))
+        review_selected_files.extend(all_qc_plots)
 
     review_bundle_dir = REVIEW_BUNDLE_DIR
     (review_bundle_dir / "plots").mkdir(parents=True, exist_ok=True)
+    
     for src in review_selected_files:
         dst = review_bundle_dir / "plots" / src.name
         dst.write_bytes(src.read_bytes())
@@ -591,6 +606,7 @@ def main() -> None:
             "qc_selection_counts": summary["qc_selection_counts"],
         },
         "selected_plot_count": len(review_selected_files),
+        "note": "Plots generated only for sites with discharge observations (RBI_READY, PARTIAL_USABLE, INSUFFICIENT). NO_DATA sites have no plots.",
     }
     (review_bundle_dir / "summary.json").write_text(json.dumps(review_summary, indent=2), encoding="utf-8")
     (review_bundle_dir / "summary.md").write_text(
@@ -602,6 +618,10 @@ def main() -> None:
                 f"- Partial/insufficient missingness patterns: {summary['partial_missingness_patterns']}",
                 f"- QC selection counts: {summary['qc_selection_counts']}",
                 f"- Selected plot count: {len(review_selected_files)}",
+                "",
+                "**Note**: Hydrograph QC plots were generated only for sites with discharge observations in the probe window.",
+                "NO_DATA sites (which have no discharge observations) do not have plots.",
+                "This is expected behavior; the review bundle contains only diagnostic plots for data-available basins.",
             ]
         ),
         encoding="utf-8",

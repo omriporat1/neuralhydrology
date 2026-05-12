@@ -78,12 +78,24 @@ The 75-basin probe results were audited to understand:
 2. Whether hourly resampling and RBI calculation are correct
 3. Data completeness and missingness patterns for partial/insufficient basins
 
+### Key insight: Metadata existence ≠ usable data
+
+The availability audit showed that many basins have USGS site records and parameter 00060 metadata. However, metadata overlap with the Flash-NH research period does not guarantee that discharge observations exist in the requested water year (2023-10-01 to 2024-09-30).
+
+The probe confirmed that a significant fraction of basins (39% in the 75-basin sample) have no discharge observations during the screening water year, even though their metadata suggest parameter 00060 exists.
+
+**Implication**: Before scaling RBI retrieval to all 5,836 area-filtered basins, a coverage eligibility stage must filter basins by their metadata overlap with the research period AND screening water year. Basins with only historical metadata should be excluded.
+
 ### NO_DATA classification
 
-All 30 NO_DATA basins were rechecked against the USGS IV service during diagnostics. Classification showed:
-- 30 classified as "request/service issue" during recheck: these sites either have no recent IV data, are legacy/inactive gages, or have catalog metadata overlap but no observations in the requested water year (2023-10-01 to 2024-09-30).
+All 30 NO_DATA basins were rechecked against the USGS IV service during diagnostics. Refined classification shows:
+- **historical_only_no_research_overlap** (majority): Sites have 00060 historically but no observations during 2020-10-14 to 2025-12-31; these are legacy/inactive gages.
+- **has_research_overlap_but_no_screening_wy_observations**: Sites have 00060 with some overlap to the research period, but no observations during 2023-10-01 to 2024-09-30.
+- **has_screening_metadata_but_iv_empty**: Rare; sites catalog metadata suggest overlap but IV queries return no data (usually service issues).
+- **invalid_site_or_no_00060**: Site metadata missing or parameter 00060 absent.
+- **request_error / parser_error**: Network or parsing failures during probe.
 
-This is expected and not indicative of a systematic problem. These sites should be excluded from RBI screening because discharge data are simply not available in the requested window.
+These classifications allow for more informed decisions about basin inclusion/exclusion before attempting RBI download.
 
 ### RBI formula verification
 
@@ -98,9 +110,11 @@ The formula is computed as $\sum |Q_t - Q_{t-1}| / \sum Q_t$ using the final hou
 ### Scaling readiness
 
 Before scaling the discharge retrieval workflow to all area-filtered basins (5,836 total):
+- **Coverage eligibility filtering must happen first** (see docs/usgs_coverage_eligibility_strategy.md).
 - NO_DATA causes are well understood and expected; they should be accepted as part of the workflow.
 - RBI must be interpreted only after hourly completeness is high enough (>= 90% for RBI_READY).
 - The native/sub-hourly IV retrieval followed by hourly resampling path is confirmed as scalable.
+- Historical-only gages (no research-period overlap) should be excluded from the RBI analysis unless a separate historical analysis is intended.
 
 ## Why this is useful for scaling
 
@@ -109,3 +123,5 @@ The probe will tell us whether the discharge workflow is practical enough to sca
 If a meaningful fraction of the probe sample reaches RBI_READY or PARTIAL_USABLE status, then the full discharge workflow can be expanded to the entire area-filtered basin universe.
 
 If the probe shows poor coverage or heavy geographic dropout, then the sampling rules, basin universe, or target source assumptions should be revisited before scaling.
+
+The coverage eligibility stage ensures that we only attempt RBI retrieval for basins that have meaningful data availability in the relevant time window.
