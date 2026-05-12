@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -428,7 +428,7 @@ def process_site(
         )
 
 
-def merge_results(existing: pd.DataFrame, new_rows: list[dict]) -> pd.DataFrame:
+def merge_results(existing: pd.DataFrame, new_rows: list[dict]) -> tuple[pd.DataFrame, list[str], int]:
     new_df = pd.DataFrame(new_rows)
     if existing.empty:
         combined = new_df
@@ -438,20 +438,61 @@ def merge_results(existing: pd.DataFrame, new_rows: list[dict]) -> pd.DataFrame:
         combined = pd.concat([existing, new_df], ignore_index=True)
 
     if combined.empty:
-        return combined
+        return combined, [], 0
 
     combined["STAID"] = combined["STAID"].astype(str).str.zfill(8)
-    combined = combined.drop_duplicates(subset=["STAID"], keep="last")
-    combined = combined.sort_values(["screening_status", "area_bin", "BFI_bin", "STAID"], na_position="last").reset_index(drop=True)
-    return combined
+    dup_mask = combined.duplicated(subset=["STAID"], keep=False)
+    duplicate_staids = sorted(combined.loc[dup_mask, "STAID"].astype(str).unique().tolist())
+    duplicate_rows_count = int(dup_mask.sum())
+
+    deduped = combined.drop_duplicates(subset=["STAID"], keep="last")
+    deduped = deduped.sort_values(["screening_status", "area_bin", "BFI_bin", "STAID"], na_position="last").reset_index(drop=True)
+    return deduped, duplicate_staids, duplicate_rows_count
 
 
-def build_summary(results: pd.DataFrame, attempted_basins: int, total_eligible_basins: int) -> dict[str, object]:
+def build_summary(
+    results: pd.DataFrame,
+    total_eligible_basins: int,
+    max_basins_requested: Optional[int],
+    unique_sites_attempted_this_run: int,
+    duplicate_staids: list[str],
+    duplicate_rows_count: int,
+    logger: logging.Logger,
+) -> dict[str, object]:
     status_counts = results["screening_status"].value_counts().reindex(STATUS_ORDER, fill_value=0).to_dict()
     timestep_counts = results["inferred_timestep_mode"].value_counts().reindex(TIMESTEP_ORDER, fill_value=0).to_dict()
 
     ready_df = results[results["screening_status"] == "RBI_READY"]
     rbi_ready_median = float(ready_df["rbi"].median()) if ready_df["rbi"].notna().any() else None
+
+    unique_sites_stored_total = int(results["STAID"].astype(str).nunique()) if not results.empty else 0
+    results_rows_stored_total = int(len(results))
+    status_count_sum = int(sum(int(v) for v in status_counts.values()))
+
+    check_status_vs_unique = status_count_sum == unique_sites_stored_total
+    check_unique_vs_staid = unique_sites_stored_total == int(results["STAID"].astype(str).nunique()) if not results.empty else True
+    check_rows_vs_unique = results_rows_stored_total == unique_sites_stored_total
+
+    warnings: list[str] = []
+    if not check_status_vs_unique:
+        warnings.append(
+            f"WARNING: sum(status_counts)={status_count_sum} does not equal unique_sites_stored_total={unique_sites_stored_total}"
+        )
+    if not check_unique_vs_staid:
+        warnings.append("WARNING: unique_sites_stored_total does not match unique STAID count in results table")
+    if not check_rows_vs_unique:
+        warnings.append(
+            f"WARNING: results_rows_stored_total={results_rows_stored_total} contains duplicate STAID rows; unique_sites_stored_total={unique_sites_stored_total}"
+        )
+    if duplicate_staids:
+        warnings.append(
+            f"WARNING: duplicate STAID rows detected before de-duplication: {len(duplicate_staids)} unique sites, {duplicate_rows_count} rows"
+        )
+
+    for message in warnings:
+        logger.warning(message)
+
+    completed_fraction = float(unique_sites_stored_total / total_eligible_basins) if total_eligible_basins > 0 else 0.0
 
     summary = {
         "screening_window": {
@@ -460,15 +501,30 @@ def build_summary(results: pd.DataFrame, attempted_basins: int, total_eligible_b
             "expected_hourly_count": EXPECTED_HOURLY_COUNT,
         },
         "candidate_universe_total_eligible_screening_wy": int(total_eligible_basins),
-        "attempted_basins": int(attempted_basins),
-        "results_rows": int(len(results)),
+        "max_basins_requested": int(max_basins_requested) if max_basins_requested is not None else None,
+        "attempted_basins": unique_sites_stored_total,
+        "unique_sites_attempted_this_run": int(unique_sites_attempted_this_run),
+        "results_rows_stored_total": results_rows_stored_total,
+        "unique_sites_stored_total": unique_sites_stored_total,
+        "completed_fraction_of_candidate_universe": round(completed_fraction, 6),
+        "results_rows": results_rows_stored_total,
         "status_counts": {k: int(v) for k, v in status_counts.items()},
         "timestep_counts": {k: int(v) for k, v in timestep_counts.items()},
+        "status_count_sum": status_count_sum,
+        "duplicate_staids_detected_count": int(len(duplicate_staids)),
+        "duplicate_rows_detected_count": int(duplicate_rows_count),
+        "duplicate_staids_detected": duplicate_staids,
+        "consistency_checks": {
+            "status_counts_sum_equals_unique_sites_stored_total": bool(check_status_vs_unique),
+            "unique_sites_stored_total_equals_unique_staid_in_results": bool(check_unique_vs_staid),
+            "results_rows_stored_total_equals_unique_sites_stored_total": bool(check_rows_vs_unique),
+        },
+        "warnings": warnings,
         "median_hourly_completeness_pct": float(results["hourly_completeness_pct"].median()) if not results.empty else 0.0,
         "median_rbi_among_rbi_ready": rbi_ready_median,
         "rbi_non_null_count": int(results["rbi"].notna().sum()) if "rbi" in results.columns else 0,
         "unit_conversion_count": int(results["unit_conversion_applied"].fillna(False).sum()) if "unit_conversion_applied" in results.columns else 0,
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     return summary
 
@@ -482,8 +538,11 @@ def write_summary_files(paths: dict[str, Path], summary: dict[str, object]) -> N
         "## Scope",
         "",
         f"- Candidate universe (ELIGIBLE_SCREENING_WY): {summary['candidate_universe_total_eligible_screening_wy']}",
-        f"- Attempted basins in this run: {summary['attempted_basins']}",
-        f"- Result rows currently stored: {summary['results_rows']}",
+        f"- Max basins requested: {summary['max_basins_requested']}",
+        f"- Unique sites attempted this run: {summary['unique_sites_attempted_this_run']}",
+        f"- Result rows currently stored (total): {summary['results_rows_stored_total']}",
+        f"- Unique sites currently stored (total): {summary['unique_sites_stored_total']}",
+        f"- Completed fraction of candidate universe: {summary['completed_fraction_of_candidate_universe']:.6f}",
         "",
         "## Status Counts",
         "",
@@ -496,6 +555,13 @@ def write_summary_files(paths: dict[str, Path], summary: dict[str, object]) -> N
 
     lines.extend(
         [
+            "",
+            "## Consistency Checks",
+            "",
+            f"- sum(status_counts) = unique_sites_stored_total: {summary['consistency_checks']['status_counts_sum_equals_unique_sites_stored_total']}",
+            f"- unique_sites_stored_total = unique STAID in results: {summary['consistency_checks']['unique_sites_stored_total_equals_unique_staid_in_results']}",
+            f"- results_rows_stored_total = unique_sites_stored_total: {summary['consistency_checks']['results_rows_stored_total_equals_unique_sites_stored_total']}",
+            f"- Duplicate STAID detected count: {summary['duplicate_staids_detected_count']}",
             "",
             "## Key Metrics",
             "",
@@ -511,6 +577,19 @@ def write_summary_files(paths: dict[str, Path], summary: dict[str, object]) -> N
 
     for timestep in TIMESTEP_ORDER:
         lines.append(f"| {timestep} | {summary['timestep_counts'].get(timestep, 0)} |")
+
+    lines.extend(
+        [
+            "",
+            "## Warnings",
+            "",
+        ]
+    )
+    if summary.get("warnings"):
+        for warning in summary["warnings"]:
+            lines.append(f"- {warning}")
+    else:
+        lines.append("- None")
 
     lines.extend(
         [
@@ -724,11 +803,15 @@ def write_review_bundle(paths: dict[str, Path], summary: dict[str, object], argv
     review_summary = {
         "status_counts": summary.get("status_counts", {}),
         "attempted_basins": summary.get("attempted_basins", 0),
+        "unique_sites_attempted_this_run": summary.get("unique_sites_attempted_this_run", 0),
+        "results_rows_stored_total": summary.get("results_rows_stored_total", 0),
+        "unique_sites_stored_total": summary.get("unique_sites_stored_total", 0),
         "candidate_universe_total_eligible_screening_wy": summary.get("candidate_universe_total_eligible_screening_wy", 0),
         "median_hourly_completeness_pct": summary.get("median_hourly_completeness_pct", None),
         "median_rbi_among_rbi_ready": summary.get("median_rbi_among_rbi_ready", None),
         "selected_plot_count": len(copied),
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "warnings": summary.get("warnings", []),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
     (review_bundle_dir / "summary.json").write_text(json.dumps(review_summary, indent=2), encoding="utf-8")
@@ -737,7 +820,10 @@ def write_review_bundle(paths: dict[str, Path], summary: dict[str, object], argv
             [
                 "# RBI Screening Review Bundle",
                 "",
-                f"- Attempted basins: {review_summary['attempted_basins']}",
+                f"- Attempted basins (stored total): {review_summary['attempted_basins']}",
+                f"- Unique sites attempted this run: {review_summary['unique_sites_attempted_this_run']}",
+                f"- Results rows stored total: {review_summary['results_rows_stored_total']}",
+                f"- Unique sites stored total: {review_summary['unique_sites_stored_total']}",
                 f"- Candidate universe (ELIGIBLE_SCREENING_WY): {review_summary['candidate_universe_total_eligible_screening_wy']}",
                 f"- Status counts: {review_summary['status_counts']}",
                 f"- Median hourly completeness: {review_summary['median_hourly_completeness_pct']}",
@@ -767,7 +853,7 @@ def write_review_bundle(paths: dict[str, Path], summary: dict[str, object], argv
     ]
 
     manifest = {
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "files": [
             {
                 "path": str(path.relative_to(paths["output_dir"])).replace("\\", "/"),
@@ -809,17 +895,17 @@ def main() -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
-    rows = [] if existing.empty else existing.to_dict(orient="records")
+    rows: list[dict] = []
     to_process = eligible[~eligible["STAID"].astype(str).isin(done_ids)].copy()
     logger.info("Basins remaining in this run: %s", len(to_process))
 
     newly_processed = 0
-    attempted = 0
+    attempted_this_run_ids: set[str] = set()
     start_time = time.time()
 
     for idx, (_, site_row) in enumerate(to_process.iterrows(), start=1):
         staid = str(site_row["STAID"]).zfill(8)
-        attempted += 1
+        attempted_this_run_ids.add(staid)
         logger.info("Processing %s (%s/%s remaining-run)", staid, idx, len(to_process))
 
         result = process_site(
@@ -835,18 +921,32 @@ def main() -> None:
         newly_processed += 1
 
         if newly_processed % args.batch_size == 0 or idx == len(to_process):
-            merged = merge_results(existing, rows)
+            merged, duplicate_staids, duplicate_rows_count = merge_results(existing, rows)
             save_results(paths, merged)
             status_counts = merged["screening_status"].value_counts().to_dict() if not merged.empty else {}
             logger.info("Checkpoint saved after %s new basins; cumulative rows=%s; status=%s", newly_processed, len(merged), status_counts)
+            if duplicate_staids:
+                logger.warning(
+                    "Duplicate STAID rows detected in combined results before de-duplication: %s unique sites, %s rows",
+                    len(duplicate_staids),
+                    duplicate_rows_count,
+                )
 
-    final_results = merge_results(existing, rows)
+    final_results, duplicate_staids, duplicate_rows_count = merge_results(existing, rows)
     if final_results.empty:
         logger.warning("No results rows exist after run; writing empty summary")
     else:
         save_results(paths, final_results)
 
-    summary = build_summary(final_results, attempted_basins=attempted, total_eligible_basins=total_eligible)
+    summary = build_summary(
+        final_results,
+        total_eligible_basins=total_eligible,
+        max_basins_requested=args.max_basins,
+        unique_sites_attempted_this_run=len(attempted_this_run_ids),
+        duplicate_staids=duplicate_staids,
+        duplicate_rows_count=duplicate_rows_count,
+        logger=logger,
+    )
     write_summary_files(paths, summary)
     generate_plots(paths, final_results, eligible)
     write_review_bundle(paths, summary, sys.argv)

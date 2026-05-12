@@ -63,6 +63,31 @@ Primary commands:
 - Full run:
   python scripts/usgs_rbi_screening_scale.py --batch-size 25 --resume
 
+## Summary accounting fields
+
+The summary files use explicit run-scope and stored-total counters to avoid ambiguity during resume runs:
+
+- candidate_universe_total_eligible_screening_wy: Total eligible basins available for this workflow (expected 3647 for current eligibility table).
+- max_basins_requested: Value passed via --max-basins (or null for full run).
+- unique_sites_attempted_this_run: Number of unique STAID values processed in the current invocation.
+- results_rows_stored_total: Number of rows currently stored in results output.
+- unique_sites_stored_total: Number of unique STAID values currently stored in results output.
+- completed_fraction_of_candidate_universe: unique_sites_stored_total / candidate_universe_total_eligible_screening_wy.
+- status_counts: Counts by screening_status across stored unique sites.
+
+The attempted_basins field is aligned to stored-total coverage to avoid underreporting in resume mode.
+
+## Consistency and duplicate checks
+
+The script performs explicit integrity checks before writing summary files:
+
+- sum(status_counts.values()) must equal unique_sites_stored_total.
+- unique_sites_stored_total must equal the unique STAID count in the results table.
+- Duplicate STAID rows are detected in combined pre-dedup results and reported.
+
+If any check fails, a WARNING is written to both summary JSON/MD and the workflow log.
+Duplicate rows are de-duplicated by STAID (keep latest row) and are not double-counted in summary totals.
+
 ## How screening supports pilot basin selection
 
 The scaled output provides, per basin:
