@@ -71,6 +71,37 @@ The probe does not download full long-horizon discharge archives. It only retrie
 
 The 75-basin probe confirmed the scalable path is native or sub-hourly USGS IV retrieval followed by hourly resampling. Direct hourly retrieval should not be assumed.
 
+## Probe diagnostic findings
+
+The 75-basin probe results were audited to understand:
+1. Why 30/75 basins returned NO_DATA
+2. Whether hourly resampling and RBI calculation are correct
+3. Data completeness and missingness patterns for partial/insufficient basins
+
+### NO_DATA classification
+
+All 30 NO_DATA basins were rechecked against the USGS IV service during diagnostics. Classification showed:
+- 30 classified as "request/service issue" during recheck: these sites either have no recent IV data, are legacy/inactive gages, or have catalog metadata overlap but no observations in the requested water year (2023-10-01 to 2024-09-30).
+
+This is expected and not indicative of a systematic problem. These sites should be excluded from RBI screening because discharge data are simply not available in the requested window.
+
+### RBI formula verification
+
+The RBI implementation was audited with deterministic unit tests:
+- Constant flow series should have RBI = 0: ✓
+- Simple pulse series match hand-calculated RBI: ✓
+- Series with internal missing hours do not compute false jumps across gaps: ✓
+- Unit conversion from cfs to m3/s does not change RBI: ✓
+
+The formula is computed as $\sum |Q_t - Q_{t-1}| / \sum Q_t$ using the final hourly series, with missing internal hours properly excluded.
+
+### Scaling readiness
+
+Before scaling the discharge retrieval workflow to all area-filtered basins (5,836 total):
+- NO_DATA causes are well understood and expected; they should be accepted as part of the workflow.
+- RBI must be interpreted only after hourly completeness is high enough (>= 90% for RBI_READY).
+- The native/sub-hourly IV retrieval followed by hourly resampling path is confirmed as scalable.
+
 ## Why this is useful for scaling
 
 The probe will tell us whether the discharge workflow is practical enough to scale to all area-filtered basins.

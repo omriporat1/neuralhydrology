@@ -377,6 +377,11 @@ def infer_native_timestep(timestamp_index: pd.DatetimeIndex) -> tuple[Optional[f
     return mode_value, mode_share, "irregular"
 
 
+def build_hourly_series(raw_series_converted: pd.Series) -> pd.Series:
+    hourly = raw_series_converted.resample("1h").mean()
+    return hourly.reindex(EXPECTED_HOURLY_INDEX)
+
+
 def compute_probe_metrics(hourly_series: pd.Series) -> tuple[Optional[float], Optional[float], Optional[float], Optional[int], Optional[int]]:
     valid = hourly_series.dropna()
     if len(valid) < 2:
@@ -386,7 +391,10 @@ def compute_probe_metrics(hourly_series: pd.Series) -> tuple[Optional[float], Op
     if not np.isfinite(total) or total <= 0:
         return None, None, None, None, None
 
-    diffs = valid.diff().abs().dropna()
+    consecutive_mask = valid.index.to_series().diff().eq(pd.Timedelta(hours=1))
+    diffs = valid.diff().abs().where(consecutive_mask).dropna()
+    if diffs.empty:
+        return None, None, None, None, None
     rbi = float(diffs.sum() / total)
     max_hourly_dqdt = float(diffs.max()) if not diffs.empty else None
     normalized = float(max_hourly_dqdt / valid.mean()) if max_hourly_dqdt is not None and valid.mean() > 0 else None
@@ -396,6 +404,9 @@ def compute_probe_metrics(hourly_series: pd.Series) -> tuple[Optional[float], Op
     q95_count = int((valid >= q95).sum())
     q99_count = int((valid >= q99).sum())
     return rbi, max_hourly_dqdt, normalized, q95_count, q99_count
+
+
+calculate_probe_metrics = compute_probe_metrics
 
 
 def process_site(site_row: pd.Series, session: requests.Session, logger: logging.Logger) -> ProbeResult:
@@ -524,8 +535,7 @@ def process_site(site_row: pd.Series, session: requests.Session, logger: logging
     raw_series_converted = converted_values.groupby(level=0).mean().sort_index()
     native_timestep_minutes, native_timestep_share, timestep_mode = infer_native_timestep(raw_series_converted.index)
 
-    hourly = raw_series_converted.resample("1h").mean()
-    hourly = hourly.reindex(EXPECTED_HOURLY_INDEX)
+    hourly = build_hourly_series(raw_series_converted)
     hourly_values_count = int(hourly.notna().sum())
     completeness_pct = 100.0 * hourly_values_count / EXPECTED_HOURLY_COUNT
 
