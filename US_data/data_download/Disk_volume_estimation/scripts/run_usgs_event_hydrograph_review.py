@@ -31,6 +31,11 @@ import numpy as np
 import pandas as pd
 import requests
 
+from scripts.run_usgs_event_hydrograph_review_v002 import main as run_v002_main
+
+if __name__ == "__main__":
+    raise SystemExit(run_v002_main())
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS_DIR = ROOT / "reports/flashnh_usgs_rbi_screening_wy2024_v001"
 DEFAULT_OUTPUT_DIR = ROOT / "reports/flashnh_usgs_event_hydrograph_review_v001"
