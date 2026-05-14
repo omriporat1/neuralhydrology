@@ -50,23 +50,22 @@ All metrics are computed using gap-aware logic:
 
 ### Hard QC Flags (Exclusion Criteria)
 
-These flags indicate basins that should be excluded from pilot consideration:
+Hard exclusions are limited to clear unusable-data cases that indicate data quality problems or absence of usable hydrologic signal:
 
 - `HARD_LOW_COMPLETENESS_LT90`: Hourly completeness < 90%
 - `HARD_NEGATIVE_FLOW_SEVERE`: Negative flow fraction > 1%
-- `HARD_ZERO_FLOW_DOMINATED`: Zero flow fraction ≥ 25%
-- `HARD_Q50_ZERO_OR_NEAR_ZERO`: Q50 ≤ 0 or non-finite
 - `HARD_NO_RBI`: RBI cannot be computed or is non-finite
-- `HARD_SUSPICIOUS_SPIKE_SEVERE`: Max hourly jump / Q50 ≥ 20 (artifact-like)
+- `HARD_Q50_ZERO_OR_NEAR_ZERO`: Q50 ≤ 0 or non-finite **and** positive flow is < 5% of record **and** zero flow dominates (≥ 80%)
 
-Any basin with one or more hard QC flags is assigned to `EXCLUDE_HARD_QC` class.
+*Note: High normalized jumps and suspicious spikes are no longer hard exclusions. Small flashy basins legitimately exhibit high hourly variability relative to their median flow; these are now flagged as context information.*
 
 ### Context Flags (Informational)
 
-These flags provide hydrological context but do not automatically exclude basins:
+These flags provide hydrological context but do not automatically exclude basins. Basins with context flags are assigned to `MANUAL_REVIEW_CONTEXT` for further inspection:
 
 - `CONTEXT_ZERO_FLOW_SOME`: Zero flow fraction ≥ 5%
-- `CONTEXT_HIGH_NORMALIZED_JUMP`: Max hourly jump / Q50 ≥ 5
+- `CONTEXT_HIGH_NORMALIZED_JUMP`: Max hourly jump / Q50 ≥ 5 and < 20
+- `CONTEXT_SUSPICIOUS_SPIKE_SEVERE`: Max hourly jump / Q50 ≥ 20 (potentially artifact-like, but not auto-excluded)
 - `CONTEXT_LOW_SPECIFIC_FLOW`: Q99 per km² ≤ 0.01 m³/s
 - `CONTEXT_HIGH_SPECIFIC_PEAK`: Q_max per km² ≥ 1.0 m³/s
 - `CONTEXT_INTERMITTENT_LIKE`: Zero flow fraction ≥ 10%
@@ -77,16 +76,16 @@ These flags provide hydrological context but do not automatically exclude basins
 
 ## Candidate Classes
 
-Basins are assigned to one of six candidate classes:
+Basins are assigned to one of six candidate classes based on metrics and QC flags:
 
-1. **EXCLUDE_HARD_QC**: Hard QC flags present; excluded from pilot consideration
-2. **FLASHY_CORE**: Completeness ≥ 95%, RBI ≥ 0.10, strong flashiness indicators
+1. **EXCLUDE_HARD_QC**: One or more hard QC flags present; excluded from pilot consideration
+2. **FLASHY_CORE**: Completeness ≥ 95%, RBI ≥ 0.10 (strongest flashiness indicators)
 3. **FLASHY_MODERATE**: Completeness ≥ 95%, 0.05 ≤ RBI < 0.10, strong event response
-4. **FLASHY_POSSIBLE**: Completeness ≥ 90%, RBI < 0.05 but strong event-response metrics
-5. **LOW_FLASHINESS_CONTROL**: Completeness ≥ 90%, low RBI, weak event response (control basins)
-6. **MANUAL_REVIEW_CONTEXT**: No hard QC failures but context flags or ambiguous classification
+4. **FLASHY_POSSIBLE**: Completeness ≥ 90%, RBI < 0.05 but strong event-response metrics (e.g., multiple Q99+ peaks)
+5. **LOW_FLASHINESS_CONTROL**: Completeness ≥ 90%, low RBI, weak event response (control/reference basins)
+6. **MANUAL_REVIEW_CONTEXT**: No hard QC failures, but context flags or ambiguous classification warrant inspection
 
-Note: `CONTEXT_POSSIBLE_REGULATION_OR_ARTIFACT` is a context flag only; it does not automatically exclude a basin, but instead flags it for manual review.
+**Classification logic:** A basin with no hard QC flags is evaluated by its RBI, data completeness, and event response characteristics. If it meets criteria for FLASHY_CORE/MODERATE/POSSIBLE or LOW_FLASHINESS_CONTROL, it is assigned accordingly. Otherwise, if context flags are present or classification is uncertain, it is marked as MANUAL_REVIEW_CONTEXT for human inspection.
 
 ## Output Files
 

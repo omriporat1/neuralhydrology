@@ -421,27 +421,36 @@ def compute_wy2024_metrics(
         "largest_event_rise_per_km2": largest_peak_rise_per_km2,
     }
 
-    # Hard QC flags (exclusion criteria)
+    # Hard QC flags (exclusion criteria) - limited to clear unusable data cases
     hard_flags: list[str] = []
     context_flags: list[str] = []
 
+    # Clear data quality / completeness issues
     if completeness_pct < 90.0:
         hard_flags.append("HARD_LOW_COMPLETENESS_LT90")
     if negative_fraction > 0.01:
         hard_flags.append("HARD_NEGATIVE_FLOW_SEVERE")
-    if zero_fraction >= 0.25:
-        hard_flags.append("HARD_ZERO_FLOW_DOMINATED")
-    if q50 <= 0 or not np.isfinite(q50):
-        hard_flags.append("HARD_Q50_ZERO_OR_NEAR_ZERO")
     if not np.isfinite(rbi):
         hard_flags.append("HARD_NO_RBI")
-    if np.isfinite(max_abs_jump_over_q50) and max_abs_jump_over_q50 >= 20:
-        hard_flags.append("HARD_SUSPICIOUS_SPIKE_SEVERE")
 
-    # Context flags (informational)
+    # Q50 only hard if severely zero/missing with no usable positive signal
+    # Allow small-basin spike artifacts; check completeness + positive flow existence
+    if q50 <= 0 or not np.isfinite(q50):
+        # Only hard exclude if there's truly no usable positive-flow signal
+        positive_flow_count = int((valid > 0).sum()) if not valid.empty else 0
+        positive_flow_fraction = positive_flow_count / valid_count if valid_count > 0 else 0.0
+        if positive_flow_fraction < 0.05 and zero_fraction > 0.8:
+            # Severe zero-flow domination with almost no positive signal
+            hard_flags.append("HARD_Q50_ZERO_OR_NEAR_ZERO")
+
+    # Context flags (informational) - high jumps are normal for flashy basins
     if zero_fraction >= 0.05:
         context_flags.append("CONTEXT_ZERO_FLOW_SOME")
-    if np.isfinite(max_abs_jump_over_q50) and max_abs_jump_over_q50 >= 5:
+    if np.isfinite(max_abs_jump_over_q50) and max_abs_jump_over_q50 >= 20:
+        # Severe spike patterns - context only, not hard exclusion
+        context_flags.append("CONTEXT_SUSPICIOUS_SPIKE_SEVERE")
+    if np.isfinite(max_abs_jump_over_q50) and 5 <= max_abs_jump_over_q50 < 20:
+        # High normalized jump - normal for flashy basins
         context_flags.append("CONTEXT_HIGH_NORMALIZED_JUMP")
     if np.isfinite(q99_per_km2) and q99_per_km2 <= 0.01:
         context_flags.append("CONTEXT_LOW_SPECIFIC_FLOW")
@@ -465,7 +474,8 @@ def compute_wy2024_metrics(
 def classify_candidate_class(
     metrics: dict, hard_flags: list[str], context_flags: list[str]
 ) -> str:
-    """Classify basin into candidate class."""
+    """Classify basin into candidate class based on metrics and QC flags."""
+    # Hard exclusion takes precedence
     if hard_flags:
         return "EXCLUDE_HARD_QC"
 
@@ -474,12 +484,14 @@ def classify_candidate_class(
     event_count_q99 = int(metrics.get("event_count_q99", 0))
     max_abs_jump_over_q50 = metrics.get("max_abs_hourly_jump_over_Q50", float("nan"))
 
+    # Assess if basin has strong hydrologic response
     strong_response = False
     if np.isfinite(max_abs_jump_over_q50) and max_abs_jump_over_q50 >= 5:
         strong_response = True
     if event_count_q99 >= 2:
         strong_response = True
 
+    # Primary classification by RBI and response patterns
     if completeness >= 95 and np.isfinite(rbi) and rbi >= 0.10:
         return "FLASHY_CORE"
 
@@ -497,9 +509,11 @@ def classify_candidate_class(
     if np.isfinite(rbi) and rbi < 0.05 and not strong_response and completeness >= 90:
         return "LOW_FLASHINESS_CONTROL"
 
+    # If no clear classification but has context flags, mark for manual review
     if context_flags:
         return "MANUAL_REVIEW_CONTEXT"
 
+    # Default fallback
     return "MANUAL_REVIEW_CONTEXT"
 
 
@@ -581,11 +595,41 @@ def build_summary(
     ].copy()
     controls_df.to_csv(tables_dir / "low_flashiness_controls.csv", index=False)
 
+    # Compute hard QC flag statistics (flags are stored as JSON strings)
+    hard_flag_counts = {}
+    context_flag_counts = {}
+    if "hard_flags" in metrics_df.columns:
+        for flags_str in metrics_df["hard_flags"]:
+            try:
+                flags_list = json.loads(flags_str) if isinstance(flags_str, str) else (flags_str or [])
+                for flag in flags_list:
+                    hard_flag_counts[flag] = hard_flag_counts.get(flag, 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+    if "context_flags" in metrics_df.columns:
+        for flags_str in metrics_df["context_flags"]:
+            try:
+                flags_list = json.loads(flags_str) if isinstance(flags_str, str) else (flags_str or [])
+                for flag in flags_list:
+                    context_flag_counts[flag] = context_flag_counts.get(flag, 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    hard_qc_exclusions_count = int(len(hard_qc_df))
+    hard_qc_exclusion_pct = (
+        100.0 * hard_qc_exclusions_count / len(metrics_df)
+        if len(metrics_df) > 0
+        else 0.0
+    )
+
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_basins": int(len(metrics_df)),
         "candidate_class_counts": class_counts.to_dict(orient="records"),
-        "hard_qc_exclusions_count": int(len(hard_qc_df)),
+        "hard_qc_flag_counts": hard_flag_counts,
+        "context_flag_counts": context_flag_counts,
+        "hard_qc_exclusions_count": hard_qc_exclusions_count,
+        "hard_qc_exclusion_percentage": hard_qc_exclusion_pct,
         "flashy_core_count": int(
             len(metrics_df[metrics_df["candidate_class"] == "FLASHY_CORE"])
         ),
@@ -614,12 +658,36 @@ def build_summary(
         f"Generated: {summary['generated_at']}",
         "",
         f"Total basins processed: {summary['total_basins']}",
+        f"Hard QC exclusions: {summary['hard_qc_exclusions_count']} ({summary['hard_qc_exclusion_percentage']:.1f}%)",
         "",
         "## Candidate Class Distribution",
         "",
     ]
     for row in class_counts.to_dict(orient="records"):
         md_lines.append(f"- {row['candidate_class']}: {row['count']}")
+    
+    md_lines.extend([
+        "",
+        "## Hard QC Flag Breakdown",
+        "",
+    ])
+    if hard_flag_counts:
+        for flag, count in sorted(hard_flag_counts.items()):
+            md_lines.append(f"- {flag}: {count}")
+    else:
+        md_lines.append("(None)")
+    
+    md_lines.extend([
+        "",
+        "## Context Flag Breakdown",
+        "",
+    ])
+    if context_flag_counts:
+        for flag, count in sorted(context_flag_counts.items()):
+            md_lines.append(f"- {flag}: {count}")
+    else:
+        md_lines.append("(None)")
+    
     md_lines.extend([
         "",
         "## Key Counts",
