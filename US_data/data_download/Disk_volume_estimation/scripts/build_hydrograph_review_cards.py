@@ -39,7 +39,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_METRICS_DIR = REPO_ROOT / "reports" / "flashnh_wy2024_streamflow_metrics_v001"
+DEFAULT_METRICS_DIR = REPO_ROOT / "reports" / "flashnh_wy2024_streamflow_metrics_v002"
 DEFAULT_OUTPUT_DIR  = REPO_ROOT / "reports" / "flashnh_hydrograph_review_cards_v001"
 DEFAULT_MAX_BASINS  = 80
 DEFAULT_SEED        = 42
