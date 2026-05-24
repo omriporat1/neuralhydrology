@@ -110,6 +110,10 @@ def parse_args(argv=None):
                    help=f"Root output directory. Default: {DEFAULT_OUTPUT_DIR}")
     p.add_argument("--max-basins",  type=int,  default=DEFAULT_MAX_BASINS,
                    help=f"Maximum basins in review set. Default: {DEFAULT_MAX_BASINS}")
+    p.add_argument("--metrics-file", type=str, default=None,
+                   help="CSV filename to load from within --metrics-dir (may be a relative "
+                        "sub-path, e.g. tables/wy2024_metrics_with_site_metadata.csv). "
+                        "Default: tables/wy2024_streamflow_metrics.csv")
     p.add_argument("--no-show",     action="store_true",
                    help="Never display plots interactively (always save to disk).")
     p.add_argument("--seed",        type=int,  default=DEFAULT_SEED,
@@ -133,10 +137,14 @@ def _parse_flag_list(val):
         return []
 
 
-def load_metrics(metrics_dir: Path) -> pd.DataFrame:
+def load_metrics(metrics_dir: Path, metrics_file: str = None) -> pd.DataFrame:
     tables_dir = metrics_dir / "tables"
-    for p in [tables_dir / "wy2024_streamflow_metrics.csv",
-              metrics_dir / "wy2024_streamflow_metrics.csv"]:
+    if metrics_file:
+        candidates = [metrics_dir / metrics_file, tables_dir / metrics_file]
+    else:
+        candidates = [tables_dir / "wy2024_streamflow_metrics.csv",
+                      metrics_dir / "wy2024_streamflow_metrics.csv"]
+    for p in candidates:
         if p.exists():
             print(f"  Loading metrics: {p}")
             df = pd.read_csv(p, dtype={"STAID": str})
@@ -149,7 +157,9 @@ def load_metrics(metrics_dir: Path) -> pd.DataFrame:
             )
             return df
     raise FileNotFoundError(
-        f"wy2024_streamflow_metrics.csv not found in {metrics_dir}. Check --metrics-dir."
+        f"Metrics CSV not found in {metrics_dir} "
+        f"(tried: {[str(c) for c in candidates]}). "
+        f"Check --metrics-dir and --metrics-file."
     )
 
 
@@ -478,6 +488,40 @@ def _annot_box(ax, x, y, text, color, xoffset=8, yoffset=4):
                           ec=color, alpha=0.85, lw=0.6))
 
 
+def _clamp_q_ylim(ax, q: pd.Series, upper_headroom: float = 1.15) -> str:
+    """Set Q panel y-limits so large negative values do not compress the positive view.
+
+    The positive range (0 → max_q * headroom) is always fully visible.  A small
+    negative buffer (3 % of the upper limit) is added below zero so that
+    near-zero negative artefacts remain visible.  If actual negative values
+    exceed that buffer they are clipped and an annotation string is returned;
+    otherwise the string is empty.
+
+    The log panel is unaffected — call this only on linear Q axes.
+    """
+    q_valid = q.dropna()
+    if len(q_valid) == 0:
+        return ""
+
+    q_pos = q_valid[q_valid >= 0]
+    if len(q_pos) > 0:
+        q_upper = float(q_pos.max()) * upper_headroom
+    else:
+        q_upper = max(float(q_valid.max()) * upper_headroom, 1e-6)
+
+    neg_floor = -0.03 * max(q_upper, 1e-6)   # small negative buffer
+    q_min = float(q_valid.min())
+
+    if q_min < neg_floor:
+        # True negatives exceed buffer — clip and annotate
+        ax.set_ylim(bottom=neg_floor, top=q_upper)
+        return f"neg Q clipped for display: minQ={q_min:.3g}"
+    else:
+        # Negatives (if any) fit within the buffer — show actual bottom
+        ax.set_ylim(bottom=min(q_min, neg_floor), top=q_upper)
+        return ""
+
+
 def _metric_block(row: pd.Series, qc_labels: list) -> str:
     def fv(k, fmt=".4g"):
         v = row.get(k, np.nan)
@@ -613,7 +657,7 @@ def _format_event_metrics_text(em: dict, row: pd.Series, qc_labels: list) -> str
 # ---------------------------------------------------------------------------
 def plot_full_year(staid: str, q: pd.Series, row: pd.Series,
                    qc_labels: list, out_dir: Path) -> Path:
-    fig, axes = plt.subplots(2, 1, figsize=(14, 5.5),
+    fig, axes = plt.subplots(2, 1, figsize=(16, 6.5),
                               gridspec_kw={"height_ratios": [3, 1.2]},
                               constrained_layout=True)
     ax, ax_log = axes
@@ -621,6 +665,14 @@ def plot_full_year(staid: str, q: pd.Series, row: pd.Series,
     # Linear panel
     _plot_segments(ax, q, color=PLOT_COLORS["series"], lw=0.55, alpha=0.85, label="Q (m3/s)")
     _add_q_hlines(ax, row)
+
+    # Clamp negative Q so large artefacts don't compress the positive view
+    clip_msg = _clamp_q_ylim(ax, q, upper_headroom=1.12)
+    if clip_msg:
+        ax.text(0.01, 0.02, clip_msg,
+                transform=ax.transAxes, fontsize=6, va="bottom", color="#ef4444",
+                bbox=dict(boxstyle="round,pad=0.2", fc="#fef2f2", ec="#ef4444", alpha=0.85))
+
     ax.set_ylabel("Q (m3/s)", fontsize=8)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
     ax.xaxis.set_major_locator(mdates.MonthLocator())
@@ -655,7 +707,7 @@ def plot_full_year(staid: str, q: pd.Series, row: pd.Series,
         fontsize=8,
     )
     out_path = out_dir / f"{staid}_full_year.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
@@ -672,7 +724,7 @@ def plot_event_panel(staid: str, q_win: pd.Series, centre_off: int,
     q50  = row.get("Q50", np.nan)
 
     fig, (ax_q, ax_dq) = plt.subplots(
-        2, 1, figsize=(13, 6.0),
+        2, 1, figsize=(15, 7.0),
         gridspec_kw={"height_ratios": [3, 1.6]},
         sharex=True, constrained_layout=True,
     )
@@ -703,10 +755,12 @@ def plot_event_panel(staid: str, q_win: pd.Series, centre_off: int,
         ax_q.axvline(mf_t, color=PLOT_COLORS["fall"], lw=1.2, ls=":", zorder=5,
                      label=f"MaxFall {mf_v:.4g} m3/s/hr")
 
-    # Adaptive y-limits: base on local event window, reference lines don't expand axis
-    q_valid = q_win.dropna()
-    if len(q_valid) > 0:
-        ax_q.set_ylim(bottom=0, top=float(q_valid.max()) * 1.15)
+    # Adaptive y-limits: clamp negatives, show positive range with headroom
+    clip_msg = _clamp_q_ylim(ax_q, q_win, upper_headroom=1.15)
+    if clip_msg:
+        ax_q.text(0.01, 0.02, clip_msg,
+                  transform=ax_q.transAxes, fontsize=5.5, va="bottom", color="#ef4444",
+                  bbox=dict(boxstyle="round,pad=0.2", fc="#fef2f2", ec="#ef4444", alpha=0.85))
 
     # Gap banner
     if has_gap:
@@ -751,11 +805,21 @@ def plot_event_panel(staid: str, q_win: pd.Series, centre_off: int,
                       color=PLOT_COLORS["fall"], s=40, zorder=7, marker="v",
                       label=f"MaxFall {em['max_fall']:.4g}")
 
-    # Adaptive dQ y-limits: symmetric around zero
+    # Adaptive dQ y-limits: symmetric around zero; clip spikes via P95
     dq_clean = dq.dropna()
     if not dq_clean.empty:
-        dq_abs_max = max(float(dq_clean.abs().max()), 1e-10)
-        ax_dq.set_ylim(-dq_abs_max * 1.25, dq_abs_max * 1.25)
+        dq_abs = dq_clean.abs()
+        dq_abs_max = float(dq_abs.max())
+        dq_abs_p95 = float(dq_abs.quantile(0.95))
+        if dq_abs_max > 10 * dq_abs_p95 and dq_abs_p95 > 0:
+            clip_lim = dq_abs_p95 * 3.0
+            ax_dq.set_ylim(-clip_lim, clip_lim)
+            ax_dq.text(0.99, 0.01, f"dQ clipped: true max={dq_abs_max:.3g}",
+                       transform=ax_dq.transAxes, fontsize=5.5, va="bottom", ha="right",
+                       color="#ef4444",
+                       bbox=dict(boxstyle="round,pad=0.2", fc="#fef2f2", ec="#ef4444", alpha=0.85))
+        else:
+            ax_dq.set_ylim(-max(dq_abs_max, 1e-10) * 1.25, max(dq_abs_max, 1e-10) * 1.25)
 
     ax_dq.set_ylabel("dQ (m3/s/hr)", fontsize=7)
     ax_dq.set_xlabel(f"Date (UTC)  [+/-{half_hours} h window]", fontsize=7)
@@ -777,7 +841,7 @@ def plot_event_panel(staid: str, q_win: pd.Series, centre_off: int,
         plt.setp(ax_dq.xaxis.get_majorticklabels(), rotation=0, ha="center", fontsize=6.5)
 
     out_path = out_dir / f"{staid}_{event_type}_e{event_num:02d}_{window_label}.png"
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     return out_path, has_gap
 
@@ -787,7 +851,7 @@ def plot_zero_flow_panel(staid: str, q: pd.Series, row: pd.Series,
     valid = q.dropna()
     if len(valid) == 0:
         return None
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 3.5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.0))
     _plot_segments(ax1, q, color=PLOT_COLORS["series"], lw=0.5, alpha=0.8)
     ax1.axhline(0, color=PLOT_COLORS["zero"], lw=0.8, ls="--", label="Q=0")
     ax1.set_title(f"Zero/low-flow context — {staid}  zero_frac="
@@ -807,7 +871,7 @@ def plot_zero_flow_panel(staid: str, q: pd.Series, row: pd.Series,
         ax2.grid(True, ls=":", lw=0.35, alpha=0.5)
     fig.tight_layout()
     out_path = out_dir / f"{staid}_zero_flow_context.png"
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
+    fig.savefig(out_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
@@ -1047,6 +1111,19 @@ def _rbi_bin(rbi):
     return "RBI>=0.30"
 
 
+def _area_bin(sqkm):
+    """Compute area_bin label from DRAIN_SQKM.
+    Matches the labels used in the upstream metrics table (1-1000 km2 project scope)."""
+    if pd.isna(sqkm):
+        return "unknown"
+    v = float(sqkm)
+    if v < 10:
+        return "1-10 km²"
+    if v < 100:
+        return "10-100 km²"
+    return "100-1000 km²"
+
+
 def write_summary(review_df: pd.DataFrame, records: list, out_dir: Path) -> Path:
     summ_dir = out_dir / "summaries"
     summ_dir.mkdir(parents=True, exist_ok=True)
@@ -1057,6 +1134,11 @@ def write_summary(review_df: pd.DataFrame, records: list, out_dir: Path) -> Path
         return {}
 
     review_df = review_df.copy()
+    # Recompute area_bin from DRAIN_SQKM: pandas 3.x groupby.apply drops the groupby
+    # column from results, so area_bin may be NaN in review_df rows that came through
+    # _stratified_sample. Derive it fresh from DRAIN_SQKM instead.
+    if "DRAIN_SQKM" in review_df.columns:
+        review_df["area_bin"] = review_df["DRAIN_SQKM"].apply(_area_bin)
     review_df["rbi_bin"] = review_df.get("RBI", pd.Series(dtype=float)).apply(_rbi_bin)
 
     n_groups  = review_df["review_group"].nunique()
@@ -1134,10 +1216,16 @@ def main(argv=None):
     # Load metrics
     print("\nLoading metrics table...")
     try:
-        df = load_metrics(md)
+        df = load_metrics(md, args.metrics_file)
     except FileNotFoundError as exc:
         print(f"ERROR: {exc}"); return
     print(f"  {len(df)} basins loaded.")
+
+    # Filter to main_training_candidate when the column is present
+    if "main_training_candidate" in df.columns:
+        n_before = len(df)
+        df = df[df["main_training_candidate"].astype(str).str.upper().isin({"TRUE", "1", "YES"})].copy()
+        print(f"  main_training_candidate filter: {n_before} -> {len(df)} basins")
 
     # Select review set
     print(f"\nSelecting review set (max {args.max_basins} basins, seed {args.seed})...")
