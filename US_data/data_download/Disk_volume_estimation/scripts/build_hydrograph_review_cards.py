@@ -118,6 +118,12 @@ def parse_args(argv=None):
                    help="Never display plots interactively (always save to disk).")
     p.add_argument("--seed",        type=int,  default=DEFAULT_SEED,
                    help=f"Random seed. Default: {DEFAULT_SEED}")
+    p.add_argument("--selected-staids-csv", type=Path, default=None,
+                   help="CSV with a pre-selected STAID list. When provided, bypasses "
+                        "internal select_review_set(); extra columns from this CSV are "
+                        "passed through to the human_review_template.")
+    p.add_argument("--selected-staid-column", type=str, default="STAID",
+                   help="Column name for STAID in --selected-staids-csv. Default: STAID")
     return p.parse_args(argv)
 
 
@@ -1023,7 +1029,12 @@ def write_human_review_template(review_df: pd.DataFrame,
 
     def fv(row, k):
         v = row.get(k, np.nan)
-        return "" if pd.isna(v) else v
+        try:
+            return "" if pd.isna(v) else v
+        except (TypeError, ValueError):
+            # v is array-like (e.g. list column such as context_flags_list);
+            # convert to string representation so it can be written to CSV
+            return str(v) if v is not None else ""
 
     rows = []
     for _, row in review_df.iterrows():
@@ -1034,7 +1045,7 @@ def write_human_review_template(review_df: pd.DataFrame,
         while len(evs) < 3:
             evs.append("")
         qc_labels = assign_qc_labels(row)
-        rows.append({
+        base = {
             "STAID":               s,
             "candidate_class":     fv(row, "candidate_class"),
             "review_group":        fv(row, "review_group"),
@@ -1066,7 +1077,13 @@ def write_human_review_template(review_df: pd.DataFrame,
             "artifact_type":       "",
             "confidence":          "",
             "reviewer_notes":      "",
-        })
+        }
+        # Pass through any extra columns present in review_df (e.g. rule flags,
+        # preliminary_training_status, sampling_tier from an external selected-basins CSV).
+        for col in review_df.columns:
+            if col not in base and col != "STAID":
+                base[col] = fv(row, col)
+        rows.append(base)
 
     tmpl = pd.DataFrame(rows)
     p = out_dir / "tables" / "human_review_template.csv"
@@ -1227,12 +1244,38 @@ def main(argv=None):
         df = df[df["main_training_candidate"].astype(str).str.upper().isin({"TRUE", "1", "YES"})].copy()
         print(f"  main_training_candidate filter: {n_before} -> {len(df)} basins")
 
-    # Select review set
-    print(f"\nSelecting review set (max {args.max_basins} basins, seed {args.seed})...")
-    review_df = select_review_set(df, args.max_basins, args.seed)
-    print(f"  {len(review_df)} basins selected.")
-    for g, n in review_df["review_group"].value_counts().items():
-        print(f"    {g}: {n}")
+    # Select review set — either from external CSV or internal stratified selection
+    if args.selected_staids_csv is not None:
+        print(f"\nLoading pre-selected basins from {args.selected_staids_csv}...")
+        sel = pd.read_csv(args.selected_staids_csv, dtype={args.selected_staid_column: str})
+        sel = sel.rename(columns={args.selected_staid_column: "STAID"})
+        sel_staids = sel["STAID"].tolist()
+        # Filter metrics df to selected STAIDs
+        df_filt = df[df["STAID"].isin(sel_staids)].copy()
+        # Join extra columns from the selected-basins table (non-overlapping)
+        extra_cols = ["STAID"] + [c for c in sel.columns if c != "STAID" and c not in df_filt.columns]
+        df_filt = df_filt.merge(sel[extra_cols], on="STAID", how="left")
+        # Restore selection order
+        order = {s: i for i, s in enumerate(sel_staids)}
+        df_filt["_sel_order"] = df_filt["STAID"].map(order)
+        df_filt = df_filt.sort_values("_sel_order").drop(columns=["_sel_order"]).reset_index(drop=True)
+        # Ensure review_group exists (use sampling_tier as fallback)
+        if "review_group" not in df_filt.columns:
+            if "sampling_tier" in df_filt.columns:
+                df_filt["review_group"] = df_filt["sampling_tier"]
+            else:
+                df_filt["review_group"] = "second_pass_rules"
+        review_df = df_filt
+        print(f"  {len(review_df)} pre-selected basins loaded.")
+        missing = [s for s in sel_staids if s not in df_filt["STAID"].values]
+        if missing:
+            print(f"  WARNING: {len(missing)} selected STAIDs not found in metrics: {missing[:5]}")
+    else:
+        print(f"\nSelecting review set (max {args.max_basins} basins, seed {args.seed})...")
+        review_df = select_review_set(df, args.max_basins, args.seed)
+        print(f"  {len(review_df)} basins selected.")
+        for g, n in review_df["review_group"].value_counts().items():
+            print(f"    {g}: {n}")
 
     # Per-class counts
     if "candidate_class" in review_df.columns:
