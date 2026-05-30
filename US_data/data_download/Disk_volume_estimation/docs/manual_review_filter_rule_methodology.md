@@ -1,7 +1,7 @@
 # Manual Review Filter Rule Methodology — Flash-NH Basin Screening
 
-**Version**: 1.0
-**Status**: Methodology reference — analysis is preliminary; no basins have been removed.
+**Version**: 2.0
+**Status**: Final — two-pass manual review completed; final basin selection complete (flashnh_final_basin_selection_v001).
 
 ---
 
@@ -13,10 +13,13 @@ streamflow QC (hard exclusions) and USGS site-type metadata audit already remove
 ~300 basins. However, automated QC cannot distinguish all problematic basins from
 legitimately extreme hydrology.
 
-A stratified random sample of 73 basins was drawn for human hydrograph inspection.
-The review set was intentionally enriched for suspicious cases (extreme RBI, extreme
-rise rates, high Q-ratio, context-flagged basins) to calibrate whether the automated
-flags reflect real problems or real flashy hydrology.
+Two manual review passes were completed. **Pass 1** drew a stratified random sample of
+73 basins enriched for suspicious cases (extreme RBI, extreme rise rates, high Q-ratio,
+context-flagged basins) to calibrate whether automated flags reflect real problems or
+real flashy hydrology. **Pass 2** drew 75 basins targeted at the HOLDOUT_REVIEW_PRELIM
+pool, stratified by risk rule tier (compound-risk CDEGHJ≥2, per-rule tier-2 samples,
+near-threshold controls, and clean CORE controls). Together, **148 basins** were reviewed
+with no overlapping STAIDs between passes.
 
 ---
 
@@ -38,8 +41,9 @@ the 3,034 `main_training_candidate == True` basins.
 
 ## 3. Manual Labels as Calibration Data, Not Classifier Labels
 
-The 73 reviewed basins are **not** a representative random sample of the 3,034 main
-candidates. They are **stratified/enriched** for suspicious cases. This means:
+The 148 reviewed basins (73 pass-1 + 75 pass-2) are **not** a representative random
+sample of the 3,034 main candidates. They are **stratified/enriched** for suspicious
+cases. This means:
 
 - EXCLUDE and UNSURE rates in the review set are artificially inflated relative to
   the full population.
@@ -57,18 +61,33 @@ has stronger calibration support than one with low rate.
 
 ## 4. Decision Taxonomy
 
-| Status label | Meaning | Policy |
+### Preliminary labels (from rule analysis)
+
+Used during the analysis phase to propose status for all 3,034 candidates:
+
+| Preliminary label | Meaning | Policy proposal |
 |---|---|---|
-| TRAIN_CORE_PRELIM | No risk flags; passes all checks | Include in training data |
-| TRAIN_SOFT_KEEP_PRELIM | One moderate risk flag triggers (F, I, C, D, E) | Include but note risk; inspect in post-training residual analysis |
-| HOLDOUT_REVIEW_PRELIM | Compound risk (>=2 flags), or rule G/H triggers, or reviewed UNSURE | Hold out from training pending second-pass review |
-| EXCLUDE_TRAINING_PRELIM | Reviewed EXCLUDE (manual override) or metadata HARD_EXCLUDE | Exclude from training; document reason |
+| TRAIN_CORE_PRELIM | No risk flags; passes all checks | Proposed: include in training data |
+| TRAIN_SOFT_KEEP_PRELIM | One moderate risk flag triggers (F, I, C, D, E) | Proposed: include but track as risk stratum |
+| HOLDOUT_REVIEW_PRELIM | Compound risk (≥2 CDEGHJ flags), or reviewed UNSURE | Proposed: hold out pending second-pass review |
+| EXCLUDE_TRAINING_PRELIM | Reviewed EXCLUDE (manual override) or metadata HARD_EXCLUDE | Proposed: exclude; document reason |
+
+### Final labels (from flashnh_final_basin_selection_v001)
+
+Applied after both review passes; these are the accepted pre-training assignments:
+
+| Final label | Count | Trigger |
+|---|---|---|
+| TRAIN_CORE | 2,216 | No flags trigger; reviewed KEEP with no compound risk |
+| TRAIN_SOFT_KEEP | 627 | Single CDEJ/G/H/F/I rule, or reviewed KEEP_LOW_CONFIDENCE |
+| HOLDOUT_REVIEW | 156 | CDEJ compound risk ≥ 2, or reviewed UNSURE |
+| EXCLUDE_TRAINING | 35 | Manual EXCLUDE label, or rule_A override |
 
 **Priority order**: EXCLUDE > HOLDOUT > SOFT_KEEP > CORE.
 
-The word "PRELIM" in every status label is intentional: these are proposals, not
-final decisions. No basin should be removed from training data based on these labels
-alone without human sign-off.
+HOLDOUT_REVIEW is not a permanent exclusion. These basins are withheld from the
+initial training run and should be revisited after post-training residual analysis.
+See `docs/basin_screening_decision_memo.md` Section 10 for next steps.
 
 ---
 
@@ -132,20 +151,34 @@ are not penalized by rules C or D (NaN comparisons evaluate to False, not True).
 
 ### 6.1 Inputs (exact paths)
 
+#### Rule analysis (pass-1 calibration)
+
 | Input | Path | Row count at analysis time |
 |---|---|---|
-| Manual review labels | `reports/flashnh_hydrograph_review_cards_v004_main_training_candidate/manual_review_labels.csv` | 73 |
-| Review template | `reports/flashnh_hydrograph_review_cards_v004_main_training_candidate/tables/human_review_template.csv` | 73 |
+| Pass-1 labels (locked) | `reports/flashnh_hydrograph_review_cards_v004_main_training_candidate/manual_review_labels_pass1_locked.csv` | 73 |
+| Pass-1 review template | `reports/flashnh_hydrograph_review_cards_v004_main_training_candidate/tables/human_review_template.csv` | 73 |
 | WY2024 metrics + metadata | `reports/flashnh_usgs_site_metadata_v001/tables/wy2024_metrics_with_site_metadata.csv` | 3,324 total; 3,034 main_training_candidate |
 | GAGES-II attributes | `C:/PhD/Python/neuralhydrology/US_data/attributes/attributes_gageii_*.csv` | 9,008 rows each |
 | HydroATLAS | `C:/PhD/Python/neuralhydrology/US_data/attributes/attributes_hydroATLAS.csv` | 9,008 rows; 3,029/3,034 match after join-key fix |
 | NLDAS-2 climate | `C:/PhD/Python/neuralhydrology/US_data/attributes/attributes_nldas2_climate.csv` | 9,008 rows |
 
-### 6.2 Key Script
+#### Combined analysis (both passes)
 
-`scripts/analyze_manual_review_filter_rules.py`
+| Input | Path | Row count |
+|---|---|---|
+| Pass-2 labels | `reports/flashnh_hydrograph_review_cards_v005_second_pass_rules/manual_review_labels_pass2.csv` | 75 |
+| Pass-2 review template | `reports/flashnh_hydrograph_review_cards_v005_second_pass_rules/tables/human_review_template.csv` | 75 |
+| Full candidate rule matrix | `reports/flashnh_manual_review_rule_analysis_v001/tables/full_candidate_rule_matrix.csv` | 3,034 |
 
-Run with no arguments. All paths are constants at the top of the script. Deterministic output (no random seeds used in rule computation).
+### 6.2 Key Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/analyze_manual_review_filter_rules.py` | Pass-1 rule calibration; generates rule matrix and preliminary status |
+| `scripts/analyze_combined_manual_review_results.py` | Combines both passes; rule performance tables; proposed policy |
+| `scripts/build_final_basin_training_status.py` | Encodes accepted policy; writes final training/holdout/excluded lists |
+
+All scripts run with no arguments. Deterministic output (no random seeds in rule computation).
 
 ### 6.3 Outputs
 
@@ -165,43 +198,59 @@ All outputs go to `reports/flashnh_manual_review_rule_analysis_v001/` (gitignore
 
 ## 7. How to Report This in a Publication
 
-The following framing is consistent with the methodology:
+The following framing is consistent with the completed methodology:
 
 > "We applied a multi-stage screening workflow to identify high-quality streamflow
 > records for model training. After automated data-quality exclusions (data completeness
 > <90%, severe negative flow, zero median flow) and USGS site-type metadata filtering
 > (removing tidal stream and lake sites), we conducted manual hydrograph inspection
-> of a stratified sample of 73 basins enriched for suspicious cases. These labels were
+> across two stratified review passes totaling 148 basins. Pass 1 (73 basins) was
+> enriched for suspicious extreme-flashiness and context-flagged cases. Pass 2 (75 basins)
+> targeted basins flagged by compound regulation/lentic risk rules. Review labels were
 > used as calibration evidence to evaluate candidate risk rules based on streamflow
-> metrics and basin attributes (GAGES-II, HydroATLAS, NLDAS-2). Risk rules were
-> conservative, using p95/p99 quantile thresholds, and resulted in risk flags rather
-> than automatic exclusions. Flagged basins were held out for secondary review rather
-> than being removed outright, preserving real hydrological variability in the
-> training set."
+> metrics and basin attributes (GAGES-II, HydroATLAS, NLDAS-2). Rules were conservative,
+> using p95/p99 quantile thresholds. Regulation/lentic/artificial-flow compound risk
+> (CDEJ rules active ≥ 2) was the strongest exclusion signal (exclude-or-unsure rate
+> 0.45–0.69 in the reviewed sample). Zero-flow and extreme-jump flags alone were not
+> treated as exclusion criteria, consistent with their low exclude-or-unsure rates in
+> the reviewed sample (0.22 and 0.15 respectively). The final training set comprised
+> 2,843 basins (TRAIN_CORE + TRAIN_SOFT_KEEP); 156 basins with compound regulation risk
+> were withheld for secondary review; 35 basins were excluded based on manual EXCLUDE
+> labels or previous manual override flags."
 
 ---
 
-## 8. Next Steps Before Finalizing Basin Selection
+## 8. Completed Steps and Final Outputs
 
-1. **Inspect** `tables/candidate_rule_screening.csv`: review each rule's
-   `reviewed_exclude_or_unsure_rate` and `reviewed_false_positive_keep_rate`.
-   Decide which rules are strong enough to act on.
+All steps listed in the original "Next Steps" section have been completed.
 
-2. **Choose** which rules to accept and at what recommendation level.
-   Recommended conservative default: only rule_A (manual EXCLUDE) triggers
-   EXCLUDE_TRAINING_PRELIM; rules C/D/E/G/H/J trigger HOLDOUT_REVIEW.
+1. ✓ **Rule screening table inspected** (`tables/candidate_rule_screening.csv`):
+   Rules C, D, E, J have strong calibration support (exclude-or-unsure rate 0.41–0.57 in
+   reviewed sample). Rules G and H have weak support (0.22 and 0.15) and are not
+   treated as holdout triggers when appearing alone.
 
-3. **Create a separate final basin training status script** that encodes the
-   accepted rules and writes the definitive training set membership file.
-   This script should be committed and versioned; the preliminary analysis
-   outputs are not the final authority.
+2. ✓ **Accepted rule policy**: CDEJ compound risk (≥ 2 active) triggers HOLDOUT_REVIEW.
+   Single CDEJ/G/H/F/I rule triggers TRAIN_SOFT_KEEP. Manual EXCLUDE or rule_A triggers
+   EXCLUDE_TRAINING.
 
-4. **Expand the manual review sample** for the HOLDOUT_REVIEW_PRELIM group
-   (N=223) before finalizing exclusions. Post-training residual analysis is a
-   complementary approach: train on all TRAIN_* basins, identify high-residual
-   stations, then review those.
+3. ✓ **Final basin training status script created and run**:
+   `scripts/build_final_basin_training_status.py`. Output:
+   `reports/flashnh_final_basin_selection_v001/`.
+
+4. ✓ **Manual review expanded** to 148 basins across two passes. Combined analysis at
+   `scripts/analyze_combined_manual_review_results.py` and
+   `reports/flashnh_combined_manual_review_analysis_v001/`.
+
+### Next action
+
+Begin meteorological forcing preprocessing for the initial training set:
+`reports/flashnh_final_basin_selection_v001/tables/training_basin_list_initial.csv`
+(2,843 basins). See `docs/basin_screening_decision_memo.md` Section 10 for the
+full milestone plan.
 
 ---
 
-*This document describes methodology, not results. For quantitative results, see
-`reports/flashnh_manual_review_rule_analysis_v001/summaries/manual_review_rule_analysis_summary.md`.*
+*This document describes methodology and final outcomes. For quantitative results, see:*
+- *`reports/flashnh_manual_review_rule_analysis_v001/summaries/manual_review_rule_analysis_summary.md`*
+- *`reports/flashnh_combined_manual_review_analysis_v001/summaries/combined_manual_review_analysis_summary.md`*
+- *`reports/flashnh_final_basin_selection_v001/summaries/final_basin_selection_summary.md`*

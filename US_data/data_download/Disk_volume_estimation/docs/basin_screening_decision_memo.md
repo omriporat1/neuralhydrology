@@ -1,25 +1,32 @@
 # Flash-NH Basin Screening Decision Memo
 
-**Date**: 2026-05-19 (updated after metadata audit; original: 2026-05-13)
-**Status**: Decision-ready — screening phase complete
+**Date**: 2026-05-27 (updated after final pre-training basin selection; prior: 2026-05-19)
+**Status**: Final pre-training selection complete — flashnh_final_basin_selection_v001
 **Author**: Flash-NH research team
 
 ---
 
 ## 1. Executive Recommendation
 
-**Carry forward all 3,034 main_training_candidate basins as the Flash-NH training universe.**
+**Initial training set: 2,843 basins (TRAIN_CORE + TRAIN_SOFT_KEEP, from flashnh_final_basin_selection_v001). Held for secondary review: 156 basins (HOLDOUT_REVIEW). Hard-excluded: 35 basins (EXCLUDE_TRAINING).**
 
-The recommended universe has been refined in two passes:
+| Final status | Count | % of 3,034 | Notes |
+|---|---|---|---|
+| TRAIN_CORE | 2,216 | 73.0% | No risk flags; passes all checks |
+| TRAIN_SOFT_KEEP | 627 | 20.7% | One moderate risk flag; included in training, tracked as risk stratum |
+| HOLDOUT_REVIEW | 156 | 5.1% | Compound regulation/lentic risk; withheld pending residual analysis |
+| EXCLUDE_TRAINING | 35 | 1.2% | Manual EXCLUDE label or rule_A override |
+| **Initial training set** | **2,843** | **93.7%** | TRAIN_CORE + TRAIN_SOFT_KEEP |
+
+The main training universe of 3,034 main_training_candidate basins was established in two automated screening passes:
 1. **Streamflow hard-QC**: 279 basins excluded for data-quality failures (completeness, negative flow, near-zero median, missing RBI) → 3,045 hard-QC-passing basins.
 2. **USGS site-type metadata audit** (completed 2026-05-19): 11 additional basins excluded from the hard-QC-passing set because their USGS monitoring-location `site_type_code` identifies them as tidal streams or lake/reservoir sites → **3,034 main_training_candidate basins**.
 
+A subsequent two-pass manual hydrograph review (148 basins total: 73 in pass-1, 75 in pass-2) calibrated risk rules against human judgment and produced the final pre-training basin status. See Section 7 for the final selection details and Section 9 for the manual-review execution record.
+
 Do not restrict model training or evaluation to Pilot-100 or Pilot-150. Those subsets are useful only for debugging and rapid iteration. The candidate classes (FLASHY_CORE, FLASHY_MODERATE, FLASHY_POSSIBLE, LOW_FLASHINESS_CONTROL, MANUAL_REVIEW_CONTEXT) should be retained as stratification metadata and diagnostic strata — not as strict inclusion filters.
 
-The screening phase is complete. The remaining work before meteorological preprocessing is:
-
-1. Spot-check a prioritized sample of suspicious basins — not all 1,000+ context-flagged basins.
-2. Begin meteorological forcing preprocessing for the full 3,034-basin universe.
+**The screening phase is complete.** The next step is to begin meteorological forcing preprocessing for the initial training set of 2,843 basins (`reports/flashnh_final_basin_selection_v001/tables/training_basin_list_initial.csv`).
 
 ---
 
@@ -38,6 +45,11 @@ The following table summarizes basin counts at each filtering stage.
 | Hard-QC-passing (pre-metadata) | 3,045 (91.6%) | All basins passing streamflow quality thresholds |
 | Metadata hard-exclusions (site-type audit) | 19 total; 11 from hard-QC-passing | 18 tidal streams (ST-TS) + 1 lake/reservoir (LK); see Section 3 |
 | **main_training_candidate universe** | **3,034** | Hard-QC-pass AND metadata policy = ACCEPT |
+| Manual review pass-1 | 73 basins reviewed | Stratified sample enriched for suspicious cases |
+| Manual review pass-2 | 75 basins reviewed | Targeted sample from HOLDOUT_REVIEW_PRELIM + per-rule tiers |
+| **EXCLUDE_TRAINING (final)** | **35** | Manual EXCLUDE (both passes) + rule_A override |
+| **HOLDOUT_REVIEW (final)** | **156** | CDEJ compound risk ≥ 2; manual UNSURE decisions |
+| **Initial training set (TRAIN_CORE + TRAIN_SOFT_KEEP)** | **2,843** | 93.7% of main_training_candidate; see Section 7 |
 
 Note: 8 of the 19 metadata hard-exclusions were already in the streamflow EXCLUDE_HARD_QC class (they failed both streamflow QC and metadata QC). The 11 that are new exclusions were previously in the hard-QC-passing set and would have been silently included without the metadata audit.
 
@@ -158,9 +170,9 @@ For scientific model evaluation — generalization across basin types, geographi
 
 ## 6. Recommended Carry-Forward: main_training_candidate Universe
 
-**Decision**: Use all 3,034 main_training_candidate basins as the training and evaluation universe.
+**Decision**: Use all 3,034 main_training_candidate basins as the screening universe. The final pre-training selection is documented in Section 7.
 
-These are basins that pass both:
+These basins pass both:
 1. Streamflow hard-QC (no HARD_* flag)
 2. USGS site-type metadata audit (metadata_policy_bucket == ACCEPT, i.e., site_type_code == ST)
 
@@ -170,7 +182,7 @@ These are basins that pass both:
 - **As sampling weights for pilot subsets**: When compute constraints require a smaller training set initially, sample proportionally by class rather than selecting only CORE/MODERATE.
 - **Not as strict inclusion filters**: Do not exclude FLASHY_POSSIBLE basins from training. The model will need to generalize across the full flashiness spectrum.
 
-**MANUAL_REVIEW_CONTEXT (n=58)**: Include in training for now. These are basins with moderate-to-high RBI that also carry context flags. Their scientific value is real; the flags indicate inspection priority, not exclusion.
+**MANUAL_REVIEW_CONTEXT (n=58)**: Included in training unless specifically excluded by manual review label. These are basins with moderate-to-high RBI that also carry context flags.
 
 **EXCLUDE_HARD_QC (n=279)**: Do not include. These fail objective streamflow data quality criteria.
 
@@ -178,7 +190,71 @@ These are basins that pass both:
 
 ---
 
-## 7. Remaining Concerns
+## 7. Final Pre-Training Basin Selection (flashnh_final_basin_selection_v001)
+
+**Completed**: 2026-05-27. Scripts: `scripts/analyze_combined_manual_review_results.py`,
+`scripts/build_final_basin_training_status.py`. Outputs: `reports/flashnh_final_basin_selection_v001/`.
+
+### 7.1 Policy Summary
+
+The final pre-training basin status was determined by combining automated risk rules with
+human review labels from two manual inspection passes. The policy applies in priority order:
+
+| Final status | Trigger | Count |
+|---|---|---|
+| EXCLUDE_TRAINING | manual EXCLUDE, or rule_A (previous EXCLUDE designation) | 35 |
+| HOLDOUT_REVIEW | CDEJ compound risk ≥ 2, or manual UNSURE | 156 |
+| TRAIN_SOFT_KEEP | single CDEJ/G/H/F/I rule flag, or manual KEEP_LOW_CONFIDENCE | 627 |
+| TRAIN_CORE | no flags trigger | 2,216 |
+
+CDEJ = rule_C (HYDRO_DISTURB_INDX) + rule_D (lake/reservoir area %) +
+rule_E (degree of regulation) + rule_J (canals/DOR). The ≥ 2 threshold was calibrated
+against the combined review set (exclude-or-unsure rate 0.45–0.69 for CDEJ≥2 combinations).
+
+### 7.2 Key Interpretation
+
+- **TRAIN_CORE + TRAIN_SOFT_KEEP (2,843 basins)** form the initial training set. TRAIN_SOFT_KEEP
+  basins are fully included but tracked as a risk stratum for post-training residual analysis.
+
+- **HOLDOUT_REVIEW (156 basins)** are not permanently excluded. They are withheld from the
+  first training run and should be revisited after post-training residual analysis or targeted
+  secondary review. Roughly 30–50% of CDEJ≥2 basins reviewed as part of pass-2 were labeled
+  KEEP on visual inspection, so the holdout pool contains legitimate training candidates.
+
+- **EXCLUDE_TRAINING (35 basins)** are hard exclusions. All 35 reflect either manual EXCLUDE
+  labels (where the reviewer identified regulation artifacts, sensor problems, or lake-dominated
+  hydrology) or the rule_A override from the pass-1 analysis. Zero basins were excluded purely
+  by automated thresholds without human confirmation.
+
+- **Rule_G (mostly-zero / ephemeral) and rule_H (extreme hourly jumps) do not trigger holdout
+  or exclusion when appearing alone.** Both were confirmed by the combined review to reflect
+  real hydrological signals (intermittent streams and genuine flashy response, respectively).
+  Their exclude-or-unsure rates in the review set were 0.22 and 0.15 — below the 0.35 threshold
+  used to recommend holdout-level action.
+
+### 7.3 Evidence from Combined Manual Review
+
+- 148 basins reviewed total (73 pass-1 + 75 pass-2); no overlapping STAIDs.
+- Combined exclude rate 23.6%; unsure rate 10.1%; total concern rate 33.8%.
+- **Regulation/lentic risk** is the dominant exclusion driver. Reviewer notes mentioning
+  "regulated/managed" (n=28, exclude-or-unsure rate 0.82) and "dam/reservoir" (n=26, rate 0.77)
+  strongly predict exclusion decisions.
+- **Ephemeral/zero-flow mentions** (n=28) have exclude-or-unsure rate 0.04 — confirming these
+  should remain in training.
+
+### 7.4 Key Output Files
+
+| File | Contents |
+|---|---|
+| `tables/final_basin_training_status.csv` | 3,034 rows; final_training_status, reasons, all rule flags |
+| `tables/training_basin_list_initial.csv` | 2,843-row STAID list for initial training run |
+| `tables/holdout_basin_list.csv` | 156-row STAID list for secondary review |
+| `tables/excluded_basin_list.csv` | 35-row STAID list of hard exclusions |
+| `summaries/final_basin_selection_summary.md` | Narrative policy documentation |
+
+---
+
+## 8. Remaining Concerns
 
 ### 7.1 Outlier-sensitive plots and metric distributions
 
@@ -217,67 +293,75 @@ CONTEXT_INTERMITTENT_LIKE (n=231) and CONTEXT_ZERO_FLOW_SOME (n=280) flag basins
 
 ---
 
-## 8. Efficient Manual-Review Strategy
+## 9. Manual Review Execution Record (Completed)
 
-There are ~1,042 basins in `manual_review_priority.csv`. Reviewing all of them before proceeding is not feasible and is not necessary. The following prioritized strategy covers the scientifically important cases with a tractable workload.
+Manual hydrograph review was completed across two passes. The strategy originally described
+in this section (Tier 1 / Tier 2 / Tier 3) was executed as pass-1 and pass-2.
 
-### Tier 1 — Review immediately (~30–50 basins)
+### Pass 1 — Tier 1 + Tier 2 stratified sample (73 basins, v004 review set)
 
-These are high-risk basins where artifacts could substantially bias model training or reported performance:
+Enriched for suspicious cases: extreme RBI, extreme rise rates per km², high Q-ratio,
+context-flagged basins, and candidate-class reference strata. Labels locked to
+`manual_review_labels_pass1_locked.csv`. Results:
 
-- Top 30 basins by `max_abs_hourly_jump_over_Q50` (max value ~25M; clearly non-physical)
-- Top 20 basins by `max_hourly_rise_per_km2` (max 1,670; verify against neighboring sites)
-- All 58 MANUAL_REVIEW_CONTEXT basins (already small; sort by pilot_score and inspect top 20)
+- KEEP: 40 (54.8%) | KEEP_LOW_CONFIDENCE: 12 (16.4%) | UNSURE: 5 (6.8%) | EXCLUDE: 16 (21.9%)
 
-For each: plot the WY2024 hourly hydrograph. If spikes are isolated single-point outliers, consider whether to despike or exclude. If the pattern reflects genuine regulation or natural extreme events, document and retain.
+### Pass 2 — Rule validation sample (75 basins, v005 review set)
 
-### Tier 2 — Stratified sample before final reporting (~50–80 basins)
+Targeted sample stratified by risk rule tier: 25 basins with compound risk (CDEGHJ ≥ 2),
+8 basins per per-rule tier-2 sample (rules C, D, E, J), 5 each for rules G and H,
+4 near-threshold controls, 4 clean CORE controls. Labels in `manual_review_labels_pass2.csv`. Results:
 
-Before publishing or submitting model results, sample and inspect:
+- KEEP: 34 (45.3%) | KEEP_LOW_CONFIDENCE: 12 (16.0%) | UNSURE: 10 (13.3%) | EXCLUDE: 19 (25.3%)
 
-- 5 basins per candidate class × 3 area bins × 2 BFI bins = up to 30 stratification cells
-- Top 10 basins per HUC02 region by RBI (geographic representativeness check)
-- 10 basins with zero_flow_fraction between 0.10 and 0.50 (intermittent system check)
-- 10 FLASHY_POSSIBLE basins with the lowest RBI (close to threshold; confirm they are truly low-response)
+### Combined result
 
-### Tier 3 — Deferred (remaining ~900 context-flagged basins)
+148 total reviewed basins; no overlapping STAIDs. Combined exclude-or-unsure rate: 33.8%.
+Scripts: `scripts/analyze_combined_manual_review_results.py`.
+Full analysis: `reports/flashnh_combined_manual_review_analysis_v001/`.
 
-Do not review before proceeding to meteorological preprocessing. These basins carry flags but are not in the extreme tails. They will be handled via:
-
-- Automated outlier clipping in the data pipeline (e.g., cap extreme spikes at P99.9)
+Remaining ~900 context-flagged basins not individually reviewed will be handled via:
 - Model residual analysis post-training (outlier basins will show anomalously high loss)
-- Targeted manual review only if specific basins surface as problematic during training
+- Targeted secondary review of HOLDOUT_REVIEW basins after the first training run
 
 ---
 
-## 9. Next Recommended Milestones
+## 10. Next Recommended Milestones
 
-### Milestone 1 — Visualization and reporting improvements (before meteorological preprocessing)
+### Milestone 1 — Manual review and final basin selection ✓ COMPLETE
 
-**Goal**: Make the 3,034-basin universe human-interpretable for ongoing QC.
+Basin selection is complete. Final status assigned to all 3,034 main_training_candidate basins.
+Initial training set: 2,843 basins. See Section 7 and `reports/flashnh_final_basin_selection_v001/`.
 
-- Generate log-scale histograms and maps for: RBI, Q95/Q50, max_hourly_rise_per_km2, zero_flow_fraction
-- Generate class-by-class comparison plots (box plots of RBI, completeness, area, BFI by candidate class)
-- Produce a geographic map of all 3,034 usable basins colored by candidate class and RBI
-- Complete Tier 1 manual review (~30–50 basins) and document decisions
+### Milestone 2 — Meteorological preprocessing (current milestone)
 
-These are lightweight post-processing tasks; they do not require new USGS downloads.
+**Goal**: Prepare ERA5/MRMS/RTMA basin-average forcing for the initial training set of 2,843 basins.
 
-### Milestone 2 — Meteorological preprocessing for the full usable basin set (main workstream)
+- Use `reports/flashnh_final_basin_selection_v001/tables/training_basin_list_initial.csv` as the
+  authoritative basin list for forcing extraction.
+- Use Pilot-100 or Pilot-150 as the debugging subset for initial pipeline validation only.
+- The 156 HOLDOUT_REVIEW basins may optionally have forcing prepared in parallel (they are not
+  excluded permanently and may enter training after secondary review).
 
-**Goal**: Prepare ERA5/MRMS/RTMA basin-average forcing for all 3,034 main_training_candidate basins.
-
-- Begin forcing extraction pipeline for all 3,034 basins
-- Use Pilot-100 or Pilot-150 as the debugging subset for initial pipeline validation only
-- Do not wait for Tier 2/3 manual review to complete before starting forcing extraction; those reviews are deferred
-
-**Rationale**: Forcing preprocessing is the longest-lead-time task in the pipeline. Starting it now, while Tier 1 review is in progress, is the fastest path to Stage 1 model runs with a scientifically defensible basin set.
+**Rationale**: Forcing preprocessing is the longest-lead-time task in the pipeline.
 
 ### Milestone 3 — Stage 1 model training and evaluation
 
-- Train Flash-NH on the full 3,034-basin set (or the maximum subset for which forcing data are ready)
-- Report performance stratified by candidate class, area bin, BFI bin, and HUC02
-- Use Pilot-100/150 results as debugging benchmarks, not as primary evaluation targets
+- Train Flash-NH on the 2,843-basin initial training set.
+- Report performance stratified by candidate class, area bin, BFI bin, HUC02, and
+  final_training_status (TRAIN_CORE vs. TRAIN_SOFT_KEEP).
+- Use TRAIN_SOFT_KEEP basins as an embedded risk stratum: identify whether they show
+  systematically elevated residuals relative to TRAIN_CORE.
+- Use Pilot-100/150 results as debugging benchmarks, not as primary evaluation targets.
+
+### Milestone 4 — Post-training residual analysis and HOLDOUT_REVIEW secondary decision
+
+- Rank all training basins by validation-period NSE/KGE. Identify the bottom decile.
+- Cross-check bottom-decile basins against final_training_status and rule flags.
+- For HOLDOUT_REVIEW basins: review those with the highest model-predicted confidence
+  of clean hydrology. Add confirmed-clean basins to training for a second model run.
+- For confirmed-problematic TRAIN_SOFT_KEEP or TRAIN_CORE basins: move to EXCLUDE_TRAINING
+  and document the data-driven justification in flashnh_final_basin_selection_v002.
 
 ---
 
@@ -298,3 +382,13 @@ These are lightweight post-processing tasks; they do not require new USGS downlo
 | Site metadata audit summary (JSON) | `reports/flashnh_usgs_site_metadata_v001/summaries/usgs_site_metadata_audit_summary.json` |
 | Site metadata joined table | `reports/flashnh_usgs_site_metadata_v001/tables/wy2024_metrics_with_site_metadata.csv` |
 | Static metadata attribute candidates | `reports/flashnh_usgs_site_metadata_v001/tables/static_metadata_attributes_candidates.csv` |
+| Manual review filter rule methodology | `docs/manual_review_filter_rule_methodology.md` |
+| Rule analysis script | `scripts/analyze_manual_review_filter_rules.py` |
+| Rule analysis outputs | `reports/flashnh_manual_review_rule_analysis_v001/` |
+| Combined review analysis script | `scripts/analyze_combined_manual_review_results.py` |
+| Combined review analysis outputs | `reports/flashnh_combined_manual_review_analysis_v001/` |
+| Final basin selection script | `scripts/build_final_basin_training_status.py` |
+| Final basin selection outputs | `reports/flashnh_final_basin_selection_v001/` |
+| Final basin selection summary (MD) | `reports/flashnh_final_basin_selection_v001/summaries/final_basin_selection_summary.md` |
+| Initial training basin list | `reports/flashnh_final_basin_selection_v001/tables/training_basin_list_initial.csv` |
+| Full final training status table | `reports/flashnh_final_basin_selection_v001/tables/final_basin_training_status.csv` |
