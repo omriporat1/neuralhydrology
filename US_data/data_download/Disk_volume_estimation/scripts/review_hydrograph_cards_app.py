@@ -5,8 +5,16 @@ Manual hydrograph review UI for Flash-NH WY2024 basin screening.
 Usage:
     streamlit run scripts/review_hydrograph_cards_app.py
     streamlit run scripts/review_hydrograph_cards_app.py -- --review-dir reports/my_folder
+    streamlit run scripts/review_hydrograph_cards_app.py -- --review-dir=reports/my_folder
     streamlit run scripts/review_hydrograph_cards_app.py -- --labels-file manual_review_labels_pass2.csv
-    streamlit run scripts/review_hydrograph_cards_app.py -- --review-dir reports/my_folder --labels-file pass2.csv
+    streamlit run scripts/review_hydrograph_cards_app.py -- --review-dir=reports/my_folder --labels-file=pass2.csv
+
+    # Smoke test (no Streamlit server needed):
+    python scripts/review_hydrograph_cards_app.py --self-test-config
+
+Env fallbacks (lower priority than CLI):
+    FLASHNH_REVIEW_DIR    equivalent to --review-dir
+    FLASHNH_LABELS_FILE   equivalent to --labels-file
 
 Reads:
     <review_dir>/tables/human_review_template.csv
@@ -18,6 +26,7 @@ Writes:
     Use --labels-file to write to a separate file for each review pass.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,46 +34,97 @@ import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# Paths
+# Repository root
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+_DEFAULT_REVIEW_SUBDIR = "flashnh_hydrograph_review_cards_v004_main_training_candidate"
+_DEFAULT_LABELS_NAME   = "manual_review_labels.csv"
 
-def _get_review_dir() -> Path:
-    """Parse --review-dir from sys.argv (passed after -- in streamlit run)."""
-    args = sys.argv[1:]
-    for i, a in enumerate(args):
-        if a == "--review-dir" and i + 1 < len(args):
-            return Path(args[i + 1])
-    return REPO_ROOT / "reports" / "flashnh_hydrograph_review_cards_v003_diverse"
+# ---------------------------------------------------------------------------
+# Authoritative config resolver
+# ---------------------------------------------------------------------------
 
+def resolve_app_config(argv=None, environ=None) -> dict:
+    """Resolve --review-dir and --labels-file from argv and environment.
 
-def _get_labels_csv(review_dir: Path) -> Path:
-    """Resolve the active labels file from --labels-file CLI arg.
+    Handles both --flag VALUE and --flag=VALUE forms.
+    Precedence: CLI args > env vars > defaults.
 
-    Rules:
-    - Omitted          → <review_dir>/manual_review_labels.csv  (default)
-    - Filename only    → <review_dir>/<filename>
-    - Path with dirs / absolute path → used as-is (resolved to absolute)
+    Returns a dict with keys:
+        review_dir       Path (absolute, resolved)
+        labels_file      Path (absolute, resolved)
+        review_dir_src   "CLI" | "ENV" | "DEFAULT"
+        labels_file_src  "CLI" | "ENV" | "DEFAULT"
     """
-    args = sys.argv[1:]
-    for i, a in enumerate(args):
-        if a == "--labels-file" and i + 1 < len(args):
-            raw = args[i + 1]
-            p = Path(raw)
-            # Filename only (no directory component) → place under review_dir
-            if p.parent == Path(".") and not p.is_absolute():
-                return review_dir / p
-            # Path with directories or absolute → use as-is
-            return p.resolve()
-    return review_dir / "manual_review_labels.csv"
+    if argv is None:
+        argv = sys.argv[1:]
+    if environ is None:
+        environ = os.environ
+
+    def _parse_flag(args, flag):
+        """Return the value for --flag VALUE or --flag=VALUE, or None if absent."""
+        prefix = flag + "="
+        for i, a in enumerate(args):
+            if a == flag and i + 1 < len(args):
+                return args[i + 1]
+            if a.startswith(prefix):
+                return a[len(prefix):]
+        return None
+
+    # ── review_dir ──────────────────────────────────────────────────────────
+    raw_dir = _parse_flag(argv, "--review-dir")
+    if raw_dir is not None:
+        p = Path(raw_dir)
+        review_dir = (REPO_ROOT / p if not p.is_absolute() else p).resolve()
+        review_dir_src = "CLI"
+    elif "FLASHNH_REVIEW_DIR" in environ:
+        p = Path(environ["FLASHNH_REVIEW_DIR"])
+        review_dir = (REPO_ROOT / p if not p.is_absolute() else p).resolve()
+        review_dir_src = "ENV"
+    else:
+        review_dir = (REPO_ROOT / "reports" / _DEFAULT_REVIEW_SUBDIR).resolve()
+        review_dir_src = "DEFAULT"
+
+    # ── labels_file ─────────────────────────────────────────────────────────
+    raw_lf = _parse_flag(argv, "--labels-file")
+    if raw_lf is not None:
+        p = Path(raw_lf)
+        # Filename only (no directory component) → place under review_dir
+        if p.parent == Path(".") and not p.is_absolute():
+            labels_file = (review_dir / p).resolve()
+        else:
+            labels_file = p.resolve()
+        labels_file_src = "CLI"
+    elif "FLASHNH_LABELS_FILE" in environ:
+        p = Path(environ["FLASHNH_LABELS_FILE"])
+        if p.parent == Path(".") and not p.is_absolute():
+            labels_file = (review_dir / p).resolve()
+        else:
+            labels_file = p.resolve()
+        labels_file_src = "ENV"
+    else:
+        labels_file = (review_dir / _DEFAULT_LABELS_NAME).resolve()
+        labels_file_src = "DEFAULT"
+
+    return {
+        "review_dir":      review_dir,
+        "labels_file":     labels_file,
+        "review_dir_src":  review_dir_src,
+        "labels_file_src": labels_file_src,
+    }
 
 
-REVIEW_DIR   = _get_review_dir()
+# ---------------------------------------------------------------------------
+# Module-level config — resolved once at script load time
+# ---------------------------------------------------------------------------
+_CFG = resolve_app_config()
+
+REVIEW_DIR   = _CFG["review_dir"]
+LABELS_CSV   = _CFG["labels_file"]
 TEMPLATE_CSV = REVIEW_DIR / "tables" / "human_review_template.csv"
 MANIFEST_CSV = REVIEW_DIR / "tables" / "review_card_manifest.csv"
 PLOTS_DIR    = REVIEW_DIR / "plots"
-LABELS_CSV   = _get_labels_csv(REVIEW_DIR)
 METADATA_CSV = (
     REPO_ROOT
     / "reports"
@@ -102,6 +162,8 @@ LABEL_COLS = ["STAID", "human_decision", "hydrograph_behavior",
 
 # ---------------------------------------------------------------------------
 # Data helpers
+# Each cached function takes the active path as an explicit string argument so
+# that cache keys change automatically when REVIEW_DIR / LABELS_CSV changes.
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_template(path: str) -> pd.DataFrame:
@@ -326,6 +388,140 @@ def _render_site_context(staid: str, meta_row) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Startup guard
+# ---------------------------------------------------------------------------
+def _check_config_guard() -> None:
+    """Stop the app if a CLI flag was present but the resolver did not pick it up.
+
+    This catches edge cases where sys.argv layout is unexpected (e.g. Streamlit
+    version differences) so the user gets an explicit error rather than silent
+    fallback to a wrong review directory.
+    """
+    raw_argv = sys.argv[1:]
+
+    has_review_dir_flag = any(
+        a == "--review-dir" or a.startswith("--review-dir=") for a in raw_argv
+    )
+    has_labels_file_flag = any(
+        a == "--labels-file" or a.startswith("--labels-file=") for a in raw_argv
+    )
+
+    if has_review_dir_flag and _CFG["review_dir_src"] != "CLI":
+        st.error(
+            "**CONFIG GUARD**: `--review-dir` was detected in `sys.argv` but "
+            f"`resolve_app_config()` fell through to `{_CFG['review_dir_src']}`. "
+            f"Active review dir: `{REVIEW_DIR}`  \n"
+            f"Full `sys.argv`: `{raw_argv}`  \n\n"
+            "This is a bug — please file an issue. As a workaround, set the "
+            "`FLASHNH_REVIEW_DIR` environment variable instead of the CLI flag."
+        )
+        st.stop()
+
+    if has_labels_file_flag and _CFG["labels_file_src"] != "CLI":
+        st.error(
+            "**CONFIG GUARD**: `--labels-file` was detected in `sys.argv` but "
+            f"`resolve_app_config()` fell through to `{_CFG['labels_file_src']}`. "
+            f"Active labels file: `{LABELS_CSV}`  \n"
+            f"Full `sys.argv`: `{raw_argv}`  \n\n"
+            "As a workaround, set the `FLASHNH_LABELS_FILE` environment variable."
+        )
+        st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Self-test (run without Streamlit: python scripts/review_hydrograph_cards_app.py --self-test-config)
+# ---------------------------------------------------------------------------
+def _run_self_test() -> None:
+    """Smoke-test resolve_app_config() with CLI, ENV, and DEFAULT scenarios."""
+    v005_dir    = "reports/flashnh_hydrograph_review_cards_v005_second_pass_rules"
+    v005_labels = "manual_review_labels_pass2.csv"
+    pass_count  = 0
+    fail_count  = 0
+
+    def _check(label, cfg, exp_dir_substr, exp_labels_name, exp_dir_src, exp_lf_src):
+        nonlocal pass_count, fail_count
+        rd     = str(cfg["review_dir"])
+        lf     = str(cfg["labels_file"])
+        rd_src = cfg["review_dir_src"]
+        lf_src = cfg["labels_file_src"]
+        ok = True
+
+        if exp_dir_substr not in rd:
+            print(f"  FAIL  review_dir: expected to contain '{exp_dir_substr}', got '{rd}'")
+            ok = False
+        if not lf.endswith(exp_labels_name) and not lf.endswith(exp_labels_name.replace("/", "\\")):
+            print(f"  FAIL  labels_file: expected to end with '{exp_labels_name}', got '{lf}'")
+            ok = False
+        if rd_src != exp_dir_src:
+            print(f"  FAIL  review_dir_src: expected '{exp_dir_src}', got '{rd_src}'")
+            ok = False
+        if lf_src != exp_lf_src:
+            print(f"  FAIL  labels_file_src: expected '{exp_lf_src}', got '{lf_src}'")
+            ok = False
+
+        status = "PASS" if ok else "FAIL"
+        print(f"  {status}")
+        print(f"       review_dir  [{rd_src}]: {rd}")
+        print(f"       labels_file [{lf_src}]: {lf}")
+        if ok:
+            pass_count += 1
+        else:
+            fail_count += 1
+
+    print("=" * 70)
+    print("resolve_app_config() self-test")
+    print("=" * 70)
+
+    # Test A — CLI with --flag=VALUE form (the form Streamlit passes)
+    print(f"\nTest A — CLI (--flag=VALUE form):")
+    cfg_a = resolve_app_config(
+        argv=[f"--review-dir={v005_dir}", f"--labels-file={v005_labels}"],
+        environ={},
+    )
+    _check("A", cfg_a, "v005", v005_labels, "CLI", "CLI")
+
+    # Test A2 — CLI with --flag VALUE (space-separated) form
+    print(f"\nTest A2 — CLI (--flag VALUE space form):")
+    cfg_a2 = resolve_app_config(
+        argv=["--review-dir", v005_dir, "--labels-file", v005_labels],
+        environ={},
+    )
+    _check("A2", cfg_a2, "v005", v005_labels, "CLI", "CLI")
+
+    # Test B — ENV fallback
+    print(f"\nTest B — ENV (FLASHNH_REVIEW_DIR + FLASHNH_LABELS_FILE):")
+    cfg_b = resolve_app_config(
+        argv=[],
+        environ={
+            "FLASHNH_REVIEW_DIR":  v005_dir,
+            "FLASHNH_LABELS_FILE": v005_labels,
+        },
+    )
+    _check("B", cfg_b, "v005", v005_labels, "ENV", "ENV")
+
+    # Test C — DEFAULT (no CLI, no env)
+    print(f"\nTest C — DEFAULT (no CLI, no env):")
+    cfg_c = resolve_app_config(argv=[], environ={})
+    _check("C", cfg_c, "v004", "manual_review_labels.csv", "DEFAULT", "DEFAULT")
+
+    # Test D — CLI overrides ENV for review_dir; labels_file falls to DEFAULT
+    print(f"\nTest D — CLI review_dir overrides ENV, labels_file stays DEFAULT:")
+    cfg_d = resolve_app_config(
+        argv=[f"--review-dir={v005_dir}"],
+        environ={"FLASHNH_REVIEW_DIR": "reports/flashnh_hydrograph_review_cards_v003_diverse"},
+    )
+    _check("D", cfg_d, "v005", "manual_review_labels.csv", "CLI", "DEFAULT")
+
+    print("\n" + "=" * 70)
+    total = pass_count + fail_count
+    print(f"Results: {pass_count}/{total} passed, {fail_count}/{total} failed")
+    print("=" * 70)
+
+    if fail_count > 0:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -334,6 +530,9 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
+
+    # Guard: catch resolver failures before doing anything else
+    _check_config_guard()
 
     # ── Load data ─────────────────────────────────────────────────────────
     if not TEMPLATE_CSV.exists():
@@ -367,10 +566,20 @@ def main() -> None:
 
     # ── Sidebar ────────────────────────────────────────────────────────────
     st.sidebar.title("Flash-NH Review")
-    st.sidebar.caption(f"Review dir: {REVIEW_DIR.name}")
-    st.sidebar.caption(f"Labels file: {LABELS_CSV.name}")
 
-    # Archival-safety warnings
+    # ── Config diagnostics (always visible) ───────────────────────────────
+    st.sidebar.markdown("**Active configuration**")
+    st.sidebar.caption(f"Review dir [{_CFG['review_dir_src']}]:  \n`{REVIEW_DIR}`")
+    st.sidebar.caption(f"Labels file [{_CFG['labels_file_src']}]:  \n`{LABELS_CSV}`")
+    st.sidebar.caption(
+        f"Template:  \n`{TEMPLATE_CSV}`  \n({len(template)} rows)"
+    )
+    with st.sidebar.expander("sys.argv"):
+        st.sidebar.code("\n".join(sys.argv) if sys.argv else "(empty)")
+
+    st.sidebar.markdown("---")
+
+    # ── Archival-safety warnings ───────────────────────────────────────────
     _lname_lower = LABELS_CSV.name.lower()
     if any(kw in _lname_lower for kw in ("locked", "archive", "pass1_locked")):
         st.sidebar.warning(
@@ -446,9 +655,11 @@ def main() -> None:
 
     staid_list = filt["STAID"].tolist()
 
-    # ── Basin navigation (top) ────────────────────────────────────────────
-    if "current_staid" not in st.session_state or st.session_state.current_staid not in staid_list:
-        prev = st.session_state.get("current_staid")
+    # ── Basin navigation ──────────────────────────────────────────────────
+    # nav_current_staid is the authoritative current-basin key. It is never
+    # used as a widget key, so it can always be written to safely.
+    if "nav_current_staid" not in st.session_state or st.session_state.nav_current_staid not in staid_list:
+        prev = st.session_state.get("nav_current_staid")
         fallback = staid_list[0]
         if prev is not None and prev not in staid_list:
             tmpl_order = template["STAID"].tolist()
@@ -457,32 +668,41 @@ def main() -> None:
                     if s in staid_list:
                         fallback = s
                         break
-        st.session_state.current_staid = fallback
+        st.session_state.nav_current_staid = fallback
 
-    current_idx = staid_list.index(st.session_state.current_staid)
+    current_idx = staid_list.index(st.session_state.nav_current_staid)
+
+    # Callbacks defined before any widget renders so on_click wiring is safe.
+    def _go_prev():
+        idx = staid_list.index(st.session_state.nav_current_staid)
+        if idx > 0:
+            st.session_state.nav_current_staid = staid_list[idx - 1]
+
+    def _go_next():
+        idx = staid_list.index(st.session_state.nav_current_staid)
+        if idx < len(staid_list) - 1:
+            st.session_state.nav_current_staid = staid_list[idx + 1]
+
+    def _on_staid_select():
+        st.session_state.nav_current_staid = st.session_state.staid_selector
 
     nav_prev, nav_sel, nav_next = st.columns([1, 10, 1])
     with nav_prev:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("< Prev", key="top_prev", width="stretch"):
-            if current_idx > 0:
-                st.session_state.current_staid = staid_list[current_idx - 1]
-                st.rerun()
+        st.button("< Prev", key="top_prev", on_click=_go_prev, width="stretch")
     with nav_next:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Next >", key="top_next", width="stretch"):
-            if current_idx < len(staid_list) - 1:
-                st.session_state.current_staid = staid_list[current_idx + 1]
-                st.rerun()
+        st.button("Next >", key="top_next", on_click=_go_next, width="stretch")
     with nav_sel:
         st.selectbox(
             f"Basin  ({current_idx + 1} / {len(staid_list)})",
             staid_list,
             index=current_idx,
-            key="current_staid",
+            key="staid_selector",
+            on_change=_on_staid_select,
         )
 
-    current_staid = st.session_state.current_staid
+    current_staid = st.session_state.nav_current_staid
     row = filt[filt["STAID"] == current_staid].iloc[0]
 
     # Look up the site-metadata row for map / USGS context
@@ -648,7 +868,7 @@ def main() -> None:
             save_label(current_staid, decision, behavior, artifact, confidence, notes)
             if verify_saved_label(current_staid, decision):
                 next_staid = _choose_next_staid(current_staid, staid_list, current_idx)
-                st.session_state.current_staid = next_staid
+                st.session_state.nav_current_staid = next_staid
                 st.rerun()
             else:
                 st.error(f"Save failed for {current_staid} — not advancing")
@@ -657,10 +877,7 @@ def main() -> None:
     st.markdown("---")
     bn_prev, bn_save, bn_save_next, bn_next = st.columns([1, 2, 2, 1])
     with bn_prev:
-        if st.button("< Prev", key="bot_prev", width="stretch"):
-            if current_idx > 0:
-                st.session_state.current_staid = staid_list[current_idx - 1]
-                st.rerun()
+        st.button("< Prev", key="bot_prev", on_click=_go_prev, width="stretch")
     with bn_save:
         if st.button("Save", key="save_bot", type="primary", width="stretch"):
             save_label(current_staid, decision, behavior, artifact, confidence, notes)
@@ -673,16 +890,16 @@ def main() -> None:
             save_label(current_staid, decision, behavior, artifact, confidence, notes)
             if verify_saved_label(current_staid, decision):
                 next_staid = _choose_next_staid(current_staid, staid_list, current_idx)
-                st.session_state.current_staid = next_staid
+                st.session_state.nav_current_staid = next_staid
                 st.rerun()
             else:
                 st.error(f"Save failed for {current_staid} — not advancing")
     with bn_next:
-        if st.button("Next >", key="bot_next", width="stretch"):
-            if current_idx < len(staid_list) - 1:
-                st.session_state.current_staid = staid_list[current_idx + 1]
-                st.rerun()
+        st.button("Next >", key="bot_next", on_click=_go_next, width="stretch")
 
 
 if __name__ == "__main__":
+    if "--self-test-config" in sys.argv:
+        _run_self_test()
+        sys.exit(0)
     main()
