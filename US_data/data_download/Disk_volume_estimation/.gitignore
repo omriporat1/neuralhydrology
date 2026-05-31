@@ -35,6 +35,12 @@ data/
 reports/**
 tmp/
 
+# Flash-NH pipeline: external data root directories (guard against accidental placement inside repo)
+Flash-NH_data/
+
+# GeoPackage (basin geometry files — external data)
+**/*.gpkg
+
 # Allow small curated report summaries when explicitly committed
 !reports/**/README.md
 !reports/**/summary.md

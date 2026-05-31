@@ -1,0 +1,208 @@
+# Flash-NH Stage 1 Pilot — YAML Config Template
+#
+# PURPOSE
+# -------
+# Configure the Stage 1 pilot skeleton (50 basins, 1 month, MRMS + RTMA).
+# All large data outputs go to data_root, NOT into the repository.
+#
+# QUICK START
+# -----------
+# 1. Set data_root.local to your external data storage path, or
+#    export FLASHNH_DATA_ROOT=/your/path before running any script.
+# 2. Run the pilot dry-run (creates dirs + manifests, no downloads):
+#      python scripts/run_stage1_pilot_dry_run.py --config configs/pilot_stage1.yaml
+# 3. Review outputs under {data_root}/09_manifests/stage1_pilot/
+#
+# HPC/SLURM
+# ---------
+# Set data_root.hpc to the scratch path on your cluster.
+# The same config works locally and on HPC — change data_root, not source code.
+# Set FLASHNH_DATA_ROOT on HPC to override without editing this file.
+
+project:
+  name: flash-nh
+  version: stage1_pilot_v001
+  description: "Stage 1 pilot skeleton — 50 basins, January 2023, MRMS + RTMA"
+
+data_root:
+  local: null    # Set to your external data path, e.g. D:/Flash-NH_data
+                 # Or set env var FLASHNH_DATA_ROOT to override without editing.
+  hpc: null      # e.g., /scratch/youruser/flash-nh-data  (future SLURM path)
+
+
+# ---------------------------------------------------------------------------
+# PILOT SETTINGS
+# ---------------------------------------------------------------------------
+pilot:
+  n_basins: 50
+
+  time_range:
+    start: "2023-01-01T00:00:00"
+    end:   "2023-01-31T23:00:00"
+    # Pilot month: January 2023 (UTC).
+    # RATIONALE FOR 2023 vs 2024:
+    #   All existing validated acquisition scripts (run_final_all_source_audit.py,
+    #   run_acquisition_audit.py, etc.) use 2023-01-01 as their canonical sample date.
+    #   All sample downloads in reports/ are from 2023-01-01. Switching to 2024 would
+    #   require re-running the full acquisition validation suite for that month.
+    #   January 2023 falls within the training split (2020-10-14 to 2023-09-30) per
+    #   database_design.md — appropriate for a mechanics-only pilot.
+    #   To switch to January 2024, update start/end here and re-run acquisition audit.
+
+  basin_selection:
+    # Preferred pilot composition:
+    n_train_core_keep: 40   # from TRAIN_CORE or TRAIN_SOFT_KEEP (initial training set)
+    n_holdout_review:   5   # from HOLDOUT_REVIEW (held for secondary review; QC visualization)
+    n_exclude_qc_only:  5   # from EXCLUDE_TRAINING (forced-exclusion cases; QC visualization only)
+    #
+    # If HOLDOUT_REVIEW or EXCLUDE_TRAINING counts are too small, fallback_all_train=true
+    # selects all 50 from the training set. Document this limitation in the run manifest.
+    fallback_all_train: true
+    random_seed: 42
+    #
+    # basin_status_file: null means auto-discover from repo.
+    # The script looks for:
+    #   reports/flashnh_final_basin_selection_v001/tables/final_basin_training_status.csv
+    basin_status_file: null
+
+
+# ---------------------------------------------------------------------------
+# SOURCE PRODUCTS — Stage 1 only
+# ---------------------------------------------------------------------------
+# Acquisition is NOT yet implemented in this skeleton. These sections define
+# the intended product configuration for the next implementation milestone.
+
+products:
+
+  # STAGE 1 — hourly observed forcings (implement next)
+  mrms:
+    enabled: true
+    backend: aws                  # "aws" (noaa-mrms-pds S3) or "stac" (Planetary Computer)
+    bucket: noaa-mrms-pds
+    product: MultiSensor_QPE_01H_Pass1
+    variables:
+      - precipitation
+    temporal_resolution: hourly
+    # File naming: MRMS_MultiSensor_QPE_01H_Pass1_00.00_YYYYMMDD-HHMMSS.grib2.gz
+    # S3 key structure: CONUS/MultiSensor_QPE_01H_Pass1_00.00/YYYYMMDD/<file>
+    # Validated gateway: MrmsAwsQpe1hPass1 in src/datasources/mrms.py
+
+  rtma:
+    enabled: true
+    backend: aws                  # noaa-rtma-pds S3
+    variables:
+      - air_temperature_2m        # standardized name; GRIB shortName: 2t / t2m
+      - specific_humidity_2m      # GRIB shortName: 2sh / spfh (or dewpoint as fallback)
+      - wind_u_10m                # GRIB shortName: 10u / ugrd
+      - wind_v_10m                # GRIB shortName: 10v / vgrd
+      - surface_pressure          # GRIB shortName: sp / pressfc
+    optional_variables:
+      - cloud_cover_fraction      # GRIB shortName: tcc / tcdc (not always present)
+    temporal_resolution: hourly
+    # File naming: rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp
+    # S3 key structure: rtma2p5.YYYYMMDD/<file>
+    # Validated gateway: RtmaAwsConusDataSource in src/datasources/rtma.py
+
+  # STAGE 2 placeholders — NOT implemented in this skeleton
+  # Uncomment when implementing Stage 2 daily antecedent products.
+  #
+  # era5_land:
+  #   enabled: false
+  #   temporal_resolution: daily
+  #   variables: [soil_water_layer_1, soil_water_layer_2, soil_water_layer_3,
+  #               soil_water_layer_4, snow_depth, air_temperature_2m, precipitation]
+  #   # Validated gateway: Era5LandTDataSource in src/datasources/era5_landt.py
+  #
+  # gdas:
+  #   enabled: false
+  #   temporal_resolution: daily
+  #   # Validated gateway: GdasAwsAntecedentDataSource in src/datasources/gdas.py
+  #
+  # imerg:
+  #   enabled: false
+  #   temporal_resolution: daily
+  #   # Validated gateway: ImergLateDailyDataSource in src/datasources/imerg.py
+
+  # STAGE 3 placeholders — NOT implemented in this skeleton
+  # Forecast products need init_time / lead_hour / valid_time schema.
+  #
+  # gfs:
+  #   enabled: false
+  #   temporal_resolution: forecast
+  #   max_lead_hours: 48
+  #   cycles: [0, 6, 12, 18]
+  #   # Validated gateway: GfsAwsConusDataSource in src/datasources/gfs.py
+  #
+  # ifs:
+  #   enabled: false
+  #   temporal_resolution: forecast
+  #   max_lead_hours: 48
+  #   cycles: [0, 6, 12, 18]
+  #   grid: "0.1/0.1"
+  #   # Stream logic: 00/12 UTC use oper/fc; 06/18 UTC use scda/fc (see decision_log.md)
+  #   # Validated gateway: IfsMarsDataSource in src/datasources/ifs.py
+
+
+# ---------------------------------------------------------------------------
+# CAMELSH SOURCE FILES (external, not tracked in repo)
+# ---------------------------------------------------------------------------
+# Leave all paths null to skip; discovery_report.json will record MISSING status.
+# Set these when CAMELSH files are available locally or on HPC.
+
+camelsh:
+  basin_polygons:     null   # e.g., /data/camelsh/camelsh_basins.gpkg
+  static_attributes:  null   # e.g., /data/camelsh/camels_attributes_v2.0/
+  hourly_streamflow:  null   # e.g., /data/camelsh/hourly_streamflow/
+
+
+# ---------------------------------------------------------------------------
+# EXTRACTION SETTINGS
+# ---------------------------------------------------------------------------
+extraction:
+  # Spatial statistics computed for every gridded variable over each basin.
+  # Over-extract now; temporal feature engineering is NOT done here.
+  basin_stats:
+    - mean
+    - min
+    - max
+    - std
+    - p10
+    - p25
+    - p50
+    - p75
+    - p90
+    - p95
+    - p99
+    - valid_fraction
+    - n_valid_pixels
+
+  weight_validation:
+    weight_sum_tolerance: 0.01   # per-basin weight sum must be within 1 ± tolerance
+    min_cells_per_basin: 1       # at least this many grid cells must overlap each basin
+
+
+# ---------------------------------------------------------------------------
+# QC SETTINGS
+# ---------------------------------------------------------------------------
+qc:
+  level1_automated: true     # missing fraction, range checks, valid-pixel counts
+  level2_static_plots: false  # enable after grid definitions and weight tables are ready
+  level3_animations: false    # not for this skeleton
+
+
+# ---------------------------------------------------------------------------
+# OUTPUT DIRECTORY LAYOUT (relative to data_root)
+# ---------------------------------------------------------------------------
+# These are informational — the Python code uses PipelineConfig.output_dir(key).
+# To rename a directory, change PipelineConfig._OUTPUT_DIR_NAMES, not here.
+outputs:
+  raw:                  "00_raw"
+  standardized_grids:   "01_standardized_grids"
+  basin_geometries:     "02_basin_geometries"
+  basin_timeseries:     "03_basin_timeseries"
+  ml_datasets:          "04_ml_datasets"
+  splits:               "05_splits"
+  qc_reports:           "06_qc_reports"
+  logs:                 "08_logs"
+  manifests:            "09_manifests"
+  tmp:                  "tmp"
