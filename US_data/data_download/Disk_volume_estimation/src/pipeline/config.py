@@ -49,6 +49,13 @@ class CamelsHConfig:
     basin_polygons: Optional[str] = None
     static_attributes: Optional[str] = None
     hourly_streamflow: Optional[str] = None
+    # Basin polygon identification
+    basin_polygon_id_column: str = "GAGE_ID"
+    basin_polygon_preferred_file: str = "CAMELSH_shapefile.shp"
+    basin_polygon_secondary_file: str = "CAMELSH_shapefile_hydroATLAS.shp"
+    # Provenance DOIs — record which CAMELSH version and shapefile source were used
+    camelsh_reference_doi: str = "10.5281/zenodo.16763144"
+    camelsh_polygon_source_doi: str = "10.5281/zenodo.15066778"
 
 
 @dataclass
@@ -161,6 +168,16 @@ def _parse_raw(raw: dict[str, Any]) -> PipelineConfig:
         cfg.camelsh.static_attributes = str(camelsh_raw["static_attributes"])
     if camelsh_raw.get("hourly_streamflow"):
         cfg.camelsh.hourly_streamflow = str(camelsh_raw["hourly_streamflow"])
+    if camelsh_raw.get("basin_polygon_id_column"):
+        cfg.camelsh.basin_polygon_id_column = str(camelsh_raw["basin_polygon_id_column"])
+    if camelsh_raw.get("basin_polygon_preferred_file"):
+        cfg.camelsh.basin_polygon_preferred_file = str(camelsh_raw["basin_polygon_preferred_file"])
+    if camelsh_raw.get("basin_polygon_secondary_file"):
+        cfg.camelsh.basin_polygon_secondary_file = str(camelsh_raw["basin_polygon_secondary_file"])
+    if camelsh_raw.get("camelsh_reference_doi"):
+        cfg.camelsh.camelsh_reference_doi = str(camelsh_raw["camelsh_reference_doi"])
+    if camelsh_raw.get("camelsh_polygon_source_doi"):
+        cfg.camelsh.camelsh_polygon_source_doi = str(camelsh_raw["camelsh_polygon_source_doi"])
 
     return cfg
 
@@ -186,5 +203,10 @@ def config_to_dict(cfg: PipelineConfig) -> dict[str, Any]:
             "basin_polygons": cfg.camelsh.basin_polygons,
             "static_attributes": cfg.camelsh.static_attributes,
             "hourly_streamflow": cfg.camelsh.hourly_streamflow,
+            "basin_polygon_id_column": cfg.camelsh.basin_polygon_id_column,
+            "basin_polygon_preferred_file": cfg.camelsh.basin_polygon_preferred_file,
+            "basin_polygon_secondary_file": cfg.camelsh.basin_polygon_secondary_file,
+            "camelsh_reference_doi": cfg.camelsh.camelsh_reference_doi,
+            "camelsh_polygon_source_doi": cfg.camelsh.camelsh_polygon_source_doi,
         },
     }

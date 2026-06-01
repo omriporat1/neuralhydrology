@@ -150,7 +150,37 @@ products:
 # Set these when CAMELSH files are available locally or on HPC.
 
 camelsh:
-  basin_polygons:     null   # e.g., /data/camelsh/camelsh_basins.gpkg
+  # ---------------------------------------------------------------------------
+  # Basin polygon path (REQUIRED for production weights)
+  # ---------------------------------------------------------------------------
+  # Leave null to use the auto-discovery path:
+  #   {data_root}/02_basin_geometries/camelsh/CAMELSH_shapefile.shp
+  # Or set an explicit path here.
+  #
+  # Obtaining the shapefile (~506 MB download):
+  #   1. Download shapefiles.7z from DOI 10.5281/zenodo.15066778
+  #        https://zenodo.org/records/15066778/files/shapefiles.7z
+  #   2. Extract to {data_root}/02_basin_geometries/camelsh/
+  #      7-Zip creates a shapefiles/ subdirectory; auto-discovery path becomes:
+  #        {data_root}/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp
+  #      (The script checks this path automatically.)
+  #   3. Alternatively, set basin_polygons to the explicit path below.
+  #
+  # Without real polygons, the script fails with a clear error.
+  # Circular-buffer fallback requires --allow-fallback-circles flag.
+  basin_polygons: null
+
+  # Preferred polygon file (GAGES-II derived, contains GAGE_ID)
+  basin_polygon_preferred_file: CAMELSH_shapefile.shp
+  # Secondary polygon file (HydroATLAS derived — comparison only)
+  basin_polygon_secondary_file: CAMELSH_shapefile_hydroATLAS.shp
+  # Basin ID column in the shapefile
+  basin_polygon_id_column: GAGE_ID
+
+  # CAMELSH dataset provenance
+  camelsh_reference_doi:    "10.5281/zenodo.16763144"   # v7 landing page, 2025-08-14
+  camelsh_polygon_source_doi: "10.5281/zenodo.15066778" # package containing shapefiles.7z
+
   static_attributes:  null   # e.g., /data/camelsh/camels_attributes_v2.0/
   hourly_streamflow:  null   # e.g., /data/camelsh/hourly_streamflow/
 
