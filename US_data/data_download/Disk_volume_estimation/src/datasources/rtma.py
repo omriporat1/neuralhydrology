@@ -331,17 +331,130 @@ class RtmaAwsConusDataSource(DataSource):
 	@staticmethod
 	def _selected_targets(include_optional_tcdc: bool) -> dict[str, set[str]]:
 		targets = {
-			"TMP": {"2t", "t2m", "tmp"},
+			"TMP":  {"2t", "t2m", "tmp"},
 			"SPFH": {"2sh", "sh2", "spfh", "q"},
-			"DPT": {"2d", "d2m", "dpt"},
+			"DPT":  {"2d", "d2m", "dpt"},
 			"UGRD": {"10u", "u10", "ugrd"},
 			"VGRD": {"10v", "v10", "vgrd"},
 			"PRES": {"sp", "pres", "pressfc"},
 			"TCDC": {"tcc", "tcdc"},
+			# Stage 1 variables added below (benchmark 2026-06-05 confirmed all four
+			# are present as WIND/GUST/VIS/CEIL in the RTMA 2dvaranl_ndfd .idx)
+			"WIND": {"wind", "10si", "si10"},   # 10-m wind speed
+			"GUST": {"gust", "i10fg", "fg10"},  # 10-m wind gust
+			"VIS":  {"vis"},                     # surface visibility
+			"CEIL": {"ceil", "hcpb"},            # cloud ceiling
 		}
 		if not include_optional_tcdc:
 			targets["TCDC"] = set()
 		return targets
+
+	# .idx short names (lowercased) to ALWAYS exclude from selected-message download.
+	# wdir = wind direction (circular, linear average is invalid — derive from u/v).
+	# hgt  = terrain orography (static field — belongs in static attributes, not forcings).
+	_IDX_EXCLUDE_FROM_DOWNLOAD: frozenset = frozenset({"wdir", "10wdir", "hgt", "orog", "zsfc"})
+
+	def download_selected_messages(
+		self,
+		out_dir: Path,
+		obj: "RemoteObject",
+	) -> tuple[Optional[Path], int, float]:
+		"""Download only Stage 1 GRIB2 messages using S3 byte-range requests.
+
+		Fetches the tiny .idx inventory file, identifies the byte ranges for all
+		messages except wind-direction and orography, and downloads only those
+		ranges.  Saves to the same path structure as download_sample() so the
+		local cache works transparently.
+
+		Both SPFH (specific humidity, 2sh) and DPT (dewpoint, 2d) messages are
+		included when both are present — no mutual exclusion is applied here
+		because Stage 1 requires both variables.
+
+		Falls back to full-file download if the .idx is unavailable.
+
+		Returns
+		-------
+		(local_path, bytes_downloaded, elapsed_seconds)
+		  local_path is None on failure.
+		"""
+		bucket, key = self._parse_s3_url(obj.url)
+		idx_key = f"{key}.idx"
+		s3 = self._s3_client()
+
+		# Fetch .idx
+		try:
+			log_request(
+				LOGGER, self.name, "s3.get_object.idx",
+				url=f"s3://{bucket}/{idx_key}",
+				params={"Bucket": bucket, "Key": idx_key},
+			)
+			resp = s3.get_object(Bucket=bucket, Key=idx_key)
+			idx_text = resp["Body"].read().decode("utf-8", errors="replace")
+		except Exception as exc:
+			LOGGER.warning(
+				"RTMA .idx unavailable for %s (%s) — falling back to full-file download",
+				key, exc,
+			)
+			files = self.download_sample(out_dir, [obj])
+			elapsed = self._last_total_download_time
+			path = files[0] if files else None
+			return path, (path.stat().st_size if path else 0), elapsed
+
+		entries = self._parse_idx_entries(idx_text)
+		if not entries:
+			LOGGER.warning("RTMA .idx empty for %s — falling back to full-file", key)
+			files = self.download_sample(out_dir, [obj])
+			elapsed = self._last_total_download_time
+			path = files[0] if files else None
+			return path, (path.stat().st_size if path else 0), elapsed
+
+		# Select messages: all except excluded short names; include both DPT and SPFH
+		selected = [
+			e for e in entries
+			if e["short_name"] not in self._IDX_EXCLUDE_FROM_DOWNLOAD
+		]
+		if not selected:
+			LOGGER.warning("No Stage 1 messages selected from .idx for %s", key)
+			files = self.download_sample(out_dir, [obj])
+			path = files[0] if files else None
+			return path, (path.stat().st_size if path else 0), self._last_total_download_time
+
+		# Build merged byte ranges to minimise S3 API calls
+		raw_ranges = [(e["offset"], e["end_offset"]) for e in selected]
+		merged = self._merge_ranges(raw_ranges)
+
+		out_path = out_dir / obj.key
+		out_path.parent.mkdir(parents=True, exist_ok=True)
+
+		t0 = time.perf_counter()
+		total_bytes = 0
+		try:
+			with out_path.open("wb") as fh:
+				for start, end in merged:
+					range_header = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+					log_request(
+						LOGGER, self.name, "s3.get_object.range",
+						url=f"s3://{bucket}/{key}",
+						params={"Bucket": bucket, "Key": key, "Range": range_header},
+					)
+					r = s3.get_object(Bucket=bucket, Key=key, Range=range_header)
+					chunk = r["Body"].read()
+					fh.write(chunk)
+					total_bytes += len(chunk)
+		except Exception as exc:
+			elapsed = time.perf_counter() - t0
+			LOGGER.warning("RTMA selected-message download failed for %s: %s", key, exc)
+			out_path.unlink(missing_ok=True)
+			return None, 0, elapsed
+
+		elapsed = time.perf_counter() - t0
+		n_sel = len(selected)
+		n_total = len(entries)
+		LOGGER.info(
+			"RTMA selected-message: %d/%d messages, %d bytes, %.2fs, %d ranges",
+			n_sel, n_total, total_bytes, elapsed, len(merged),
+		)
+		return out_path, total_bytes, elapsed
 
 	def _build_selector(self, entries: list[dict[str, Any]]) -> dict[str, bool]:
 		targets = self._selected_targets(include_optional_tcdc=True)
