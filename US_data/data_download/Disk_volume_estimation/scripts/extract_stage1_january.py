@@ -168,6 +168,11 @@ def _format_duration(seconds: float) -> str:
     return f"{m}m {s:.0f}s"
 
 
+def _fmt_hms(seconds: int) -> str:
+    a = abs(int(seconds))
+    return f"{a // 3600:02d}:{(a % 3600) // 60:02d}:{a % 60:02d}"
+
+
 # ---------------------------------------------------------------------------
 # Cache index builders (build once; avoid rglob per hour)
 # ---------------------------------------------------------------------------
@@ -891,11 +896,74 @@ def _run_validation(
 
 
 # ---------------------------------------------------------------------------
+# Live progress helpers
+# ---------------------------------------------------------------------------
+
+def _write_live_progress(
+    prov_dir: "Path",
+    run_start_utc: "datetime",
+    total_hours_scheduled: int,
+    products: list,
+    prog: dict,
+) -> None:
+    import csv as _csv
+    now = datetime.utcnow()
+    elapsed_s = max(0.0, (now - run_start_utc).total_seconds())
+    total_hp = total_hours_scheduled * len(products)
+    completed_hp = prog["mrms_ok"] + prog["rtma_ok"]
+    pct = completed_hp / max(total_hp, 1) * 100
+    est_rem = (elapsed_s / pct * (100 - pct)) if pct > 0 else None
+
+    progress_data: dict = {
+        "run_start_time":              run_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "current_time_utc":            now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "total_hours_scheduled":       total_hours_scheduled,
+        "completed_hour_products":     completed_hp,
+        "completed_mrms_hours":        prog["mrms_ok"],
+        "completed_rtma_hours":        prog["rtma_ok"],
+        "failed_hour_products":        prog["failed"],
+        "percent_complete":            round(pct, 2),
+        "elapsed_seconds":             round(elapsed_s, 1),
+        "estimated_remaining_seconds": round(est_rem, 1) if est_rem is not None else None,
+        "download_workers":            prog.get("download_workers"),
+        "rtma_mode":                   prog.get("rtma_mode"),
+        "files_downloaded":            prog["files_downloaded"],
+        "files_reused":                prog["files_reused"],
+        "bytes_downloaded_total":      prog["bytes_downloaded"],
+        "latest_completed_hour":       prog["latest_hour"],
+        "latest_status_message":       prog["latest_msg"],
+        "latest_error_message":        prog["latest_err"],
+    }
+
+    json_path = prov_dir / "live_progress.json"
+    try:
+        with open(json_path, "w", encoding="utf-8") as fh:
+            json.dump(progress_data, fh, indent=2)
+            fh.flush()
+    except Exception:
+        pass
+
+    csv_path = prov_dir / "live_progress.csv"
+    csv_fields = list(progress_data.keys())
+    write_header = not csv_path.exists()
+    try:
+        with open(csv_path, "a", encoding="utf-8", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=csv_fields)
+            if write_header:
+                w.writeheader()
+            w.writerow(progress_data)
+            fh.flush()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> int:
     t_wall_start = time.perf_counter()
+    _run_start_utc = datetime.utcnow()
     args = _parse_args()
 
     from src.pipeline.config import load_config, config_to_dict
@@ -1004,6 +1072,15 @@ def main() -> int:
               staging_dir / "mrms", staging_dir / "rtma"]:
         d.mkdir(parents=True, exist_ok=True)
 
+    # --- Live log file handler ---
+    _log_path = prov_dir / "live_run.log"
+    _fh = logging.FileHandler(str(_log_path), mode="a", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s", datefmt="%H:%M:%S"
+    ))
+    logging.getLogger().addHandler(_fh)
+    LOGGER.info("Live run log: %s", _log_path)
+
     # --- Load existing completion status and metrics for resume ---
     existing_success: set[tuple[str, str]] = set()  # (valid_time_utc, product)
     metrics_csv_path = prov_dir / "hourly_runtime_and_volume.csv"
@@ -1021,6 +1098,22 @@ def main() -> int:
         except Exception as exc:
             LOGGER.warning("Cannot read existing metrics CSV: %s — starting fresh", exc)
             metrics_rows = []
+
+    # --- Progress state (includes pre-existing resume counts) ---
+    _prog: dict = {
+        "mrms_ok":          sum(1 for _, p in existing_success if p == _MRMS_PRODUCT),
+        "rtma_ok":          sum(1 for _, p in existing_success if p == _RTMA_PRODUCT),
+        "failed":           0,
+        "files_downloaded": 0,
+        "files_reused":     0,
+        "bytes_downloaded": 0,
+        "latest_hour":      None,
+        "latest_msg":       "starting",
+        "latest_err":       None,
+        "download_workers": args.download_workers,
+        "rtma_mode":        args.rtma_mode,
+    }
+    _write_live_progress(prov_dir, _run_start_utc, n_hours, products, _prog)
 
     # ---------------------------------------------------------------------------
     # RTMA parallel prefetch (I/O phase separated from serial decode/extract)
@@ -1054,6 +1147,8 @@ def main() -> int:
             for dt, (path, dl_s) in prefetch_results.items():
                 if path is not None:
                     rtma_cache[dt] = path         # add to cache for main-loop lookup
+                    _prog["files_downloaded"] += 1
+                    _prog["bytes_downloaded"] += path.stat().st_size if path.exists() else 0
                 rtma_prefetch_times[dt] = dl_s   # record per-hour download time
         else:
             LOGGER.info("RTMA prefetch: nothing to download (all files cached or resumed)")
@@ -1070,6 +1165,7 @@ def main() -> int:
     for i, dt in enumerate(all_hours):
         dt_str   = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         hour_tag = dt.strftime("%Y%m%d%H")
+        _hr_mrms_ok = 0; _hr_rtma_ok = 0; _hr_failed = 0  # per-hour product counters
 
         if i == 0 or (i + 1) % 24 == 0 or i == n_hours - 1:
             pct = (i + 1) / n_hours * 100
@@ -1088,6 +1184,7 @@ def main() -> int:
                         all_mrms_frames.append(hour_df)
                     else:
                         all_rtma_frames.append(hour_df)
+                    # Already counted in _prog initial state from existing_success; don't re-add
                     continue
                 except Exception:
                     pass  # Fall through and re-process
@@ -1127,6 +1224,7 @@ def main() -> int:
                     missing_rows.append({
                         "product": product, "valid_time_utc": dt_str, "reason": "not_in_s3",
                     })
+                    _hr_failed += 1
                     continue
 
                 # Inline serial download fallback:
@@ -1159,6 +1257,7 @@ def main() -> int:
                     missing_rows.append({
                         "product": product, "valid_time_utc": dt_str, "reason": "download_failed",
                     })
+                    _hr_failed += 1
                     continue
 
                 if is_mrms:
@@ -1167,6 +1266,11 @@ def main() -> int:
                     rtma_cache[dt] = raw_path
 
             raw_size_bytes = raw_path.stat().st_size if raw_path.exists() else 0
+            if file_reused:
+                _prog["files_reused"] += 1
+            elif is_mrms:
+                _prog["files_downloaded"] += 1
+                _prog["bytes_downloaded"] += raw_size_bytes
 
             # --- Decode + extract ---
             t_proc        = time.perf_counter()
@@ -1228,6 +1332,45 @@ def main() -> int:
                 "status":                   status,
                 "warning_message":          warn_msg,
             })
+            if status == "success":
+                if is_mrms:
+                    _hr_mrms_ok += 1
+                else:
+                    _hr_rtma_ok += 1
+            else:
+                _hr_failed += 1
+                if warn_msg:
+                    _prog["latest_err"] = warn_msg
+
+        # --- Accumulate into live progress and write once per outer hour ---
+        _prog["mrms_ok"] += _hr_mrms_ok
+        _prog["rtma_ok"] += _hr_rtma_ok
+        _prog["failed"]  += _hr_failed
+        _prog["latest_hour"] = dt_str
+        _prog["latest_msg"]  = (
+            f"hour {dt_str}: MRMS={'ok' if _hr_mrms_ok else 'fail'} "
+            f"RTMA={'ok' if _hr_rtma_ok else 'fail'}"
+        )
+        _write_live_progress(prov_dir, _run_start_utc, n_hours, products, _prog)
+
+        if (i + 1) % 24 == 0 or i == n_hours - 1:
+            _n_done = _prog["mrms_ok"] + _prog["rtma_ok"] + _prog["failed"]
+            _n_tot  = n_hours * len(products)
+            _el_s   = time.perf_counter() - t_wall_start
+            _pct    = _n_done / max(_n_tot, 1) * 100
+            _eta_s  = int(_el_s / _pct * (100 - _pct)) if _pct > 0 else 0
+            _gb     = _prog["bytes_downloaded"] / 1e9
+            print(
+                f"{_n_done}/{_n_tot} hour-products complete "
+                f"| MRMS {_prog['mrms_ok']}/{n_hours} "
+                f"| RTMA {_prog['rtma_ok']}/{n_hours} "
+                f"| {_pct:.1f}% "
+                f"| elapsed {_fmt_hms(int(_el_s))} "
+                f"| ETA {_fmt_hms(_eta_s)} "
+                f"| downloaded {_gb:.1f} GB "
+                f"| failures {_prog['failed']}",
+                flush=True,
+            )
 
     # ---------------------------------------------------------------------------
     # Combine staging into final output parquets
