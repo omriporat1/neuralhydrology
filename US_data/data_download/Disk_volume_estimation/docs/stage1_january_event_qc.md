@@ -217,6 +217,31 @@ spatial QC only**. They should **not** be interpreted as strict storm-steering
 validation for MRMS rain-cell motion. MRMS and RTMA are different products with
 different assumptions and represent different atmospheric quantities.
 
+### State Boundary Reference Layer
+
+State boundaries are **optional cartographic context**, not a scientific forcing or
+input dependency. The map panel draws them when available; if the file is absent the
+animation generation continues without them and the manifest records the outcome.
+
+| Field | Value |
+|---|---|
+| Expected cached file | `tmp/…/02_basin_geometries/reference/ne_110m_admin1_us_states.gpkg` |
+| Source | Natural Earth 110m admin-1, US states only (`iso_a2 == "US"`) |
+| Created by | `extract_stage1_one_hour.py` bootstrap (downloads once, caches locally) |
+| Manifest key | `state_boundaries_status`: `loaded` / `downloaded` / `skipped_missing` |
+
+If the cached file is missing, `generate_january_event_animations.py` automatically
+attempts a one-time CDN download and re-caches it. If that also fails, it prints a
+warning and continues without state boundaries.
+
+**Lessons-learned note (2026-06-07):** The initial all-12 run failed because the stable
+script used the wrong cache filename (`ne_110m_admin_1_states_provinces.gpkg`, the
+Natural Earth CDN zip name) instead of the project's cached name
+(`ne_110m_admin1_us_states.gpkg`). The four v2.1 pilot animations were unaffected
+because they used the correct name. After any cleanup or script renaming, run a
+single-candidate smoke test (`--candidates R02`) before proceeding to all 12 — audit
+scripts alone do not exercise the animation rendering path.
+
 ### Static Reference Frames
 
 Saved per candidate in `{candidate}/static_frames/`:
