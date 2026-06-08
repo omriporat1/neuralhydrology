@@ -55,7 +55,7 @@ RTMA_BASE      = ROOT / "tmp/stage1_pilot_dryrun/00_raw/rtma"
 FORCING_PQ     = ROOT / "tmp/stage1_pilot_dryrun/03_basin_timeseries/stage1_pilot/january_2023/combined_hourly_basin_stats.parquet"
 CANDIDATES_CSV = ROOT / "tmp/stage1_pilot_dryrun/09_manifests/stage1_pilot/january_2023_event_qc/event_animation_candidates_refined.csv"
 CAMELSH_SHP    = ROOT / "tmp/stage1_pilot_dryrun/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp"
-STATES_GPKG    = ROOT / "tmp/stage1_pilot_dryrun/02_basin_geometries/reference/ne_110m_admin_1_states_provinces.gpkg"
+STATES_GPKG    = ROOT / "tmp/stage1_pilot_dryrun/02_basin_geometries/reference/ne_110m_admin1_us_states.gpkg"
 MRMS_WEIGHTS   = ROOT / "tmp/stage1_pilot_dryrun/02_basin_geometries/weights/mrms/pilot_mrms_weights.parquet"
 
 ANIM_SUBDIR = "pilot"
@@ -144,6 +144,42 @@ FFMPEG_OK = (_FFMPEG is not None)
 FFMPEG_INSTALL_NOTE = (
     "ffmpeg not found. Install: 'winget install Gyan.FFmpeg' or "
     "https://ffmpeg.org/download.html, add bin/ to PATH. GIF fallback active.")
+
+
+# ── State boundary loader ──────────────────────────────────────────────────────
+
+_NE_CDN_URL = ("https://naturalearth.s3.amazonaws.com/110m_cultural/"
+               "ne_110m_admin_1_states_provinces.zip")
+
+
+def load_states_gdf(cache_path: Path) -> tuple:
+    """Load US state boundaries; return (gdf_or_None, status_str).
+
+    Status values:
+      'loaded'         — read from local cache file
+      'downloaded'     — fetched from Natural Earth CDN and cached locally
+      'skipped_missing'— file absent and download failed; animation continues without boundaries
+    """
+    if cache_path.exists():
+        try:
+            gdf = gpd.read_file(str(cache_path))
+            return gdf, "loaded"
+        except Exception as e:
+            print(f"  Warning: could not read state boundary file ({e})")
+
+    print(f"  State boundary file not found: {cache_path.name}")
+    print(f"  Attempting download from Natural Earth CDN…", end="", flush=True)
+    try:
+        all_states = gpd.read_file(_NE_CDN_URL)
+        us_states  = all_states[all_states["iso_a2"] == "US"].copy()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        us_states.to_file(str(cache_path), driver="GPKG")
+        print(f" OK ({len(us_states)} features cached)")
+        return us_states, "downloaded"
+    except Exception as e:
+        print(f" FAILED ({e})")
+        print("  Warning: continuing without state boundaries (cartographic context only).")
+        return None, "skipped_missing"
 
 
 # ── MRMS helpers ───────────────────────────────────────────────────────────────
@@ -385,7 +421,8 @@ def render_frame(fig, ax_map, ax_sf, ax_pr, ax_t2,
     else:
         ax_map.set_facecolor("#c8c8c8")
 
-    states_gdf.boundary.plot(ax=ax_map, color="#777777", linewidth=0.5, zorder=2)
+    if states_gdf is not None:
+        states_gdf.boundary.plot(ax=ax_map, color="#777777", linewidth=0.5, zorder=2)
 
     # RTMA 10m wind quiver (qualitative context; not storm-steering validation)
     if WIND_VECTORS_ENABLED and wind_arrows is not None:
@@ -727,6 +764,7 @@ def animate_candidate(cand: dict, pq_df: pd.DataFrame,
         "map_params_source":          "explicit" if rid in CANDIDATE_MAP_PARAMS else "area-based default",
         "wind_vectors_enabled":       WIND_VECTORS_ENABLED,
         "wind_vectors_loaded_frames": n_rtma_ok if WIND_VECTORS_ENABLED else 0,
+        "state_boundaries_status":    "loaded" if states_gdf is not None else "skipped_missing",
         "rtma_audit_status":          "PASS (8/8 frames; see rtma_spatial_audit.json)",
         "sync_audit_status":          "PASS (10/10 frames; see sync_audit.json)",
         "runtime_s":                  round(elapsed, 1),
@@ -764,10 +802,11 @@ def main():
     pq_df["STAID"] = pq_df["STAID"].astype(str).str.zfill(8)
     basin_gdf  = gpd.read_file(CAMELSH_SHP)
     basin_gdf  = basin_gdf.set_crs("EPSG:4326", allow_override=True)
-    states_gdf = gpd.read_file(STATES_GPKG)
+    states_gdf, state_boundaries_status = load_states_gdf(STATES_GPKG)
     weights_df = pd.read_parquet(MRMS_WEIGHTS)
     weights_df["STAID"] = weights_df["STAID"].astype(str).str.zfill(8)
-    print(f"  basins={len(basin_gdf)}  states={len(states_gdf)}  "
+    n_states   = len(states_gdf) if states_gdf is not None else 0
+    print(f"  basins={len(basin_gdf)}  states={n_states} [{state_boundaries_status}]  "
           f"weights={len(weights_df)}")
     print(f"  ffmpeg: {'OK -> MP4' if FFMPEG_OK else 'NOT FOUND -> GIF fallback'}")
     if not FFMPEG_OK:
@@ -793,6 +832,8 @@ def main():
         "output_mode":                "MP4" if FFMPEG_OK else "GIF (PillowWriter)",
         "wind_vectors_enabled":       WIND_VECTORS_ENABLED,
         "wind_vectors_target_arrows": WIND_TARGET_ARROWS,
+        "state_boundaries_status":    state_boundaries_status,
+        "state_boundaries_path":      str(STATES_GPKG),
         "rtma_audit":                 "PASS (8/8 frames, 0.0000% diff) — see rtma_spatial_audit.json",
         "sync_audit":                 "PASS (10/10 frames) — see sync_audit.json",
         "mrms_convention": (
@@ -823,6 +864,7 @@ def main():
     print("\n" + "=" * 64)
     print("ANIMATION SUMMARY")
     print("=" * 64)
+    print(f"  state_boundaries: {state_boundaries_status}")
     for rid, res in manifest["candidates"].items():
         warn = "; ".join(res.get("warnings", [])) or "none"
         out  = res.get("gif_path") or "?"
