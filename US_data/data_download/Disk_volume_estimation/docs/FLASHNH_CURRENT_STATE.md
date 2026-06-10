@@ -1,11 +1,49 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
 
 ## Current milestone
 
-Stage 1 Milestone 2E complete. RTMA/URMA-family precipitation diagnostic complete.
-Next stage: Stage 1 consolidation / model-ready preflight.
+Stage 1 Milestone 2G complete. NeuralHydrology January pilot package built and audited.
+**Next: Milestone 2H — Streamflow recovery for 22 missing CAMELSH basins.**
+
+---
+
+## Milestone 2G — NeuralHydrology NetCDF builder + preflight auditor (completed 2026-06-09)
+
+NeuralHydrology-compatible January 2023 pilot package built and audited.
+Full documentation: `docs/stage1_neuralhydrology_preflight.md`
+
+**Scripts:**
+- `scripts/build_stage1_neuralhydrology_january_pilot.py` — builder (~8s)
+- `scripts/audit_stage1_neuralhydrology_january_pilot.py` — auditor (~20s)
+
+**Package:** `tmp/stage1_pilot_dryrun/12_neuralhydrology_january_pilot_dataset/package/` (gitignored)
+
+**Audit result:** PASS — 0 errors, 1 warning
+
+**Package summary:**
+- 50 per-basin NetCDF files; `date` coordinate; 744 hourly UTC steps; January 2023
+- 11 variables per basin (10 dynamic forcings + `qobs_m3s` target)
+- Smoke dynamic inputs: `mrms_qpe_1h_mm`, `rtma_2t_K`, `rtma_2d_K`, `rtma_2sh_kgkg`, `rtma_10u_ms`, `rtma_10v_ms`
+- `attributes_full.csv`: 50 rows × 238 cols (237 attribute cols + `gauge_id`)
+  - Manifest records 237, counting only attribute cols; both are correct
+- Full HydroATLAS integration: 50/50 pilot match; 193 new columns
+- Streamflow: 20 full, 8 partial, 22 all-NaN (CAMELSH files missing locally)
+- Audit warning (expected, S2): nulls in `max_abs_hourly_jump_over_Q50` (1), `q95_q50_ratio` (1), `wet_cl_smj` (14) — NaN preserved, no imputation
+
+**No model training run. No generated files committed.**
+
+---
+
+## Milestone 2F — NeuralHydrology package design (completed 2026-06-08)
+
+Design and decision documentation for the NeuralHydrology package.
+Full documentation: `tmp/stage1_pilot_dryrun/12_neuralhydrology_january_pilot_dataset/design/`
+
+Key decisions: V1 (both rtma_2d_K and rtma_2sh_kgkg in smoke), V2 (rtma_sp_Pa in wide only),
+V3 (rtma_tcc_pct in wide only), S1 (22 missing CAMELSH → all-NaN qobs_m3s, 2H blocker),
+S2 (preserve NaN, no imputation), S3 (full HydroATLAS 50/50), S4 (seed=42, streamflow-only split).
 
 ---
 
@@ -98,13 +136,19 @@ Pilot animations: R02, R06, R09, R11 — reviewed and approved.
 
 ---
 
-## Next stage: Stage 1 consolidation / model-ready preflight
+## Next: Milestone 2H — Streamflow recovery for 22 missing CAMELSH basins
 
-Tasks to plan (not yet started; user approval required):
+The 22 basins with all-NaN `qobs_m3s` must be recovered before:
+- Serious NeuralHydrology training runs
+- Scientific performance claims
+- HPC-scale 2020–2025 packaging
 
-1. Decide on all-12 animation run.
-2. Event QC conclusions: finalize which of R01–R12 are included in Stage 1 training.
-3. Model-ready data preflight: verify combined parquet schema, feature ranges,
-   missing-value fractions, and temporal coverage.
+Recovery plan: `tmp/stage1_pilot_dryrun/12_neuralhydrology_january_pilot_dataset/design/streamflow_recovery_plan.md`
+
+**Pending tasks (require user approval before starting):**
+
+1. Milestone 2H: CAMELSH streamflow recovery for 22 missing basins.
+2. Decide on all-12 animation run (2E follow-up).
+3. Event QC conclusions: finalize which of R01–R12 are included in Stage 1 training.
 4. HPC transfer planning.
 5. Stage 1 model configuration and first training run.
