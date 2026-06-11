@@ -100,23 +100,26 @@ def compute_active_chunks(
 ) -> list[tuple[str, str, str]]:
     """
     Return the WY_CHUNKS that overlap [start_ts, end_ts] with request windows
-    clipped to that interval (plus a 15-min tail buffer for snap coverage).
+    buffered by ±15 min (matching SNAP_TOLERANCE) so that observations that
+    snap to the first or last target hour are never excluded by the API window.
 
-    This means a January 2023 smoke (--start 2023-01-01 --end 2023-01-31T23:00)
-    fetches only WY2023 clipped to Jan 2023, not the full 6-chunk default set.
-    Full-period default runs are unaffected (all 6 chunks pass the filter and
-    the clip changes only WY2026's tail from 23:59:59 to 23:15:00, which is
-    functionally identical for the ±15-min snap).
+    Without the head buffer, an observation at 2022-12-31T23:45Z that should
+    snap to 2023-01-01T00:00Z would not be fetched for a Jan 2023 smoke run.
+
+    Overlap test uses the un-buffered [start_ts, end_ts] so extra chunks are
+    never pulled in.  Target time index and snap logic are unchanged.
     """
     active: list[tuple[str, str, str]] = []
-    fetch_end = end_ts + pd.Timedelta(minutes=15)  # ensures snap tolerance coverage
+    buf = pd.Timedelta(minutes=15)
+    fetch_start = start_ts - buf  # head buffer covers snap window of first hour
+    fetch_end   = end_ts   + buf  # tail buffer covers snap window of last  hour
 
     for wy_label, wy_start_str, wy_end_str in WY_CHUNKS:
         wy_s = pd.Timestamp(wy_start_str.replace("Z", ""))
         wy_e = pd.Timestamp(wy_end_str.replace("Z", ""))
         if wy_e < start_ts or wy_s > end_ts:
-            continue  # no overlap
-        clipped_s = max(wy_s, start_ts)
+            continue  # no overlap with target period
+        clipped_s = max(wy_s, fetch_start)
         clipped_e = min(wy_e, fetch_end)
         active.append((
             wy_label,
