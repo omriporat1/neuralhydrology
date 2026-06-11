@@ -208,13 +208,62 @@ python scripts/recover_stage1_usgs_iv_streamflow_pilot.py --force
 
 ---
 
-## Next Step
+## Milestone 2H-C — Full January 2023 Recovery (2026-06-10)
 
-After user approval, extend Part B to all 21 non-EXCLUDE_QC basins using:
+Script: `scripts/recover_stage1_usgs_iv_streamflow_january.py`
 
-```bash
-python scripts/recover_stage1_usgs_iv_streamflow_pilot.py --staids <all-21-comma-separated> --force
-```
+Extended recovery to all 21 eligible basins (22 missing − 1 EXCLUDE_QC: 10336700).
+All 21 passed validation: 744 timestamps each, no sentinels, no negatives.
 
-Note the 03298135 late-2025 caveat: full gap accounting is needed for the HPC build, but January
-2023 data is available and valid.
+Output: `tmp/stage1_pilot_dryrun/15_streamflow_recovery_january_eligible/recovered_camelsh_like/`
+(21 NC files, 23 KB each).
+
+Coverage gain across 50-basin pilot: **+15,583 valid hours**
+(20,576 → 36,159 valid qobs hours out of 37,200 total).
+
+---
+
+## Milestone 2H-D — Package Rebuild with Recovery (2026-06-10)
+
+Script: `scripts/build_stage1_neuralhydrology_january_with_recovery.py` (commit `0595384`)
+
+Built new NeuralHydrology-compatible January 2023 package under
+`tmp/stage1_pilot_dryrun/16_neuralhydrology_january_with_recovery/`.
+Reads forcing from the 2G package NC files; replaces only `qobs_m3s`.
+
+Streamflow sources in the rebuilt package:
+
+| Source label | Count | Description |
+|---|---|---|
+| `local_CAMELSH` | 24 | 24 TRAIN/HOLDOUT_QC basins with original local CAMELSH qobs |
+| `USGS_IV_recovered` | 21 | 21 basins recovered via 2H-C; includes 4 HOLDOUT_QC |
+| `EXCLUDE_QC_local_CAMELSH` | 4 | EXCLUDE_QC basins with local CAMELSH data; QC lineage only |
+| `EXCLUDE_QC_missing` | 1 | 10336700; qobs all-NaN; never recovered |
+
+All 5 EXCLUDE_QC basins are excluded from all training and evaluation lists.
+
+---
+
+## Full-Period Target Source Design
+
+For the **full-period research window (2020-10-14 through 2025-12-31)**, USGS NWIS IV
+(parameter code 00060) is the canonical and sole streamflow target source for Flash-NH
+Stage 1. The CAMELSH-based recovery documented above applies to the January 2023 pilot only.
+
+Detailed specification for the full-period USGS IV acquisition strategy is in:
+
+**[`docs/stage1_usgs_iv_full_period_target_plan.md`](stage1_usgs_iv_full_period_target_plan.md)**
+
+That document covers:
+- Target-source policy (API endpoint, parameter, units, timestamp policy)
+- Full-period window: 1,905 days = 45,720 hourly steps
+- Proposed output layout and canonical NetCDF schema
+- Acquisition strategy (station × water-year chunks, rate limiting, resume)
+- Gap and quality audit design
+- HPC / SLURM job array design
+- Storage and runtime estimates anchored to pilot calibration data
+- Acceptance criteria for next pilot milestone (2I-B)
+- Open questions (snap tolerance, qualifier handling, raw cache retention)
+
+**03298135 late-2025 caveat** applies to the full-period build; that document
+contains the specific flag requirement in the gap audit design.
