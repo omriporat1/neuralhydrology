@@ -91,6 +91,42 @@ WY_CHUNKS: list[tuple[str, str, str]] = [
 
 
 # ---------------------------------------------------------------------------
+# Period-aware chunk selection
+# ---------------------------------------------------------------------------
+
+def compute_active_chunks(
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> list[tuple[str, str, str]]:
+    """
+    Return the WY_CHUNKS that overlap [start_ts, end_ts] with request windows
+    clipped to that interval (plus a 15-min tail buffer for snap coverage).
+
+    This means a January 2023 smoke (--start 2023-01-01 --end 2023-01-31T23:00)
+    fetches only WY2023 clipped to Jan 2023, not the full 6-chunk default set.
+    Full-period default runs are unaffected (all 6 chunks pass the filter and
+    the clip changes only WY2026's tail from 23:59:59 to 23:15:00, which is
+    functionally identical for the ±15-min snap).
+    """
+    active: list[tuple[str, str, str]] = []
+    fetch_end = end_ts + pd.Timedelta(minutes=15)  # ensures snap tolerance coverage
+
+    for wy_label, wy_start_str, wy_end_str in WY_CHUNKS:
+        wy_s = pd.Timestamp(wy_start_str.replace("Z", ""))
+        wy_e = pd.Timestamp(wy_end_str.replace("Z", ""))
+        if wy_e < start_ts or wy_s > end_ts:
+            continue  # no overlap
+        clipped_s = max(wy_s, start_ts)
+        clipped_e = min(wy_e, fetch_end)
+        active.append((
+            wy_label,
+            clipped_s.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            clipped_e.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ))
+    return active
+
+
+# ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 
@@ -272,16 +308,18 @@ def load_or_fetch_all_chunks(
     dry_run: bool,
     logger: logging.Logger,
     failed_log: list,
+    active_chunks: list[tuple[str, str, str]],
 ) -> pd.DataFrame:
     """
-    Return combined raw IV DataFrame for all WY chunks.
+    Return combined raw IV DataFrame for the supplied active_chunks.
     Uses Parquet cache when available (skips re-download unless --force).
     Falls back to monthly sub-chunks if a WY request fails.
+    active_chunks is the period-filtered/clipped list from compute_active_chunks().
     """
     all_frames: list[pd.DataFrame] = []
     request_log: list[dict] = []
 
-    for wy_label, wy_start, wy_end in WY_CHUNKS:
+    for wy_label, wy_start, wy_end in active_chunks:
         pq_path = parquet_path(raw_cache_dir, staid, wy_label)
 
         # -- cache hit --
@@ -675,6 +713,7 @@ def process_staid(
     args_dict: dict,
     acquisition_log: list,
     failed_log: list,
+    active_chunks: list[tuple[str, str, str]],
 ) -> dict:
     t_basin_start = time.time()
     staid = staid.strip().zfill(8)
@@ -707,9 +746,9 @@ def process_staid(
     }
 
     try:
-        # Load or fetch all WY chunks
+        # Load or fetch active WY chunks (period-filtered)
         raw_df = load_or_fetch_all_chunks(
-            staid, raw_cache_dir, sess, force, dry_run, logger, failed_log
+            staid, raw_cache_dir, sess, force, dry_run, logger, failed_log, active_chunks
         )
         result["n_raw_obs"] = len(raw_df)
 
@@ -843,6 +882,12 @@ def main() -> None:
     n_hours = len(target_index)
     print(f"Target grid: {args.start} to {args.end} = {n_hours} hourly steps")
 
+    # Compute period-aware WY chunks (filtered + clipped to requested period)
+    active_chunks = compute_active_chunks(start_ts, end_ts)
+    print(f"Active WY chunks ({len(active_chunks)}/{len(WY_CHUNKS)} total):")
+    for label, cs, ce in active_chunks:
+        print(f"  {label}: {cs} to {ce}")
+
     generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_hash      = git_commit_hash()
     args_dict     = {"start": args.start, "end": args.end}
@@ -859,7 +904,7 @@ def main() -> None:
             staid, out_dir, target_index, sess,
             args.force, args.dry_run,
             git_hash, generated_utc, args_dict,
-            acquisition_log, failed_log,
+            acquisition_log, failed_log, active_chunks,
         )
         # Polite delay between stations
         if not args.dry_run:

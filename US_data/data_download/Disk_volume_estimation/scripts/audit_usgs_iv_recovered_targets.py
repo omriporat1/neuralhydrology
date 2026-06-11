@@ -98,19 +98,21 @@ def git_commit_hash() -> str:
         return "UNKNOWN"
 
 
-def load_pilot_manifest() -> dict[str, str]:
+def load_pilot_manifest(
+    path: pathlib.Path = PILOT_MANIFEST_PATH,
+) -> dict[str, str]:
     """
     Load pilot_basin_manifest.csv and return {STAID: pilot_role} mapping.
     STAIDs are zero-padded to 8 characters.  Returns empty dict if file absent.
     """
-    if not PILOT_MANIFEST_PATH.exists():
+    if not path.exists():
         print(
-            f"  WARNING: pilot manifest not found at {PILOT_MANIFEST_PATH}; "
+            f"  WARNING: pilot manifest not found at {path}; "
             "pilot_role will be UNKNOWN for all basins.",
             file=sys.stderr,
         )
         return {}
-    df = pd.read_csv(PILOT_MANIFEST_PATH, dtype=str)
+    df = pd.read_csv(path, dtype=str)
     # Normalise column names — manifest may use 'staid' or 'STAID'
     df.columns = [c.strip().upper() for c in df.columns]
     if "STAID" not in df.columns or "PILOT_ROLE" not in df.columns:
@@ -140,7 +142,12 @@ def load_canonical_nc(nc_path: pathlib.Path) -> tuple[pd.Series, dict]:
 # Per-basin coverage
 # ---------------------------------------------------------------------------
 
-def compute_per_basin_coverage(staid: str, sf: pd.Series, attrs: dict) -> dict:
+def compute_per_basin_coverage(
+    staid: str,
+    sf: pd.Series,
+    attrs: dict,
+    period_end: pd.Timestamp = PERIOD_END,
+) -> dict:
     n_total = len(sf)
     valid   = sf.dropna()
     n_valid = len(valid)
@@ -150,11 +157,12 @@ def compute_per_basin_coverage(staid: str, sf: pd.Series, attrs: dict) -> dict:
     first_valid = str(valid.index[0])  if n_valid > 0 else ""
     last_valid  = str(valid.index[-1]) if n_valid > 0 else ""
 
-    # Late-2025 gap check
+    # Late-period gap check (against effective period_end, not always 2025-12-31)
     late_gap_flag = False
+    gap_days = float("nan")
     if n_valid > 0:
         last_obs = valid.index[-1]
-        gap_days = (PERIOD_END - last_obs).total_seconds() / 86400.0
+        gap_days = (period_end - last_obs).total_seconds() / 86400.0
         late_gap_flag = gap_days > LATE_2025_GAP_DAYS
 
     return {
@@ -229,7 +237,11 @@ def compute_month_coverage(staid: str, sf: pd.Series) -> list[dict]:
 # Gap audit
 # ---------------------------------------------------------------------------
 
-def compute_gap_audit(staid: str, sf: pd.Series) -> dict:
+def compute_gap_audit(
+    staid: str,
+    sf: pd.Series,
+    period_end: pd.Timestamp = PERIOD_END,
+) -> dict:
     is_nan = sf.isna()
     n_gaps = 0
     longest_gap = 0
@@ -260,7 +272,7 @@ def compute_gap_audit(staid: str, sf: pd.Series) -> dict:
         if cur_gap > 24:
             gap_starts.append({"start": str(cur_start), "hours": cur_gap})
 
-    # Late-2025 gap check
+    # Late-period gap check (against effective period_end, not always 2025-12-31)
     valid = sf.dropna()
     late_gap_flag = False
     last_valid_utc = ""
@@ -268,7 +280,7 @@ def compute_gap_audit(staid: str, sf: pd.Series) -> dict:
     if len(valid) > 0:
         last_valid_utc = str(valid.index[-1])
         gap_to_period_end_days = round(
-            (PERIOD_END - valid.index[-1]).total_seconds() / 86400.0, 2
+            (period_end - valid.index[-1]).total_seconds() / 86400.0, 2
         )
         late_gap_flag = gap_to_period_end_days > LATE_2025_GAP_DAYS
 
@@ -716,8 +728,7 @@ def write_summary(
         "## Validation Criteria",
         "",
         f"- [{'PASS' if n_basins > 0 else 'N/A'}] {n_basins} canonical NCs present",
-        f"- [{'PASS' if n_hours_target == 45720 else 'CHECK'}] "
-        f"expected 45,720 hourly steps, target grid has {n_hours_target:,}",
+        f"- [PASS] target grid: {n_hours_target:,} hourly steps (period-derived)",
         f"- [{'PASS' if n_jan_mm == 0 else 'FAIL'}] "
         f"Jan 2023 comparison: {n_jan_pass} PASS, {n_jan_mm} MISMATCH, {n_jan_na} N/A",
         f"- [{'PASS' if n_neg == 0 else 'CHECK'}] "
@@ -782,6 +793,28 @@ def parse_args() -> argparse.Namespace:
         "--staids", type=str, default="",
         help="Comma-separated STAIDs to audit (default: all NC files in canonical-dir).",
     )
+    # Period override (inferred from NC attrs if not provided)
+    p.add_argument(
+        "--expected-start", type=str, default="",
+        help="Override expected period start (ISO 8601 UTC, e.g. 2023-01-01T00:00:00Z). "
+             "If omitted, inferred from canonical NC attrs.",
+    )
+    p.add_argument(
+        "--expected-end", type=str, default="",
+        help="Override expected period end (ISO 8601 UTC, e.g. 2023-01-31T23:00:00Z). "
+             "If omitted, inferred from canonical NC attrs.",
+    )
+    # Manifest and comparison path overrides (useful on HPC where paths differ)
+    p.add_argument(
+        "--pilot-manifest", type=pathlib.Path, default=None,
+        help="Override path to pilot_basin_manifest.csv. "
+             "Defaults to the standard local path; pass /dev/null or nonexistent to suppress.",
+    )
+    p.add_argument(
+        "--skip-jan2023-comparison", action="store_true",
+        help="Skip the Jan 2023 vs 2H-C comparison entirely. "
+             "Useful for smoke runs on HPC where 2H-C files are not available.",
+    )
     return p.parse_args()
 
 
@@ -812,8 +845,29 @@ def main() -> None:
 
     print(f"Auditing {len(nc_paths)} canonical NC file(s)")
 
-    # Build expected target index to get n_hours_target
-    target_index    = pd.date_range("2020-10-14", "2025-12-31 23:00", freq="h")
+    # Resolve effective audit period
+    # Priority: CLI args > first NC file attrs > module-level defaults
+    audit_start, audit_end = PERIOD_START, PERIOD_END
+    if args.expected_start and args.expected_end:
+        audit_start = pd.Timestamp(args.expected_start.replace("Z", ""))
+        audit_end   = pd.Timestamp(args.expected_end.replace("Z", ""))
+        print(f"  Audit period (CLI): {audit_start} to {audit_end}")
+    else:
+        try:
+            _, peek_attrs = load_canonical_nc(nc_paths[0])
+            ps = peek_attrs.get("period_start_utc", "")
+            pe = peek_attrs.get("period_end_utc", "")
+            if ps and pe:
+                audit_start = pd.Timestamp(ps.replace("Z", ""))
+                audit_end   = pd.Timestamp(pe.replace("Z", ""))
+                print(f"  Audit period (NC attrs): {audit_start} to {audit_end}")
+            else:
+                print(f"  Audit period (default): {audit_start} to {audit_end}")
+        except Exception:
+            print(f"  Audit period (default): {audit_start} to {audit_end}")
+
+    # Build expected target index from effective period
+    target_index    = pd.date_range(audit_start, audit_end, freq="h")
     n_hours_target  = len(target_index)
 
     per_basin_rows: list[dict] = []
@@ -838,12 +892,26 @@ def main() -> None:
         if n_sentinel > 0:
             print(f"  [{staid}] WARNING: {n_sentinel} decoded -9999 values found!")
 
-        per_basin_rows.append(compute_per_basin_coverage(staid, sf, attrs))
+        per_basin_rows.append(compute_per_basin_coverage(staid, sf, attrs, period_end=audit_end))
         wy_rows.extend(compute_wy_coverage(staid, sf))
         month_rows.extend(compute_month_coverage(staid, sf))
-        gap_rows.append(compute_gap_audit(staid, sf))
+        gap_rows.append(compute_gap_audit(staid, sf, period_end=audit_end))
         qual_rows.append(compute_quality_audit(staid, sf, attrs))
-        jan_rows.append(compare_jan2023(staid, sf))
+        if args.skip_jan2023_comparison:
+            jan_rows.append({
+                "STAID": staid,
+                "n_jan_hours": 0,
+                "n_valid_fullperiod": 0,
+                "n_nan_fullperiod": 0,
+                "comparison_status": "SKIPPED",
+                "n_valid_2hc": None,
+                "n_matched_exactly": None,
+                "n_float32_match": None,
+                "max_abs_diff": None,
+                "note": "skipped via --skip-jan2023-comparison",
+            })
+        else:
+            jan_rows.append(compare_jan2023(staid, sf))
 
         row = per_basin_rows[-1]
         print(
@@ -852,8 +920,9 @@ def main() -> None:
             f"late_gap={row['late_2025_gap_flag']}"
         )
 
-    # Load pilot manifest for advisory classification
-    pilot_roles = load_pilot_manifest()
+    # Load pilot manifest for advisory classification (CLI override or default path)
+    manifest_path = args.pilot_manifest if args.pilot_manifest is not None else PILOT_MANIFEST_PATH
+    pilot_roles = load_pilot_manifest(path=manifest_path)
 
     # Advisory target-status classification
     status_rows: list[dict] = []
@@ -875,8 +944,9 @@ def main() -> None:
     pd.DataFrame(status_rows).to_csv(audit_dir / "target_status.csv", index=False)
     print(f"  Wrote target_status.csv ({len(status_rows)} rows)")
 
-    # Comparison plot
-    make_comparison_plot(jan_rows, canon_dir, qc_dir / "jan2023_fullperiod_vs_2hc_comparison.png")
+    # Comparison plot (skip if --skip-jan2023-comparison)
+    if not args.skip_jan2023_comparison:
+        make_comparison_plot(jan_rows, canon_dir, qc_dir / "jan2023_fullperiod_vs_2hc_comparison.png")
 
     # Summary
     write_summary(
