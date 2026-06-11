@@ -24,10 +24,11 @@ HPC host: `h2o.es.huji.ac.il`
 | Check | Result |
 |---|---|
 | `git clone` of `master` succeeded | PASS |
-| `git pull` brings latest `ba4b577` (2I-B) | PASS |
+| `git pull` brings latest `edda406` (HPC preflight patch) | PASS |
 | USGS NWIS IV network access from h2o | PASS — requests.get() to waterservices.usgs.gov succeeded |
 | `recover_usgs_iv_full_period_hourly.py --dry-run` | PASS |
-| 1-month smoke for `02073000` (Jan 2023, real fetch) | PASS — 744/744 valid hours |
+| 1-month smoke for `02073000` (Jan 2023, post-`edda406`) | PASS — 743/744 valid (1 NaN at T=0, acceptable) |
+| Full-period smoke for `02073000` (post-`edda406`) | PASS — 45,720/45,720 valid |
 | PROJ/pyproj warning at import | NON-BLOCKING — warning observed but irrelevant for streamflow scripts |
 | Pilot manifest on HPC | ABSENT — use `--pilot-manifest /dev/null` or omit; advisory statuses will show `UNKNOWN` |
 | 2H-C comparison files on HPC | ABSENT — use `--skip-jan2023-comparison`; comparison will be SKIPPED |
@@ -138,11 +139,91 @@ Expected output:
 
 ---
 
+## h2o Smoke Results After edda406
+
+Both smokes ran after pulling commits `7f17f17` (period-aware recovery/audit) and
+`edda406` (request head buffer).
+
+### Smoke A — 1-month Jan 2023 (`02073000`)
+
+| Item | Value |
+|---|---|
+| Basin | `02073000` |
+| Period | `2023-01-01T00:00:00Z` to `2023-01-31T23:00:00Z` |
+| Target grid | 744 hourly steps |
+| Active chunks | 1/6 — WY2023 only |
+| API request window | `2022-12-31T23:45:00Z` to `2023-01-31T23:15:00Z` (±15 min buffered) |
+| Raw rows | 2,975 |
+| Result | **PASS** |
+| valid / NaN | 743 / 1 |
+| Missing timestamp | `2023-01-01 00:00:00` |
+| Audit period | Inferred from NC attrs: Jan 2023 |
+| Late-gap flag | False |
+| Jan 2023 comparison | SKIPPED (`--skip-jan2023-comparison`) |
+| Output footprint | 104 KB under `/data42/omrip/Flash-NH/tmp/smoke_jan2023_02073000` |
+
+**NaN interpretation:** The single NaN at `2023-01-01T00:00:00Z` is acceptable. USGS
+returned no raw observation within ±15 min of that target hour even with the head buffer
+applied. This is not a snapping failure — it is a genuine data gap at the very first
+timestamp of the requested window for this station.
+
+---
+
+### Smoke B — Full-period (`02073000`, 2020-10-14 through 2025-12-31)
+
+| Item | Value |
+|---|---|
+| Basin | `02073000` |
+| Period | `2020-10-14T00:00:00Z` to `2025-12-31T23:00:00Z` |
+| Target grid | 45,720 hourly steps |
+| Active chunks | 6/6 |
+| Raw rows | 181,894 |
+| Snap: exact | 45,389 |
+| Snap: nearest (within ±15 min) | 331 |
+| Snap: missing | 0 |
+| Result | **PASS** |
+| valid / NaN / negative | 45,720 / 0 / 0 |
+| Station wall time | 14.2 s |
+| Total wall time | 14.7 s |
+| Raw cache | ~1.5 MB |
+| Canonical NC | ~549 KB |
+| Output footprint | 2.2 MB under `/data42/omrip/Flash-NH/tmp/smoke_fullperiod_02073000` |
+| Audit period | Inferred from NC attrs: full Stage 1 period |
+| Late-gap flag | False |
+| Jan 2023 comparison | SKIPPED (`--skip-jan2023-comparison`) |
+
+100% coverage, 0 NaN. Full-period pipeline validated end-to-end on h2o.
+
+---
+
+## Parallelism and Scale-Up
+
+The current script is sequential within a station and across stations when invoked
+directly. For the 50-basin Stage 1 full-period build this is fine on a single node;
+at ~15 s/basin the full 50-basin run takes roughly 12–15 minutes.
+
+For scale-up beyond 50 basins, prefer **external station-level parallelism** rather
+than adding concurrency inside the script (which would complicate the Parquet cache
+and rate-limiting):
+
+| Approach | When to use |
+|---|---|
+| SLURM job array (`--array=0-49`) | If scheduler access on h2o is confirmed |
+| `GNU parallel` / `xargs -P` with `--delay` | If h2o is a shared server without SLURM |
+| Small Python launcher (`concurrent.futures`, `max_workers=4–8`) | If neither of the above is available |
+
+**Rate-limit guidance:** Do not use aggressive concurrency against USGS NWIS IV.
+Start with 4 parallel stations. After validating that all 4 succeed cleanly, cautiously
+raise to 8. The script already adds a polite inter-station delay; parallel launchers
+should add an additional inter-request delay of at least 0.5–1 s.
+
+---
+
 ## Scheduler Status
 
-No SLURM configuration has been set up yet. The Stage 1 50-basin full-period acquisition
-will be the first scheduled job array. Script design ready; submission scripts to be
-written in the next milestone (2I-C or equivalent).
+No SLURM configuration has been set up yet for this project on h2o. The Stage 1
+50-basin full-period acquisition will be the first scheduled job array. Script design
+is ready; submission scripts to be written in the next milestone (2I-C or equivalent).
 
 ---
 
