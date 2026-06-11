@@ -79,7 +79,10 @@ REC_2HC_DIR = (
 # Late-2025 gap threshold
 LATE_2025_GAP_DAYS = 14
 
-# Pilot manifest (provides pilot_role per STAID)
+# Versioned pilot manifest — checked first; works on HPC without generated tmp/
+CONFIG_MANIFEST_PATH = REPO_ROOT / "config/stage1_pilot_basin_manifest.csv"
+
+# Legacy generated manifest — backward-compatible fallback only
 PILOT_MANIFEST_PATH = (
     REPO_ROOT / "tmp/stage1_pilot_dryrun/09_manifests/stage1_pilot/pilot_basin_manifest.csv"
 )
@@ -920,8 +923,14 @@ def main() -> None:
             f"late_gap={row['late_2025_gap_flag']}"
         )
 
-    # Load pilot manifest for advisory classification (CLI override or default path)
-    manifest_path = args.pilot_manifest if args.pilot_manifest is not None else PILOT_MANIFEST_PATH
+    # Load pilot manifest for advisory classification.
+    # Priority: --pilot-manifest CLI > versioned config > legacy generated tmp fallback.
+    if args.pilot_manifest is not None:
+        manifest_path = args.pilot_manifest
+    elif CONFIG_MANIFEST_PATH.exists():
+        manifest_path = CONFIG_MANIFEST_PATH
+    else:
+        manifest_path = PILOT_MANIFEST_PATH  # legacy fallback (not present on HPC)
     pilot_roles = load_pilot_manifest(path=manifest_path)
 
     # Advisory target-status classification

@@ -30,7 +30,7 @@ HPC host: `h2o.es.huji.ac.il`
 | 1-month smoke for `02073000` (Jan 2023, post-`edda406`) | PASS — 743/744 valid (1 NaN at T=0, acceptable) |
 | Full-period smoke for `02073000` (post-`edda406`) | PASS — 45,720/45,720 valid |
 | PROJ/pyproj warning at import | NON-BLOCKING — warning observed but irrelevant for streamflow scripts |
-| Pilot manifest on HPC | ABSENT — use `--pilot-manifest /dev/null` or omit; advisory statuses will show `UNKNOWN` |
+| Pilot manifest on HPC | NOW VERSIONED — `config/stage1_pilot_basin_manifest.csv` committed; no longer requires generated tmp path |
 | 2H-C comparison files on HPC | ABSENT — use `--skip-jan2023-comparison`; comparison will be SKIPPED |
 
 ---
@@ -216,6 +216,29 @@ and rate-limiting):
 Start with 4 parallel stations. After validating that all 4 succeed cleanly, cautiously
 raise to 8. The script already adds a polite inter-station delay; parallel launchers
 should add an additional inter-request delay of at least 0.5–1 s.
+
+---
+
+## Versioned Pilot Basin Manifest
+
+`config/stage1_pilot_basin_manifest.csv` is now committed to the repo.  It contains
+the frozen Stage 1 pilot role assignments for all 50 basins (STAID + pilot_role only),
+derived from the generated tmp manifest produced by `select_pilot_basins.py` (seed=42).
+
+| pilot_role | Count |
+|---|---|
+| TRAIN | 40 |
+| HOLDOUT_QC | 5 |
+| EXCLUDE_QC | 5 |
+
+The audit script resolves the pilot manifest in this priority order:
+
+1. `--pilot-manifest PATH` (explicit CLI override)
+2. `config/stage1_pilot_basin_manifest.csv` (versioned, works on HPC)
+3. `tmp/stage1_pilot_dryrun/09_manifests/stage1_pilot/pilot_basin_manifest.csv` (legacy local fallback)
+
+After `git pull` on h2o, the audit will find the versioned manifest and advisory
+`pilot_role` values will no longer show `UNKNOWN` for the 50 known pilot basins.
 
 ---
 
