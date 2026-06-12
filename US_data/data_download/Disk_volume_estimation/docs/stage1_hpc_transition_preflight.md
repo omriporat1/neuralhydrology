@@ -307,7 +307,9 @@ should add an additional inter-request delay of at least 0.5–1 s.
 
 ---
 
-## Versioned Pilot Basin Manifest
+## Versioned Basin Manifests
+
+### 50-basin pilot roles
 
 `config/stage1_pilot_basin_manifest.csv` is now committed to the repo.  It contains
 the frozen Stage 1 pilot role assignments for all 50 basins (STAID + pilot_role only),
@@ -327,6 +329,41 @@ The audit script resolves the pilot manifest in this priority order:
 
 After `git pull` on h2o, the audit will find the versioned manifest and advisory
 `pilot_role` values will no longer show `UNKNOWN` for the 50 known pilot basins.
+
+---
+
+### 2,843-basin initial training list
+
+`config/stage1_initial_training_basin_manifest.csv` is now committed to the repo.
+This is **curated selection metadata** — not a generated run artifact. It captures the
+finalized Stage 1 initial training basin set as of the pre-training selection step,
+independent of any specific run output. The broader generated final-selection reports
+(`reports/flashnh_final_basin_selection_v001/`) remain untracked.
+
+| Column | Description |
+|---|---|
+| `STAID` | Zero-padded to 8 chars (longer IDs preserved as-is) |
+| `final_training_status` | `TRAIN_CORE` or `TRAIN_SOFT_KEEP` |
+
+| final_training_status | Count |
+|---|---|
+| TRAIN_CORE | 2,216 |
+| TRAIN_SOFT_KEEP | 627 |
+| **Total** | **2,843** |
+
+Sort order: ascending by STAID (deterministic lexicographic; equivalent to ascending numeric for standard 8-char IDs).
+
+Pass this manifest directly to the recovery script via `--staids-file`:
+
+```bash
+python scripts/recover_usgs_iv_full_period_hourly.py \
+    --staids-file config/stage1_initial_training_basin_manifest.csv \
+    --out-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843 \
+    --force
+```
+
+`--staids-file` accepts any CSV with a `STAID` column (case-insensitive header).
+It is **mutually exclusive** with `--staids` — provide one or the other, not both.
 
 ---
 

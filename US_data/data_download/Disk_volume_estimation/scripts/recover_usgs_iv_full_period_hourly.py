@@ -41,6 +41,12 @@ Usage
       --staids 01585200,02073000,02077670,10164500,02266500,03298135,02344700 \\
       --out-dir tmp/stage1_pilot_dryrun/17_usgs_iv_full_period_pilot \\
       --force
+
+  # Full 2,843-basin run from versioned manifest:
+  python scripts/recover_usgs_iv_full_period_hourly.py \\
+      --staids-file config/stage1_initial_training_basin_manifest.csv \\
+      --out-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843 \\
+      --force
 """
 
 from __future__ import annotations
@@ -839,7 +845,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--staids-file", type=pathlib.Path, default=None,
-        help="Path to text file with one STAID per line.",
+        help=(
+            "Path to CSV file with a STAID column "
+            "(e.g. config/stage1_initial_training_basin_manifest.csv). "
+            "Mutually exclusive with --staids."
+        ),
     )
     p.add_argument(
         "--out-dir", type=pathlib.Path,
@@ -860,19 +870,56 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # Resolve STAID list
+    # Resolve STAID list — --staids and --staids-file are mutually exclusive
+    if args.staids and args.staids_file:
+        print(
+            "ERROR: --staids and --staids-file are mutually exclusive; provide only one.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     staids: list[str] = []
     if args.staids:
         staids = [s.strip().zfill(8) for s in args.staids.split(",") if s.strip()]
-    if args.staids_file and args.staids_file.exists():
-        for line in args.staids_file.read_text().splitlines():
-            s = line.strip()
-            if s and not s.startswith("#"):
-                staids.append(s.zfill(8))
-    staids = list(dict.fromkeys(staids))  # deduplicate, preserve order
+    elif args.staids_file:
+        if not args.staids_file.exists():
+            print(f"ERROR: --staids-file not found: {args.staids_file}", file=sys.stderr)
+            sys.exit(1)
+        df_sf = pd.read_csv(args.staids_file, dtype=str)
+        df_sf.columns = [c.strip().upper() for c in df_sf.columns]
+        if "STAID" not in df_sf.columns:
+            print(
+                f"ERROR: --staids-file must contain a 'STAID' column; "
+                f"found columns: {df_sf.columns.tolist()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raw_ids = [s.strip().zfill(8) for s in df_sf["STAID"].dropna() if str(s).strip()]
+        seen: dict[str, bool] = {}
+        dupes: list[str] = []
+        for s in raw_ids:
+            if s in seen:
+                dupes.append(s)
+            else:
+                seen[s] = True
+        if dupes:
+            preview = dupes[:5]
+            ellipsis = "..." if len(dupes) > 5 else ""
+            print(
+                f"WARNING: {len(dupes)} duplicate STAID(s) in --staids-file; "
+                f"de-duplicating (keeping first occurrence): {preview}{ellipsis}",
+                file=sys.stderr,
+            )
+        staids = list(seen.keys())
+    else:
+        print(
+            "ERROR: no STAIDs specified. Use --staids or --staids-file.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if not staids:
-        print("ERROR: no STAIDs specified. Use --staids or --staids-file.", file=sys.stderr)
+        print("ERROR: --staids-file resulted in an empty STAID list.", file=sys.stderr)
         sys.exit(1)
 
     out_dir = args.out_dir
