@@ -29,6 +29,7 @@ HPC host: `h2o.es.huji.ac.il`
 | `recover_usgs_iv_full_period_hourly.py --dry-run` | PASS |
 | 1-month smoke for `02073000` (Jan 2023, post-`edda406`) | PASS — 743/744 valid (1 NaN at T=0, acceptable) |
 | Full-period smoke for `02073000` (post-`edda406`) | PASS — 45,720/45,720 valid |
+| **50-basin full-period smoke (post-`8c58416`)** | **PASS — 50/50 stations, 2,224,973 valid hours, coverage 0.9733** |
 | PROJ/pyproj warning at import | NON-BLOCKING — warning observed but irrelevant for streamflow scripts |
 | Pilot manifest on HPC | NOW VERSIONED — `config/stage1_pilot_basin_manifest.csv` committed; no longer requires generated tmp path |
 | 2H-C comparison files on HPC | ABSENT — use `--skip-jan2023-comparison`; comparison will be SKIPPED |
@@ -193,6 +194,93 @@ timestamp of the requested window for this station.
 | Jan 2023 comparison | SKIPPED (`--skip-jan2023-comparison`) |
 
 100% coverage, 0 NaN. Full-period pipeline validated end-to-end on h2o.
+
+---
+
+### Smoke C — 50-basin full-period (post-`8c58416`)
+
+Run location: `/data42/omrip/Flash-NH/tmp/smoke_fullperiod_50basins`
+
+#### Recovery
+
+| Item | Value |
+|---|---|
+| Stations processed | 50 |
+| PASS / FAIL / ERROR | 50 / 0 / 0 |
+| Period per basin | `2020-10-14T00:00:00Z` to `2025-12-31T23:00:00Z` |
+| Target grid | 45,720 hourly steps/basin |
+| Total runtime | 748.1 s (~14.96 s/basin) |
+| Raw cache | 95.8 MB |
+| Canonical NCs | 26.8 MB |
+| Output footprint (post-audit) | 125 MB |
+| Negative values | 0 |
+| Failed/zero-observation chunks | 3 (`07263580` WY2026 Oct/Nov/Dec) |
+
+The 3 failed chunks are expected: `07263580` is `EXCLUDE_QC` with a late-period outage (last obs 2025-05-01). This is not a pipeline failure.
+
+#### Audit
+
+| Item | Value |
+|---|---|
+| Basins audited | 50 |
+| Total valid hours | 2,224,973 |
+| Total NaN hours | 61,027 |
+| Overall coverage | 0.9733 |
+| Basins ≥ 90% coverage | 48 / 50 |
+| Late-2025 gap flags | 3 |
+| Suspicious spike flags | 24 |
+| Jan 2023 comparison | SKIPPED (`--skip-jan2023-comparison`) |
+| Pilot roles (versioned manifest) | TRAIN 40, HOLDOUT_QC 5, EXCLUDE_QC 5 |
+
+#### Target-status distribution
+
+| target_status | Count |
+|---|---|
+| TARGET_QUALITY_REVIEW | 22 |
+| TARGET_USABLE_WITH_GAPS | 12 |
+| TARGET_READY_CONTINUOUS | 9 |
+| TARGET_ROLE_EXCLUDED | 5 |
+| TARGET_OPERATIONAL_REVIEW | 2 |
+
+| Advisory flag | True | False |
+|---|---|---|
+| `operational_readiness_flag` | 21 | 29 |
+| `historical_training_utility_flag` | 43 | 7 |
+
+#### Late-period gap basins
+
+| STAID | Last obs | Days before period end | pilot_role |
+|---|---|---|---|
+| `03298135` | 2025-11-24 16:00:00 | 37.3 | TRAIN |
+| `05372995` | 2025-12-01 12:00:00 | 30.5 | TRAIN |
+| `07263580` | 2025-05-01 04:00:00 | 244.8 | EXCLUDE_QC |
+
+#### High-review basins
+
+| STAID | pilot_role | target_status | coverage | longest_gap_h | late_gap |
+|---|---|---|---|---|---|
+| `07263580` | EXCLUDE_QC | TARGET_ROLE_EXCLUDED | 0.8698 | 5,875 | True |
+| `01390450` | TRAIN | TARGET_QUALITY_REVIEW | 0.6748 | 14,854 | False |
+| `03298135` | TRAIN | TARGET_OPERATIONAL_REVIEW | 0.9750 | 895 | True |
+| `05372995` | TRAIN | TARGET_OPERATIONAL_REVIEW | 0.9385 | 731 | True |
+| `10348850` | TRAIN | TARGET_USABLE_WITH_GAPS | 0.9425 | 905 | False |
+
+#### Interpretation
+
+**Result: PASS.** The 50-basin full-period acquisition pipeline is validated end-to-end on h2o.
+
+- Late-period gaps (`03298135`, `05372995`) are operational-readiness issues; they do not automatically exclude basins from historical training.
+- `01390450` (coverage 0.6748, longest gap 14,854 h) requires scientific review before use in training.
+- Suspicious-spike flags (24 basins) are advisory and require manual interpretation; they do not disqualify basins.
+- `07263580` (EXCLUDE_QC) is excluded from training by policy regardless of coverage.
+- The `TARGET_QUALITY_REVIEW` majority reflects conservative spike thresholds (5× p99), not a systemic pipeline problem.
+
+#### Prerequisites before scaling to full 2,843-basin run
+
+1. Exact 2,843 STAID list confirmed.
+2. Job persistence method on h2o decided (`tmux`, `screen`, or `nohup`).
+3. Decision on sequential vs. conservative external station-level parallelism (see **Parallelism and Scale-Up** section).
+4. Confirmation that h2o is acceptable for multi-hour unattended sequential runs.
 
 ---
 
