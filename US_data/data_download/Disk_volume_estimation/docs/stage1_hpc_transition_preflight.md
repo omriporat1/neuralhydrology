@@ -367,6 +367,92 @@ It is **mutually exclusive** with `--staids` — provide one or the other, not b
 
 ---
 
+## Full 2,843-Basin Recovery — Recommended Approach
+
+Use `scripts/launch_usgs_iv_recovery_shards.py` to run the full 2,843-basin recovery
+with controlled station-level parallelism. h2o has 128 cores and no SLURM, so the
+launcher runs multiple `recover_usgs_iv_full_period_hourly.py` subprocesses in parallel,
+each writing to its own shard output directory.
+
+### Why 4 shards for the first run
+
+- 4 concurrent USGS requests is polite and well within NWIS IV rate limits.
+- At ~15 s/basin sequential, 4 shards of ~711 basins each run in ~177 min instead of ~12 h.
+- Failures are isolated per shard: if one shard fails, the others continue and the
+  failed shard can be re-run individually with its own `manifests/shard_XX.csv`.
+- After one clean 4-shard run, raising to 8 shards is safe if h2o has no complaints.
+
+### Shard assignment
+
+STAIDs are split into contiguous sequential blocks by row order
+(shard_00 = rows 0–710, shard_01 = rows 711–1421, …). Block sizes differ by at most 1.
+Round-robin was not used; sequential blocks keep geographically/numerically adjacent
+basins together and simplify partial re-runs.
+
+### h2o commands — full 2,843-basin run with screen
+
+Run inside a `screen` session so the launcher survives SSH disconnects:
+
+```bash
+cd /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation
+git pull
+
+# Start a named screen session
+screen -S flashnh_2843
+
+# Inside screen: first do a dry-run to confirm shard manifests and commands
+python scripts/launch_usgs_iv_recovery_shards.py \
+    --out-root /data42/omrip/Flash-NH/tmp/stage1_full_2843 \
+    --n-shards 4 \
+    --dry-run
+
+# If dry-run PASS, launch the real run
+python scripts/launch_usgs_iv_recovery_shards.py \
+    --out-root /data42/omrip/Flash-NH/tmp/stage1_full_2843 \
+    --n-shards 4 \
+    --force
+
+# Detach from screen (keep running): Ctrl-A  D
+# Reattach later:
+screen -r flashnh_2843
+```
+
+Expected shard layout under `/data42/omrip/Flash-NH/tmp/stage1_full_2843/`:
+
+```
+manifests/
+  shard_00.csv  (~711 STAIDs)
+  shard_01.csv  (~711 STAIDs)
+  shard_02.csv  (~711 STAIDs)
+  shard_03.csv  (~710 STAIDs)
+shard_00/
+  canonical/    (711 × *_hourly.nc)
+  raw_cache/
+  logs/
+    recovery.log       (aggregate stdout from the shard subprocess)
+    <staid>_acquire.log  (per-station logs written by recovery script)
+shard_01/ ... shard_03/   (same layout)
+launcher_summary.json
+launcher_summary.md
+```
+
+After all 4 shards complete (~3 h at 4× parallel), check the launcher summary:
+
+```bash
+cat /data42/omrip/Flash-NH/tmp/stage1_full_2843/launcher_summary.md
+```
+
+Expected: `n_pass=4  n_fail=0`.  If any shard failed, re-run it individually:
+
+```bash
+python scripts/recover_usgs_iv_full_period_hourly.py \
+    --staids-file /data42/omrip/Flash-NH/tmp/stage1_full_2843/manifests/shard_02.csv \
+    --out-dir     /data42/omrip/Flash-NH/tmp/stage1_full_2843/shard_02 \
+    --force
+```
+
+---
+
 ## Scheduler Status
 
 No SLURM configuration has been set up yet for this project on h2o. The Stage 1
