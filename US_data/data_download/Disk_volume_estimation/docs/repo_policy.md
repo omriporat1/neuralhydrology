@@ -30,3 +30,30 @@ Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pi
 - Keep generated outputs out of source directories.
 - Prefer small, reviewable artifacts in `reports/` and documentation in `docs/`.
 - If a large binary file is needed for a reproducible example, document the reason before adding it.
+
+## Post-h2o Run Export Policy
+
+After any substantial h2o (or other HPC) run that produces generated outputs,
+create a compact **audit export bundle** before documenting results or proceeding
+to the next milestone.
+
+### What to include / exclude
+
+| Include | Exclude |
+|---|---|
+| Launcher summary JSON and Markdown | Canonical NetCDF files |
+| Audit CSV files (gap, quality, coverage, target status) | Raw Parquet caches |
+| Main audit / run log | Per-station acquisition logs |
+| Shard manifests | GRIB / large binaries |
+
+### Policy
+
+- Name bundles `<run_name>_audit_export.tar.gz` and place under a local `tmp/`
+  subdirectory (gitignored).
+- **Do not commit** the archive or extracted files to the repo.
+- Scientific conclusions in committed documentation must be based on **inspected
+  audit CSVs**, not terminal summaries or log tails alone.
+- Quote specific numbers from the CSV files rather than paraphrasing logs.
+
+See `docs/stage1_hpc_transition_preflight.md` → "Post-h2o Run Export Policy"
+for the canonical example export command.

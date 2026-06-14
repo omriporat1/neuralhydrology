@@ -30,6 +30,7 @@ HPC host: `h2o.es.huji.ac.il`
 | 1-month smoke for `02073000` (Jan 2023, post-`edda406`) | PASS — 743/744 valid (1 NaN at T=0, acceptable) |
 | Full-period smoke for `02073000` (post-`edda406`) | PASS — 45,720/45,720 valid |
 | **50-basin full-period smoke (post-`8c58416`)** | **PASS — 50/50 stations, 2,224,973 valid hours, coverage 0.9733** |
+| **Full 2,843-basin acquisition (post-`e362c0e`, 2026-06-13)** | **PASS — 4/4 shards rc=0, 2,843 canonical NCs, coverage 0.9652** |
 | PROJ/pyproj warning at import | NON-BLOCKING — warning observed but irrelevant for streamflow scripts |
 | Pilot manifest on HPC | NOW VERSIONED — `config/stage1_pilot_basin_manifest.csv` committed; no longer requires generated tmp path |
 | 2H-C comparison files on HPC | ABSENT — use `--skip-jan2023-comparison`; comparison will be SKIPPED |
@@ -472,3 +473,209 @@ UserWarning: pyproj unable to set database path ...
 This is non-blocking for all Flash-NH Stage 1 streamflow scripts (no geographic projection
 needed). It will be resolved when the project-local Python venv is set up with matching
 PROJ data files.
+
+---
+
+## Full 2,843-Basin Acquisition — Results (2026-06-13)
+
+Launcher commit: `e362c0e`. Audit export: `tmp/stage1_pilot_dryrun/tmp/stage1_full_2843_audit_export.tar.gz`
+(not committed; exported from h2o then inspected locally).
+
+### Recovery
+
+| Item | Value |
+|---|---|
+| Date | 2026-06-13 (12:16 UTC → 15:16 UTC) |
+| Input manifest | `config/stage1_initial_training_basin_manifest.csv` |
+| Output root | `/data42/omrip/Flash-NH/tmp/stage1_full_2843` |
+| Period | `2020-10-14T00:00:00Z` to `2025-12-31T23:00:00Z` (45,720 h/basin) |
+| Shards | 4 (711 / 711 / 711 / 710 STAIDs) |
+| Shard return codes | 0 / 0 / 0 / 0 |
+| Wall clock (wall, not CPU) | 10,780.4 s (~2 h 59 min) |
+| Canonical NCs written | 2,843 / 2,843 |
+| Output footprint | 6.6 GB |
+| Launcher result | **PASS** |
+
+Chunk-level "No timeSeries" / "Zero observations" log entries are
+**data-availability findings**, not launcher failures — all 4 shards returned rc=0
+and all 2,843 canonical files exist.
+
+### Audit
+
+| Item | Value |
+|---|---|
+| Basins audited | 2,843 |
+| Total valid hours | 125,464,270 |
+| Total NaN hours | 4,517,690 |
+| Overall coverage | 0.9652 |
+| Systematic offset flags | 0 |
+| Jan 2023 comparison | SKIPPED (`--skip-jan2023-comparison`) |
+| `pilot_role` for non-pilot basins | `UNKNOWN` (expected; `config/stage1_pilot_basin_manifest.csv` covers only the 50 pilot basins) |
+
+#### Target-status distribution
+
+| target_status | Count | Meaning |
+|---|---|---|
+| TARGET_QUALITY_REVIEW | 1,375 | Advisory: spike heuristic triggered; not auto-excluded |
+| TARGET_READY_CONTINUOUS | 702 | No flags; fully usable for training |
+| TARGET_USABLE_WITH_GAPS | 677 | Gaps present but historically useful |
+| TARGET_OPERATIONAL_REVIEW | 89 | Late-period gap; hold out of first operational subset |
+| **Total** | **2,843** | |
+
+#### Advisory flag counts
+
+| Flag | True | False |
+|---|---|---|
+| `operational_readiness_flag` | 1,379 | 1,464 |
+| `historical_training_utility_flag` | 2,754 | 89 |
+| `late_2025_gap_flag` | 89 | 2,754 |
+| `suspicious_spike_flag` | 1,406 | 1,437 |
+| `systematic_offset_flag` | 0 | 2,843 |
+
+#### Coverage thresholds
+
+| Threshold | Basins below |
+|---|---|
+| coverage < 0.99 | 1,472 |
+| coverage < 0.95 | 613 |
+| coverage < 0.90 | 251 |
+| coverage < 0.80 | 75 |
+| coverage < 0.70 | 31 |
+| coverage < 0.50 | 12 |
+
+Lowest coverage basin: `11147070` at 0.3722 (longest gap 26,249 h).
+
+#### Water-year mean coverage (across 2,843 basins)
+
+| WY | Mean coverage |
+|---|---|
+| WY2021 | 0.9619 |
+| WY2022 | 0.9610 |
+| WY2023 | 0.9695 |
+| WY2024 | 0.9849 |
+| WY2025 | 0.9552 |
+| WY2026 | 0.9399 |
+
+---
+
+### Quality-review interpretation
+
+**Do not treat `TARGET_QUALITY_REVIEW` basins as automatically unusable.**
+
+The `suspicious_spike_flag` (5× p99 threshold) is conservative by design.
+Manual inspection of hydrographs in the pilot set showed that rapid rises and
+sharp peaks are often hydrologically real — flash flood and snowmelt events
+routinely exceed 5× p99 streamflow. A spike flag alone does not indicate bad
+data.
+
+**Policy for the first NeuralHydrology training package:**
+`TARGET_QUALITY_REVIEW` basins remain eligible. The spike flag is an advisory
+priority for later targeted review; it is not an exclusion criterion at this
+stage. The 1,375 flagged basins collectively provide valuable training signal,
+especially for high-flow events.
+
+---
+
+### Operational-review interpretation
+
+`TARGET_OPERATIONAL_REVIEW` basins (89) have late-period gaps and are
+**not currently operationally ready** — they cannot produce up-to-date
+predictions because recent data is missing. They should be **held out of the
+first training target subset** unless deliberately included in a
+historical-only experiment.
+
+The 89 basins with `late_2025_gap_flag=True` map 1:1 to `historical_training_utility_flag=False`.
+Their last valid observations range from 2024-09-20 (STAID `07024200`, 467 days before
+period end) to late December 2025. These are data-availability outages, not pipeline
+failures.
+
+---
+
+### Negative streamflow findings and policy
+
+| Item | Value |
+|---|---|
+| Basins with negative qobs | 18 |
+| Total negative hourly values | 4,894 |
+| Dominant basin 1 | `02299472` — 2,605 negative values |
+| Dominant basin 2 | `04073468` — 2,054 negative values |
+| Remaining 16 basins | ≤ 95 negative values each |
+
+This is **not a large-scale acquisition failure**. Negative USGS streamflow values
+can occur due to tidal influence, backwater effects, or instrument calibration offsets.
+
+**Policy before NeuralHydrology package build:**
+
+1. Set all negative `qobs_m3s` values to NaN during the training-package build step.
+2. Consider excluding `02299472` and `04073468` from the first training package, or flag
+   them explicitly for review before inclusion. Their negative-value counts (2,605 and 2,054)
+   are large enough to potentially bias loss functions.
+3. For the remaining 16 basins, setting negative time steps to NaN is sufficient unless
+   further review reveals a broader issue.
+
+---
+
+### First NeuralHydrology training package — recommended target policy
+
+| Criterion | Action |
+|---|---|
+| `historical_training_utility_flag=True` | Include (2,754 basins) |
+| `TARGET_QUALITY_REVIEW` | Include; treat spike flag as advisory for later review |
+| `TARGET_OPERATIONAL_REVIEW` (89) | Exclude from first package; include in historical-only experiments |
+| Negative qobs values | Set to NaN during package build |
+| `02299472`, `04073468` | Optionally exclude from first package pending review |
+
+**Effective first-package candidate count: 2,754 basins**
+(all `historical_training_utility_flag=True`, inclusive of `TARGET_QUALITY_REVIEW`).
+
+---
+
+## Post-h2o Run Export Policy
+
+After any substantial h2o run that produces generated outputs, create a compact
+**audit export bundle** before committing documentation or proceeding to the next
+milestone. The export should happen on h2o and be transferred locally for inspection.
+
+### What to include in an export bundle
+
+| Include | Exclude |
+|---|---|
+| `launcher_summary.json` / `.md` | Canonical NetCDF files (too large) |
+| Audit CSV files (gap, quality, coverage, target status) | Raw Parquet caches |
+| Main audit log (`audit_*.log`) | Per-station acquisition logs |
+| Shard manifests (`manifests/shard_XX.csv`) | GRIB / GeoTIFF / large binaries |
+
+### Naming convention
+
+```
+<run_name>_audit_export.tar.gz
+```
+
+Place in a local `tmp/` subdirectory (gitignored). Do not commit the archive or
+extracted files.
+
+### Authorship
+
+Scientific conclusions in committed documentation must be based on **inspected
+audit files**, not terminal summaries alone. Quote specific numbers from the
+CSV files rather than paraphrasing log output.
+
+### Example export command (on h2o)
+
+```bash
+cd /data42/omrip/Flash-NH/tmp
+
+tar czf stage1_full_2843_audit_export.tar.gz \
+    stage1_full_2843/launcher_summary.json \
+    stage1_full_2843/launcher_summary.md \
+    stage1_full_2843/audit_2843.log \
+    stage1_full_2843/audit/gap_audit.csv \
+    stage1_full_2843/audit/per_basin_coverage.csv \
+    stage1_full_2843/audit/per_water_year_coverage.csv \
+    stage1_full_2843/audit/quality_audit.csv \
+    stage1_full_2843/audit/target_status.csv
+
+# Transfer to local machine
+scp h2o.es.huji.ac.il:/data42/omrip/Flash-NH/tmp/stage1_full_2843_audit_export.tar.gz \
+    tmp/stage1_pilot_dryrun/tmp/
+```

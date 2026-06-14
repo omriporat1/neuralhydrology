@@ -1,11 +1,30 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-09
+Last updated: 2026-06-14
 
 ## Current milestone
 
-Stage 1 Milestone 2G complete. NeuralHydrology January pilot package built and audited.
-**Next: Milestone 2H — Streamflow recovery for 22 missing CAMELSH basins.**
+Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
+**Next: Stage 1 target-policy and NeuralHydrology full-period package build.**
+
+See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
+target-policy recommendations.
+
+### Quick summary
+
+- 2,843 canonical hourly NetCDF files on h2o at `/data42/omrip/Flash-NH/tmp/stage1_full_2843/`
+- Coverage 0.9652 overall; 2,754 basins with `historical_training_utility_flag=True`
+- 89 basins with late-period gaps (`TARGET_OPERATIONAL_REVIEW`) — hold out of first package
+- 18 basins with negative qobs — set to NaN during package build
+- `TARGET_QUALITY_REVIEW` (1,375 basins): eligible for training; spike flag is advisory only
+- No systematic offset issues (0 basins)
+
+### Immediate next steps
+
+1. Define target-policy configuration for the NeuralHydrology package builder.
+2. Build the full-period NeuralHydrology package (2,754-basin subset or all 2,843 with NaN-clamp).
+3. Optionally exclude `02299472` and `04073468` from the first package pending review.
+4. Run first NeuralHydrology training experiment.
 
 ---
 
