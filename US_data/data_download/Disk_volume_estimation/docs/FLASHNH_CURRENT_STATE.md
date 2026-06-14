@@ -27,12 +27,15 @@ The following can proceed **without h2o** and without heavy execution:
 2. Package-builder script design for the full-period NeuralHydrology package.
 
 The following are **blocked** pending h2o operations preflight
-(`docs/stage1_h2o_operations_preflight.md`):
+(`docs/stage1_h2o_operations_preflight.md`). Partial answers received (2026-06-14):
+`/data42` is not backed up; ~20 TB overall volume target; `/data42/hydrolab/Data`
+is the likely shared data root. Scheduler policy, CPU limits, GPU, and promotion
+policy remain open.
 
-3. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM).
-4. Basin-average preprocessing.
-5. NeuralHydrology training.
-6. Promotion of curated data to shared lab storage.
+3. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM) — gate G1 BLOCKED.
+4. Basin-average preprocessing — gate G2 BLOCKED.
+5. NeuralHydrology training — gate G3 BLOCKED.
+6. Promotion of curated data to shared lab storage — gate G4 BLOCKED.
 
 **Do not initiate heavy h2o workloads until the operations preflight gates are cleared.**
 
