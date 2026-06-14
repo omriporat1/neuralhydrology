@@ -21,10 +21,20 @@ target-policy recommendations.
 
 ### Immediate next steps
 
-1. Define target-policy configuration for the NeuralHydrology package builder.
-2. Build the full-period NeuralHydrology package (2,754-basin subset or all 2,843 with NaN-clamp).
-3. Optionally exclude `02299472` and `04073468` from the first package pending review.
-4. Run first NeuralHydrology training experiment.
+The following can proceed **without h2o** and without heavy execution:
+
+1. Target-policy configuration design (basin inclusion rules, negative-qobs handling).
+2. Package-builder script design for the full-period NeuralHydrology package.
+
+The following are **blocked** pending h2o operations preflight
+(`docs/stage1_h2o_operations_preflight.md`):
+
+3. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM).
+4. Basin-average preprocessing.
+5. NeuralHydrology training.
+6. Promotion of curated data to shared lab storage.
+
+**Do not initiate heavy h2o workloads until the operations preflight gates are cleared.**
 
 ---
 

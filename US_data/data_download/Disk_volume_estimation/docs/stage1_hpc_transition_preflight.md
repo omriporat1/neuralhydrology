@@ -456,9 +456,15 @@ python scripts/recover_usgs_iv_full_period_hourly.py \
 
 ## Scheduler Status
 
-No SLURM configuration has been set up yet for this project on h2o. The Stage 1
-50-basin full-period acquisition will be the first scheduled job array. Script design
-is ready; submission scripts to be written in the next milestone (2I-C or equivalent).
+No scheduler (`sbatch`, `squeue`, `sinfo`, `qsub`, `bsub`) was detected in the PATH
+during the Stage 1 streamflow preflight. The 2,843-basin acquisition used `screen` +
+the 4-shard Python launcher (`launch_usgs_iv_recovery_shards.py`), which was
+sufficient for that workload.
+
+Before heavier spatial downloads or NeuralHydrology training are initiated on h2o,
+scheduler availability, CPU fair-use limits, GPU access, and storage policy must be
+clarified. See `docs/stage1_h2o_operations_preflight.md` for the full checklist and
+decision gates.
 
 ---
 
