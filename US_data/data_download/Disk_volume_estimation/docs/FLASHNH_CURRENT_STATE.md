@@ -7,7 +7,8 @@ Last updated: 2026-06-15
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
 h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026-06-15).
-**Next: target-cleaned builder design, then Moriah transfer layout.**
+Target package builder + auditor implemented and smoke-tested locally (2026-06-15, 5 basins PASS).
+**Next: full 2,843-basin target package build on h2o, then Moriah transfer layout.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -47,12 +48,28 @@ See `docs/stage1_h2o_operations_preflight.md` for full gate status.
 
 See `docs/stage1_environment.md` for full install notes, workaround, and CUDA caveat details.
 
+### Target package builder status (as of 2026-06-15)
+
+Milestone 2J-B: scripts implemented and smoke-tested.
+
+- **Builder:** `scripts/build_stage1_target_package.py`
+- **Auditor:** `scripts/audit_stage1_target_package.py`
+- **Doc:** `docs/stage1_target_package_builder.md`
+- **Smoke result:** 5/5 PASS — 0 errors, 0 warnings
+  - 0 negative values in smoke set (pilot basins have clean data)
+  - 2,591 existing NaN preserved (no gap filling)
+  - SHA-256 checksums, manifest, and provenance all written
+- **Special-review halt logic:** implemented (02299472, 04073468 require explicit override)
+- **Full h2o build:** not yet run — requires explicit approval and activation of h2o env
+
+See `docs/stage1_target_package_builder.md` for full commands and acceptance criteria.
+
 ### Immediate next steps
 
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **Target-cleaned builder design** — design the script that consumes the 2,843
-   canonical NC files + `config/stage1_target_policy.yaml` and produces the
-   NeuralHydrology-format target dataset. Local code design, no heavy execution.
+2. **Full 2,754-basin target build on h2o** — run builder on h2o with `--status-csv`
+   enforcing full policy. Resolve special-review disposition for 02299472 / 04073468.
+   Run auditor on output. Requires explicit approval before launching.
 3. **Moriah transfer layout design** — define directory structure and transfer procedure
    for moving assembled NH packages from h2o to Moriah.
 

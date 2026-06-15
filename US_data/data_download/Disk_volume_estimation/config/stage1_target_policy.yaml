@@ -135,4 +135,4 @@ package_build_status:
   block_reason: >
     Heavy h2o execution is on hold pending scheduler/CPU/GPU/storage policy
     clarification (docs/stage1_h2o_operations_preflight.md, gates G1-G6).
-  local_smoke_permitted: false  # Change to true only with explicit approval.
+  local_smoke_permitted: true   # Approved 2026-06-15 for Milestone 2J-B validation.
