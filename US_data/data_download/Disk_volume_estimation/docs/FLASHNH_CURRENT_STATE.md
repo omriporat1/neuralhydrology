@@ -7,8 +7,8 @@ Last updated: 2026-06-15
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
 h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026-06-15).
-Target package builder + auditor implemented and smoke-tested locally (2026-06-15, 5 basins PASS).
-**Next: full 2,843-basin target package build on h2o, then Moriah transfer layout.**
+Target package builder + auditor implemented, locally smoke-tested, and h2o policy-smoke PASS (2026-06-15).
+**Next: resolve special-review disposition (02299472/04073468), then full 2,754-basin target build on h2o.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -60,17 +60,23 @@ Milestone 2J-B: scripts implemented and smoke-tested.
   - 2,591 existing NaN preserved (no gap filling)
   - SHA-256 checksums, manifest, and provenance all written
 - **Special-review halt logic:** implemented (02299472, 04073468 require explicit override)
-- **Full h2o build:** not yet run — requires explicit approval and activation of h2o env
+- **h2o policy smoke:** PASS (2026-06-15) — 4 basins, 01135300 excluded (hist_util=False),
+  08010000 cleaned 95 neg→NaN; audit 0 errors/0 warnings; 02299472 halt confirmed (EXIT 1)
+  - `canonical_merged` confirmed: 2,843 flat NCs, 2,843 unique STAIDs, 0 recursive duplicates
+- **Full h2o build:** not yet run — requires explicit approval; resolve 02299472/04073468 disposition first
 
 See `docs/stage1_target_package_builder.md` for full commands and acceptance criteria.
 
 ### Immediate next steps
 
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **Full 2,754-basin target build on h2o** — run builder on h2o with `--status-csv`
-   enforcing full policy. Resolve special-review disposition for 02299472 / 04073468.
-   Run auditor on output. Requires explicit approval before launching.
-3. **Moriah transfer layout design** — define directory structure and transfer procedure
+2. **Resolve special-review disposition** — decide include (`--allow-review-required`) or
+   exclude (`--exclude-staids`) for 02299472 (2,605 neg) and 04073468 (2,054 neg).
+   Must be resolved before the full build can run.
+3. **Full 2,754-basin target build on h2o** — run builder on h2o with `--status-csv`
+   and resolved special-review flags. Run auditor on output.
+   Requires explicit approval before launching.
+4. **Moriah transfer layout design** — define directory structure and transfer procedure
    for moving assembled NH packages from h2o to Moriah.
 
 The following are **conditionally unblocked** (etiquette rules apply):

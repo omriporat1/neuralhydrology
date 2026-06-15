@@ -186,7 +186,7 @@ cd /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estim
 screen -S flashnh_target_build
 
 python scripts/build_stage1_target_package.py \
-    --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843 \
+    --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843/canonical_merged \
     --policy config/stage1_target_policy.yaml \
     --status-csv /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
     --out-dir /data42/omrip/Flash-NH/tmp/stage1_target_package_v001 \
@@ -203,6 +203,69 @@ python scripts/audit_stage1_target_package.py \
 Note: `--expected-basins 2754` reflects the policy's `effective_candidate_count`
 (all basins with `historical_training_utility_flag=True`). Adjust if special-review
 basins `02299472` / `04073468` are excluded (→ 2,752).
+
+---
+
+## h2o policy smoke (2026-06-15)
+
+Smoke run on h2o against the real 2,843-basin `canonical_merged` tree with full
+`--status-csv` enforcement. Validates policy filtering, negative-qobs cleaning,
+and special-review halt before the full build.
+
+**canonical_merged verified:** 2,843 flat NCs, 2,843 unique STAIDs, 0 recursive duplicates.
+
+**Build command (5 candidates → 4 included):**
+
+```bash
+python scripts/build_stage1_target_package.py \
+    --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843/canonical_merged \
+    --policy config/stage1_target_policy.yaml \
+    --status-csv /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
+    --out-dir /data42/omrip/Flash-NH/tmp/stage1_target_package_policy_smoke \
+    --staids 01019000,01049500,01073319,08010000,01135300 \
+    --force
+```
+
+**Build result: PASS**
+
+| Basin | Status | Valid hours | NaN hours | Neg cleaned |
+|---|---|---|---|---|
+| `01019000` | TARGET_READY_CONTINUOUS | 45,205 | 515 | 0 |
+| `01049500` | TARGET_READY_CONTINUOUS | 45,714 | 6 | 0 |
+| `01073319` | TARGET_QUALITY_REVIEW | 43,091 | 2,629 | 0 |
+| `08010000` | TARGET_QUALITY_REVIEW | 43,712 | 2,008 | **95** |
+| ~~`01135300`~~ | TARGET_OPERATIONAL_REVIEW | — | — | excluded (hist_util=False) |
+
+- NaN before / after: 5,063 / 5,158 (delta = 95 = `08010000` neg-cleaned)
+- Valid hours total: 177,722
+- Build time: 1.0s
+
+**Audit result: PASS — 0 errors, 0 warnings**
+
+| Check | Result |
+|---|---|
+| Required package files | PASS |
+| Basin count (4 == 4) | PASS |
+| SHA-256 checksums (4/4) | PASS |
+| Per-basin NC audit (4/4) | PASS |
+| `01135300` absent (89 held-out, 0 in package) | PASS |
+| Special-review basins `02299472`/`04073468` absent | PASS |
+| TARGET_QUALITY_REVIEW in package: 2 (`01073319`, `08010000`) | advisory |
+
+**Special-review halt test: PASS (exit code 1)**
+
+```bash
+python scripts/build_stage1_target_package.py \
+    --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843/canonical_merged \
+    --policy config/stage1_target_policy.yaml \
+    --status-csv /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
+    --out-dir /data42/omrip/Flash-NH/tmp/stage1_target_package_special_review_test \
+    --staids 02299472 --force
+```
+
+`02299472` passes policy filter (hist_util=True, TARGET_QUALITY_REVIEW), then triggers
+`review_required` halt. Builder exited 1; no NC files written. To include or exclude it
+in the full build, pass `--allow-review-required 02299472` or `--exclude-staids 02299472`.
 
 ---
 
@@ -230,10 +293,13 @@ basins `02299472` / `04073468` are excluded (→ 2,752).
    # Expected: BUILD HALTED by special-review policy
    ```
 
-4. **Sharded h2o layout**: The builder's `_find_canonical_ncs()` function uses
-   `rglob('*_hourly.nc')` to find canonical NCs recursively under `stage1_full_2843/`.
-   This covers both flat and sharded layouts. First run on h2o should use a
-   smoke (e.g., `--staids 02073000,01585200,02077670`) before scaling to 2,754 basins.
+4. **Canonical NC layout on h2o**: The acquisition pipeline writes NCs to both
+   per-shard directories (`shard_NN/canonical/`) and a flat merged copy at
+   `canonical_merged/`. Using the broad root `stage1_full_2843/` as `--canonical-dir`
+   with `rglob` finds 5,686 NCs (2 × 2,843); `nc_map` silently deduplicates
+   (last-wins), which is correct but ambiguous. Always use
+   `stage1_full_2843/canonical_merged` as `--canonical-dir`. Confirmed flat: 2,843,
+   recursive: 2,843, unique STAIDs: 2,843 (2026-06-15).
 
 ---
 
