@@ -6,8 +6,8 @@ Last updated: 2026-06-15
 
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
-h2o preprocessing environment spec created (`envs/environment-stage1-h2o.yml`, 2026-06-15).
-**Next: install h2o env on h2o, then target-cleaned builder design, Moriah transfer layout.**
+h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026-06-15).
+**Next: target-cleaned builder design, then Moriah transfer layout.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -34,16 +34,26 @@ Key policy clarifications from PI:
 
 See `docs/stage1_h2o_operations_preflight.md` for full gate status.
 
+### h2o environment status (as of 2026-06-15)
+
+- **Prefix:** `/data42/omrip/Flash-NH/envs/flashnh-stage1`
+- **Python:** `3.11.15` | **Size:** `7.0 G`
+- **Smoke test:** ALL PASS — core, geospatial, dask, cfgrib/eccodes, NetCDF, Parquet, neuralhydrology
+- **Log:** `/data42/omrip/Flash-NH/tmp/env_smoke_20260615T120918Z/env_smoke.log`
+- **Activation on h2o:** `source /opt/conda/etc/profile.d/conda.sh && conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1`
+- **Caveat:** `neuralhydrology` pip-pulled CUDA torch (2.12.0+cu130); env is 7.0 G vs lean CPU intent.
+  `cuda_available=False` on h2o — functionally harmless. Future spec revision to use `--no-deps` or CPU torch.
+- **h2o is not for NeuralHydrology training.** Training remains designated for Moriah cluster.
+
+See `docs/stage1_environment.md` for full install notes, workaround, and CUDA caveat details.
+
 ### Immediate next steps
 
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **Install h2o env** — run `mamba/conda env create` on h2o using
-   `envs/environment-stage1-h2o.yml`, activate, run smoke tests from
-   `docs/stage1_environment.md`. Environment spec and docs committed.
-3. **Target-cleaned builder design** — design the script that consumes the 2,843
+2. **Target-cleaned builder design** — design the script that consumes the 2,843
    canonical NC files + `config/stage1_target_policy.yaml` and produces the
    NeuralHydrology-format target dataset. Local code design, no heavy execution.
-4. **Moriah transfer layout design** — define directory structure and transfer procedure
+3. **Moriah transfer layout design** — define directory structure and transfer procedure
    for moving assembled NH packages from h2o to Moriah.
 
 The following are **conditionally unblocked** (etiquette rules apply):

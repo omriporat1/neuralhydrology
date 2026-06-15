@@ -54,7 +54,7 @@ the [Moriah Cluster (Training Destination)](#moriah-cluster-training-destination
 | CUDA / PyTorch | **Answered** | Not applicable on h2o; `torch` not installed; not needed for preprocessing workloads |
 | CPU/process fair-use | **Partially answered** | CPU compute allowed; see Compute Etiquette section below |
 | Training location | **Answered** | Moriah GPU cluster — not h2o; see Moriah section below |
-| Python environment | **Partially answered** | Project-local conda env planned; proposed path `/data42/omrip/Flash-NH/envs/flashnh-stage1`; `envs/environment-stage1-h2o.yml` is the next repo artifact |
+| Python environment | **Answered** | Installed at `/data42/omrip/Flash-NH/envs/flashnh-stage1`; Python 3.11.15; 7/7 smoke PASS (2026-06-15); activation requires `source /opt/conda/etc/profile.d/conda.sh` first |
 | Promotion approval | **Partially answered** | Subfolders under `/data42/hydrolab/Data` allowed with reproducibility policy; formal write-access and convention confirmation still needed |
 
 ### Key cautions from partial answers
@@ -144,25 +144,43 @@ environment. The two envs have different dependency trees:
 
 ## Environment Strategy
 
-The current shared env (`iacpy3_2025`) is used for smoke tests and acquisition.
-A dedicated project environment is the next infrastructure milestone.
+**h2o preprocessing env: INSTALLED AND SMOKE-TESTED (2026-06-15)**
 
-| Item | Planned |
+| Item | Status |
 |---|---|
-| h2o preprocessing env path | `/data42/omrip/Flash-NH/envs/flashnh-stage1` |
-| h2o env spec file (repo) | `envs/environment-stage1-h2o.yml` |
-| Moriah training env | Separate design; after h2o env is stable |
+| h2o preprocessing env path | `/data42/omrip/Flash-NH/envs/flashnh-stage1` ✅ |
+| h2o env spec file (repo) | `envs/environment-stage1-h2o.yml` ✅ committed |
+| Python version | `3.11.15` ✅ |
+| Env size | `7.0 G` (see CUDA torch caveat below) |
+| All smoke checks | **7/7 PASS** ✅ |
+| Smoke log | `/data42/omrip/Flash-NH/tmp/env_smoke_20260615T120918Z/env_smoke.log` |
+| Documentation | `docs/stage1_environment.md` ✅ |
+| Moriah training env | Separate design; after Moriah access confirmed |
 | Moriah env spec file (repo) | `envs/environment-stage1-moriah.yml` (future) |
-| Documentation | `docs/stage1_environment.md` (future) |
 
-**Spec committed (2026-06-15):** `envs/environment-stage1-h2o.yml` — Python 3.11,
-conda-forge primary channel, full geospatial + GRIB stack, no GPU/PyTorch.
-See `docs/stage1_environment.md` for install command, activation, smoke tests,
-and GRIB fallback strategy.
+**Install workaround (h2o-specific):** `mamba` was broken (`libmamba.so.4` load error);
+default conda solver hit a permission error on `/opt/conda/pkgs/cache/`. Successful command:
 
-**Next env step:** Install the env on h2o under `/data42/omrip/Flash-NH/envs/flashnh-stage1`
-and run the smoke tests. All future acquisition, preprocessing, and builder runs on h2o
-should use this env rather than the shared `iacpy3_2025`.
+```bash
+export CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs
+conda env create --solver classic \
+    --file envs/environment-stage1-h2o.yml \
+    --prefix /data42/omrip/Flash-NH/envs/flashnh-stage1
+```
+
+**Activation on h2o** requires sourcing conda first (non-login shells):
+
+```bash
+source /opt/conda/etc/profile.d/conda.sh
+conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
+```
+
+**CUDA torch caveat:** `neuralhydrology` pip-installed `torch==2.12.0+cu130` and NVIDIA
+packages, making the env 7.0 G. `torch.cuda.is_available()` = `False` on h2o — CUDA is
+inert. Future spec revision will use `--no-deps` or a CPU-only torch to keep the env lean.
+**h2o is not for NeuralHydrology training** — training remains designated for Moriah.
+
+See `docs/stage1_environment.md` for full install notes, smoke test results, and mitigation plan.
 
 ---
 
@@ -489,12 +507,12 @@ Notes:
 
 **Bulk CPU/storage work on h2o is conditionally unblocked** (etiquette rules apply).
 **Training is not planned on h2o** — that goes to Moriah.
+**h2o preprocessing env is installed and smoke-tested** — use `flashnh-stage1` for all future h2o work.
 
 Unblocked work that can proceed now:
 
-1. **h2o environment setup** — create `envs/environment-stage1-h2o.yml`, install the
-   project conda env at `/data42/omrip/Flash-NH/envs/flashnh-stage1`, document in
-   `docs/stage1_environment.md`. This is the next infrastructure milestone.
+1. ~~**h2o environment setup**~~ — **DONE (2026-06-15)**. Env at
+   `/data42/omrip/Flash-NH/envs/flashnh-stage1`, all 7 smoke checks PASS.
 2. **Target-cleaned builder design** — design the script that consumes the 2,843
    canonical NC files + `config/stage1_target_policy.yaml` and produces the
    NeuralHydrology-format target dataset. Local code design, no heavy execution.

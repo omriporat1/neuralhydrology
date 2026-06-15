@@ -2,6 +2,10 @@
 
 Last updated: 2026-06-15
 
+**Install status: INSTALLED AND SMOKE-TESTED (2026-06-15)**
+Smoke log: `/data42/omrip/Flash-NH/tmp/env_smoke_20260615T120918Z/env_smoke.log`
+All 7 smoke checks PASS. See [Smoke test results](#smoke-test-results) below.
+
 ---
 
 ## Overview
@@ -10,9 +14,15 @@ This document describes the dedicated conda environment for Flash-NH Stage 1
 preprocessing work on h2o (`h2o.es.huji.ac.il`).
 
 The environment is intentionally scoped to **CPU preprocessing and data work only**.
-It does not include GPU libraries, PyTorch, or NeuralHydrology training dependencies.
+It does not include intentional GPU libraries or NeuralHydrology training dependencies.
 Those belong in a separate Moriah training environment (`envs/environment-stage1-moriah.yml`,
 to be created when Moriah access is confirmed).
+
+> **Note:** The current installed env (7.0 G) is larger than intended because `neuralhydrology`
+> pulled in a CUDA-enabled `torch==2.12.0+cu130` and associated NVIDIA packages via pip.
+> `torch.cuda.is_available()` returns `False` on h2o (no GPU), so this is harmless for
+> preprocessing work. A future spec revision should install `neuralhydrology --no-deps`
+> or pin a CPU-only torch to keep the h2o env lean. See [Known risks](#known-risks) for details.
 
 ---
 
@@ -70,6 +80,31 @@ Primary channel: `conda-forge`
 
 ## Install command
 
+### What actually worked on h2o (2026-06-15)
+
+Two failures occurred before the successful install:
+
+1. **`mamba` failed** — `/opt/conda/bin/mamba` could not load `libmamba.so.4` (broken
+   system mamba installation on h2o).
+2. **`conda` default solver failed** — the default libmamba solver hit a shared
+   package-cache permission error under `/opt/conda/pkgs/cache/`.
+
+**Successful workaround:**
+
+```bash
+export CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs
+conda env create \
+    --solver classic \
+    --file /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation/envs/environment-stage1-h2o.yml \
+    --prefix /data42/omrip/Flash-NH/envs/flashnh-stage1
+```
+
+Two key flags: `--solver classic` bypasses the broken libmamba solver; setting
+`CONDA_PKGS_DIRS` redirects the package cache to a location where the user has write
+access.
+
+### Original install guidance (for reference / future reinstalls)
+
 **Preferred — mamba (faster solver):**
 
 ```bash
@@ -78,15 +113,17 @@ mamba env create \
     --prefix /data42/omrip/Flash-NH/envs/flashnh-stage1
 ```
 
-**Fallback — conda (if mamba is unavailable):**
+**Fallback — conda classic (use this on h2o):**
 
 ```bash
+export CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs
 conda env create \
+    --solver classic \
     --file /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation/envs/environment-stage1-h2o.yml \
     --prefix /data42/omrip/Flash-NH/envs/flashnh-stage1
 ```
 
-If neither `mamba` nor `conda` is available in PATH, check for `micromamba`:
+If micromamba is available and mamba/conda both fail:
 
 ```bash
 micromamba env create \
@@ -98,11 +135,19 @@ micromamba env create \
 
 ## Activation
 
+On h2o, conda is not automatically initialized in non-login shells. The `conda activate`
+command will fail with "CommandNotFoundError" unless conda is sourced first:
+
 ```bash
+source /opt/conda/etc/profile.d/conda.sh
 conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
 ```
 
-Or, if using micromamba:
+This two-step sequence is required in fresh SSH sessions and `screen` windows on h2o.
+Add `source /opt/conda/etc/profile.d/conda.sh` to your `.bashrc` or to the top of any
+`screen`-launched script to avoid the error.
+
+If using micromamba:
 
 ```bash
 micromamba activate /data42/omrip/Flash-NH/envs/flashnh-stage1
@@ -110,9 +155,34 @@ micromamba activate /data42/omrip/Flash-NH/envs/flashnh-stage1
 
 ---
 
+## Smoke test results
+
+**Status: ALL PASS (2026-06-15)**
+Log: `/data42/omrip/Flash-NH/tmp/env_smoke_20260615T120918Z/env_smoke.log`
+Python: `3.11.15` | Env size: `7.0 G` | `git status --short`: clean after smoke
+
+| Check | Result |
+|---|---|
+| `core_imports` (numpy, pandas, xarray, netCDF4, pyarrow, requests, yaml) | PASS |
+| `geospatial_imports` (geopandas, rasterio, pyproj, shapely) | PASS |
+| `dask_imports` | PASS |
+| `grib_imports_cfgrib_eccodes` | PASS |
+| `netcdf_write_read_tmp` | PASS |
+| `parquet_write_read_tmp` | PASS |
+| `neuralhydrology_import_only` | PASS |
+| `torch_import_check` (`torch==2.12.0+cu130`; `cuda_available=False`) | PASS |
+
+> **Torch/CUDA note:** `neuralhydrology` pip-installed a CUDA-enabled torch (2.12.0+cu130)
+> and NVIDIA packages, inflating the env to 7.0 G. `torch.cuda.is_available()` returns
+> `False` on h2o — no GPU hardware is present, so CUDA is inert. This is functionally
+> harmless for preprocessing but differs from the lean CPU-only intent. See
+> [Known risks](#known-risks) for the planned mitigation.
+
+---
+
 ## Smoke test
 
-Run these after installing to confirm the environment is functional.
+Run these after a fresh install to confirm the environment is functional.
 All commands should complete without error.
 
 ### Core imports
@@ -207,17 +277,27 @@ Both `pyogrio` and `fiona` are included; `pyogrio` is the faster modern reader a
 `geopandas ≥ 0.13` uses it by default. If there is a conflict between them, remove
 `fiona` — `pyogrio` covers the required use cases.
 
-### neuralhydrology (pip install on h2o)
+### neuralhydrology + CUDA torch (known oversizing issue)
 
-`neuralhydrology` is installed via pip for import-only use (reading configs, testing
-package structure). No training will run on h2o. If the pip install fails due to a
-missing torch wheel, install neuralhydrology without its optional extras:
+`neuralhydrology` is installed via pip for import-only use on h2o; no training will run.
+On the 2026-06-15 install, pip resolved `neuralhydrology`'s dependencies and pulled in
+`torch==2.12.0+cu130` plus associated NVIDIA CUDA packages (~3–4 G of the 7.0 G total).
+`torch.cuda.is_available()` returns `False` because h2o has no GPU, so CUDA is inert.
 
-```bash
-pip install neuralhydrology --no-deps
-```
+This is acceptable for now, but a future revision of `environment-stage1-h2o.yml` should
+avoid the oversizing. Planned mitigation options (choose one at revision time):
 
-and install the required non-GPU deps manually if needed.
+1. `pip install neuralhydrology --no-deps` and declare only the non-torch extras manually.
+2. Pin `torch` to a CPU-only wheel before installing neuralhydrology:
+   ```bash
+   pip install torch --index-url https://download.pytorch.org/whl/cpu
+   pip install neuralhydrology
+   ```
+3. Remove `neuralhydrology` from the h2o spec entirely and install it only on Moriah,
+   where GPU torch is needed anyway.
+
+Until this is addressed, the 7.0 G env size and CUDA-enabled torch on h2o are documented
+as a known caveat, not a blocker.
 
 ---
 
@@ -241,3 +321,4 @@ from this env.
 | Date | Change |
 |---|---|
 | 2026-06-15 | Initial spec created; Python 3.11, conda-forge primary channel |
+| 2026-06-15 | Install completed on h2o; all 7 smoke checks PASS; mamba/solver/cache workaround documented; CUDA torch caveat added |
