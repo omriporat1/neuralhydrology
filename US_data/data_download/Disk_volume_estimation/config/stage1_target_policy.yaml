@@ -1,0 +1,138 @@
+# Flash-NH Stage 1 — Target Policy Configuration
+# policy_name: stage1_target_policy_v001
+#
+# Machine-readable design input for the Stage 1 full-period NeuralHydrology
+# package builder.  This file does NOT create or modify data.  It records the
+# agreed target-inclusion, cleaning, and special-review rules so that the
+# package builder reads policy from config rather than hard-coding decisions.
+#
+# See docs/stage1_target_policy.md for the full rationale.
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+policy_name: stage1_target_policy_v001
+policy_version: "1"
+created: "2026-06-15"
+purpose: >
+  First full-period NeuralHydrology target policy for Stage 1 Flash-NH.
+  Defines basin inclusion, qobs cleaning, and special-review rules to be
+  consumed by the package builder.  Does not execute any data transformation.
+
+target_period_start_utc: "2020-10-14T00:00:00Z"
+target_period_end_utc:   "2025-12-31T23:00:00Z"
+target_grid_hours: 45720  # len(pd.date_range("2020-10-14", "2025-12-31 23:00", freq="h"))
+
+source_manifest: "config/stage1_initial_training_basin_manifest.csv"
+source_h2o_acquisition_root: "/data42/omrip/Flash-NH/tmp/stage1_full_2843"
+source_h2o_audit_root:       "/data42/omrip/Flash-NH/tmp/stage1_full_2843/audit"
+
+# Audit CSV files consumed by the package builder (relative to source_h2o_audit_root)
+audit_files:
+  target_status:       "target_status.csv"
+  gap_audit:           "gap_audit.csv"
+  quality_audit:       "quality_audit.csv"
+  per_basin_coverage:  "per_basin_coverage.csv"
+
+# ---------------------------------------------------------------------------
+# Expected audit counts (from 2026-06-13 h2o run, commit e362c0e)
+# Used for sanity-checking the audit CSVs before running the package builder.
+# ---------------------------------------------------------------------------
+expected_counts:
+  total_acquired_basins: 2843
+  canonical_nc_files: 2843
+  historical_training_utility_true: 2754
+  historical_training_utility_false: 89
+  target_status_counts:
+    TARGET_QUALITY_REVIEW: 1375
+    TARGET_READY_CONTINUOUS: 702
+    TARGET_USABLE_WITH_GAPS: 677
+    TARGET_OPERATIONAL_REVIEW: 89
+  negative_qobs_basins: 18
+  negative_qobs_total_hours: 4894
+  dominant_negative_qobs_basins:
+    "02299472": 2605
+    "04073468": 2054
+
+# ---------------------------------------------------------------------------
+# Inclusion policy
+# ---------------------------------------------------------------------------
+inclusion:
+  # Primary gate: include basins with historical_training_utility_flag == True.
+  # This covers TARGET_QUALITY_REVIEW + TARGET_READY_CONTINUOUS + TARGET_USABLE_WITH_GAPS.
+  # It excludes TARGET_OPERATIONAL_REVIEW (all 89 have historical_training_utility_flag=False).
+  include_if_historical_utility: true
+
+  # Explicitly hold out TARGET_OPERATIONAL_REVIEW basins (late-period gaps).
+  # These 89 basins are not operationally ready and should not enter the first
+  # training target subset.  They may be included in future historical-only experiments.
+  exclude_status:
+    - TARGET_OPERATIONAL_REVIEW
+
+  # TARGET_QUALITY_REVIEW basins remain eligible.
+  # The suspicious_spike_flag heuristic (5× p99) is conservative; rapid rises and
+  # sharp peaks are often hydrologically real flash-flood or snowmelt signals.
+  # The flag is advisory only — not an automatic exclusion criterion at this stage.
+  quality_review_eligible: true
+  spike_flag_is_advisory: true
+
+  # Effective first-package candidate count before special-review handling:
+  # 2,754 basins (all with historical_training_utility_flag=True).
+  effective_candidate_count: 2754
+
+# ---------------------------------------------------------------------------
+# Target-cleaning policy (applied during package build, not here)
+# ---------------------------------------------------------------------------
+target_cleaning:
+  # Negative streamflow values are physically impossible for most USGS gauges.
+  # Set all negative qobs values to NaN during package build.
+  set_negative_to_nan: true
+
+  # All other NaN values are preserved as-is.
+  preserve_existing_nan: true
+
+  # No gap filling, interpolation, or imputation at any point.
+  interpolation: none
+  gap_filling: none
+  imputation: none
+
+  # Non-negative observed qobs values are not altered.
+  alter_positive_obs: false
+
+# ---------------------------------------------------------------------------
+# Special-review policy
+# ---------------------------------------------------------------------------
+special_review:
+  # These two basins have the largest counts of negative qobs values.
+  # They are flagged here so the package builder can surface them explicitly
+  # rather than silently include or exclude.
+  # Default recommendation: require review before including in the first package.
+  # The config field 'first_package_action' controls what the builder does:
+  #   'include_after_nan_clamp' — include with negative values set to NaN
+  #   'exclude'                 — exclude from this package version
+  #   'review_required'         — builder must raise an error or warning and halt
+  #                               unless overridden by the caller
+  dominant_negative_qobs_basins:
+    "02299472":
+      n_negative_values: 2605
+      first_package_action: review_required
+    "04073468":
+      n_negative_values: 2054
+      first_package_action: review_required
+
+  # For the remaining 16 basins with small negative-value counts:
+  # setting negative time steps to NaN is sufficient unless further review
+  # reveals a larger issue.  No special action beyond the global cleaning policy.
+  remaining_negative_qobs_handling: set_negative_to_nan
+
+# ---------------------------------------------------------------------------
+# Package-build status
+# ---------------------------------------------------------------------------
+package_build_status:
+  # Full package build on h2o is blocked by operations preflight gates.
+  # See docs/stage1_h2o_operations_preflight.md for the current gate status.
+  h2o_build_blocked: true
+  block_reason: >
+    Heavy h2o execution is on hold pending scheduler/CPU/GPU/storage policy
+    clarification (docs/stage1_h2o_operations_preflight.md, gates G1-G6).
+  local_smoke_permitted: false  # Change to true only with explicit approval.
