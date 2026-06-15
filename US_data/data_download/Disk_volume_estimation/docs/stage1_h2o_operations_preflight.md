@@ -1,7 +1,7 @@
 # Flash-NH Stage 1 — h2o Operations Preflight
 
-Last updated: 2026-06-14
-Status: **PARTIALLY ANSWERED — heavy execution still blocked pending full policy clarification**
+Last updated: 2026-06-15
+Status: **KEY POLICIES ANSWERED — CPU/storage work conditionally unblocked; training designated for Moriah cluster**
 
 ---
 
@@ -17,18 +17,23 @@ proceeds to:
 The completed USGS IV target acquisition (2,843 basins, 4-shard launcher,
 ~3 h wall clock, 6.6 GB output, commit `e362c0e`) validated h2o for
 **moderate network-bound sequential workloads** under `screen`-based job
-management. It did not validate h2o for:
+management.
 
-- Large sustained downloads (TB-scale spatial raster archives)
-- Multi-hour CPU-heavy preprocessing at high parallelism
-- GPU training workloads
-- Promotion to shared lab storage
+Following policy clarification (2026-06-15), h2o is designated as the platform for:
+
+- Large spatial-data bulk downloads (MRMS, RTMA/URMA, etc.)
+- Basin-average preprocessing and intermediate data assembly
+- Canonical dataset storage and eventual promotion to shared lab storage
+
+**NeuralHydrology model training is not planned on h2o.** h2o has no usable GPU
+and is not a training platform. Training will run on the Moriah cluster — see
+the [Moriah Cluster (Training Destination)](#moriah-cluster-training-destination) section below.
 
 ---
 
 ## Known Facts and Partial Answers
 
-### Confirmed from preflight / project owner
+### Confirmed from preflight / project owner (updated 2026-06-15)
 
 | Item | Status | Known value |
 |---|---|---|
@@ -36,28 +41,28 @@ management. It did not validate h2o for:
 | Personal work root | Confirmed | `/data42/omrip/Flash-NH` |
 | Repo clone | Confirmed | `/data42/omrip/Flash-NH/repos/flash-nh` |
 | Generated outputs | Confirmed | `/data42/omrip/Flash-NH/tmp` |
-| Machine purpose | **Partially answered** | Intended to support multi-hour to multi-day computations |
-| Scheduler in PATH | Confirmed (observed) | None detected (`sbatch`, `squeue`, `sinfo`, `qsub`, `bsub` absent); full scheduler policy still unknown |
-| Session managers | Partially confirmed | `screen` available and used for 2,843-basin run; `tmux` unverified |
-| `/data42` backup | **Answered** | **Not backed up.** Processed outputs must be exported/transferred locally or promoted deliberately |
+| Machine purpose | **Answered** | Storage, downloads, preprocessing, and data assembly; **not** NeuralHydrology training |
+| Scheduler in PATH | **Answered** | No scheduler **by design** (not a gap — intentional); `screen` is the agreed background job manager |
+| Session managers | Confirmed | `screen` available and in use; `tmux` unverified |
+| `/data42` backup | **Answered** | **Not backed up.** Processed outputs must be exported locally or promoted deliberately |
+| `/data42/omrip` auto-delete | **Partially answered** | Not auto-deleted; formal retention lifetime still unknown |
 | Total volume guidance | **Answered** | Try not to exceed ~20 TB overall across all Flash-NH data on `/data42` |
-| Raw data reproducibility | **Answered** | Raw spatial downloads are redownloadable, but request specs, manifests, and checksums must be documented for reproducibility |
-| Likely shared data root | **Partially answered** | `/data42/hydrolab/Data` is the likely location; write-access and promotion policy still TBD |
-| `/data42` capacity / quota | Partially known | Large free capacity observed; per-user quota unknown |
-| Purge / auto-delete policy | Unknown | Not yet answered |
-| Python environment | Partially known | `iacpy3_2025` shared env used for smoke/recovery; project-local env strategy not yet decided |
-| GPU availability | Unknown | Check with `nvidia-smi`; see discovery commands below |
-| CUDA / PyTorch | Unknown | Depends on GPU availability result |
-| CPU/process fair-use | Unknown | Not yet answered |
-| Training location | Unknown | h2o vs external GPU cluster not yet decided |
-| Promotion approval | Unknown | Process for promoting to `/data42/hydrolab/Data` not yet answered |
+| Raw data reproducibility | **Answered** | Raw spatial downloads are redownloadable, but request specs, manifests, and checksums must be documented |
+| Shared data root | **Partially answered** | `/data42/hydrolab/Data/Flash-NH_data/` — subfolders allowed following reproducibility policy; exact write-access and naming TBD |
+| `/data42` capacity / quota | Partially known | Large free capacity observed; formal per-user quota unknown |
+| GPU availability | **Answered** | **No usable GPU** (`nvidia-smi` not found; `torch` not installed in env; PI confirms h2o likely has no GPU) |
+| CUDA / PyTorch | **Answered** | Not applicable on h2o; `torch` not installed; not needed for preprocessing workloads |
+| CPU/process fair-use | **Partially answered** | CPU compute allowed; see Compute Etiquette section below |
+| Training location | **Answered** | Moriah GPU cluster — not h2o; see Moriah section below |
+| Python environment | **Partially answered** | Project-local conda env planned; proposed path `/data42/omrip/Flash-NH/envs/flashnh-stage1`; `envs/environment-stage1-h2o.yml` is the next repo artifact |
+| Promotion approval | **Partially answered** | Subfolders under `/data42/hydrolab/Data` allowed with reproducibility policy; formal write-access and convention confirmation still needed |
 
 ### Key cautions from partial answers
 
 - **`/data42` is not backed up.** Any curated outputs that must be preserved long-term
   must be either:
   - transferred to a local machine (e.g. via `scp` or `rsync`), or
-  - promoted to `/data42/hydrolab/Data` once that policy is confirmed, or
+  - promoted to `/data42/hydrolab/Data/Flash-NH_data/` once naming and write-access are confirmed, or
   - documented with checksums so they can be regenerated if lost.
 
 - **~20 TB total volume target.** Estimated Flash-NH spatial-data footprint
@@ -72,6 +77,90 @@ management. It did not validate h2o for:
   download can be reproduced exactly. Checksums on downloaded files are strongly
   recommended.
 
+- **`/data42/omrip` is not auto-deleted**, but it is also not backed up. Do not treat
+  it as permanent storage — treat it as a working space that requires deliberate export
+  or promotion for anything that needs to survive long-term.
+
+---
+
+## h2o Compute Etiquette
+
+h2o has no scheduler by design. CPU compute is allowed under the following rules:
+
+1. **Start with smoke tests.** Validate a new workload with 1–4 basins or a short time
+   window before launching full-scale jobs.
+
+2. **CPU ceiling: 50–60%.** After smoke tests pass, scale to no more than 50–60% total
+   CPU use. On a 64-core machine that means ≤ 32–38 active workers; start with 16–32.
+
+3. **Use 12–24 hour chunks.** Break large workloads into resumable chunks so that a
+   failure or interruption does not require a full restart. Chunk boundaries should be
+   logged with checksums so completed chunks can be skipped on re-run.
+
+4. **Notify for long or heavy jobs.** Before launching a job expected to run more than
+   a few hours or use more than ~30% CPU, notify the PI / machine owner. A short
+   Slack message or email is sufficient.
+
+5. **Run under `screen`.** All background jobs must be launched inside a named `screen`
+   session so they survive SSH disconnect and can be monitored or killed if needed.
+
+6. **Monitor load.** Check `uptime` or `htop` before expanding parallelism. If average
+   load is already above ≈ 0.7 × nproc, hold off until it drops.
+
+---
+
+## Moriah Cluster (Training Destination)
+
+NeuralHydrology model training is planned for the Moriah GPU cluster at HUJI.
+
+| Item | Value |
+|---|---|
+| Cluster name | Moriah |
+| Personal root | `/sci/labs/efratmorin/omripo/PhD` |
+| Proposed repo clone | `/sci/labs/efratmorin/omripo/PhD/repos/flash-nh` |
+| Proposed data root | `/sci/labs/efratmorin/omripo/PhD/Data/Flash-NH_data/` |
+| GPU access | Yes (GPU cluster; CUDA/PyTorch available) |
+| Scheduler | Standard HPC scheduler (SLURM expected; confirm before use) |
+
+### Data transfer from h2o to Moriah
+
+Assembled NeuralHydrology packages (forcing time series, target NCs, attributes CSV,
+splits) must be transferred from h2o to Moriah before training can begin. The
+recommended approach:
+
+1. Assemble the NH package on h2o (preprocessing, builder script).
+2. Create a compact audit export bundle (see `docs/repo_policy.md`).
+3. Transfer the full assembled package directory to Moriah via `scp`, `rsync`, or
+   shared-filesystem access if available.
+4. Record transfer checksums. Both endpoints (h2o and Moriah) should have matching
+   `checksums.sha256` files.
+
+**Moriah GPU environment is a separate design task** from the h2o preprocessing
+environment. The two envs have different dependency trees:
+- h2o env: data downloads, xarray, geopandas, rasterio — no GPU libraries needed
+- Moriah env: PyTorch + NeuralHydrology + CUDA — no download tooling needed
+
+---
+
+## Environment Strategy
+
+The current shared env (`iacpy3_2025`) is used for smoke tests and acquisition.
+A dedicated project environment is the next infrastructure milestone.
+
+| Item | Planned |
+|---|---|
+| h2o preprocessing env path | `/data42/omrip/Flash-NH/envs/flashnh-stage1` |
+| h2o env spec file (repo) | `envs/environment-stage1-h2o.yml` |
+| Moriah training env | Separate design; after h2o env is stable |
+| Moriah env spec file (repo) | `envs/environment-stage1-moriah.yml` (future) |
+| Documentation | `docs/stage1_environment.md` (future) |
+
+**Next env step:** Create `envs/environment-stage1-h2o.yml` pinning the preprocessing
+dependencies (Python version, xarray, pandas, netCDF4, requests, shapely, geopandas,
+rasterio, etc.) and install the env under `/data42/omrip/Flash-NH/envs/flashnh-stage1`
+on h2o. All future acquisition, preprocessing, and builder runs on h2o should use this
+env rather than the shared `iacpy3_2025`.
+
 ---
 
 ## Questions for PI / Machine Owner
@@ -80,29 +169,26 @@ Status legend: ✅ Answered  ⚠️ Partially answered  ❓ Still open
 
 ### 1. Machine Role and Intended Use
 
-- ⚠️ Is h2o a shared research server or a personal workstation?
-  *Partial: intended for multi-hour to multi-day computations; shared status unclear*
+- ✅ What is h2o for? → Storage, downloads, preprocessing, and data assembly. Not training.
 - ❓ Are there other active users whose workloads compete for CPU/RAM/disk?
-- ❓ Is h2o the intended long-term home for Flash-NH compute, or a stepping stone?
+- ✅ Is h2o the intended home for preprocessing? → Yes; training goes to Moriah.
 
 ---
 
 ### 2. Scheduler Availability and Direct-Run Policy
 
-- ❓ Is there a job scheduler (SLURM, PBS/Torque, LSF, SGE) installed but not in
-  the default PATH? If so, how is it accessed?
-- ❓ If no scheduler: what is the agreed policy for multi-hour background jobs —
-  `screen`, `nohup`, `tmux`, or something else?
+- ✅ Is there a job scheduler? → No scheduler by design. `screen` is the agreed approach.
+- ✅ What is the policy for multi-hour background jobs? → `screen`; `tmux` is likely fine but unverified.
 - ❓ Is there a maximum number of simultaneous background processes per user?
 
 ---
 
 ### 3. Fair-Use CPU, Process, and Wall-Time Limits
 
-- ❓ Is there an agreed per-user CPU core limit for background jobs?
+- ⚠️ Is there an agreed per-user CPU core limit? → Informal: stay ≤ 50–60% total CPU. Formal quota unknown.
 - ❓ Is there a wall-time limit on unattended processes?
 - ❓ Are there times of day or days of week when heavy CPU use is restricted?
-- ❓ Should compute-heavy jobs be announced to other users?
+- ⚠️ Should compute-heavy jobs be announced? → Yes; notify PI/machine owner before long or heavy jobs.
 
 ---
 
@@ -110,9 +196,9 @@ Status legend: ✅ Answered  ⚠️ Partially answered  ❓ Still open
 
 - ✅ Is `/data42` backed up? → **No. Not backed up.**
 - ⚠️ Total volume guidance: try not to exceed ~20 TB overall.
-- ❓ Is there a per-user quota on `/data42` beyond the informal ~20 TB guidance?
+- ❓ Is there a formal per-user quota on `/data42` beyond the informal ~20 TB guidance?
 - ❓ Are there inode limits?
-- ❓ Is there a purge or auto-delete policy for files under `/data42/omrip`?
+- ⚠️ Purge / auto-delete policy for `/data42/omrip`? → Not auto-deleted; formal lifetime unknown.
 - ❓ What is the expected lifetime of data in `/data42/omrip`?
 
 ---
@@ -123,13 +209,12 @@ Status legend: ✅ Answered  ⚠️ Partially answered  ❓ Still open
 |---|---|---|
 | Raw USGS IV Parquet cache | `/data42/omrip/Flash-NH/tmp/stage1_full_2843/*/raw_cache/` | In-place; deletable once canonical NCs verified |
 | Canonical hourly NC files | `/data42/omrip/Flash-NH/tmp/stage1_full_2843/*/canonical/` | Promote to shared space or export locally |
-| MRMS / RTMA raw GRIB2 | Not yet downloaded | Needs location decision before download |
-| Basin-average Parquet | Not yet created | Acceptable under personal tmp? |
-| Final NeuralHydrology inputs | Not yet created | Promote to shared space |
+| MRMS / RTMA raw GRIB2 | Not yet downloaded | Stage under `/data42/omrip/Flash-NH/tmp/` before processing |
+| Basin-average Parquet | Not yet created | Under personal tmp; promote cleaned product to shared space |
+| Final NeuralHydrology inputs | Not yet created | Promote to `/data42/hydrolab/Data/Flash-NH_data/04_ml_datasets/` |
 
-- ⚠️ `/data42/hydrolab/Data` is the likely shared data root — write access and naming
-  convention not yet confirmed.
-- ❓ Quotas or approval requirements for promotion?
+- ⚠️ `/data42/hydrolab/Data/Flash-NH_data/` is the proposed shared root — subfolders
+  allowed following reproducibility policy; formal write-access and exact naming TBD.
 
 ---
 
@@ -148,54 +233,52 @@ Planned bulk downloads (rough estimates; may be refined):
 - ✅ Raw downloads are redownloadable — but request specs and manifests must be documented.
 - ❓ Are there network egress or bandwidth limits from h2o to external sources?
 - ❓ Should large downloads be scheduled at off-peak hours?
-- ❓ Is there a preferred staging area for raw downloads?
 - ❓ Does the institution require data transfer agreements (ECMWF)?
 
 ---
 
 ### 7. GPU Availability and Training Policy
 
-- ❓ Does h2o have one or more GPUs? (Check `nvidia-smi` — see discovery commands)
-- ❓ Is GPU access shared or reserved per user?
-- ❓ Is there a queuing mechanism for GPU access?
-- ❓ Should NeuralHydrology training run on h2o or an external GPU cluster?
-- ❓ Are there CUDA driver / PyTorch version constraints?
+- ✅ Does h2o have usable GPUs? → **No.** `nvidia-smi` not found; `torch` not installed; PI confirms h2o likely has no GPU.
+- ✅ Should NeuralHydrology training run on h2o? → **No.** Training designated for Moriah cluster.
+- ❓ Moriah scheduler details (confirm SLURM partition names and GPU queue policy before first training run).
+- ❓ Are there CUDA driver / PyTorch version constraints on Moriah?
 
 ---
 
 ### 8. Software Environment Policy
 
-- ⚠️ Production should use a project-designated environment, not rely indefinitely
-  on the shared `iacpy3_2025` env. Specific strategy (project venv, new conda env,
-  container) not yet decided.
-- ❓ Can a project-local conda env be created under `/data42/omrip`?
-- ❓ Is `mamba`, `micromamba`, or `conda` preferred?
-- ❓ Are `apptainer`/`singularity` or `docker` available and encouraged?
+- ⚠️ Production should use a project-designated environment under `/data42/omrip/Flash-NH/envs/flashnh-stage1`, not the shared `iacpy3_2025` env.
+- ⚠️ Env spec `envs/environment-stage1-h2o.yml` is the next repo artifact.
+- ❓ Can a project-local conda env be created under `/data42/omrip`? (Assumed yes; not yet confirmed.)
+- ❓ Is `mamba`, `micromamba`, or `conda` preferred on h2o?
 - ❓ What is the intended lifetime of `iacpy3_2025`?
 
 ---
 
 ### 9. Monitoring and Notification
 
+- ⚠️ Notification rule: notify PI / machine owner before heavy CPU or disk workloads (> few hours or > ~30% CPU).
 - ❓ Is there a standard way to be notified when a long job completes or fails?
-- ❓ Should other lab members be notified before heavy CPU or disk workloads?
 - ❓ Is there a shared job registry for active h2o workloads?
 
 ---
 
 ### 10. Data Promotion to Shared Lab Storage
 
-- ⚠️ Likely shared root: `/data42/hydrolab/Data` — not yet confirmed.
+- ⚠️ Shared root: `/data42/hydrolab/Data/Flash-NH_data/` — subfolders allowed with provenance; write access not yet formally confirmed.
 - ❓ What is the promotion process (who approves, what metadata is required)?
-- ❓ Are there naming or versioning conventions required?
+- ❓ Are there naming or versioning conventions required by the lab?
 - ❓ Is there a retention policy for data in shared space?
 
 ---
 
 ## Proposed Shared Data Layout
 
-**This is a proposal only.** Nothing should be promoted to `/data42/hydrolab/Data`
-until PI/shared-data policy is confirmed and write access is granted.
+Subfolders under `/data42/hydrolab/Data` are approved following the project
+reproducibility policy. Promotion of curated datasets should proceed with full
+provenance (manifest, checksums, provenance JSON, git commit) as described below.
+**Confirm write access before the first promotion.**
 
 ```
 /data42/hydrolab/Data/Flash-NH_data/
@@ -379,30 +462,48 @@ for reference. Do not commit the output file.
 
 | Gate | Condition to clear | Status |
 |---|---|---|
-| **G1: Spatial bulk download** | Storage quota confirmed; download location agreed; off-peak policy confirmed | **BLOCKED** |
-| **G2: Basin-average preprocessing** | CPU/process fair-use limits confirmed; storage location agreed | **BLOCKED** |
-| **G3: NeuralHydrology training** | GPU availability confirmed; training location agreed; environment pinned | **BLOCKED** |
-| **G4: Shared-data promotion** | `/data42/hydrolab/Data` write access and naming convention confirmed | **BLOCKED** |
-| **G5: Scheduler / parallelism** | Scheduler availability or direct-run policy documented | **BLOCKED** |
-| **G6: `/data42` purge policy** | Purge and lifetime policy for `/data42/omrip` clarified | **BLOCKED** |
+| **G1: Spatial bulk download** | Storage location agreed; off-peak preference known; volume target acknowledged | **CONDITIONALLY UNBLOCKED** — `/data42/omrip` not auto-deleted; 20 TB informal target acknowledged; staging under `/data42/omrip/Flash-NH/tmp/` is acceptable; formal per-user quota still open |
+| **G2: Basin-average preprocessing** | CPU fair-use policy known; storage location agreed | **CONDITIONALLY UNBLOCKED** — CPU compute allowed with etiquette (≤50–60% CPU; start 16–32 workers; notify for heavy jobs); staging location agreed in principle |
+| **G3: NeuralHydrology training** | Training platform designated | **NOT PLANNED ON h2o** — h2o has no usable GPU; training is designated for Moriah cluster; Moriah scheduler details still need confirmation before first training run |
+| **G4: Shared-data promotion** | `/data42/hydrolab/Data` subfolders approved; provenance policy followed | **CONDITIONALLY UNBLOCKED** — subfolders allowed with reproducibility provenance; formal write-access and exact naming convention confirmation still needed |
+| **G5: Scheduler / parallelism** | Background-job policy documented | **RESOLVED** — no scheduler by design; `screen`-based job management is the agreed approach |
+| **G6: `/data42` purge policy** | Auto-delete policy clarified | **PARTIALLY RESOLVED** — `/data42/omrip` not auto-deleted; formal retention lifetime still unknown |
 
-Notes on partial answers:
-- The ~20 TB informal volume target is **acknowledged but not a formal quota**. G1 and G2 remain blocked until a formal or agreed-upon per-user limit is known.
-- The confirmed `/data42` no-backup policy means G4 is doubly important: promotions to shared space are the primary data protection path.
-- Scheduler (G5) remains fully open; `screen`-based launcher is acceptable for the scale of the USGS acquisition but must be re-evaluated for TB-scale downloads.
+Notes:
+- G1 and G2 are conditionally unblocked, meaning bulk downloads and preprocessing may
+  begin with compute-etiquette rules followed. Start with smoke tests, scale up gradually.
+- G3 is reclassified from BLOCKED to NOT PLANNED ON h2o. The blocker is now "confirm
+  Moriah scheduler + env before first training run" rather than "decide training location."
+- G4 is conditionally unblocked pending formal write-access confirmation. Do not promote
+  until a test write is confirmed to succeed.
+- G5 is fully resolved: screen-based job management is the established pattern.
+- G6 is partially resolved: no auto-delete on `/data42/omrip`, but formal lifetime unknown.
+  Treat personal tmp as impermanent and export/promote curated outputs.
 
 ---
 
 ## Recommended Immediate Project Status
 
-**Heavy h2o execution is on hold.** Work that can proceed **without h2o**:
+**Bulk CPU/storage work on h2o is conditionally unblocked** (etiquette rules apply).
+**Training is not planned on h2o** — that goes to Moriah.
 
-1. **Target-policy configuration** — define basin inclusion/exclusion rules and
-   negative-qobs handling for the NeuralHydrology package builder. Code-only, local.
-2. **Package-builder script design** — design the script that consumes the 2,843
-   canonical NC files and produces the NeuralHydrology-format package. Local design,
-   no heavy execution.
-3. **Respond to open preflight questions** — particularly scheduler policy, CPU limits,
-   GPU availability, and `/data42/hydrolab/Data` write-access.
-4. **Run read-only h2o discovery** — execute the command block above on h2o and
-   save output locally. Takes < 1 min, no load.
+Unblocked work that can proceed now:
+
+1. **h2o environment setup** — create `envs/environment-stage1-h2o.yml`, install the
+   project conda env at `/data42/omrip/Flash-NH/envs/flashnh-stage1`, document in
+   `docs/stage1_environment.md`. This is the next infrastructure milestone.
+2. **Target-cleaned builder design** — design the script that consumes the 2,843
+   canonical NC files + `config/stage1_target_policy.yaml` and produces the
+   NeuralHydrology-format target dataset. Local code design, no heavy execution.
+3. **Moriah transfer layout design** — define the exact directory structure and
+   transfer procedure for moving assembled NH packages from h2o to Moriah.
+4. **Push pending commits** — push local commits ahead of origin.
+
+Blocked pending additional confirmation:
+
+5. **Spatial bulk downloads (MRMS, RTMA/URMA)** — wait for smoke-test sign-off under
+   etiquette rules and confirm per-user quota is acceptable before TB-scale downloads.
+6. **Shared-data promotion** — confirm write access to `/data42/hydrolab/Data/Flash-NH_data/`
+   before first promotion.
+7. **NeuralHydrology training** — blocked on Moriah scheduler confirmation, env setup,
+   and assembled NH package transfer.

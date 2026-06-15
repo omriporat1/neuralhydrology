@@ -1,14 +1,15 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-14
+Last updated: 2026-06-15
 
 ## Current milestone
 
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
-**Next: Stage 1 target-policy and NeuralHydrology full-period package build.**
+Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
+**Next: h2o environment setup, target-cleaned builder design, Moriah transfer layout.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
-target-policy recommendations.
+`docs/stage1_target_policy.md` for target-policy rationale.
 
 ### Quick summary
 
@@ -19,25 +20,44 @@ target-policy recommendations.
 - `TARGET_QUALITY_REVIEW` (1,375 basins): eligible for training; spike flag is advisory only
 - No systematic offset issues (0 basins)
 
+### h2o / Moriah operating plan (as of 2026-06-15)
+
+Key policy clarifications from PI:
+- h2o is **storage, downloads, preprocessing, and assembly** — not training
+- h2o has **no usable GPU** (`nvidia-smi` not found; PI confirms)
+- No scheduler by design; `screen` is the agreed background job manager
+- CPU compute allowed with etiquette: ≤50–60% CPU; start 16–32 workers; notify before long jobs
+- `/data42/omrip` is not auto-deleted; `/data42` is not backed up
+- `/data42/hydrolab/Data/Flash-NH_data/` subfolders allowed with reproducibility provenance
+- **NeuralHydrology training → Moriah cluster** (`/sci/labs/efratmorin/omripo/PhD`)
+
+See `docs/stage1_h2o_operations_preflight.md` for full gate status.
+
 ### Immediate next steps
 
-The following can proceed **without h2o** and without heavy execution:
+1. **Push pending commits** — push commits currently ahead of origin.
+2. **h2o environment setup** — create `envs/environment-stage1-h2o.yml`, install project
+   conda env at `/data42/omrip/Flash-NH/envs/flashnh-stage1`, document in
+   `docs/stage1_environment.md`. Next infrastructure milestone.
+3. **Target-cleaned builder design** — design the script that consumes the 2,843
+   canonical NC files + `config/stage1_target_policy.yaml` and produces the
+   NeuralHydrology-format target dataset. Local code design, no heavy execution.
+4. **Moriah transfer layout design** — define directory structure and transfer procedure
+   for moving assembled NH packages from h2o to Moriah.
 
-1. Target-policy configuration design (basin inclusion rules, negative-qobs handling).
-2. Package-builder script design for the full-period NeuralHydrology package.
+The following are **conditionally unblocked** (etiquette rules apply):
 
-The following are **blocked** pending h2o operations preflight
-(`docs/stage1_h2o_operations_preflight.md`). Partial answers received (2026-06-14):
-`/data42` is not backed up; ~20 TB overall volume target; `/data42/hydrolab/Data`
-is the likely shared data root. Scheduler policy, CPU limits, GPU, and promotion
-policy remain open.
+5. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM) — gate G1 CONDITIONALLY UNBLOCKED.
+6. Basin-average preprocessing — gate G2 CONDITIONALLY UNBLOCKED.
 
-3. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM) — gate G1 BLOCKED.
-4. Basin-average preprocessing — gate G2 BLOCKED.
-5. NeuralHydrology training — gate G3 BLOCKED.
-6. Promotion of curated data to shared lab storage — gate G4 BLOCKED.
+The following require additional confirmation before proceeding:
 
-**Do not initiate heavy h2o workloads until the operations preflight gates are cleared.**
+7. Promotion of curated data to shared lab storage — gate G4 CONDITIONALLY UNBLOCKED
+   (confirm write access to `/data42/hydrolab/Data/Flash-NH_data/` before first promotion).
+8. NeuralHydrology training — gate G3 NOT PLANNED ON h2o; blocked on Moriah scheduler
+   confirmation and env setup.
+
+**Do not run TB-scale spatial downloads without smoke-test sign-off under etiquette rules.**
 
 ---
 
