@@ -6,7 +6,8 @@ Last updated: 2026-06-15
 
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
-**Next: h2o environment setup, target-cleaned builder design, Moriah transfer layout.**
+h2o preprocessing environment spec created (`envs/environment-stage1-h2o.yml`, 2026-06-15).
+**Next: install h2o env on h2o, then target-cleaned builder design, Moriah transfer layout.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -36,9 +37,9 @@ See `docs/stage1_h2o_operations_preflight.md` for full gate status.
 ### Immediate next steps
 
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **h2o environment setup** — create `envs/environment-stage1-h2o.yml`, install project
-   conda env at `/data42/omrip/Flash-NH/envs/flashnh-stage1`, document in
-   `docs/stage1_environment.md`. Next infrastructure milestone.
+2. **Install h2o env** — run `mamba/conda env create` on h2o using
+   `envs/environment-stage1-h2o.yml`, activate, run smoke tests from
+   `docs/stage1_environment.md`. Environment spec and docs committed.
 3. **Target-cleaned builder design** — design the script that consumes the 2,843
    canonical NC files + `config/stage1_target_policy.yaml` and produces the
    NeuralHydrology-format target dataset. Local code design, no heavy execution.

@@ -1,0 +1,59 @@
+name: flashnh-stage1
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python=3.11
+
+  # Core numeric / data
+  - numpy
+  - pandas
+  - scipy
+
+  # xarray / NetCDF ecosystem
+  - xarray
+  - netcdf4
+  - h5netcdf
+  - h5py
+
+  # Parquet / columnar
+  - pyarrow
+
+  # Dask parallel / distributed
+  - dask
+  - distributed
+  - zarr
+
+  # HTTP / config / progress
+  - requests
+  - pyyaml
+  - tqdm
+
+  # Plotting / QC
+  - matplotlib
+
+  # Geospatial stack
+  - shapely
+  - geopandas
+  - pyproj
+  - rasterio
+  - pyogrio
+  - rioxarray
+  - fiona
+
+  # GRIB / meteorological (may be fragile — see notes)
+  - cfgrib
+  - eccodes
+
+  # Jupyter / interactive kernel
+  - ipykernel
+  - ipython
+
+  # Testing
+  - pytest
+
+  # pip extras (packages not reliably available on conda-forge)
+  - pip
+  - pip:
+    - neuralhydrology  # import-only; training not run on h2o

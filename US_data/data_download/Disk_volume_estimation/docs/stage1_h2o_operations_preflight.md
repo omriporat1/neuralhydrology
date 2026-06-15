@@ -155,11 +155,14 @@ A dedicated project environment is the next infrastructure milestone.
 | Moriah env spec file (repo) | `envs/environment-stage1-moriah.yml` (future) |
 | Documentation | `docs/stage1_environment.md` (future) |
 
-**Next env step:** Create `envs/environment-stage1-h2o.yml` pinning the preprocessing
-dependencies (Python version, xarray, pandas, netCDF4, requests, shapely, geopandas,
-rasterio, etc.) and install the env under `/data42/omrip/Flash-NH/envs/flashnh-stage1`
-on h2o. All future acquisition, preprocessing, and builder runs on h2o should use this
-env rather than the shared `iacpy3_2025`.
+**Spec committed (2026-06-15):** `envs/environment-stage1-h2o.yml` — Python 3.11,
+conda-forge primary channel, full geospatial + GRIB stack, no GPU/PyTorch.
+See `docs/stage1_environment.md` for install command, activation, smoke tests,
+and GRIB fallback strategy.
+
+**Next env step:** Install the env on h2o under `/data42/omrip/Flash-NH/envs/flashnh-stage1`
+and run the smoke tests. All future acquisition, preprocessing, and builder runs on h2o
+should use this env rather than the shared `iacpy3_2025`.
 
 ---
 
