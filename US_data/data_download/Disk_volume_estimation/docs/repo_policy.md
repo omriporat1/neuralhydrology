@@ -57,3 +57,48 @@ to the next milestone.
 
 See `docs/stage1_hpc_transition_preflight.md` → "Post-h2o Run Export Policy"
 for the canonical example export command.
+
+---
+
+## h2o/Moriah Remote Run Evidence Policy
+
+These rules apply to any run executed on a remote cluster (h2o, Moriah, or similar)
+where generated outputs are too large to commit.
+
+### Evidence bundle requirements
+
+- h2o/Moriah launchers must create or identify a **compact evidence bundle** before
+  the run concludes: logs, manifests, audit files, checksums, cleaning reports,
+  and provenance JSON. Large generated outputs (NetCDF, Parquet, GRIB) stay remote.
+- Evidence bundles must be **pulled to the local machine** before Claude documents
+  or commits any conclusions. Claude must inspect the local evidence files directly —
+  terminal summaries and pasted log tails are not sufficient.
+- Large generated artifacts (NetCDF, Parquet, GRIB, raw shards) must **not be
+  transferred or committed** unless explicitly approved by the user.
+
+### Credential and authentication policy
+
+- Passwords must **never be stored** in scripts, repo files, `.env` files, logs,
+  Claude memory, or documentation.
+- Preferred future authentication method: **SSH key + passphrase + ssh-agent + host alias**.
+- Pull scripts may reference host aliases such as `flashnh-h2o` (configured in `~/.ssh/config`),
+  but must not embed credentials, IP addresses intended to be private, or passwords.
+
+### Transfer workflow (example using host alias)
+
+```bash
+# Define alias in ~/.ssh/config (not committed):
+# Host flashnh-h2o
+#   HostName h2o.es.huji.ac.il
+#   User omrip
+#   IdentityFile ~/.ssh/id_ed25519_h2o
+
+# Pull compact evidence to local tmp/:
+mkdir -p tmp/stage1_target_package_v001_evidence
+scp "flashnh-h2o:/data42/omrip/Flash-NH/tmp/stage1_target_package_v001_logs/build.log" \
+    tmp/stage1_target_package_v001_evidence/
+scp "flashnh-h2o:.../manifest.json" tmp/stage1_target_package_v001_evidence/
+# ... etc. for audit.log, checksums.sha256, cleaning_report.csv, run_provenance.json
+```
+
+Do not `git add` any files under `tmp/`.

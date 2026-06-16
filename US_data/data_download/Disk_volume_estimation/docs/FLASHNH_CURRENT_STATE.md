@@ -1,14 +1,15 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 ## Current milestone
 
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
 h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026-06-15).
-Target package builder + auditor implemented, locally smoke-tested, and h2o policy-smoke PASS (2026-06-15).
-**Next: resolve special-review disposition (02299472/04073468), then full 2,754-basin target build on h2o.**
+Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke PASS (2026-06-15).
+**v001 target package (2,752 basins) built and audited on h2o (2026-06-16): PASS — 0 errors, 0 warnings.**
+**Next: Moriah transfer layout design. Special-review disposition (02299472/04073468) open for future v002.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -18,7 +19,8 @@ See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 - 2,843 canonical hourly NetCDF files on h2o at `/data42/omrip/Flash-NH/tmp/stage1_full_2843/`
 - Coverage 0.9652 overall; 2,754 basins with `historical_training_utility_flag=True`
 - 89 basins with late-period gaps (`TARGET_OPERATIONAL_REVIEW`) — hold out of first package
-- 18 basins with negative qobs — set to NaN during package build
+- 18 basins with negative qobs in the acquisition audit — set to NaN during package build
+  (2 heavily-negative special-review basins excluded from v001; 16 basins cleaned, 235 values neg→NaN)
 - `TARGET_QUALITY_REVIEW` (1,375 basins): eligible for training; spike flag is advisory only
 - No systematic offset issues (0 basins)
 
@@ -48,36 +50,40 @@ See `docs/stage1_h2o_operations_preflight.md` for full gate status.
 
 See `docs/stage1_environment.md` for full install notes, workaround, and CUDA caveat details.
 
-### Target package builder status (as of 2026-06-15)
+### Target package builder status (as of 2026-06-16)
 
-Milestone 2J-B: scripts implemented and smoke-tested.
+Milestone 2J-B: **COMPLETE** — scripts implemented, smoke-tested locally and on h2o, full v001 build PASS.
 
 - **Builder:** `scripts/build_stage1_target_package.py`
 - **Auditor:** `scripts/audit_stage1_target_package.py`
+- **Launcher:** `scripts/run_stage1_target_package_v001_h2o.sh` (commit `3ac51ff`)
 - **Doc:** `docs/stage1_target_package_builder.md`
-- **Smoke result:** 5/5 PASS — 0 errors, 0 warnings
-  - 0 negative values in smoke set (pilot basins have clean data)
-  - 2,591 existing NaN preserved (no gap filling)
-  - SHA-256 checksums, manifest, and provenance all written
-- **Special-review halt logic:** implemented (02299472, 04073468 require explicit override)
-- **h2o policy smoke:** PASS (2026-06-15) — 4 basins, 01135300 excluded (hist_util=False),
+- **Local smoke result (2026-06-15):** 5/5 PASS — 0 errors, 0 warnings
+- **h2o policy smoke (2026-06-15):** PASS — 4 basins, 01135300 excluded (hist_util=False),
   08010000 cleaned 95 neg→NaN; audit 0 errors/0 warnings; 02299472 halt confirmed (EXIT 1)
   - `canonical_merged` confirmed: 2,843 flat NCs, 2,843 unique STAIDs, 0 recursive duplicates
-- **Full h2o build:** not yet run — requires explicit approval; resolve 02299472/04073468 disposition first
+- **Full h2o v001 build (2026-06-16): PASS — 0 errors, 0 warnings**
+  - Input: 2,843 NCs from `canonical_merged`
+  - Excluded: 2 (`--exclude-staids`) + 89 (policy: `hist_util=False`) = 91 total excluded
+  - Built: **2,752 basins**, 0 failed
+  - Cleaned: 235 neg→NaN across 16 basins; NaN 3,880,507 → 3,880,742; valid hours 121,940,698
+  - Audit: 2,752/2,752 checksums OK; 89 held-out absent; SR basins absent; 1,373 TQR advisory
+  - Audit runtime: 18.8 s
+  - policy_sha256: `449165686d033b9cdbd395ad70e64a3bfa82d01757021e62059f254a2a30d691`
+  - Evidence bundle: `tmp/stage1_target_package_v001_evidence/` (not committed)
+  - Full result: `docs/stage1_target_package_v001_result.md`
+- **Special-review 02299472/04073468:** excluded from v001; disposition open for future v002
 
 See `docs/stage1_target_package_builder.md` for full commands and acceptance criteria.
 
 ### Immediate next steps
 
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **Resolve special-review disposition** — decide include (`--allow-review-required`) or
-   exclude (`--exclude-staids`) for 02299472 (2,605 neg) and 04073468 (2,054 neg).
-   Must be resolved before the full build can run.
-3. **Full 2,754-basin target build on h2o** — run builder on h2o with `--status-csv`
-   and resolved special-review flags. Run auditor on output.
-   Requires explicit approval before launching.
-4. **Moriah transfer layout design** — define directory structure and transfer procedure
-   for moving assembled NH packages from h2o to Moriah.
+2. **Moriah transfer layout design** — define directory structure and `rsync`/`scp` transfer
+   procedure for moving assembled NH packages from h2o to Moriah.
+3. **Special-review disposition (02299472/04073468)** — open for future v002.
+   02299472: 2,605 neg; 04073468: 2,054 neg. Decide include (`--allow-review-required`)
+   or exclude (`--exclude-staids`) before v002 build.
 
 The following are **conditionally unblocked** (etiquette rules apply):
 
@@ -222,16 +228,20 @@ Pilot animations: R02, R06, R09, R11 — reviewed and approved.
 
 ---
 
-## Next: Milestone 2H — Streamflow recovery for 22 missing CAMELSH basins
+## Historical note: Milestone 2H — Streamflow recovery for 22 missing CAMELSH basins
 
-The 22 basins with all-NaN `qobs_m3s` must be recovered before:
-- Serious NeuralHydrology training runs
-- Scientific performance claims
-- HPC-scale 2020–2025 packaging
+> This section is superseded for full-period target-package construction, which is now
+> complete (v001, 2026-06-16). The recovery work below applied to the January 2023 pilot
+> package (Milestone 2G) and is retained for reference. The current top-level next step
+> is Moriah transfer layout design (see Immediate next steps above).
 
-Recovery plan: `tmp/stage1_pilot_dryrun/12_neuralhydrology_january_pilot_dataset/design/streamflow_recovery_plan.md`
+Recovery was needed because the January 2023 pilot package built from CAMELSH files
+had 22 basins with all-NaN `qobs_m3s`. Those basins were recovered from USGS IV
+(Milestones 2H–2H-D) and are fully represented in the full-period v001 package.
 
-**Pending tasks (require user approval before starting):**
+Recovery plan (historical): `tmp/stage1_pilot_dryrun/12_neuralhydrology_january_pilot_dataset/design/streamflow_recovery_plan.md`
+
+**Original pending tasks (now completed or superseded):**
 
 1. Milestone 2H: CAMELSH streamflow recovery for 22 missing basins.
 2. Decide on all-12 animation run (2E follow-up).

@@ -1,8 +1,8 @@
 # Flash-NH Stage 1 — Target Package Builder and Auditor
 
 Milestone: 2J-B
-Date: 2026-06-15
-Status: **Scripts implemented and smoke-tested locally (5 basins, PASS)**
+Date: 2026-06-16
+Status: **Scripts implemented, h2o policy smoke PASS, full v001 build COMPLETE (2026-06-16)**
 
 ---
 
@@ -17,8 +17,11 @@ are driven by config, not hard-coded in the script.
 `scripts/audit_stage1_target_package.py` verifies the output package for structural
 correctness, value integrity, and policy compliance.
 
-This milestone does **not** execute the full 2,843-basin build on h2o.
-That step follows after the design is validated with a local smoke.
+The original 2J-B design milestone did not execute the full 2,843-basin build on h2o;
+that step followed after the design was validated with a local smoke and an h2o policy smoke.
+The conservative v001 target package (2,752 basins) was subsequently built and audited
+on h2o on 2026-06-16 (PASS — 0 errors, 0 warnings). This document records both
+the design/smoke validation and the v001 build result.
 
 ---
 
@@ -172,12 +175,11 @@ python scripts/audit_stage1_target_package.py \
 
 ## Full-run command (h2o)
 
-The preferred path for the v001 build is the committed launcher script. It runs
-all preflight checks, build, and audit in sequence, captures logs, and exits
-non-zero on any failure.
+**COMPLETE (2026-06-16).** The v001 build ran via the committed launcher script (commit `3ac51ff`).
+See [Full h2o build result (2026-06-16)](#full-h2o-build-result-2026-06-16) below.
 
 ```bash
-# Start a named screen session on h2o, then run the launcher:
+# For reference — command used for v001:
 screen -S flashnh_target_v001
 bash scripts/run_stage1_target_package_v001_h2o.sh
 ```
@@ -185,8 +187,7 @@ bash scripts/run_stage1_target_package_v001_h2o.sh
 Pass `--force` to overwrite an existing output directory.
 Run `bash scripts/run_stage1_target_package_v001_h2o.sh --help` for full options.
 
-**Do not run until explicitly approved.**
-**Special-review basins `02299472` and `04073468` are excluded (→ 2,752 basins).**
+**Special-review basins `02299472` and `04073468` are excluded from v001 (→ 2,752 basins).**
 
 Logs:   `/data42/omrip/Flash-NH/tmp/stage1_target_package_v001_logs/`
 Output: `/data42/omrip/Flash-NH/tmp/stage1_target_package_v001/`
@@ -280,29 +281,75 @@ in the full build, pass `--allow-review-required 02299472` or `--exclude-staids 
 
 ---
 
+## Full h2o build result (2026-06-16)
+
+Full v001 build on h2o via launcher `scripts/run_stage1_target_package_v001_h2o.sh` (commit `3ac51ff`).
+Evidence bundle: `tmp/stage1_target_package_v001_evidence/` (not committed). Full result: `docs/stage1_target_package_v001_result.md`.
+
+**Count pipeline:**
+
+| Stage | Count |
+|---|---|
+| Input NC files (`canonical_merged`) | 2,843 |
+| Unconditionally excluded (`--exclude-staids 02299472,04073468`) | 2 |
+| Candidates | 2,841 |
+| Policy excluded (`hist_util=False`, `TARGET_OPERATIONAL_REVIEW`) | 89 |
+| Included and built | **2,752** |
+| Failed | 0 |
+
+**Cleaning summary:**
+
+| Metric | Value |
+|---|---|
+| Basins with neg→NaN cleaning | 16 |
+| Total values cleaned | 235 |
+| NaN before cleaning | 3,880,507 |
+| NaN after cleaning | 3,880,742 |
+| Valid hours after cleaning | 121,940,698 |
+
+Cleaned basins: `01379530` (5), `02093000` (1), `02097314` (44), `02246000` (6), `04189000` (1),
+`05467000` (7), `06090500` (18), `07295000` (7), `08010000` (95), `08152000` (12),
+`08380500` (1), `09484580` (4), `10349300` (4), `11065000` (6), `11135800` (9), `11465750` (15).
+
+**Build result: PASS** — BUILD EXIT CODE: 0
+
+**Audit result: PASS — 0 errors, 0 warnings** (18.8 s)
+
+| Check | Result |
+|---|---|
+| Required package files (manifest, checksums, provenance, cleaning report) | PASS |
+| Basin count (2,752 == 2,752) | PASS |
+| SHA-256 checksums (2,752/2,752) | PASS |
+| Per-basin NC audit (2,752/2,752) | PASS |
+| Held-out basins absent (89 held-out, 0 in package) | PASS |
+| Special-review basins absent (`02299472`, `04073468`) | PASS |
+| TARGET_QUALITY_REVIEW in package: 1,373 | advisory |
+
+**Policy provenance:**
+
+- policy_name: `stage1_target_policy_v001` (version 1)
+- policy_sha256: `449165686d033b9cdbd395ad70e64a3bfa82d01757021e62059f254a2a30d691`
+- AUDIT EXIT CODE: 0
+
+---
+
 ## Known limitations
 
 1. **No `--status-csv` in smoke mode**: `historical_training_utility_flag` and
    `target_status` filters are not applied without the audit CSV. The smoke build
    uses permissive mode and includes all basins in `--canonical-dir`.
 
-2. **No negative values in 5-basin smoke**: The locally available pilot basins
+2. **No negative values in 5-basin local smoke**: The locally available pilot basins
    (from Milestone 2I-B, 7 basins) happen to have no negative `qobs` values. The
-   negative-cleaning code path is implemented and exercised by logic checks but was
-   not triggered in the smoke. The full 2,843-basin build will exercise it for 18 basins.
+   negative-cleaning code path was not triggered in the local smoke.
+   **Resolved in full v001 build (2026-06-16):** 16 basins cleaned, 235 values neg→NaN.
+   Largest: `08010000` (95), `02097314` (44), `06090500` (18), `08152000` (12), `11465750` (15).
 
-3. **Special-review STAIDs not in smoke set**: `02299472` and `04073468` are not
-   among the 7 locally available pilot basins, so the halt logic was exercised by
-   code inspection only. To test the halt path explicitly:
-
-   ```bash
-   python scripts/build_stage1_target_package.py \
-       --canonical-dir tmp/stage1_pilot_dryrun/17_usgs_iv_full_period_pilot/canonical \
-       --policy config/stage1_target_policy.yaml \
-       --out-dir tmp/stage1_target_package_smoke_sr_test \
-       --staids 02299472 --force
-   # Expected: BUILD HALTED by special-review policy
-   ```
+3. **Special-review STAIDs not in local smoke set**: `02299472` and `04073468` are not
+   among the 7 locally available pilot basins, so the halt logic was exercised by code
+   inspection only in the local smoke.
+   **Resolved in h2o policy smoke (2026-06-15):** halt triggered for `02299472`
+   (2,605 neg, `review_required`) — builder exited 1, no NCs written. Confirmed PASS.
 
 4. **Canonical NC layout on h2o**: The acquisition pipeline writes NCs to both
    per-shard directories (`shard_NN/canonical/`) and a flat merged copy at
@@ -316,13 +363,15 @@ in the full build, pass `--allow-review-required 02299472` or `--exclude-staids 
 
 ## Acceptance criteria for full h2o build
 
-- Builder returns exit code 0
-- Audit returns 0 errors
-- Basin count matches expected (2,752 or 2,754 depending on special-review decision)
-- No decoded -9999 values in any NC
-- No negative qobs in any NC after cleaning
-- Cleaning report documents all basins with neg-cleaned > 0
-- manifest.json, checksums.sha256, run_provenance.json all present and consistent
+All criteria satisfied by v001 build (2026-06-16):
+
+- Builder returns exit code 0 — **PASS**
+- Audit returns 0 errors — **PASS (0 errors, 0 warnings)**
+- Basin count matches expected (2,752) — **PASS**
+- No decoded -9999 values in any NC — **PASS**
+- No negative qobs in any NC after cleaning — **PASS**
+- Cleaning report documents all basins with neg-cleaned > 0 — **PASS (16 basins, 235 values)**
+- manifest.json, checksums.sha256, run_provenance.json all present and consistent — **PASS**
 
 ---
 
