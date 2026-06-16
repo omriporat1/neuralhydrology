@@ -170,39 +170,50 @@ python scripts/audit_stage1_target_package.py \
 
 ---
 
-## Full-run command template (h2o)
+## Full-run command (h2o)
 
-Run this after the h2o environment is activated and the audit CSV is available.
-**Do not run until explicitly approved as a full build milestone.**
+The preferred path for the v001 build is the committed launcher script. It runs
+all preflight checks, build, and audit in sequence, captures logs, and exits
+non-zero on any failure.
 
 ```bash
-# Activate env
+# Start a named screen session on h2o, then run the launcher:
+screen -S flashnh_target_v001
+bash scripts/run_stage1_target_package_v001_h2o.sh
+```
+
+Pass `--force` to overwrite an existing output directory.
+Run `bash scripts/run_stage1_target_package_v001_h2o.sh --help` for full options.
+
+**Do not run until explicitly approved.**
+**Special-review basins `02299472` and `04073468` are excluded (→ 2,752 basins).**
+
+Logs:   `/data42/omrip/Flash-NH/tmp/stage1_target_package_v001_logs/`
+Output: `/data42/omrip/Flash-NH/tmp/stage1_target_package_v001/`
+
+### Manual command reference (for partial re-runs / debugging)
+
+The launcher is equivalent to the following manual steps:
+
+```bash
 source /opt/conda/etc/profile.d/conda.sh
 conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
-
 cd /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation
-
-# Full 2,843-basin build (inside screen session)
-screen -S flashnh_target_build
 
 python scripts/build_stage1_target_package.py \
     --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_full_2843/canonical_merged \
     --policy config/stage1_target_policy.yaml \
     --status-csv /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
     --out-dir /data42/omrip/Flash-NH/tmp/stage1_target_package_v001 \
+    --exclude-staids 02299472,04073468 \
     --force
 
-# Audit after build completes
 python scripts/audit_stage1_target_package.py \
     --package-dir /data42/omrip/Flash-NH/tmp/stage1_target_package_v001 \
     --policy config/stage1_target_policy.yaml \
     --status-csv /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
-    --expected-basins 2754
+    --expected-basins 2752
 ```
-
-Note: `--expected-basins 2754` reflects the policy's `effective_candidate_count`
-(all basins with `historical_training_utility_flag=True`). Adjust if special-review
-basins `02299472` / `04073468` are excluded (→ 2,752).
 
 ---
 
