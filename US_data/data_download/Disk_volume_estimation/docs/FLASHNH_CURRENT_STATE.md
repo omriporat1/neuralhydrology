@@ -78,17 +78,26 @@ See `docs/stage1_target_package_builder.md` for full commands and acceptance cri
 
 ### Immediate next steps
 
+The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
+forcing data and package assembly on h2o before any Moriah transfer.
+
 1. **Push pending commits** — push commits currently ahead of origin.
-2. **Moriah transfer layout design** — define directory structure and `rsync`/`scp` transfer
-   procedure for moving assembled NH packages from h2o to Moriah.
-3. **Special-review disposition (02299472/04073468)** — open for future v002.
-   02299472: 2,605 neg; 04073468: 2,054 neg. Decide include (`--allow-review-required`)
-   or exclude (`--exclude-staids`) before v002 build.
+2. **Stage 1 forcing acquisition plan on h2o** — design and smoke-test MRMS + RTMA
+   bulk download pipeline (gates G1/G2 conditionally unblocked; etiquette rules apply).
+   Each job must produce a compact evidence bundle before Claude documents or commits results.
+   Start with small smoke tests; full TB-scale downloads require explicit approval.
+3. **Basin-average forcing preprocessing on h2o** — apply existing grid weights to
+   compute per-basin hourly MRMS and RTMA time series for all 2,752 v001 basins.
+4. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
+   basin-average forcings, static attributes (`attributes_full.csv`), and train/val/test
+   splits into an audited NH-compatible package.
+5. **Moriah transfer layout and checksum-verified transfer** — define directory structure
+   and `rsync`/`scp` transfer procedure; verify checksums on arrival before training.
+6. **Moriah training environment and config** — only after the assembled package passes
+   audit on Moriah. NeuralHydrology training remains designated for Moriah cluster.
 
-The following are **conditionally unblocked** (etiquette rules apply):
-
-5. Large spatial-data bulk downloads (MRMS, RTMA, URMA, NWM) — gate G1 CONDITIONALLY UNBLOCKED.
-6. Basin-average preprocessing — gate G2 CONDITIONALLY UNBLOCKED.
+**Special-review disposition (02299472/04073468)** — open for future v002, not a blocker
+for steps 2–6 above. 02299472: 2,605 neg; 04073468: 2,054 neg.
 
 The following require additional confirmation before proceeding:
 
