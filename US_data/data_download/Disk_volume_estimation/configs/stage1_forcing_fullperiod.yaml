@@ -1,0 +1,188 @@
+# Flash-NH Stage 1 Forcing — Full-Period Extraction Config
+#
+# PURPOSE
+# -------
+# Configure the full-period MRMS + RTMA forcing extraction for all 2,752
+# v001 basins over 2020-10-14T00Z – 2025-12-31T23Z on h2o.
+#
+# This config is consumed by:
+#   scripts/extract_stage1_forcing_chunk.py   (per-chunk forcing extraction)
+#   scripts/build_stage1_basin_weights.py     (v001 weight table build)
+#   scripts/run_stage1_forcing_smoke_h2o.sh   (smoke launcher)
+#   scripts/run_stage1_forcing_fullperiod_h2o.sh  (full-run launcher)
+#
+# QUICK START ON h2o
+# ------------------
+# 1. Activate environment:
+#    source /opt/conda/etc/profile.d/conda.sh
+#    conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
+#
+# 2. Build v001 weight tables (Milestone 2K-A):
+#    python scripts/build_stage1_basin_weights.py \
+#        --config configs/stage1_forcing_fullperiod.yaml \
+#        --data-root /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod \
+#        --basin-list /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv \
+#        --out-tag v001_2752 \
+#        --camelsh-polygons /path/to/CAMELSH_shapefile.shp
+#
+# 3. Run smoke test (Milestone 2K-B):
+#    bash scripts/run_stage1_forcing_smoke_h2o.sh
+#
+# 4. Run full extraction (Milestone 2K-C):
+#    bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+
+project:
+  name: flash-nh
+  version: stage1_forcing_fullperiod_v001
+  description: "Stage 1 full-period forcing: 2,752 basins, 2020-10-14 to 2025-12-31, MRMS + RTMA"
+
+
+# ---------------------------------------------------------------------------
+# H2O DATA ROOTS
+# ---------------------------------------------------------------------------
+# Set FLASHNH_DATA_ROOT env var on h2o, or override with --data-root CLI arg.
+# The forcing extraction does NOT use this for output routing — all paths
+# are passed explicitly to extract_stage1_forcing_chunk.py.
+# This section is used only by build_stage1_basin_weights.py.
+
+data_root:
+  local: null       # not used for forcing extraction
+  hpc: null         # set via FLASHNH_DATA_ROOT or --data-root on h2o
+
+
+# ---------------------------------------------------------------------------
+# FULL-PERIOD TARGET SETTINGS
+# ---------------------------------------------------------------------------
+target:
+  n_basins: 2752
+  v001_package: "/data42/omrip/Flash-NH/tmp/stage1_target_package_v001"
+
+  time_range:
+    # Matches the v001 streamflow-target period exactly.
+    # 2020-10-14T00Z is the first hour in all 2,752 target NC files.
+    start: "2020-10-14T00:00:00"
+    end:   "2025-12-31T23:00:00"
+    total_hours: 45720   # (informational)
+
+  basin_list:
+    # CSV derived from stage1_target_package_v001/manifest.json after the v001 build.
+    # Must have STAID column (8-char zero-padded).
+    # Generate with: python scripts/export_v001_basin_list.py  (future helper)
+    path: "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv"
+
+
+# ---------------------------------------------------------------------------
+# H2O STORAGE LAYOUT
+# ---------------------------------------------------------------------------
+h2o_paths:
+  forcing_root:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod"
+  raw_mrms:       "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/raw/mrms"
+  raw_rtma:       "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/raw/rtma"
+  staging_mrms:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/staging/mrms"
+  staging_rtma:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/staging/rtma"
+  chunks:         "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/chunks"
+  manifests:      "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/manifests"
+  weights:        "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/weights"
+  forcing_pkg:    "/data42/omrip/Flash-NH/tmp/stage1_forcing_package_v001"
+
+  # Grid definition JSONs (copied from local pilot run; required by weight builder)
+  # Copy from: tmp/stage1_pilot_dryrun/09_manifests/stage1_pilot/grid_definitions/
+  grid_def_dir:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions"
+
+  # v001 weight tables (output of build_stage1_basin_weights.py on h2o)
+  mrms_weights:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/02_basin_geometries/weights/mrms/v001_2752_mrms_weights.parquet"
+  rtma_weights:   "/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/02_basin_geometries/weights/rtma/v001_2752_rtma_weights.parquet"
+
+
+# ---------------------------------------------------------------------------
+# SOURCE PRODUCTS — MRMS + RTMA (same as pilot, unchanged)
+# ---------------------------------------------------------------------------
+products:
+
+  mrms:
+    enabled: true
+    backend: aws
+    bucket: noaa-mrms-pds
+    product: MultiSensor_QPE_01H_Pass1
+    variables:
+      - precipitation
+    temporal_resolution: hourly
+    # S3 key structure: CONUS/MultiSensor_QPE_01H_Pass1_00.00/YYYYMMDD/<file>
+    # Validated gateway: MrmsAwsQpe1hPass1 in src/datasources/mrms.py
+    # Units: mm (hourly accumulation; GRIB_units='unknown' is a known MRMS quirk)
+
+  rtma:
+    enabled: true
+    backend: aws
+    bucket: noaa-rtma-pds
+    variables:
+      - air_temperature_2m         # 2t  (K)
+      - specific_humidity_2m       # 2sh / 2d (kg kg-1 / K; both decoded)
+      - wind_u_10m                 # 10u (m s-1)
+      - wind_v_10m                 # 10v (m s-1)
+      - surface_pressure           # sp  (Pa)
+      - wind_speed_10m             # 10si (m s-1; optional_dynamic_candidate)
+      - wind_gust_10m              # i10fg (m s-1; optional_dynamic_candidate)
+      - total_cloud_cover          # tcc (%; optional_dynamic_candidate)
+      # ceil and vis are extracted but excluded from final forcing NC
+      # 10wdir (circular) and orog (static) are excluded from staging output
+    temporal_resolution: hourly
+    rtma_mode: selected_messages   # saves ~0.7 TB vs full_file over v001 period
+    # File pattern: noaa-rtma-pds/rtma2p5.YYYYMMDD/rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp
+    # Validated gateway: RtmaAwsConusDataSource in src/datasources/rtma.py
+
+
+# ---------------------------------------------------------------------------
+# EXTRACTION SETTINGS (same as pilot)
+# ---------------------------------------------------------------------------
+extraction:
+  basin_stats:
+    - mean
+    - min
+    - max
+    - std
+    - p10
+    - p25
+    - p50
+    - p75
+    - p90
+    - p95
+    - p99
+    - valid_fraction
+    - n_valid_pixels
+
+  weight_validation:
+    weight_sum_tolerance: 0.01
+    min_cells_per_basin: 1
+
+
+# ---------------------------------------------------------------------------
+# H2O COMPUTE ETIQUETTE
+# ---------------------------------------------------------------------------
+compute:
+  download_workers: 16          # parallel RTMA downloads per chunk job
+  # Start at 16; check uptime before expanding. ≤50-60% total CPU.
+  # On h2o with 10 Gbps network: download time per file is <1s;
+  # decode/extract dominate. 16 workers keeps download queue saturated.
+
+  chunk_strategy: monthly       # one chunk = one calendar month
+  # 63 chunks total: 2020-10 (partial: starts 2020-10-14) through 2025-12
+  # Run sequentially under screen; each chunk is ~720-744 hours × 2,752 basins.
+
+  screen_session_name: flashnh-forcing
+  # screen -S flashnh-forcing bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+
+
+# ---------------------------------------------------------------------------
+# CAMELSH SOURCE (required for weight build on h2o)
+# ---------------------------------------------------------------------------
+camelsh:
+  # Set the explicit polygon path on h2o, or let auto-discovery find it at:
+  #   {data_root}/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp
+  # If the shapefile is NOT on h2o, transfer it first:
+  #   scp <local>:path/to/shapefiles.7z flashnh-h2o:/data42/omrip/
+  #   7z x /data42/omrip/shapefiles.7z -o/data42/omrip/camelsh/
+  basin_polygons: null   # null = auto-discover; or set explicit path
+  basin_polygon_id_column: GAGE_ID
+  camelsh_reference_doi: "10.5281/zenodo.16763144"
+  camelsh_polygon_source_doi: "10.5281/zenodo.15066778"

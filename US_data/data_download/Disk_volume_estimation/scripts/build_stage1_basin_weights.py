@@ -87,6 +87,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default=str(REPO_ROOT / "configs" / "pilot_stage1.yaml"))
     p.add_argument("--data-root", default=None, help="Override data root path")
     p.add_argument(
+        "--basin-list",
+        default=None,
+        metavar="CSV",
+        help=(
+            "Override the auto-discovered pilot basin manifest with this CSV file. "
+            "The CSV must have a STAID column (8-char zero-padded gauge IDs). "
+            "Optional columns: DRAIN_SQKM, LAT_GAGE, LNG_GAGE, pilot_role. "
+            "Use this to build weights for the full v001 basin list (2,752 basins) "
+            "rather than the 50-basin pilot manifest."
+        ),
+    )
+    p.add_argument(
+        "--out-tag",
+        default="pilot",
+        metavar="TAG",
+        help=(
+            "Output filename prefix for the weight Parquet files "
+            "(default: 'pilot' → pilot_mrms_weights.parquet). "
+            "Use e.g. 'v001_2752' to produce v001_2752_mrms_weights.parquet."
+        ),
+    )
+    p.add_argument(
         "--allow-fallback-circles",
         action="store_true",
         help=(
@@ -424,10 +446,17 @@ def main() -> None:
     LOGGER.info("Git:       %s", git_commit_hash() or "unknown")
 
     # ---- Locate required inputs ----
-    pilot_manifest = data_root / "09_manifests" / "stage1_pilot" / "pilot_basin_manifest.csv"
-    if not pilot_manifest.exists():
-        LOGGER.error("Pilot manifest not found: %s  (run run_stage1_pilot_dry_run.py first)", pilot_manifest)
-        sys.exit(1)
+    if args.basin_list:
+        pilot_manifest = Path(args.basin_list)
+        if not pilot_manifest.exists():
+            LOGGER.error("--basin-list file not found: %s", pilot_manifest)
+            sys.exit(1)
+        LOGGER.info("Basin list override: %s", pilot_manifest)
+    else:
+        pilot_manifest = data_root / "09_manifests" / "stage1_pilot" / "pilot_basin_manifest.csv"
+        if not pilot_manifest.exists():
+            LOGGER.error("Pilot manifest not found: %s  (run run_stage1_pilot_dry_run.py first)", pilot_manifest)
+            sys.exit(1)
 
     grid_def_dir = data_root / "09_manifests" / "stage1_pilot" / "grid_definitions"
     mrms_json = grid_def_dir / "mrms_grid_definition.json"
@@ -525,8 +554,9 @@ def main() -> None:
     LOGGER.info("RTMA weights: %d records in %.1fs", len(rtma_weights), rtma_time)
 
     # ---- Write Parquet tables ----
-    mrms_parquet = mrms_weights_dir / "pilot_mrms_weights.parquet"
-    rtma_parquet = rtma_weights_dir / "pilot_rtma_weights.parquet"
+    out_tag = args.out_tag or "pilot"
+    mrms_parquet = mrms_weights_dir / f"{out_tag}_mrms_weights.parquet"
+    rtma_parquet = rtma_weights_dir / f"{out_tag}_rtma_weights.parquet"
     mrms_weights.to_parquet(mrms_parquet, index=False)
     rtma_weights.to_parquet(rtma_parquet, index=False)
     LOGGER.info("Written: %s", mrms_parquet.name)
@@ -598,6 +628,10 @@ def main() -> None:
     run_cmd = f"python scripts/build_stage1_basin_weights.py --config {args.config}"
     if args.data_root:
         run_cmd += f" --data-root {args.data_root}"
+    if args.basin_list:
+        run_cmd += f" --basin-list {args.basin_list}"
+    if args.out_tag and args.out_tag != "pilot":
+        run_cmd += f" --out-tag {args.out_tag}"
 
     write_run_manifest(
         weights_manifest_dir,
