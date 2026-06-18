@@ -100,38 +100,39 @@ echo "RTMA mode: ${RTMA_MODE}"
 echo "Output:    ${FORCING_ROOT}"
 echo "============================================================"
 
-# Check conda is available
-if ! command -v conda &>/dev/null; then
-    if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
-        # shellcheck disable=SC1091
-        source /opt/conda/etc/profile.d/conda.sh
-    elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
-        # shellcheck disable=SC1091
-        source "${HOME}/miniconda3/etc/profile.d/conda.sh"
-    else
-        echo "ERROR: conda not found. Please activate manually:"
-        echo "  source /opt/conda/etc/profile.d/conda.sh"
-        echo "  conda activate ${ENV_PREFIX}"
-        exit 1
-    fi
+# Source conda shell integration unconditionally — 'conda activate' requires the
+# shell function registered by conda.sh, not just the conda binary being in PATH.
+# Non-interactive shells (bash script.sh) do not source ~/.bashrc, so we must
+# do this explicitly even if 'conda' is already findable as a binary.
+if [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source /opt/conda/etc/profile.d/conda.sh
+elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/miniconda3/etc/profile.d/conda.sh"
 fi
 
-# Activate environment
-conda activate "${ENV_PREFIX}" || {
-    echo "ERROR: Could not activate ${ENV_PREFIX}"
-    echo "Check: conda env list | grep flashnh"
-    exit 1
-}
-# conda activate can silently leave the shell pointing at a different env
-# (observed on h2o: PS1 shows flashnh-stage1 but which python → iacpy3_2025).
-# Force the correct env by prepending its bin dir and rehashing.
+# Attempt conda activate — non-fatal. In non-interactive shells conda activate
+# can raise "CondaError: Run 'conda init' before 'conda activate'" even when
+# the env exists and conda.sh was sourced above. PATH-prepend below is the
+# authoritative env-selection mechanism.
+conda activate "${ENV_PREFIX}" 2>/dev/null || true
+
+# Force the correct env: prepend its bin dir and rehash the shell command table.
 export PATH="${ENV_PREFIX}/bin:${PATH}"
 hash -r
+
+# Fatal checks: verify the correct Python is active.
+if [ ! -x "${ENV_PREFIX}/bin/python" ]; then
+    echo "ERROR: ${ENV_PREFIX}/bin/python not found or not executable."
+    echo "       Ensure the flashnh-stage1 conda env is installed at ${ENV_PREFIX}."
+    exit 1
+fi
 _actual_python=$(command -v python)
 if [ "${_actual_python}" != "${ENV_PREFIX}/bin/python" ]; then
     echo "ERROR: python resolves to ${_actual_python}"
     echo "       expected ${ENV_PREFIX}/bin/python"
-    echo "PATH: ${PATH}"
+    echo "       PATH: ${PATH}"
     exit 1
 fi
 _py_ver=$(python --version 2>&1)

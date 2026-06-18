@@ -10,7 +10,8 @@ h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026
 Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke PASS (2026-06-15).
 **v001 target package (2,752 basins) built and audited on h2o (2026-06-16): PASS — 0 errors, 0 warnings.**
 **Milestone 2K-A COMPLETE (2026-06-18): v001 basin-weight tables built on h2o — 2,752/2,752 basins, PASS.**
-**Next: Milestone 2K-B — forcing extraction smoke test (48h × 10 basins on h2o).**
+**Milestone 2K-B COMPLETE (2026-06-18): forcing extraction smoke test — PASS. RTMA 48/48 h; MRMS 27/48 h (21 `not_in_s3`, expected early archive gap).**
+**Next: Milestone 2K-C — full-period forcing extraction. Requires deliberate launch plan. Do not auto-launch. See 2K-C launch caution below.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -137,6 +138,55 @@ QC plotting is advisory; the fix is in commit `026c363`.
 - **Grid-def path:** `build_stage1_basin_weights.py` now supports `--grid-def-dir` with 3-level
   auto-discovery (explicit → v001 flat → pilot legacy). Pass it explicitly to avoid ambiguity.
 
+### Stage 1 forcing — Milestone 2K-B (completed 2026-06-18)
+
+Forcing extraction smoke test on h2o. **PASS — all 12 validation checks passed.**
+
+**Evidence:** Compact evidence bundle inspected locally from `tmp/stage1_forcing_smoke_evidence/`
+(not committed). Evidence files: `smoke_manifest.json`, `smoke_summary.md`,
+`smoke_live_run.log`, `smoke_hourly_runtime_and_volume.csv`, `smoke_missing_files.csv`.
+
+**Smoke was run via direct extractor invocation.** The launcher (`scripts/run_stage1_forcing_smoke_h2o.sh`)
+raised `CondaError: Run 'conda init' before 'conda activate'` when invoked as `bash script.sh`
+in a non-interactive shell, even after the PATH-prepend patch in `43af035`. The launcher
+activation block has been patched (current commit) to source `conda.sh` unconditionally
+and make `conda activate` non-fatal. **Verify the launcher fix on h2o before launching 2K-C.**
+
+**Smoke results:**
+
+| Metric | Value |
+|---|---|
+| Period | 2020-10-14T00:00:00Z – 2020-10-15T23:00:00Z |
+| Basins | 10 |
+| MRMS hours extracted | 27/48 |
+| MRMS missing | 21 (`not_in_s3`, 2020-10-14T00Z–20Z — see note below) |
+| RTMA hours extracted | 48/48 |
+| RTMA missing | 0 |
+| `mrms_smoke.parquet` rows | 270 (27 h × 10 basins) |
+| `rtma_smoke.parquet` rows | 5,280 (48 h × 10 basins × 11 vars) |
+| `combined_smoke.parquet` rows | 5,550 |
+| Wall clock | 10m 13s |
+| Downloaded | ~3.2 GB (RTMA `selected_messages`, 4 workers) |
+| `all_pass` (manifest) | `true` |
+| Git commit at run time | `43af035d` |
+
+**MRMS 21-hour early archive gap (expected):** `noaa-mrms-pds` QPE 1h Pass1 coverage for
+2020-10-14 begins at 21:00Z, not midnight. The first 21 hours (00Z–20Z) are genuinely
+absent from S3 — this is a permanent upstream archive gap, not a pipeline error.
+The full-period first chunk (`2020-10`) will carry the same 21-hour gap in its
+`missing_files.csv`. All subsequent months have complete MRMS coverage.
+
+**Validation checks (all PASS):**
+`mrms_extracted_hours_gt_zero` · `mrms_N_basins_per_ok_hour` · `mrms_no_all_null_weighted_mean`
+· `mrms_valid_weight_fraction_ok` · `mrms_parquet_written` · `rtma_extracted_hours_gt_zero`
+· `rtma_10wdir_absent` · `rtma_orog_absent` · `rtma_at_least_8_variables`
+· `rtma_no_all_null_weighted_mean` · `rtma_parquet_written` · `combined_parquet_written`
+
+**Performance notes:**
+- RTMA `selected_messages` download: median ~42 s/file at 4 workers → ~33–40 h total at 16 workers.
+- MRMS download: ~0.3–1.3 s/file (cfgrib cold start on first file only). Negligible vs RTMA.
+- Estimated full-period RTMA raw: ~3.2 TB (`selected_messages`); MRMS raw: ~0.5 TB.
+
 ### Immediate next steps
 
 The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
@@ -146,19 +196,66 @@ forcing data and package assembly on h2o before any Moriah transfer.
    running 2K-B on h2o (`git push`, then on h2o: `git pull --ff-only`).
 2. ~~**Stage 1 forcing acquisition plan + weight build (2K-A)**~~ — **COMPLETE (2026-06-18).**
    See "Stage 1 forcing — Milestone 2K-A" section above.
-3. **Milestone 2K-B — forcing extraction smoke test** — 48h × 10 basins on h2o.
-   After pulling latest commits:
-   ```bash
-   source /opt/conda/etc/profile.d/conda.sh
-   conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
-   which python   # must show flashnh-stage1/bin/python
-   screen -S flashnh-smoke bash scripts/run_stage1_forcing_smoke_h2o.sh
-   ```
-   Pull evidence bundle locally before documenting (log, manifest, summary MD).
-   All validation gates must pass before proceeding to 2K-C.
-4. **Milestone 2K-C — full-period forcing extraction** (pending 2K-B PASS) — 63 monthly chunks,
-   2,752 basins, ~45,720 h each, under `screen`. TB-scale; requires explicit PI notification
-   and smoke-test sign-off before launch.
+3. ~~**Milestone 2K-B — forcing extraction smoke test**~~ — **COMPLETE (2026-06-18): PASS.**
+   Run via direct extractor (launcher activation was broken). Evidence: `tmp/stage1_forcing_smoke_evidence/`.
+   See "Stage 1 forcing — Milestone 2K-B" section above.
+4. **Milestone 2K-C — full-period forcing extraction** — 63 monthly chunks (2020-10 through
+   2025-12), 2,752 basins, ~45,720 hours total, under `screen`. **TB-scale. Do not launch
+   automatically.** Before starting, complete the 2K-C pre-launch checklist below.
+
+#### 2K-C pre-launch checklist and caution
+
+Before any 2K-C run, confirm all of the following:
+
+**Launcher verification (new requirement):**
+- Pull latest commits on h2o: `git pull --ff-only`
+- Run a dry activation test: `bash scripts/run_stage1_forcing_smoke_h2o.sh --help` or check that
+  the launcher reaches the Python version line without error.
+- The launcher activation bug (CondaError in non-interactive shells) is patched in the current commit.
+  **Verify the fix is working on h2o before launching 2K-C.**
+
+**One-month dry run before full 63-month launch:**
+- Run 2020-10 alone first (`screen -S flashnh-2020-10 bash scripts/run_stage1_forcing_fullperiod_h2o.sh`
+  with the month list reduced to a single entry, or via direct extractor for 2020-10-14T21Z – 2020-10-31T23Z).
+- Confirm the 2020-10 chunk manifest is written, `missing_files.csv` contains exactly 21 MRMS
+  `not_in_s3` entries for 2020-10-14T00Z–20Z, and Parquet row counts are consistent.
+- Pull the 2020-10 evidence bundle locally before enabling the full loop.
+
+**Expected 2020-10 MRMS 21-hour gap:**
+- 2020-10-14T00Z–20Z will appear as `not_in_s3` in `missing_files.csv` for the first chunk.
+- This is a documented upstream archive gap, not a pipeline error. Do not treat as a blocker.
+- All hours from 2020-10-14T21Z onward and all subsequent months have complete MRMS coverage.
+
+**PI notification:**
+- Notify PI/machine owner before starting the full 63-month extraction loop.
+- Check `uptime` before launch; hold if 1-min load > 0.7 × nproc.
+- Target ≤ 50–60% CPU; start with 16 workers; increase only after monitoring a full chunk.
+
+**Storage and raw GRIB2 deletion policy:**
+- Raw MRMS + RTMA GRIB2 cache accumulates to ~3.7 TB over the full period.
+- After each quarter's monthly chunk Parquets are written and checksummed, delete the
+  corresponding raw GRIB2 cache to free space. Do not delete until Parquets are verified.
+- Monthly chunk Parquets + per-basin forcing NCs are the curated products; raw GRIB2 is reproducible.
+- Do not exceed ~20 TB total across all Flash-NH data on `/data42`.
+
+**Evidence-bundle pull policy:**
+- After every quarter (roughly every 3 months of chunks), transfer compact evidence bundles
+  locally: chunk manifests (`*_manifest.json`) and missing-file CSVs (`*_missing_files.csv`).
+- Do not transfer raw GRIB2, staging Parquets, or combined chunk Parquets unless needed for debugging.
+- Document each quarterly bundle in `docs/FLASHNH_CURRENT_STATE.md` before proceeding.
+
+**Progress monitoring:**
+- Attach to the screen session with `screen -r flashnh-fullperiod` to check live log output.
+- Each monthly chunk writes a progress log to `{FORCING_ROOT}/manifests/{chunk_label}_live_run.log`.
+- Check `uptime` and `df -h /data42` periodically (once per few hours).
+- A per-month completion summary will be logged; each month's manifest is the checkpoint.
+
+**Stop and resume procedure:**
+- To stop cleanly: `Ctrl-C` inside the screen session; the current hour's staging Parquet may be incomplete.
+- To resume: re-run the launcher with `--resume`; already-written staging Parquets for completed hours
+  are skipped automatically.
+- Each completed monthly chunk is independent; re-running a month re-uses cached raw files and
+  skips already-extracted hours.
 5. **Basin-average per-NC assembly on h2o** (pending 2K-C) — assemble per-basin forcing NCs
    from monthly chunk Parquets; `scripts/build_stage1_forcing_basin_ncs.py` (not yet written).
 6. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
