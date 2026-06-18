@@ -122,7 +122,24 @@ conda activate "${ENV_PREFIX}" || {
     echo "Check: conda env list | grep flashnh"
     exit 1
 }
-echo "Python: $(which python) ($(python --version 2>&1))"
+# conda activate can silently leave the shell pointing at a different env
+# (observed on h2o: PS1 shows flashnh-stage1 but which python → iacpy3_2025).
+# Force the correct env by prepending its bin dir and rehashing.
+export PATH="${ENV_PREFIX}/bin:${PATH}"
+hash -r
+_actual_python=$(command -v python)
+if [ "${_actual_python}" != "${ENV_PREFIX}/bin/python" ]; then
+    echo "ERROR: python resolves to ${_actual_python}"
+    echo "       expected ${ENV_PREFIX}/bin/python"
+    echo "PATH: ${PATH}"
+    exit 1
+fi
+_py_ver=$(python --version 2>&1)
+if [[ "${_py_ver}" != *"Python 3.11"* ]]; then
+    echo "ERROR: Expected Python 3.11.x, got: ${_py_ver}"
+    exit 1
+fi
+echo "Python: ${_actual_python} (${_py_ver})"
 
 # Check required files
 for fpath in "${BASIN_LIST}" "${MRMS_WEIGHTS}" "${RTMA_WEIGHTS}"; do

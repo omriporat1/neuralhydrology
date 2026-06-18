@@ -30,6 +30,10 @@ dependencies:
   - pyyaml
   - tqdm
 
+  # AWS S3 + retry (required by MrmsAwsQpe1hPass1 and RtmaAwsConusDataSource)
+  - boto3
+  - tenacity
+
   # Plotting / QC
   - matplotlib
 

@@ -11,13 +11,15 @@ import re
 import time
 
 import boto3
-import httpx
-import planetary_computer
-from pystac_client import Client
 from botocore import UNSIGNED
 from botocore.config import Config as BotoConfig
 from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
+
+# httpx, planetary_computer, pystac_client are only used by MrmsDataSource
+# (the legacy STAC-based class). They are imported lazily inside its methods
+# so that MrmsAwsQpe1hPass1 (the AWS S3 class used for Stage 1 forcing) can be
+# imported without these optional packages installed.
 
 from src.datasources.base import CONUS_BBOX, DataSource, DerivedSpec, Region, RemoteObject, log_request
 from src.derived_size import compute_derived_bytes
@@ -47,6 +49,9 @@ class MrmsDataSource(DataSource):
 		variables: list[str],
 		lead_times: Optional[Iterable[int]] = None,
 	) -> list[RemoteObject]:
+		import planetary_computer
+		from pystac_client import Client
+
 		if region.name != CONUS_BBOX.name:
 			raise ValueError("MRMS implementation currently supports only CONUS bbox.")
 
@@ -87,6 +92,8 @@ class MrmsDataSource(DataSource):
 
 	@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 	def _download_one(self, url: str, out_path: Path) -> None:
+		import httpx
+
 		out_path.parent.mkdir(parents=True, exist_ok=True)
 		log_request(LOGGER, self.name, "http.get", url=url, params={"timeout_s": 60})
 		with httpx.stream("GET", url, timeout=60) as response:
