@@ -297,17 +297,17 @@ Planned bulk downloads (rough estimates; may be refined):
   fails to parse on Windows PowerShell 5.1 (8 AST errors). It is not needed for 2K-B or 2K-C
   (grid JSONs and CAMELSH shapefile are already transferred and verified on h2o). Fix in a
   separate small commit before relying on it for future transfer operations.
-- ⚠️ **Launcher activation bug (observed 2K-B, 2026-06-18):** Both
+- ✅ **Launcher activation bug — patched and verified (2026-06-18):** Both
   `scripts/run_stage1_forcing_smoke_h2o.sh` and `scripts/run_stage1_forcing_fullperiod_h2o.sh`
-  raised `CondaError: Run 'conda init' before 'conda activate'` when invoked as `bash script.sh`
-  in a non-interactive shell. This occurred even after the `43af035` PATH-prepend patch, because
-  `conda activate` requires the shell *function* registered by `conda.sh`, not just the conda
-  binary being in PATH — and non-interactive shells do not source `~/.bashrc`.
-  **2K-B smoke was therefore run via direct extractor invocation** (not via the launcher).
-  The launchers have been patched in the current commit: `conda.sh` is now sourced
-  unconditionally, and `conda activate` is non-fatal (`|| true`). PATH-prepend is the
-  authoritative env-selection mechanism; the Python version check is the fatal gate.
-  **Verify this fix on h2o before launching 2K-C via the launcher.**
+  previously raised `CondaError: Run 'conda init' before 'conda activate'` when invoked as
+  `bash script.sh` in a non-interactive shell. Root cause: `conda activate` requires the shell
+  *function* registered by `conda.sh`, not just the conda binary being in PATH, and non-interactive
+  shells do not source `~/.bashrc`. The 2K-B smoke was therefore run via direct extractor
+  invocation. Fixed in commit `ccb2631`: `conda.sh` is now sourced unconditionally and
+  `conda activate` is non-fatal (`|| true`); PATH-prepend is the authoritative env-selection
+  mechanism; Python version check is the fatal gate. **Verified on h2o (2026-06-18):**
+  `bash scripts/run_stage1_forcing_smoke_h2o.sh` completed end-to-end via the launcher,
+  reporting `/data42/omrip/Flash-NH/envs/flashnh-stage1/bin/python (Python 3.11.15)` and PASS.
 
 ---
 

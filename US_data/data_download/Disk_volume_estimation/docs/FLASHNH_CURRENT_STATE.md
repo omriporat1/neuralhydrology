@@ -146,11 +146,18 @@ Forcing extraction smoke test on h2o. **PASS — all 12 validation checks passed
 (not committed). Evidence files: `smoke_manifest.json`, `smoke_summary.md`,
 `smoke_live_run.log`, `smoke_hourly_runtime_and_volume.csv`, `smoke_missing_files.csv`.
 
-**Smoke was run via direct extractor invocation.** The launcher (`scripts/run_stage1_forcing_smoke_h2o.sh`)
+**Original smoke was run via direct extractor invocation.** The launcher (`scripts/run_stage1_forcing_smoke_h2o.sh`)
 raised `CondaError: Run 'conda init' before 'conda activate'` when invoked as `bash script.sh`
 in a non-interactive shell, even after the PATH-prepend patch in `43af035`. The launcher
-activation block has been patched (current commit) to source `conda.sh` unconditionally
-and make `conda activate` non-fatal. **Verify the launcher fix on h2o before launching 2K-C.**
+activation block was subsequently patched (commit `ccb2631`) to source `conda.sh` unconditionally
+and make `conda activate` non-fatal.
+
+**Launcher activation fix verified on h2o (2026-06-18):** After pulling `ccb2631`,
+`bash scripts/run_stage1_forcing_smoke_h2o.sh` completed end-to-end via the launcher
+wrapper. Python resolved correctly to `/data42/omrip/Flash-NH/envs/flashnh-stage1/bin/python (Python 3.11.15)`.
+This was a cached/resume rerun (0.0 B downloaded, ~1m 12s elapsed); output row counts and
+PASS status matched the original uncached run. **The launcher activation bug is resolved.**
+Download and runtime estimates for 2K-C should be taken from the original uncached run (10m 13s, ~3.2 GB), not this verification rerun.
 
 **Smoke results:**
 
