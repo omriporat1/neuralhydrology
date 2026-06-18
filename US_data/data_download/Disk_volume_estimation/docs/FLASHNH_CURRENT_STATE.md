@@ -1,6 +1,6 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-16
+Last updated: 2026-06-18
 
 ## Current milestone
 
@@ -9,7 +9,8 @@ Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
 h2o preprocessing environment installed and smoke-tested (`flashnh-stage1`, 2026-06-15).
 Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke PASS (2026-06-15).
 **v001 target package (2,752 basins) built and audited on h2o (2026-06-16): PASS — 0 errors, 0 warnings.**
-**Next: Moriah transfer layout design. Special-review disposition (02299472/04073468) open for future v002.**
+**Milestone 2K-A COMPLETE (2026-06-18): v001 basin-weight tables built on h2o — 2,752/2,752 basins, PASS.**
+**Next: Milestone 2K-B — forcing extraction smoke test (48h × 10 basins on h2o).**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -37,13 +38,19 @@ Key policy clarifications from PI:
 
 See `docs/stage1_h2o_operations_preflight.md` for full gate status.
 
-### h2o environment status (as of 2026-06-15)
+### h2o environment status (as of 2026-06-18)
 
 - **Prefix:** `/data42/omrip/Flash-NH/envs/flashnh-stage1`
 - **Python:** `3.11.15` | **Size:** `7.0 G`
 - **Smoke test:** ALL PASS — core, geospatial, dask, cfgrib/eccodes, NetCDF, Parquet, neuralhydrology
 - **Log:** `/data42/omrip/Flash-NH/tmp/env_smoke_20260615T120918Z/env_smoke.log`
 - **Activation on h2o:** `source /opt/conda/etc/profile.d/conda.sh && conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1`
+- **Activation caveat:** The shell prompt may show `(flashnh-stage1)` while `which python` still
+  points to `/opt/conda/envs/iacpy3_2025/bin/python`. Always run the explicit `source` + `conda activate`
+  sequence and verify with `which python` before running any job. Observed during 2K-A (2026-06-18);
+  clean reactivation resolved it.
+- **py7zr added (2026-06-18):** Installed `py7zr` into `flashnh-stage1` using the standard h2o workaround:
+  `CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs conda install --solver classic py7zr`.
 - **Caveat:** `neuralhydrology` pip-pulled CUDA torch (2.12.0+cu130); env is 7.0 G vs lean CPU intent.
   `cuda_available=False` on h2o — functionally harmless. Future spec revision to use `--no-deps` or CPU torch.
 - **h2o is not for NeuralHydrology training.** Training remains designated for Moriah cluster.
@@ -76,35 +83,101 @@ Milestone 2J-B: **COMPLETE** — scripts implemented, smoke-tested locally and o
 
 See `docs/stage1_target_package_builder.md` for full commands and acceptance criteria.
 
+### Stage 1 forcing — Milestone 2K-A (completed 2026-06-18)
+
+Input preflight and v001 basin-weight table build on h2o. **PASS — 2,752/2,752 basins.**
+
+**Input preflight (`verify_stage1_forcing_inputs_h2o.sh`):** 10/10 PASS, 0 WARN, 0 FAIL.
+
+**Key input locations on h2o:**
+
+| Item | Path | Notes |
+|---|---|---|
+| v001 basin list CSV | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv` | 2,752 rows excl. header |
+| CAMELSH shapefile | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp` | 2,752/2,752 real polygons; `.prj` absent → EPSG:4326 assumed |
+| MRMS grid def | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions/mrms_grid_definition.json` | v001 flat layout (not pilot path) |
+| RTMA grid def | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions/rtma_grid_definition.json` | same |
+
+**Weight Parquets (output):**
+
+| File | Size | Basins |
+|---|---|---|
+| `02_basin_geometries/weights/mrms/v001_2752_mrms_weights.parquet` | 37 MB | 2,752/2,752 |
+| `02_basin_geometries/weights/rtma/v001_2752_rtma_weights.parquet` | 12 MB | 2,752/2,752 |
+
+All paths relative to `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/`.
+
+**Clean build command:**
+
+```bash
+python scripts/build_stage1_basin_weights.py \
+    --config configs/stage1_forcing_fullperiod.yaml \
+    --data-root /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod \
+    --basin-list /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv \
+    --out-tag v001_2752 \
+    --grid-def-dir /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions \
+    --skip-qc-plots
+```
+
+Fatal validation: all PASS. `--skip-qc-plots` used because the h2o CAMELSH shapefile lacks
+`LNG_GAGE`, `LAT_GAGE`, `DRAIN_SQKM` columns (schema: `LAYER, MAP_NAME, AREA, PERIMETER, GAGE_ID, geometry`).
+QC plotting is advisory; the fix is in commit `026c363`.
+
+**Operational lessons from 2K-A:**
+
+- **Activation caveat:** Shell prompt can show `(flashnh-stage1)` while `which python` points to
+  the wrong env. Always verify with `which python` after activation.
+- **py7zr:** Added to `flashnh-stage1` on h2o using `CONDA_PKGS_DIRS` + `--solver classic` workaround.
+- **PS1 helper broken:** `scripts/prepare_stage1_forcing_inputs_h2o.ps1` fails to parse on
+  Windows PowerShell 5.1 (8 AST parse errors). It is not needed for 2K-B (grid JSONs and
+  CAMELSH shapefile are already in place). Fix in a separate commit before relying on it again.
+- **Stale verifier message:** `verify_stage1_forcing_inputs_h2o.sh` still prints
+  "Ready to proceed to Milestone 2K-A" even after weights are built. Minor stale message;
+  not a blocker. Clean up in a later small commit.
+- **Grid-def path:** `build_stage1_basin_weights.py` now supports `--grid-def-dir` with 3-level
+  auto-discovery (explicit → v001 flat → pilot legacy). Pass it explicitly to avoid ambiguity.
+
 ### Immediate next steps
 
 The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
 forcing data and package assembly on h2o before any Moriah transfer.
 
-1. **Push pending commits** — push commits currently ahead of origin.
-2. **Stage 1 forcing acquisition plan on h2o** — design and smoke-test MRMS + RTMA
-   bulk download pipeline (gates G1/G2 conditionally unblocked; etiquette rules apply).
-   Each job must produce a compact evidence bundle before Claude documents or commits results.
-   Start with small smoke tests; full TB-scale downloads require explicit approval.
-3. **Basin-average forcing preprocessing on h2o** — apply existing grid weights to
-   compute per-basin hourly MRMS and RTMA time series for all 2,752 v001 basins.
-4. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
+1. **Push pending commits** — commit `026c363` is currently ahead of origin; push before
+   running 2K-B on h2o (`git push`, then on h2o: `git pull --ff-only`).
+2. ~~**Stage 1 forcing acquisition plan + weight build (2K-A)**~~ — **COMPLETE (2026-06-18).**
+   See "Stage 1 forcing — Milestone 2K-A" section above.
+3. **Milestone 2K-B — forcing extraction smoke test** — 48h × 10 basins on h2o.
+   After pulling latest commits:
+   ```bash
+   source /opt/conda/etc/profile.d/conda.sh
+   conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
+   which python   # must show flashnh-stage1/bin/python
+   screen -S flashnh-smoke bash scripts/run_stage1_forcing_smoke_h2o.sh
+   ```
+   Pull evidence bundle locally before documenting (log, manifest, summary MD).
+   All validation gates must pass before proceeding to 2K-C.
+4. **Milestone 2K-C — full-period forcing extraction** (pending 2K-B PASS) — 63 monthly chunks,
+   2,752 basins, ~45,720 h each, under `screen`. TB-scale; requires explicit PI notification
+   and smoke-test sign-off before launch.
+5. **Basin-average per-NC assembly on h2o** (pending 2K-C) — assemble per-basin forcing NCs
+   from monthly chunk Parquets; `scripts/build_stage1_forcing_basin_ncs.py` (not yet written).
+6. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
    basin-average forcings, static attributes (`attributes_full.csv`), and train/val/test
    splits into an audited NH-compatible package.
-5. **Moriah transfer layout and checksum-verified transfer** — define directory structure
+7. **Moriah transfer layout and checksum-verified transfer** — define directory structure
    and `rsync`/`scp` transfer procedure; verify checksums on arrival before training.
-6. **Moriah training environment and config** — only after the assembled package passes
+8. **Moriah training environment and config** — only after the assembled package passes
    audit on Moriah. NeuralHydrology training remains designated for Moriah cluster.
 
 **Special-review disposition (02299472/04073468)** — open for future v002, not a blocker
-for steps 2–6 above. 02299472: 2,605 neg; 04073468: 2,054 neg.
+for steps 3–8 above. 02299472: 2,605 neg; 04073468: 2,054 neg.
 
 The following require additional confirmation before proceeding:
 
-7. Promotion of curated data to shared lab storage — gate G4 CONDITIONALLY UNBLOCKED
-   (confirm write access to `/data42/hydrolab/Data/Flash-NH_data/` before first promotion).
-8. NeuralHydrology training — gate G3 NOT PLANNED ON h2o; blocked on Moriah scheduler
-   confirmation and env setup.
+- Promotion of curated data to shared lab storage — gate G4 CONDITIONALLY UNBLOCKED
+  (confirm write access to `/data42/hydrolab/Data/Flash-NH_data/` before first promotion).
+- NeuralHydrology training — gate G3 NOT PLANNED ON h2o; blocked on Moriah scheduler
+  confirmation and env setup.
 
 **Do not run TB-scale spatial downloads without smoke-test sign-off under etiquette rules.**
 

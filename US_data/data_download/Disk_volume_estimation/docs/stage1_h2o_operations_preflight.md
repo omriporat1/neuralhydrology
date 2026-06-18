@@ -173,6 +173,21 @@ conda env create --solver classic \
 ```bash
 source /opt/conda/etc/profile.d/conda.sh
 conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
+which python   # verify: must show .../flashnh-stage1/bin/python
+```
+
+**Activation caveat (observed 2026-06-18):** The shell prompt may show `(flashnh-stage1)` while
+`which python` still points to `/opt/conda/envs/iacpy3_2025/bin/python`. Always verify `which python`
+after activation. If it shows the wrong path, run the `source` + `conda activate` sequence again
+explicitly. Clean reactivation resolves it. Do not start any job until `which python` confirms
+the correct prefix.
+
+**Additional package — py7zr (added 2026-06-18):** `py7zr` was installed into `flashnh-stage1`
+using the same solver workaround required during initial env creation:
+
+```bash
+export CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs
+conda install --solver classic py7zr
 ```
 
 **CUDA torch caveat:** `neuralhydrology` pip-installed `torch==2.12.0+cu130` and NVIDIA
@@ -269,11 +284,19 @@ Planned bulk downloads (rough estimates; may be refined):
 
 ### 8. Software Environment Policy
 
-- ⚠️ Production should use a project-designated environment under `/data42/omrip/Flash-NH/envs/flashnh-stage1`, not the shared `iacpy3_2025` env.
-- ⚠️ Env spec `envs/environment-stage1-h2o.yml` is the next repo artifact.
-- ❓ Can a project-local conda env be created under `/data42/omrip`? (Assumed yes; not yet confirmed.)
-- ❓ Is `mamba`, `micromamba`, or `conda` preferred on h2o?
+- ✅ Production should use `flashnh-stage1` under `/data42/omrip/Flash-NH/envs/flashnh-stage1`,
+  not the shared `iacpy3_2025` env. Confirmed in use from 2K-A (2026-06-18).
+- ✅ Env spec `envs/environment-stage1-h2o.yml` committed.
+- ✅ Project-local conda env confirmed creatable under `/data42/omrip` (done successfully).
+- ⚠️ `mamba` broken on h2o (`libmamba.so.4` load error); use `conda --solver classic` with
+  `CONDA_PKGS_DIRS=/home/omrip/.conda/pkgs` for all installs. Applies to both env creation
+  and subsequent package additions (e.g., `py7zr` added 2026-06-18).
+- ❓ Is `micromamba` available on h2o as an alternative?
 - ❓ What is the intended lifetime of `iacpy3_2025`?
+- ⚠️ **PS1 transfer helper broken (2026-06-18):** `scripts/prepare_stage1_forcing_inputs_h2o.ps1`
+  fails to parse on Windows PowerShell 5.1 (8 AST errors). It is not needed for 2K-B or 2K-C
+  (grid JSONs and CAMELSH shapefile are already transferred and verified on h2o). Fix in a
+  separate small commit before relying on it for future transfer operations.
 
 ---
 
