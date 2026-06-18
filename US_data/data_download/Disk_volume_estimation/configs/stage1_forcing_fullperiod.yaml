@@ -23,7 +23,14 @@
 #        --data-root /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod \
 #        --basin-list /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv \
 #        --out-tag v001_2752 \
-#        --camelsh-polygons /path/to/CAMELSH_shapefile.shp
+#        --grid-def-dir /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions \
+#        --camelsh-polygons /path/to/CAMELSH_shapefile.shp \
+#        --skip-qc-plots
+#
+#    NOTE: --skip-qc-plots is recommended on h2o because the CAMELSH shapefile
+#    on h2o lacks LNG_GAGE/LAT_GAGE/DRAIN_SQKM columns. QC plots are advisory
+#    only (failures never cause nonzero exit), but this flag avoids the overhead.
+#    Omit --skip-qc-plots on local pilot runs that have the full CAMELSH schema.
 #
 # 3. Run smoke test (Milestone 2K-B):
 #    bash scripts/run_stage1_forcing_smoke_h2o.sh

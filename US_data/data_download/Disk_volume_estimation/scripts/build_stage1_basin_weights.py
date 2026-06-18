@@ -18,9 +18,18 @@ but produces weights that are NOT valid for training or scientific extraction.
 
 PREREQUISITE
 ------------
-Milestone 2A must have been run first so that grid-definition JSON files exist at:
+Grid-definition JSON files must exist before this script runs.
+
+Pilot (default, auto-discovered):
   {data_root}/09_manifests/stage1_pilot/grid_definitions/mrms_grid_definition.json
   {data_root}/09_manifests/stage1_pilot/grid_definitions/rtma_grid_definition.json
+
+Full-period v001 (flat layout, auto-discovered if pilot path absent):
+  {data_root}/grid_definitions/mrms_grid_definition.json
+  {data_root}/grid_definitions/rtma_grid_definition.json
+
+Explicit override (recommended for v001 to avoid ambiguity):
+  --grid-def-dir /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions
 
 OUTPUTS (under configured data root)
 --------------------------------------
@@ -109,6 +118,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--grid-def-dir",
+        default=None,
+        metavar="DIR",
+        dest="grid_def_dir",
+        help=(
+            "Directory containing mrms_grid_definition.json and rtma_grid_definition.json. "
+            "If not given, the script searches in order: "
+            "(1) {data_root}/grid_definitions/  [v001 full-period flat layout], "
+            "(2) {data_root}/09_manifests/stage1_pilot/grid_definitions/  [pilot layout]. "
+            "Use this flag to avoid ambiguity, e.g.: "
+            "--grid-def-dir /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions"
+        ),
+    )
+    p.add_argument(
+        "--skip-qc-plots",
+        action="store_true",
+        dest="skip_qc_plots",
+        help=(
+            "Skip optional QC plots (overview map and sample basin weight plots). "
+            "Recommended for h2o operational runs where matplotlib may be slow or "
+            "display columns (LNG_GAGE, DRAIN_SQKM) are absent from the basin list. "
+            "Weight table validation and Parquet output are unaffected. "
+            "Plot failures are always advisory — they never cause a nonzero exit — "
+            "but this flag avoids the overhead entirely."
+        ),
+    )
+    p.add_argument(
         "--allow-fallback-circles",
         action="store_true",
         help=(
@@ -125,7 +161,12 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def _select_sample_basins(basin_gdf, weights_mrms, weights_rtma, n=6):
-    """Return up to n representative STAIDs for QC detail plots."""
+    """Return up to n representative STAIDs for QC detail plots.
+
+    Selects basins spanning the drainage-area distribution. Works whether or
+    not DRAIN_SQKM / pilot_role columns are present (v001 CAMELSH schema has
+    neither; only LAYER, MAP_NAME, AREA, PERIMETER, GAGE_ID, geometry).
+    """
     import numpy as np
 
     staids_with_weights = set(weights_mrms["STAID"].unique()) & set(weights_rtma["STAID"].unique())
@@ -133,10 +174,26 @@ def _select_sample_basins(basin_gdf, weights_mrms, weights_rtma, n=6):
     if gdf.empty:
         return basin_gdf["STAID"].tolist()[:n]
 
-    gdf = gdf.sort_values("DRAIN_SQKM").reset_index(drop=True)
+    # Determine sort column for size-stratified sampling.
+    # Priority: DRAIN_SQKM → AREA (shapefile native) → geometry area → STAID sort.
+    if "DRAIN_SQKM" in gdf.columns:
+        sort_col = "DRAIN_SQKM"
+    elif "AREA" in gdf.columns:
+        sort_col = "AREA"
+    else:
+        try:
+            gdf["_geom_area_km2"] = gdf.geometry.to_crs(5070).area / 1e6
+            sort_col = "_geom_area_km2"
+        except Exception:
+            sort_col = None
+
+    if sort_col is not None:
+        gdf = gdf.sort_values(sort_col).reset_index(drop=True)
+    else:
+        gdf = gdf.sort_values("STAID").reset_index(drop=True)
+
     n_basins = len(gdf)
     indices = []
-
     # smallest, ~25th pct, median, ~75th pct, largest
     for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
         i = min(int(frac * (n_basins - 1)), n_basins - 1)
@@ -145,11 +202,12 @@ def _select_sample_basins(basin_gdf, weights_mrms, weights_rtma, n=6):
 
     selected = set(gdf.iloc[indices]["STAID"].tolist())
 
-    # Add a HOLDOUT_QC and an EXCLUDE_QC if available
-    for role in ("HOLDOUT_QC", "EXCLUDE_QC"):
-        cands = gdf[gdf["pilot_role"] == role]
-        if not cands.empty and len(selected) < n:
-            selected.add(cands.iloc[0]["STAID"])
+    # Add a HOLDOUT_QC and an EXCLUDE_QC if pilot_role column is present
+    if "pilot_role" in gdf.columns:
+        for role in ("HOLDOUT_QC", "EXCLUDE_QC"):
+            cands = gdf[gdf["pilot_role"] == role]
+            if not cands.empty and len(selected) < n:
+                selected.add(cands.iloc[0]["STAID"])
 
     return list(selected)[:n]
 
@@ -174,13 +232,7 @@ def _plot_overview_map(basin_gdf, mrms_spec, rtma_spec, out_path: Path) -> bool:
             fill=False, edgecolor="steelblue", linestyle="--", linewidth=1,
             label=f"MRMS grid ({mrms_spec.ncols}×{mrms_spec.nrows})",
         ))
-        ax.add_patch(plt.Rectangle(
-            (float(basin_gdf["LNG_GAGE"].min()) - 2, float(basin_gdf["LAT_GAGE"].min()) - 2),
-            0.01, 0.01,
-            fill=False, edgecolor="darkorange", linestyle="-.", linewidth=1,
-            label="RTMA grid (approx bbox)",
-        ))
-        # RTMA bbox from spec
+        # RTMA bbox (hardcoded; does not require gauge columns)
         rtma_bbox_min_lon, rtma_bbox_max_lon = -138.4, -59.0
         rtma_bbox_min_lat, rtma_bbox_max_lat = 19.2, 57.1
         ax.add_patch(plt.Rectangle(
@@ -188,22 +240,49 @@ def _plot_overview_map(basin_gdf, mrms_spec, rtma_spec, out_path: Path) -> bool:
             rtma_bbox_max_lon - rtma_bbox_min_lon,
             rtma_bbox_max_lat - rtma_bbox_min_lat,
             fill=False, edgecolor="darkorange", linestyle="-.", linewidth=1,
+            label="RTMA grid (approx bbox)",
         ))
         # CONUS outline
         ax.add_patch(plt.Rectangle((-126, 24), 60, 26,
             fill=False, edgecolor="black", linestyle=":", linewidth=0.7, label="CONUS bbox"))
 
-        # Basin centroids coloured by role
-        role_colors = {"TRAIN": "#2196F3", "HOLDOUT_QC": "#FF9800", "EXCLUDE_QC": "#F44336"}
-        for role, color in role_colors.items():
-            sub = basin_gdf[basin_gdf["pilot_role"] == role]
-            if sub.empty:
-                continue
-            sizes = np.clip(np.log10(sub["DRAIN_SQKM"].astype(float) + 1) * 20, 10, 80)
-            ax.scatter(
-                sub["LNG_GAGE"].astype(float), sub["LAT_GAGE"].astype(float),
-                c=color, s=sizes, alpha=0.85, zorder=5, label=f"{role} (n={len(sub)})",
-            )
+        # Basin centroids — derive lon/lat from gauge columns or geometry centroids
+        has_lng_lat = "LNG_GAGE" in basin_gdf.columns and "LAT_GAGE" in basin_gdf.columns
+        try:
+            plot_gdf = basin_gdf.copy()
+            if has_lng_lat:
+                plot_gdf["_lon"] = basin_gdf["LNG_GAGE"].astype(float)
+                plot_gdf["_lat"] = basin_gdf["LAT_GAGE"].astype(float)
+            else:
+                crs4326 = basin_gdf.to_crs(4326)
+                plot_gdf["_lon"] = crs4326.geometry.centroid.x
+                plot_gdf["_lat"] = crs4326.geometry.centroid.y
+            # Derive area column for sizing
+            if "DRAIN_SQKM" in basin_gdf.columns:
+                plot_gdf["_area"] = basin_gdf["DRAIN_SQKM"].astype(float)
+            elif "AREA" in basin_gdf.columns:
+                plot_gdf["_area"] = basin_gdf["AREA"].astype(float)
+            else:
+                plot_gdf["_area"] = basin_gdf.geometry.to_crs(5070).area / 1e6
+            sizes_all = np.clip(np.log10(plot_gdf["_area"] + 1) * 20, 10, 80)
+            # Colour by pilot_role if present, else single colour
+            if "pilot_role" in plot_gdf.columns:
+                role_colors = {
+                    "TRAIN": "#2196F3", "HOLDOUT_QC": "#FF9800", "EXCLUDE_QC": "#F44336",
+                }
+                for role, color in role_colors.items():
+                    sub = plot_gdf[plot_gdf["pilot_role"] == role]
+                    if sub.empty:
+                        continue
+                    sizes = np.clip(np.log10(sub["_area"] + 1) * 20, 10, 80)
+                    ax.scatter(sub["_lon"], sub["_lat"], c=color, s=sizes,
+                               alpha=0.85, zorder=5, label=f"{role} (n={len(sub)})")
+            else:
+                ax.scatter(plot_gdf["_lon"], plot_gdf["_lat"], c="#2196F3",
+                           s=sizes_all, alpha=0.85, zorder=5,
+                           label=f"all basins (n={len(plot_gdf)})")
+        except Exception as exc:
+            LOGGER.info("Could not plot basin scatter (missing columns): %s", exc)
 
         ax.set_xlim(-135, -55)
         ax.set_ylim(20, 55)
@@ -258,9 +337,20 @@ def _plot_sample_basins(
                 continue
 
             br = basin_row.iloc[0]
-            lat_c = float(br["LAT_GAGE"])
-            lon_c = float(br["LNG_GAGE"])
-            area = float(br.get("DRAIN_SQKM", 0))
+            # Derive centroid; fall back to geometry if gauge columns absent
+            if "LAT_GAGE" in br.index and "LNG_GAGE" in br.index:
+                lat_c = float(br["LAT_GAGE"])
+                lon_c = float(br["LNG_GAGE"])
+            else:
+                try:
+                    centroid = basin_row.to_crs(4326).geometry.centroid.iloc[0]
+                    lon_c, lat_c = centroid.x, centroid.y
+                except Exception:
+                    ax.set_visible(False)
+                    continue
+            area = float(br["DRAIN_SQKM"]) if "DRAIN_SQKM" in br.index else (
+                float(br["AREA"]) if "AREA" in br.index else 0.0
+            )
             role = br.get("pilot_role", "?")
 
             # Get weights for this basin
@@ -458,12 +548,44 @@ def main() -> None:
             LOGGER.error("Pilot manifest not found: %s  (run run_stage1_pilot_dry_run.py first)", pilot_manifest)
             sys.exit(1)
 
-    grid_def_dir = data_root / "09_manifests" / "stage1_pilot" / "grid_definitions"
+    # Resolve grid definition directory.
+    # Priority: --grid-def-dir arg > flat v001 layout > pilot legacy layout.
+    _pilot_grid_dir    = data_root / "09_manifests" / "stage1_pilot" / "grid_definitions"
+    _fullperiod_grid_dir = data_root / "grid_definitions"
+
+    if args.grid_def_dir:
+        grid_def_dir = Path(args.grid_def_dir)
+        LOGGER.info("Grid def dir (explicit): %s", grid_def_dir)
+    elif _fullperiod_grid_dir.is_dir() and (_fullperiod_grid_dir / "mrms_grid_definition.json").exists():
+        grid_def_dir = _fullperiod_grid_dir
+        LOGGER.info("Grid def dir (v001 flat layout): %s", grid_def_dir)
+    elif _pilot_grid_dir.is_dir() and (_pilot_grid_dir / "mrms_grid_definition.json").exists():
+        grid_def_dir = _pilot_grid_dir
+        LOGGER.info("Grid def dir (pilot legacy layout): %s", grid_def_dir)
+    else:
+        LOGGER.error(
+            "Grid definition JSONs not found. Searched:\n"
+            "  (1) --grid-def-dir: %s\n"
+            "  (2) v001 flat:      %s\n"
+            "  (3) pilot legacy:   %s\n"
+            "Transfer grid definitions first (prepare_stage1_forcing_inputs_h2o.ps1)\n"
+            "or pass --grid-def-dir <path> explicitly.",
+            args.grid_def_dir or "(not provided)",
+            _fullperiod_grid_dir,
+            _pilot_grid_dir,
+        )
+        sys.exit(1)
+
     mrms_json = grid_def_dir / "mrms_grid_definition.json"
     rtma_json = grid_def_dir / "rtma_grid_definition.json"
     for p in [mrms_json, rtma_json]:
         if not p.exists():
-            LOGGER.error("Grid definition not found: %s  (run build_stage1_grid_definitions.py first)", p)
+            LOGGER.error(
+                "Grid definition not found: %s\n"
+                "  Grid def dir resolved to: %s\n"
+                "  Pass --grid-def-dir to override.",
+                p, grid_def_dir,
+            )
             sys.exit(1)
 
     # ---- Output paths ----
@@ -572,14 +694,20 @@ def main() -> None:
     with open(weights_manifest_dir / "weight_validation_rtma.json", "w", encoding="utf-8") as fh:
         json.dump(rtma_val, fh, indent=2, default=str)
 
-    # ---- QC plots ----
-    LOGGER.info("Generating QC plots ...")
-    overview_ok = _plot_overview_map(basin_gdf, mrms_spec, rtma_spec, qc_dir / "overview_basin_map.png")
-    sample_staids = _select_sample_basins(basin_gdf, mrms_weights, rtma_weights, n=6)
-    mrms_plot_ok = _plot_sample_basins(basin_gdf, mrms_weights, sample_staids, "mrms_qpe_1h_pass1",
-                                        qc_dir / "mrms_sample_basins.png", geom_method=geom_method)
-    rtma_plot_ok = _plot_sample_basins(basin_gdf, rtma_weights, sample_staids, "rtma_conus_aws_2p5km",
-                                        qc_dir / "rtma_sample_basins.png", geom_method=geom_method)
+    # ---- QC plots (advisory — failures never cause nonzero exit) ----
+    overview_ok = False
+    mrms_plot_ok = False
+    rtma_plot_ok = False
+    if not args.skip_qc_plots:
+        LOGGER.info("Generating QC plots ...")
+        overview_ok = _plot_overview_map(basin_gdf, mrms_spec, rtma_spec, qc_dir / "overview_basin_map.png")
+        sample_staids = _select_sample_basins(basin_gdf, mrms_weights, rtma_weights, n=6)
+        mrms_plot_ok = _plot_sample_basins(basin_gdf, mrms_weights, sample_staids, "mrms_qpe_1h_pass1",
+                                            qc_dir / "mrms_sample_basins.png", geom_method=geom_method)
+        rtma_plot_ok = _plot_sample_basins(basin_gdf, rtma_weights, sample_staids, "rtma_conus_aws_2p5km",
+                                            qc_dir / "rtma_sample_basins.png", geom_method=geom_method)
+    else:
+        LOGGER.info("QC plots skipped (--skip-qc-plots)")
 
     # ---- Write summary ----
     polygon_source_str = str(resolved_polygon_path) if resolved_polygon_path else None
@@ -608,6 +736,8 @@ def main() -> None:
     )
 
     # ---- Combine all validation checks ----
+    # Fatal checks: weight table correctness and Parquet output.
+    # Exit code and "Overall" reflect only these.
     all_checks: dict[str, Any] = {
         "mrms_table_nonempty":               mrms_val["checks"]["table_nonempty"],
         "mrms_no_negative_weights":          mrms_val["checks"]["no_negative_weights"],
@@ -620,6 +750,10 @@ def main() -> None:
         "rtma_weight_sums_within_tolerance": rtma_val["checks"]["weight_sums_within_tolerance"],
         "rtma_parquet_written":              rtma_parquet.exists(),
         "all_basins_have_geometry":          len(missing_geom) == 0,
+    }
+    # Advisory checks: QC plots are nice-to-have; their absence does not block
+    # extraction. Reported in the final summary but excluded from sys.exit(1).
+    advisory_checks: dict[str, Any] = {
         "overview_map_written":              overview_ok,
         "mrms_sample_plot_written":          mrms_plot_ok,
         "rtma_sample_plot_written":          rtma_plot_ok,
@@ -632,6 +766,10 @@ def main() -> None:
         run_cmd += f" --basin-list {args.basin_list}"
     if args.out_tag and args.out_tag != "pilot":
         run_cmd += f" --out-tag {args.out_tag}"
+    if args.grid_def_dir:
+        run_cmd += f" --grid-def-dir {args.grid_def_dir}"
+    if args.skip_qc_plots:
+        run_cmd += " --skip-qc-plots"
 
     write_run_manifest(
         weights_manifest_dir,
@@ -651,7 +789,7 @@ def main() -> None:
             "mrms_sample_plot": str(qc_dir / "mrms_sample_basins.png"),
             "rtma_sample_plot": str(qc_dir / "rtma_sample_basins.png"),
         },
-        validation_results=all_checks,
+        validation_results={**all_checks, **advisory_checks},
         extra={
             "geometry_method": geom_method,
             "test_only": test_only,
@@ -665,14 +803,21 @@ def main() -> None:
 
     # ---- Final report ----
     print(f"\n{'='*60}")
-    print("VALIDATION")
+    print("VALIDATION (fatal checks)")
     print(f"{'='*60}")
     for k, v in all_checks.items():
         tag = "PASS" if v else "FAIL"
         print(f"  {tag}  {k}")
 
+    print(f"\n{'='*60}")
+    print("ADVISORY (QC plots — do not affect exit code)")
+    print(f"{'='*60}")
+    for k, v in advisory_checks.items():
+        tag = "OK  " if v else "SKIP"
+        print(f"  {tag}  {k}")
+
     overall = "PASS" if all(all_checks.values()) else "FAIL"
-    print(f"\nOverall: {overall}")
+    print(f"\nOverall: {overall}  (exit 0 if PASS; plots are advisory)")
     print(f"\nKey outputs:")
     print(f"  MRMS weights:  {mrms_parquet}")
     print(f"  RTMA weights:  {rtma_parquet}")
