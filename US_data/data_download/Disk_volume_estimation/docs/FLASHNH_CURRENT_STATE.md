@@ -1,6 +1,6 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-18
+Last updated: 2026-06-19
 
 ## Current milestone
 
@@ -11,7 +11,8 @@ Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke
 **v001 target package (2,752 basins) built and audited on h2o (2026-06-16): PASS — 0 errors, 0 warnings.**
 **Milestone 2K-A COMPLETE (2026-06-18): v001 basin-weight tables built on h2o — 2,752/2,752 basins, PASS.**
 **Milestone 2K-B COMPLETE (2026-06-18): forcing extraction smoke test — PASS. RTMA 48/48 h; MRMS 27/48 h (21 `not_in_s3`, expected early archive gap).**
-**Next: Milestone 2K-C — full-period forcing extraction. Requires deliberate launch plan. Do not auto-launch. See 2K-C launch caution below.**
+**Milestone 2K-C COMPLETE (2026-06-18): October 2020 one-month run — PASS. 432h, 2,752 basins, 396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period extraction PAUSED — 66.5-day projected wall time requires 2K-D optimization.**
+**Next: Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark. h2o has 64 physical cores / 2.0 TiB RAM; target ≤ 7–14 days full-period wall time.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -194,6 +195,48 @@ The full-period first chunk (`2020-10`) will carry the same 21-hour gap in its
 - MRMS download: ~0.3–1.3 s/file (cfgrib cold start on first file only). Negligible vs RTMA.
 - Estimated full-period RTMA raw: ~3.2 TB (`selected_messages`); MRMS raw: ~0.5 TB.
 
+### Stage 1 forcing — Milestone 2K-C (completed 2026-06-18)
+
+October 2020 one-month forcing extraction on h2o. **PASS — all 12 extractor validation checks passed.**
+
+**Evidence:** Compact bundle in `tmp/stage1_evidence_exports/2020-10/` (not committed).
+
+| Metric | Value |
+|---|---|
+| Period | 2020-10-14T00Z – 2020-10-31T23Z |
+| Scheduled hours | 432 |
+| Basins | 2,752 |
+| MRMS extracted | 396/432 |
+| MRMS not_in_s3 | 36 (3 clusters — see below) |
+| RTMA extracted | 432/432 |
+| RTMA variables | 11 (incl. diagnostic `ceil`, `vis`; `10wdir`/`orog` absent, confirmed) |
+| Combined rows | 14,167,296 (1,089,792 MRMS + 13,077,504 RTMA) |
+| MRMS raw | 207 MB |
+| RTMA raw | 30.7 GB |
+| Wall clock | 15h 04m 57s (`download_workers=8`) |
+| `all_pass` | `true` |
+| Git commit at run | `194a489` |
+
+**MRMS 36-hour gap (permanent S3 gaps — not pipeline errors):**
+
+| Cluster | Hours | Timestamps |
+|---|---|---|
+| Archive-start | 21 h | 2020-10-14T00Z–20Z |
+| Oct 25–26 outage | 14 h | 2020-10-25T23Z; 2020-10-26T00Z–11Z, 15Z |
+| Oct 29 spot | 1 h | 2020-10-29T23Z |
+
+**Throughput and full-period projection:**
+
+- Actual throughput: 125.7 s/hr (serial, extraction-dominated)
+- Full-period projection at current serial code: **66.5 days** (45,720 h × 125.7 s / 86400)
+- Primary bottleneck: `extract_basin_statistics` in `src/pipeline/extraction.py:396`
+  — `weights_df.loc[weights_df["STAID"] == staid]` O(N) scan, 30,272 calls per RTMA hour
+- The 20.2-day figure from `scaling_estimates.json` was computed from RTMA download time only
+  (download is pipelined/prefetched and is NOT on the serial critical path)
+
+**Full-period extraction is PAUSED.** Target: ≤ 7–14 days after 2K-D optimization.
+Next: 2K-D profiling, pre-grouped weight lookup, process-parallel benchmark on h2o.
+
 ### Immediate next steps
 
 The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
@@ -206,9 +249,13 @@ forcing data and package assembly on h2o before any Moriah transfer.
 3. ~~**Milestone 2K-B — forcing extraction smoke test**~~ — **COMPLETE (2026-06-18): PASS.**
    Run via direct extractor (launcher activation was broken). Evidence: `tmp/stage1_forcing_smoke_evidence/`.
    See "Stage 1 forcing — Milestone 2K-B" section above.
-4. **Milestone 2K-C — full-period forcing extraction** — 63 monthly chunks (2020-10 through
-   2025-12), 2,752 basins, ~45,720 hours total, under `screen`. **TB-scale. Do not launch
-   automatically.** Before starting, complete the 2K-C pre-launch checklist below.
+4. ~~**Milestone 2K-C — October 2020 one-month run**~~ — **COMPLETE (2026-06-18): PASS.**
+   396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period **PAUSED** — 66.5 days projected.
+   See "Stage 1 forcing — Milestone 2K-C" section above.
+4b. **Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark** — profile
+    `extract_basin_statistics` hotspot, implement pre-grouped weight lookup + batched percentiles,
+    add `--process-workers` flag, benchmark 4/8/16/32 parallel workers on h2o (64 physical cores,
+    2.0 TiB RAM). Target: ≤ 7–14 days projected full-period wall time before unblocking Phase 2.
 
 #### 2K-C pre-launch checklist and caution
 

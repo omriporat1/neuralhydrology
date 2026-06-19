@@ -64,23 +64,35 @@ git status --short
 
 ### MRMS archive gap (expected — not an error)
 
-The `noaa-mrms-pds` S3 bucket for `MultiSensor_QPE_01H_Pass1` starts at **2020-10-14T21:00:00Z**.
-Hours 00Z–20Z on 2020-10-14 (21 hours) have no S3 object and will appear as `not_in_s3` in `missing_files.csv`.
+October 2020 has **36 confirmed permanent S3 gaps** across three clusters:
 
-This is a permanent upstream gap. It will show in `missing_files.csv` and is recorded
-in `2020-10_manifest.json` with `all_pass=true` because the pipeline correctly handles missing S3 objects.
-The validation check `mrms_202010_gap=21` must be PASS for October 2020.
+| Cluster | Hours | Timestamps |
+|---|---|---|
+| Archive-start gap | 21 h | 2020-10-14T00Z – 20Z (the `noaa-mrms-pds` QPE 1h Pass1 archive begins at 2020-10-14T21Z) |
+| Oct 25–26 S3 outage | 14 h | 2020-10-25T23Z; 2020-10-26T00Z–11Z; 2020-10-26T15Z |
+| Oct 29 spot gap | 1 h | 2020-10-29T23Z |
+
+All 36 appear as `not_in_s3` in `missing_files.csv`; zero are pipeline failures.
+`2020-10_manifest.json` records `all_pass=true`.
+The validation check `mrms_202010_gap=36` must be PASS for October 2020.
 
 ### Expected output sizes
 
-| File | Expected size |
+Observed October 2020 actuals (from 2026-06-18 run, `download_workers=8`):
+
+| Item | Observed value |
 |---|---|
-| Raw MRMS GRIB2 (411 files × ~10 MB) | ~4 GB |
-| Raw RTMA GRIB2 (432 files × ~71 MB) | ~31 GB |
-| Staging Parquets (hourly, all basins) | ~5–15 GB |
-| Chunk Parquet `combined_2020-10.parquet` | ~3–8 GB |
+| MRMS raw GRIB2 (396 files) | 207 MB |
+| RTMA raw GRIB2 (432 files × ~68 MB) | 30.7 GB |
+| MRMS output Parquet | 23 MB |
+| RTMA output Parquet | 864 MB |
+| Combined rows | 14,167,296 (396×2752 MRMS + 432×2752×11 RTMA) |
 | Manifests + CSVs | <10 MB |
-| **Total October 2020** | **~40–55 GB** |
+| Wall clock | 15h 04m 57s at 8 download workers |
+
+A fresh run (no cache) at 16 download workers would take somewhat less wall time.
+Full-period throughput estimate: 125.7 s/hr → **66.5 days** at current serial code.
+See go/no-go table below; full-period extraction is paused pending 2K-D optimization.
 
 ### Dry run first (verify configuration without downloading)
 
@@ -174,7 +186,6 @@ mkdir -p "${EXPORT_DIR}"
 cd "${MANIFEST_DIR}" && tar czf \
   "${EXPORT_DIR}/stage1_forcing_202010_v001_audit_export.tar.gz" \
   2020-10_manifest.json \
-  2020-10_summary.json \
   2020-10_summary.md \
   2020-10_hourly_runtime_and_volume.csv \
   2020-10_scaling_estimates.json \
@@ -200,17 +211,22 @@ The launcher also prints these exact commands at completion.
 Before launching Phase 2 (full 63 months), all of the following must hold
 based on evidence transferred locally:
 
-| Gate | Criterion |
-|---|---|
-| `manifest_all_pass` | `all_pass: true` in `2020-10_manifest.json` |
-| `mrms_hours_ok` | MRMS extracted hours > 0 (expect 411) |
-| `rtma_hours_ok` | RTMA extracted hours = 432 |
-| `mrms_202010_gap` | `missing_files.csv` has exactly 21 `not_in_s3` rows (hours 00Z–20Z on 2020-10-14) |
-| Scaling estimate | RTMA full 45,720h estimate ≤ 48h (2 days) at 16 workers |
-| Disk headroom | ≥4 TB free after October 2020 data is on disk |
-| No unexpected FAIL statuses | `validation_checks.csv` shows 0 FAIL rows (WARN for gap is OK) |
+**October 2020 PASS — all gates met as of 2026-06-18 run.**
 
-If scaling estimate > 48h, discuss increasing workers to 32 before Phase 2.
+| Gate | Criterion | October 2020 result |
+|---|---|---|
+| `manifest_all_pass` | `all_pass: true` in `2020-10_manifest.json` | **PASS** |
+| `mrms_hours_ok` | MRMS extracted hours > 0 (actual 396) | **PASS** |
+| `rtma_hours_ok` | RTMA extracted hours = 432 | **PASS** |
+| `mrms_202010_gap` | `missing_files.csv` has exactly 36 `not_in_s3` rows (3 clusters) | **PASS** (36=36) |
+| No unexpected FAIL statuses | `validation_checks.csv` shows 0 FAIL rows | **PASS** |
+| Disk headroom | ≥4 TB free after October 2020 data is on disk | Confirmed |
+| Scaling estimate | Full 45,720h ≤ 14 days at optimized code | **PAUSED — 66.5 days at current serial code; requires 2K-D optimization** |
+
+**Full-period extraction (Phase 2) is blocked on Milestone 2K-D.**
+Current throughput: 125.7 s/hr (serial) → 66.5 days for 45,720 hours. Target: ≤ 7–14 days.
+The bottleneck is `extract_basin_statistics` STAID scan (O(N) per basin, 30,272 calls/RTMA-hour).
+See `2K-D: extraction optimization + h2o CPU-parallel benchmark` for the plan.
 
 ---
 

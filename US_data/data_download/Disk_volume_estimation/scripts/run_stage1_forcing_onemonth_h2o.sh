@@ -42,9 +42,11 @@
 # EXPECTED OUTPUTS (October 2020, all 2,752 v001 basins)
 # -------------------------------------------------------
 # Total scheduled hours:  432  (2020-10-14T00Z → 2020-10-31T23Z)
-# MRMS not_in_s3:          21  (hours 00Z–20Z on 2020-10-14; permanent S3 gap)
-# MRMS extracted hours:   411  → rows: 411 × 2,752 = 1,130,472
-# RTMA extracted hours:   432  → rows: 432 × 2,752 × ~10 vars ≈ 11,888,640
+# MRMS not_in_s3:          36  (21h archive-start 00Z–20Z Oct 14 + 15h S3 outage Oct 25–26, Oct 29)
+# MRMS extracted hours:   396  → rows: 396 × 2,752 = 1,089,792
+# RTMA extracted hours:   432  → rows: 432 × 2,752 × 11 vars = 13,077,504
+# (11 RTMA vars incl. diagnostic ceil, vis; 10wdir and orog remain excluded)
+# Combined rows:                                           14,167,296
 # Chunk Parquet:  chunks/2020-10/combined_2020-10.parquet
 # Manifest:       manifests/2020-10_manifest.json  (all_pass=true if OK)
 #
@@ -195,18 +197,23 @@ if [ "${DRY_RUN}" = "1" ]; then
     echo "  End:           ${END}"
     echo "  Hours:         ${HOUR_COUNT} scheduled"
     if [ "${MONTH_LABEL}" = "2020-10" ]; then
-        echo "  MRMS gap:      21 h not_in_s3 (00Z–20Z on 2020-10-14; permanent S3 gap)"
+        echo "  MRMS gap:      36 h not_in_s3 (3 clusters: 21h 00Z–20Z Oct 14 archive-start;"
+        echo "                 14h Oct 25–26 S3 outage; 1h Oct 29T23Z spot gap)"
     fi
     echo ""
     echo "Expected row counts:"
     python - <<PYEOF
 n_h = ${HOUR_COUNT}
 n_b = ${BASIN_COUNT}
-mrms_gap = 21 if "${MONTH_LABEL}" == "2020-10" else 0
+# 21h archive-start gap + 14h Oct 25-26 S3 outage + 1h Oct 29T23Z spot gap = 36 total
+mrms_gap = 36 if "${MONTH_LABEL}" == "2020-10" else 0
 mrms_h = n_h - mrms_gap
+# 11 RTMA vars: 9 model vars (2t,2d,2sh,sp,10u,10v,10si,i10fg,tcc) + ceil + vis (diagnostic staging)
+# 10wdir (circular) and orog (static) are excluded from staging output
+n_rtma_vars = 11
 print(f"  MRMS rows:  {mrms_h:,} h × {n_b:,} basins = {mrms_h * n_b:,}")
-print(f"  RTMA rows:  {n_h:,} h × {n_b:,} basins × ~10 vars ≈ {n_h * n_b * 10:,}")
-print(f"  Combined:   ≈ {mrms_h * n_b + n_h * n_b * 10:,} rows")
+print(f"  RTMA rows:  {n_h:,} h × {n_b:,} basins × {n_rtma_vars} vars = {n_h * n_b * n_rtma_vars:,}")
+print(f"  Combined:   {mrms_h * n_b + n_h * n_b * n_rtma_vars:,} rows")
 PYEOF
     echo ""
     echo "Planned outputs:"
@@ -427,18 +434,30 @@ estimates = {
     "generated_utc":         datetime.now(timezone.utc).isoformat(),
 }
 if rtma_dl_times:
-    med = statistics.median(rtma_dl_times)
-    estimates["rtma_median_dl_s"]             = round(med, 2)
-    estimates["rtma_full_45720h_estimate_h"]  = round(45720 * med / 3600, 1)
-    estimates["rtma_full_45720h_estimate_d"]  = round(45720 * med / 86400, 1)
+    estimates["rtma_median_dl_s"] = round(statistics.median(rtma_dl_times), 2)
 if mrms_dl_times:
-    estimates["mrms_median_dl_s"]             = round(statistics.median(mrms_dl_times), 2)
+    estimates["mrms_median_dl_s"] = round(statistics.median(mrms_dl_times), 2)
+# Scale estimate from actual wall-clock throughput.
+# RTMA extraction (76 s/hr serial) dominates; RTMA download is prefetched in parallel
+# and is NOT on the critical path. Using median download time alone understates true cost.
+wall_s = m.get("wall_clock_seconds")
+n_h_sched = m.get("n_hours_scheduled", N_HOURS) or N_HOURS
+if wall_s and n_h_sched > 0:
+    s_per_hr = wall_s / n_h_sched
+    estimates["actual_s_per_hour"]      = round(s_per_hr, 1)
+    estimates["full_45720h_estimate_h"] = round(45720 * s_per_hr / 3600, 1)
+    estimates["full_45720h_estimate_d"] = round(45720 * s_per_hr / 86400, 1)
+    estimates["scaling_basis"] = (
+        "wall_clock_seconds / n_hours_scheduled — actual throughput; "
+        "RTMA prefetch is parallel and not on the serial critical path"
+    )
 
 est_path = MDIR / f"{LABEL}_scaling_estimates.json"
 est_path.write_text(json.dumps(estimates, indent=2))
 
 # Validation checks
-expected_gap = 21 if LABEL == "2020-10" else 0
+# 21h archive-start (00Z-20Z Oct 14) + 14h S3 outage (Oct 25-26) + 1h spot (Oct 29T23Z)
+expected_gap = 36 if LABEL == "2020-10" else 0
 checks = [
     {"check": "mrms_hours_ok",     "result": "PASS" if n_mrms_ok > 0       else "FAIL",
      "value": n_mrms_ok,   "threshold": ">0",                  "note": "MRMS extracted hours"},
@@ -452,7 +471,7 @@ if expected_gap > 0:
     checks.append({
         "check": "mrms_202010_gap", "result": "PASS" if gap_ok else "WARN",
         "value": n_missing_s3, "threshold": f"=={expected_gap}",
-        "note": "known MRMS S3 gap hours 00Z-20Z on 2020-10-14"
+        "note": "MRMS S3 gaps Oct-2020: 21h archive-start (00Z-20Z Oct14) + 14h outage (Oct25-26) + 1h spot (Oct29T23Z)"
     })
 
 chk_path = MDIR / f"{LABEL}_validation_checks.csv"
@@ -466,9 +485,9 @@ print(f"Manifest all_pass:  {all_pass}")
 print(f"MRMS ok hours:      {n_mrms_ok}/{N_HOURS}")
 print(f"RTMA ok hours:      {n_rtma_ok}/{N_HOURS}")
 print(f"Missing (not_in_s3): {n_missing_s3}  ({'expected' if n_missing_s3 == expected_gap else 'unexpected'})")
-if "rtma_full_45720h_estimate_h" in estimates:
-    print(f"Scale estimate:     RTMA full 45,720h ≈ {estimates['rtma_full_45720h_estimate_h']}h"
-          f" / {estimates['rtma_full_45720h_estimate_d']}d at {len(rtma_dl_times)} worker-median {estimates['rtma_median_dl_s']}s/file")
+if "full_45720h_estimate_h" in estimates:
+    print(f"Scale estimate:     full 45,720h ≈ {estimates['full_45720h_estimate_h']}h"
+          f" / {estimates['full_45720h_estimate_d']}d  ({estimates['actual_s_per_hour']}s/hr actual throughput)")
 print(f"")
 n_fail = sum(1 for c in checks if c["result"] == "FAIL")
 n_pass = sum(1 for c in checks if c["result"] == "PASS")
@@ -498,7 +517,6 @@ echo "  mkdir -p ${_EXPORT_DIR}"
 echo "  cd ${MANIFEST_DIR} && \\"
 echo "  tar czf ${_TARBALL} \\"
 echo "      ${MONTH_LABEL}_manifest.json \\"
-echo "      ${MONTH_LABEL}_summary.json \\"
 echo "      ${MONTH_LABEL}_summary.md \\"
 echo "      ${MONTH_LABEL}_hourly_runtime_and_volume.csv \\"
 echo "      ${MONTH_LABEL}_scaling_estimates.json \\"
