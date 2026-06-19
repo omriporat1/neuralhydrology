@@ -347,18 +347,20 @@ def _compute_basin_stats(
         else float(np.mean(valid_vals))
     )
 
+    # Batch all percentile calls into one sort pass (7 quantiles → one np.percentile call).
+    _pcts = np.percentile(valid_vals, [10, 25, 50, 75, 90, 95, 99])
     return {
         "weighted_mean":        weighted_mean,
         "unweighted_min":       float(np.min(valid_vals)),
         "unweighted_max":       float(np.max(valid_vals)),
         "unweighted_std":       float(np.std(valid_vals)),
-        "unweighted_q10":       float(np.percentile(valid_vals, 10)),
-        "unweighted_q25":       float(np.percentile(valid_vals, 25)),
-        "unweighted_q50":       float(np.percentile(valid_vals, 50)),
-        "unweighted_q75":       float(np.percentile(valid_vals, 75)),
-        "unweighted_q90":       float(np.percentile(valid_vals, 90)),
-        "unweighted_q95":       float(np.percentile(valid_vals, 95)),
-        "unweighted_q99":       float(np.percentile(valid_vals, 99)),
+        "unweighted_q10":       float(_pcts[0]),
+        "unweighted_q25":       float(_pcts[1]),
+        "unweighted_q50":       float(_pcts[2]),
+        "unweighted_q75":       float(_pcts[3]),
+        "unweighted_q90":       float(_pcts[4]),
+        "unweighted_q95":       float(_pcts[5]),
+        "unweighted_q99":       float(_pcts[6]),
         "valid_cell_count":     n_valid,
         "total_weight":         total_weight,
         "valid_weight_fraction": valid_w_sum,
@@ -372,6 +374,26 @@ def _compute_basin_stats(
 # Basin extraction
 # ---------------------------------------------------------------------------
 
+def _build_basin_cells(
+    weights_df: pd.DataFrame,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Pre-group a weight DataFrame into per-STAID numpy arrays for O(1) lookup.
+
+    Returns {STAID: (row_idx, col_idx, normalized_weight)} where each tuple
+    holds 1-D numpy arrays. Build once before the extraction loop and pass as
+    ``basin_cells`` to :func:`extract_basin_statistics` to eliminate the O(N)
+    boolean-mask scan over the full weight table on every basin-hour call.
+    """
+    cells: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for staid, group in weights_df.groupby("STAID", sort=False):
+        cells[str(staid)] = (
+            group["row_idx"].values.astype(np.intp),
+            group["col_idx"].values.astype(np.intp),
+            group["normalized_weight"].values.astype(np.float64),
+        )
+    return cells
+
+
 def extract_basin_statistics(
     var_grid: VariableGrid,
     weights_df: pd.DataFrame,
@@ -379,11 +401,16 @@ def extract_basin_statistics(
     *,
     weight_table_path: str,
     source_file_path: str,
+    basin_cells: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
 ) -> pd.DataFrame:
     """Extract basin-level statistics for all pilot basins for one VariableGrid.
 
     pilot_staids must use the same zero-padded 8-digit format as weights_df['STAID'].
     Basins absent from weights_df are logged and omitted from the output.
+
+    Pass ``basin_cells`` (built once via :func:`_build_basin_cells`) to use O(1)
+    dict lookup instead of a repeated O(N) boolean scan over weights_df.  All
+    existing callers that omit ``basin_cells`` continue to work unchanged.
 
     Returns a DataFrame with columns defined in STAT_COLUMNS.
     """
@@ -393,18 +420,28 @@ def extract_basin_statistics(
     missing: list[str]  = []
 
     for staid in pilot_staids:
-        basin_wts = weights_df.loc[weights_df["STAID"] == staid]
-        if basin_wts.empty:
-            missing.append(staid)
-            LOGGER.warning(
-                "No weight rows for STAID=%s product=%s — omitting basin",
-                staid, var_grid.product,
-            )
-            continue
-
-        rows   = basin_wts["row_idx"].values
-        cols   = basin_wts["col_idx"].values
-        norm_w = basin_wts["normalized_weight"].values.astype(np.float64)
+        if basin_cells is not None:
+            entry = basin_cells.get(staid)
+            if entry is None:
+                missing.append(staid)
+                LOGGER.warning(
+                    "No weight rows for STAID=%s product=%s — omitting basin",
+                    staid, var_grid.product,
+                )
+                continue
+            rows, cols, norm_w = entry
+        else:
+            basin_wts = weights_df.loc[weights_df["STAID"] == staid]
+            if basin_wts.empty:
+                missing.append(staid)
+                LOGGER.warning(
+                    "No weight rows for STAID=%s product=%s — omitting basin",
+                    staid, var_grid.product,
+                )
+                continue
+            rows   = basin_wts["row_idx"].values
+            cols   = basin_wts["col_idx"].values
+            norm_w = basin_wts["normalized_weight"].values.astype(np.float64)
 
         # Safety: drop cells outside grid bounds
         in_bounds = (rows >= 0) & (rows < nrows) & (cols >= 0) & (cols < ncols)

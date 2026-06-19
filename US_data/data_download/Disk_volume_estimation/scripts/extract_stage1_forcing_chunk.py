@@ -329,7 +329,13 @@ def _prefetch_rtma_files(
 # Per-hour decode + extract
 # ---------------------------------------------------------------------------
 
-def _process_hour_mrms(mrms_path: Path, mrms_weights: Any, staids: list[str], mrms_weights_path: Path) -> tuple[Any, float, float]:
+def _process_hour_mrms(
+    mrms_path: Path,
+    mrms_weights: Any,
+    staids: list[str],
+    mrms_weights_path: Path,
+    basin_cells: Any = None,
+) -> tuple[Any, float, float]:
     from src.pipeline.extraction import decode_mrms_grid, extract_basin_statistics
     t0 = time.perf_counter()
     mrms_grid = decode_mrms_grid(mrms_path)
@@ -339,12 +345,19 @@ def _process_hour_mrms(mrms_path: Path, mrms_weights: Any, staids: list[str], mr
         mrms_grid, mrms_weights, staids,
         weight_table_path=str(mrms_weights_path),
         source_file_path=str(mrms_path),
+        basin_cells=basin_cells,
     )
     extract_s = time.perf_counter() - t0
     return df, decode_s, extract_s
 
 
-def _process_hour_rtma(rtma_path: Path, rtma_weights: Any, staids: list[str], rtma_weights_path: Path) -> tuple[Any, float, float, list[str], list[str]]:
+def _process_hour_rtma(
+    rtma_path: Path,
+    rtma_weights: Any,
+    staids: list[str],
+    rtma_weights_path: Path,
+    basin_cells: Any = None,
+) -> tuple[Any, float, float, list[str], list[str]]:
     import pandas as pd
     from src.pipeline.extraction import (
         decode_rtma_grids, extract_basin_statistics,
@@ -364,6 +377,7 @@ def _process_hour_rtma(rtma_path: Path, rtma_weights: Any, staids: list[str], rt
             vg, rtma_weights, staids,
             weight_table_path=str(rtma_weights_path),
             source_file_path=str(rtma_path),
+            basin_cells=basin_cells,
         )
         for vg in included
     ]
@@ -644,6 +658,12 @@ def main() -> int:
         rtma_weights = rtma_weights[rtma_weights["STAID"].isin(staids_set)].copy()
         LOGGER.info("Weights filtered: MRMS %d rows, RTMA %d rows", len(mrms_weights), len(rtma_weights))
 
+    # Pre-group weight tables for O(1) per-basin lookup — eliminates O(N) STAID scan hotspot
+    from src.pipeline.extraction import _build_basin_cells
+    mrms_basin_cells = _build_basin_cells(mrms_weights)
+    rtma_basin_cells = _build_basin_cells(rtma_weights)
+    LOGGER.info("Basin cells pre-grouped: MRMS %d basins, RTMA %d basins", len(mrms_basin_cells), len(rtma_basin_cells))
+
     # --- Output directory layout ---
     raw_dir      = out_dir / "raw"
     staging_dir  = out_dir / "staging"
@@ -875,11 +895,13 @@ def main() -> int:
             try:
                 if is_mrms:
                     hour_df, decode_s, extract_s = _process_hour_mrms(
-                        raw_path, mrms_weights, staids, mrms_weights_path
+                        raw_path, mrms_weights, staids, mrms_weights_path,
+                        basin_cells=mrms_basin_cells,
                     )
                 else:
                     hour_df, decode_s, extract_s, _, _ = _process_hour_rtma(
-                        raw_path, rtma_weights, staids, rtma_weights_path
+                        raw_path, rtma_weights, staids, rtma_weights_path,
+                        basin_cells=rtma_basin_cells,
                     )
 
                 t_w = time.perf_counter()
