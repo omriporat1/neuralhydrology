@@ -66,22 +66,19 @@
 #       --rtma-weights   "${RTMA_WEIGHTS}" \
 #       --out-dir        "${FORCING_ROOT}" \
 #       --chunk-label    2021-03 \
-#       --download-workers 16 \
+#       --download-workers 6 \
 #       --resume
 #
 # WORKER COUNT POLICY
 # -------------------
-# Default: 16 workers (conservative for first full run on h2o).
-# This keeps CPU usage well within the 50-60% etiquette cap while keeping
-# the download queue saturated on h2o's 10 Gbps link.
+# Default: 6 workers — production setting for 2K-E 3-way outer parallelism
+# (3 concurrent groups × 6 workers = 18 total S3 connections, benchmarked at
+# 3.04 days projected; see 2K-D). Do NOT increase beyond 6 per group without
+# a new benchmark: x3/dw6 already shows S3 bandwidth sharing (dl_median 43–46 s).
+#   To override: DOWNLOAD_WORKERS=8 bash run_stage1_forcing_fullperiod_h2o.sh
 #
-# Increasing to 32 workers is permitted ONLY after:
-#   1. Smoke test PASS (2K-B) confirms correct behavior at 4 workers.
-#   2. First one-month evidence bundle transferred locally and inspected.
-#   3. System load (uptime) confirms headroom (load avg < 40 under 16 workers).
-#   To override: DOWNLOAD_WORKERS=32 bash run_stage1_forcing_fullperiod_h2o.sh
-#
-# Do NOT use 64 or more workers on h2o without explicit PI approval.
+# Do NOT use 16 or more workers per group (54+ total S3 connections) without
+# explicit PI approval and a fresh outer-parallel benchmark.
 #
 # BASIN WEIGHTS NOTE
 # ------------------
@@ -151,7 +148,7 @@ export TMPDIR="${FLASHNH_TMPDIR}"
 # Compute settings
 # ---------------------------------------------------------------------------
 
-DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-16}"
+DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-6}"
 RTMA_MODE="${RTMA_MODE:-selected_messages}"
 
 # Optional: space-separated list of chunk labels to skip (e.g. "2020-10 2021-06")
