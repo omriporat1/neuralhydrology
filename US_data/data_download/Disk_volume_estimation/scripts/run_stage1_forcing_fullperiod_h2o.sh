@@ -167,6 +167,10 @@ GROUP_ID="${GROUP_ID:-}"
 # Set DRY_RUN=1 to print the selected months and extractor command without running.
 DRY_RUN="${DRY_RUN:-0}"
 
+# Limit to the first N months of the selected group (positive integer).
+# Useful for staged rollout / safety-limited first run. Default empty = no limit.
+MAX_MONTHS="${MAX_MONTHS:-}"
+
 # ---------------------------------------------------------------------------
 # Month list: 63 monthly chunks
 # 2020-10 starts 2020-10-14 (partial month — first day of v001 target period)
@@ -268,6 +272,18 @@ if [ -n "${GROUP_ID}" ]; then
     TOTAL_MONTHS=${#MONTH_LIST[@]}
 fi
 
+# MAX_MONTHS validation and truncation (applied after GROUP_ID filtering).
+if [ -n "${MAX_MONTHS}" ]; then
+    if ! [[ "${MAX_MONTHS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: MAX_MONTHS must be a positive integer (got: '${MAX_MONTHS}')"
+        exit 1
+    fi
+    if [ "${MAX_MONTHS}" -lt "${TOTAL_MONTHS}" ]; then
+        MONTH_LIST=("${MONTH_LIST[@]:0:${MAX_MONTHS}}")
+        TOTAL_MONTHS=${#MONTH_LIST[@]}
+    fi
+fi
+
 # Per-group run log; falls back to fullperiod_run_log.txt for ungrouped runs.
 case "${GROUP_ID}" in
     A) GLOBAL_LOG="${MANIFEST_DIR}/group_a_run_log.txt" ;;
@@ -286,6 +302,7 @@ echo "============================================================"
 echo "Group:     ${GROUP_ID:-ALL (no group filter)}"
 _month_range="${GROUP_START:-2020-10} – ${GROUP_END:-2025-12}"
 echo "Months:    ${TOTAL_MONTHS}  (${_month_range})"
+[ -n "${MAX_MONTHS}" ] && echo "Max months: ${MAX_MONTHS}  *** SAFETY LIMITER ACTIVE ***"
 echo "Basins:    2,752 (from ${BASIN_LIST})"
 echo "Workers:   ${DOWNLOAD_WORKERS}"
 echo "RTMA mode: ${RTMA_MODE}"
