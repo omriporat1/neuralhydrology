@@ -92,3 +92,35 @@ Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pi
   - **Stage 2**: ERA5-Land + GDAS + IMERG Late Daily (medium-priority, moderate burden)
   - **Stage 3**: GFS + IFS (low-priority, highest burden; IFS uses 0.1/0.1 grid with stream split logic)
 - Caveats: External data provider availability, credential lifecycle, and throughput variance remain operational (not logic) issues.
+
+## 2026-06-20 Stage 1 Forcing Throughput Optimization (Milestone 2K-D)
+
+**D1 — Serial extraction optimization (commit `3ff4965`):**
+- Pre-grouped the weight DataFrame into a `{STAID: (row_idx, col_idx, norm_w)}` dict at startup,
+  eliminating 90,816 O(N) scans per RTMA-hour and shifting per-basin-hour lookup to O(1).
+- Replaced 7 sequential `np.percentile` calls with one batched call (635,712 redundant sort passes
+  eliminated per RTMA-hour).
+- Measured result: `extraction_median_s` 91.976 s → 2.17 s/hr (**24.7× speedup**).
+- Bottleneck fully shifted to S3 download. D2 process-workers judged unnecessary and **deferred**.
+
+**Download-worker sensitivity benchmark (48h RTMA-only, 2,752 basins):**
+- dw2 → dw16 scanned: individual download time increases (31 → 45 s/file) due to S3 bandwidth
+  sharing, but wall-clock decreases via prefetch concurrency.
+- dw16 = 570.5 s wall → 6.29 days projected (GREEN vs 14-day target, but not compelling alone).
+
+**Outer-parallelism x2 (2 chunks × dw8, commit `cf8db74`):**
+- Parent wall 736 s → 4.057 days projected — **YELLOW** (partial scaling; insufficient alone).
+- Decision: do not proceed with x2.
+
+**Outer-parallelism x3 (3 chunks × dw6, commit `a275296`):**
+- Parent wall 826 s → 3.035 days projected — **USEFUL GREEN** (within acceptable range).
+- All 3 chunks: `all_pass=True`, 48/48 hours, 1,453,056 rows each.
+- Decision: **stop optimization here**.
+
+**Final decisions (all binding):**
+1. Full-period launch configuration: **3 concurrent chunk processes × 6 download workers each**
+   (18 total S3 connections). Splits 63 months into 3 groups (~21 months each).
+2. D2 process-workers: **deferred indefinitely.** Extraction is 2.17 s/hr; download dominates.
+3. x4 outer-parallelism: **not recommended.** S3 contention risk; marginal gain; x3 is sufficient.
+4. `run_stage1_forcing_fullperiod_h2o.sh` needs outer-parallel group support before Phase 2 launch.
+5. All h2o paths remain under `/data42/omrip/Flash-NH/` (system `/tmp` prohibited).

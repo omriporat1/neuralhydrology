@@ -221,38 +221,80 @@ based on evidence transferred locally:
 | `mrms_202010_gap` | `missing_files.csv` has exactly 36 `not_in_s3` rows (3 clusters) | **PASS** (36=36) |
 | No unexpected FAIL statuses | `validation_checks.csv` shows 0 FAIL rows | **PASS** |
 | Disk headroom | ≥4 TB free after October 2020 data is on disk | Confirmed |
-| Scaling estimate | Full 45,720h ≤ 14 days at optimized code | **PAUSED — 66.5 days at current serial code; requires 2K-D optimization** |
+| Scaling estimate | Full 45,720h ≤ 14 days at optimized code | **PASS — 3.04 days projected (3×dw6, commit `a275296`; 2K-D COMPLETE 2026-06-20)** |
 
-**Full-period extraction (Phase 2) is blocked on Milestone 2K-D.**
-Current throughput: 125.7 s/hr (serial) → 66.5 days for 45,720 hours. Target: ≤ 7–14 days.
-The bottleneck is `extract_basin_statistics` STAID scan (O(N) per basin, 30,272 calls/RTMA-hour).
-See `2K-D: extraction optimization + h2o CPU-parallel benchmark` for the plan.
+**Phase 2 is unblocked.** All Phase 1 go/no-go gates are met. See 2K-D summary in
+`docs/FLASHNH_CURRENT_STATE.md` for benchmark details (D1 optimization 24.7×; x3/dw6 outer-parallel
+projection 3.035 days). Launch using the outer-parallel strategy described in Phase 2 below.
 
 ---
 
 ## Phase 2 — Full 63-Month Run
 
-After Phase 1 evidence is approved:
+**Mechanism: 3-way outer parallelism (3 concurrent chunk processes × 6 download workers each).**
+Validated by Milestone 2K-D benchmark (commit `a275296`): projected 3.035 days effective wall time.
+
+### Outer-parallel launch strategy
+
+Split the 63 monthly chunks into 3 non-overlapping groups (~21 months each), launch each group under
+a dedicated `screen` session, and let all three run concurrently.
+
+**Month groups (63 months, 2020-10 through 2025-12):**
+
+| Group | Screen name | Months | Count |
+|---|---|---|---|
+| A | `flashnh-group-a` | 2020-10 → 2022-06 | 21 months |
+| B | `flashnh-group-b` | 2022-07 → 2024-01 | 19 months |
+| C | `flashnh-group-c` | 2024-02 → 2025-12 | 23 months |
+
+> Note: October 2020 (Phase 1) is already complete with `all_pass=true`. The fullperiod launcher
+> auto-skips it when the valid manifest exists.
+
+**Pre-launch (once, on h2o):**
 
 ```bash
-# On h2o, pull latest commits first:
 cd /data42/omrip/Flash-NH/repo
-git pull
-
-# Dry-run the fullperiod launcher to confirm skip behavior:
-# (No DRY_RUN mode in fullperiod launcher — just review the config section)
-head -60 scripts/run_stage1_forcing_fullperiod_h2o.sh
-
-# Launch under screen:
-screen -S flashnh-forcing bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+git pull --ff-only
+head -60 scripts/run_stage1_forcing_fullperiod_h2o.sh   # review MONTHS_A/B/C config
 ```
 
-The fullperiod launcher:
-- Auto-skips October 2020 if `all_pass=true` manifest exists
-- Runs months sequentially; does NOT abort on a single month's failure
-- Checks for `STOP_AFTER_MONTH` stop-file between months
-- Logs each month outcome to `manifests/fullperiod_run_log.txt`
-- Checks disk every 12 months
+**Launch all three groups:**
+
+```bash
+# Group A
+screen -dmS flashnh-group-a bash -c "
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group A \
+      --download-workers 6 \
+      2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_a.log"
+
+# Group B
+screen -dmS flashnh-group-b bash -c "
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group B \
+      --download-workers 6 \
+      2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_b.log"
+
+# Group C
+screen -dmS flashnh-group-c bash -c "
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group C \
+      --download-workers 6 \
+      2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_c.log"
+
+# Verify all three are running:
+screen -ls
+```
+
+> **Note:** `run_stage1_forcing_fullperiod_h2o.sh` does not yet have a `--group` flag. If the
+> launcher remains a single sequential script, run it three times with different `MONTHS_*`
+> environment overrides, or create separate scripts for each group. The outer-parallel launcher
+> design is the recommended next implementation milestone before launching Phase 2.
+
+**Monitor:**
+
+```bash
+screen -r flashnh-group-a    # Ctrl-A D to detach
+htop                          # confirm ~18 S3 connections, CPU ≤ 50%
+df -h /data42                 # watch disk headroom
+```
 
 ### Skip a month during the full run
 
@@ -263,17 +305,18 @@ SKIP_MONTHS="2021-03 2021-04" bash scripts/run_stage1_forcing_fullperiod_h2o.sh
 
 ### Worker count policy for full run
 
-| Worker count | Condition required |
-|---|---|
-| 16 (default) | Phase 1 evidence PASS; always safe to start here |
-| 32 | Phase 1 evidence shows < 50% CPU load at 16 workers AND scaling estimate > 36h total |
-| 64+ | Requires explicit PI approval |
+**2K-D benchmark recommendation: 6 workers per chunk, 3 concurrent chunks (18 total S3 connections).**
 
-To increase workers for the fullperiod run:
+| Configuration | Projected days | Condition |
+|---|---|---|
+| 1 chunk × dw16 (serial baseline) | 6.29 days | Single session; safe but slow |
+| 2 chunks × dw8 (x2 outer-parallel) | 4.06 days (YELLOW) | Insufficient; do not use |
+| **3 chunks × dw6 (x2 outer-parallel)** | **3.04 days** | **Recommended — USEFUL GREEN** |
+| 4 chunks × dw6 (x4 outer-parallel) | Not benchmarked | Not recommended — S3 risk |
 
-```bash
-DOWNLOAD_WORKERS=32 bash scripts/run_stage1_forcing_fullperiod_h2o.sh
-```
+Do not increase to x4 outer-parallelism without a new controlled benchmark. The x3/dw6 result
+showed marginal diminishing returns (per-chunk dl_median 43–46 s vs 35 s at single-chunk dw8),
+indicating S3 bandwidth sharing. x4 would add risk for minimal gain.
 
 ### Quarterly evidence bundle pull
 
@@ -354,8 +397,10 @@ MRMS coverage from 2020-10-14T21Z onward is nearly complete; gaps after this dat
 | Script | Purpose |
 |---|---|
 | `scripts/run_stage1_forcing_onemonth_h2o.sh` | Phase 1 one-month launcher (default: Oct 2020) |
-| `scripts/run_stage1_forcing_fullperiod_h2o.sh` | Phase 2 full 63-month loop |
+| `scripts/run_stage1_forcing_fullperiod_h2o.sh` | Phase 2 full 63-month loop (sequential; extend for --group) |
 | `scripts/run_stage1_forcing_smoke_h2o.sh` | 2K-B smoke test (48h × 10 basins; already PASS) |
 | `scripts/extract_stage1_forcing_chunk.py` | Core extractor (called by all launchers) |
 | `scripts/build_stage1_basin_weights.py` | Weight builder (2K-A; already complete) |
 | `scripts/verify_stage1_forcing_inputs_h2o.sh` | Input file preflight checker |
+| `scripts/bench_stage1_outer_parallel_h2o.sh` | 2K-D outer-parallel benchmark (x3/dw6; COMPLETE) |
+| `scripts/summarize_stage1_outer_parallel.py` | 2K-D benchmark summary + projection (CLI: bench_base path) |

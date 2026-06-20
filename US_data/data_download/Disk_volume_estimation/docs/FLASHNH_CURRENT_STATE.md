@@ -1,6 +1,6 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-19
+Last updated: 2026-06-20
 
 ## Current milestone
 
@@ -12,7 +12,8 @@ Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke
 **Milestone 2K-A COMPLETE (2026-06-18): v001 basin-weight tables built on h2o — 2,752/2,752 basins, PASS.**
 **Milestone 2K-B COMPLETE (2026-06-18): forcing extraction smoke test — PASS. RTMA 48/48 h; MRMS 27/48 h (21 `not_in_s3`, expected early archive gap).**
 **Milestone 2K-C COMPLETE (2026-06-18): October 2020 one-month run — PASS. 432h, 2,752 basins, 396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period extraction PAUSED — 66.5-day projected wall time requires 2K-D optimization.**
-**Next: Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark. h2o has 64 physical cores / 2.0 TiB RAM; target ≤ 7–14 days full-period wall time.**
+**Milestone 2K-D COMPLETE (2026-06-20): D1 serial extraction optimization → 24.7× speedup (91.9 s → 2.17 s/hr, commit `3ff4965`). Outer-parallelism benchmark 3×dw6 → 3.04 days projected (commit `a275296`). D2 process-workers deferred. x4 not recommended. Decision: full-period launch using 3 concurrent chunks × 6 download workers.**
+**Next: Full-period forcing extraction — 63 monthly chunks under controlled 3-way outer parallelism on h2o.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -234,8 +235,81 @@ October 2020 one-month forcing extraction on h2o. **PASS — all 12 extractor va
 - The 20.2-day figure from `scaling_estimates.json` was computed from RTMA download time only
   (download is pipelined/prefetched and is NOT on the serial critical path)
 
-**Full-period extraction is PAUSED.** Target: ≤ 7–14 days after 2K-D optimization.
-Next: 2K-D profiling, pre-grouped weight lookup, process-parallel benchmark on h2o.
+**Full-period extraction was PAUSED at 2K-C completion.** 2K-D is now COMPLETE — see section below.
+
+### Stage 1 forcing — Milestone 2K-D (completed 2026-06-20)
+
+Extraction optimization and outer-parallelism throughput benchmark.
+**COMPLETE — effective full-period projection 3.04 days (3 concurrent chunks × 6 download workers).**
+
+#### D1: Serial extraction optimization (commit `3ff4965`)
+
+Two targeted changes to `src/pipeline/extraction.py` and `scripts/extract_stage1_forcing_chunk.py`:
+
+1. **Pre-grouped weight lookup** — `_build_basin_cells()` pre-groups the weight DataFrame by
+   STAID into a `{STAID: (row_idx, col_idx, norm_w)}` dict at startup. Each per-basin-hour call
+   becomes an O(1) dict lookup instead of an O(N) boolean scan over the 2,752-row weight table
+   (90,816 scans/RTMA-hour eliminated).
+2. **Batched percentile computation** — 7 sequential `np.percentile` calls replaced with one
+   batched call, eliminating 635,712 redundant sort passes per RTMA-hour.
+
+**Measured result:** `extraction_median_s` 91.976 s → 2.17 s/hr (**24.7× speedup**).
+Bottleneck fully shifted from extraction CPU to S3 download. D2 process-workers not needed.
+
+#### Download-worker sensitivity benchmark (48h RTMA-only, 2,752 basins)
+
+Commit `3ff4965`; RTMA `selected_messages`; Oct 2020 period; all runs `all_pass=True`.
+
+| Workers | Wall (s) | Proj. days | dl_median (s) | ext_median (s) |
+|---|---|---|---|---|
+| 2  | 1157.7 | 12.76 | 31.3 | 2.21 |
+| 4  | 804.8  | 8.87  | 31.3 | 2.19 |
+| 8  | 642.9  | 7.09  | 35.9 | 2.18 |
+| 16 | 570.5  | **6.29** | 44.9 | 2.17 |
+
+Individual download time increases with worker count (S3 bandwidth sharing) but wall-clock improves
+via prefetch concurrency. dw16 projects 6.29 days. D2 process-workers deferred; outer parallelism
+is the lever for sub-4-day throughput.
+
+#### Outer-parallelism benchmarks (RTMA-only, 48h per chunk, 2,752 basins)
+
+All chunks `all_pass=True`, `successful_hours=48/48`, `actual_rows=1,453,056`.
+
+**x2 — 2 chunks × dw8 (16 total S3 connections):**
+Commits `cf8db74`; evidence `tmp/stage1_2kd_evidence/outer_parallel_rtma_48h_dw8_x2/`.
+
+| Chunk | Chunk wall (s) | dl_median (s) | ext_median (s) |
+|---|---|---|---|
+| outer-x2-a | 735.4 | 47.2 | 2.195 |
+| outer-x2-b | 720.0 | 43.1 | 2.291 |
+| **Parent wall** | **736 s** | | |
+
+Projection: 45720 × 736 / (2 × 48) / 86400 = **4.057 days — YELLOW (partial scaling).**
+
+**x3 — 3 chunks × dw6 (18 total S3 connections):**
+Commit `a275296`; evidence `tmp/stage1_2kd_evidence/outer_parallel_rtma_48h_dw6_x3/`.
+
+| Chunk | Chunk wall (s) | dl_median (s) | ext_median (s) |
+|---|---|---|---|
+| outer-x3-a | 825.9 | 45.9 | 2.233 |
+| outer-x3-b | 801.1 | 43.9 | 2.206 |
+| outer-x3-c | 801.2 | 42.5 | 2.204 |
+| **Parent wall** | **826 s** | | |
+
+Projection: 45720 × 826 / (3 × 48) / 86400 = **3.035 days — USEFUL GREEN.**
+
+#### Decisions (all binding)
+
+- **Stop performance optimization.** 3.04 days projected is within the acceptable range.
+- **D2 process-workers: deferred indefinitely.** Extraction is 2.17 s/hr; download (43–46 s/file)
+  dominates. Process parallelism within a single chunk would not improve end-to-end throughput.
+- **x4 outer-parallelism: not recommended.** x3 achieves 3.04 days; x4 would push total S3
+  concurrency to 24 workers, increasing contention and operational risk for marginal gain.
+  RTMA-only benchmark may understate MRMS+RTMA mixed-product overhead.
+- **Full-period launch recommendation:** 3 concurrent chunk processes × 6 download workers each.
+  All outputs under `/data42/omrip/Flash-NH/`. Mechanism: 3 independent screen sessions covering
+  non-overlapping month groups (~21 months each), or a new parallel launcher.
+  See updated `docs/stage1_forcing_fullperiod_launch_plan.md` for Phase 2 outer-parallel details.
 
 ### Immediate next steps
 
@@ -252,10 +326,13 @@ forcing data and package assembly on h2o before any Moriah transfer.
 4. ~~**Milestone 2K-C — October 2020 one-month run**~~ — **COMPLETE (2026-06-18): PASS.**
    396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period **PAUSED** — 66.5 days projected.
    See "Stage 1 forcing — Milestone 2K-C" section above.
-4b. **Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark** — profile
-    `extract_basin_statistics` hotspot, implement pre-grouped weight lookup + batched percentiles,
-    add `--process-workers` flag, benchmark 4/8/16/32 parallel workers on h2o (64 physical cores,
-    2.0 TiB RAM). Target: ≤ 7–14 days projected full-period wall time before unblocking Phase 2.
+4b. ~~**Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark**~~ — **COMPLETE (2026-06-20): PASS.**
+    D1 serial optimization 24.7×; outer-parallelism x3×dw6 → 3.035 days projected. D2 deferred. x4 not recommended.
+    See "Stage 1 forcing — Milestone 2K-D" section above.
+4c. **Milestone 2K-E — full-period forcing extraction (63 monthly chunks, 3-way outer parallelism).**
+    Launch 3 concurrent chunk processes × 6 download workers each, covering non-overlapping month groups
+    (~21 months per group). All outputs under `/data42/omrip/Flash-NH/`. Notify PI before launch.
+    See `docs/stage1_forcing_fullperiod_launch_plan.md` for Phase 2 outer-parallel launch strategy.
 
 #### 2K-C pre-launch checklist and caution
 
