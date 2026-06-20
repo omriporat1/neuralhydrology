@@ -124,3 +124,26 @@ Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pi
 3. x4 outer-parallelism: **not recommended.** S3 contention risk; marginal gain; x3 is sufficient.
 4. `run_stage1_forcing_fullperiod_h2o.sh` needs outer-parallel group support before Phase 2 launch.
 5. All h2o paths remain under `/data42/omrip/Flash-NH/` (system `/tmp` prohibited).
+
+## 2026-06-20 Stage 1 Forcing — 2K-E Pre-Launch Patch
+
+**Goal:** Enable 3-way outer parallelism without a new launcher script.
+
+**Changes applied (pre-launch patch, not yet run):**
+
+- `GROUP_ID=A|B|C` env var added to `run_stage1_forcing_fullperiod_h2o.sh`; filters the 63-month
+  `MONTH_LIST` to the group's sub-range before the loop. Empty `GROUP_ID` preserves original
+  sequential all-63-month behaviour.
+  - Group A: 2020-10 → 2022-06 (21 months)
+  - Group B: 2022-07 → 2024-01 (19 months)
+  - Group C: 2024-02 → 2025-12 (23 months)
+- `DRY_RUN=1` mode prints the selected month list and extractor command template, then exits.
+  Used to confirm group month counts before committing to a multi-day run.
+- Per-group run logs: `manifests/group_{a,b,c}_run_log.txt` (independent; no write conflicts).
+- Path safety guard: launcher fails immediately if `FORCING_ROOT` does not begin with
+  `/data42/omrip/Flash-NH/`.
+- `TMPDIR` redirected to `/data42/omrip/Flash-NH/tmp/tmpdir_flashnh`; never writes to system `/tmp`.
+- `${FORCING_ROOT}/logs/` created at startup for screen `tee` targets.
+- `report_stage1_forcing_progress_h2o.sh` Section 1 updated to scan all three group logs.
+
+**Decision:** Do not launch extraction until this commit is on h2o and dry-run is confirmed PASS.

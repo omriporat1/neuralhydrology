@@ -13,7 +13,7 @@ Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke
 **Milestone 2K-B COMPLETE (2026-06-18): forcing extraction smoke test — PASS. RTMA 48/48 h; MRMS 27/48 h (21 `not_in_s3`, expected early archive gap).**
 **Milestone 2K-C COMPLETE (2026-06-18): October 2020 one-month run — PASS. 432h, 2,752 basins, 396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period extraction PAUSED — 66.5-day projected wall time requires 2K-D optimization.**
 **Milestone 2K-D COMPLETE (2026-06-20): D1 serial extraction optimization → 24.7× speedup (91.9 s → 2.17 s/hr, commit `3ff4965`). Outer-parallelism benchmark 3×dw6 → 3.04 days projected (commit `a275296`). D2 process-workers deferred. x4 not recommended. Decision: full-period launch using 3 concurrent chunks × 6 download workers.**
-**Next: Full-period forcing extraction — 63 monthly chunks under controlled 3-way outer parallelism on h2o.**
+**Milestone 2K-E pre-launch patch COMPLETE (2026-06-20): `GROUP_ID=A/B/C` and `DRY_RUN=1` added to fullperiod launcher; path safety guard and per-group logs; reporter updated. Dry-run validation pending on h2o. Full-period extraction NOT yet launched.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -316,8 +316,9 @@ Projection: 45720 × 826 / (3 × 48) / 86400 = **3.035 days — USEFUL GREEN.**
 The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
 forcing data and package assembly on h2o before any Moriah transfer.
 
-1. **Push pending commits** — commit `026c363` is currently ahead of origin; push before
-   running 2K-B on h2o (`git push`, then on h2o: `git pull --ff-only`).
+1. **Push 2K-E pre-launch patch and pull on h2o** — `git push`, then on h2o:
+   `git pull --ff-only` in the repo root, then confirm dry-runs pass:
+   `GROUP_ID=A DRY_RUN=1 bash scripts/run_stage1_forcing_fullperiod_h2o.sh` (and B, C).
 2. ~~**Stage 1 forcing acquisition plan + weight build (2K-A)**~~ — **COMPLETE (2026-06-18).**
    See "Stage 1 forcing — Milestone 2K-A" section above.
 3. ~~**Milestone 2K-B — forcing extraction smoke test**~~ — **COMPLETE (2026-06-18): PASS.**

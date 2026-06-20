@@ -132,6 +132,22 @@ ENV_PREFIX="${FLASHNH_ROOT}/envs/flashnh-stage1"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
+# Safety checks
+# ---------------------------------------------------------------------------
+
+# All Flash-NH h2o outputs must live under /data42/omrip/Flash-NH/
+case "${FORCING_ROOT}" in
+    /data42/omrip/Flash-NH/*) ;;
+    *) echo "ERROR: FORCING_ROOT must begin with /data42/omrip/Flash-NH/"
+       echo "       Got: ${FORCING_ROOT}"
+       exit 1 ;;
+esac
+
+# Never use system /tmp for Flash-NH artifacts.
+FLASHNH_TMPDIR="${FLASHNH_ROOT}/tmp/tmpdir_flashnh"
+export TMPDIR="${FLASHNH_TMPDIR}"
+
+# ---------------------------------------------------------------------------
 # Compute settings
 # ---------------------------------------------------------------------------
 
@@ -146,6 +162,13 @@ SKIP_MONTHS="${SKIP_MONTHS:-}"
 # Create it with: touch ${FORCING_ROOT}/STOP_AFTER_MONTH
 # The file is removed automatically on clean stop.
 STOP_FILE="${FORCING_ROOT}/STOP_AFTER_MONTH"
+
+# Group to run: A = 2020-10–2022-06, B = 2022-07–2024-01, C = 2024-02–2025-12.
+# Leave unset (or empty) to run all 63 months sequentially (original behaviour).
+GROUP_ID="${GROUP_ID:-}"
+
+# Set DRY_RUN=1 to print the selected months and extractor command without running.
+DRY_RUN="${DRY_RUN:-0}"
 
 # ---------------------------------------------------------------------------
 # Month list: 63 monthly chunks
@@ -225,19 +248,86 @@ MONTH_LIST=(
 TOTAL_MONTHS=${#MONTH_LIST[@]}
 
 # ---------------------------------------------------------------------------
+# Group filtering
+# ---------------------------------------------------------------------------
+
+case "${GROUP_ID}" in
+    A) GROUP_START="2020-10"; GROUP_END="2022-06" ;;
+    B) GROUP_START="2022-07"; GROUP_END="2024-01" ;;
+    C) GROUP_START="2024-02"; GROUP_END="2025-12" ;;
+    "") GROUP_START=""; GROUP_END="" ;;
+    *) echo "ERROR: GROUP_ID must be A, B, or C (got: '${GROUP_ID}')"; exit 1 ;;
+esac
+
+if [ -n "${GROUP_ID}" ]; then
+    FILTERED_LIST=()
+    for ENTRY in "${MONTH_LIST[@]}"; do
+        LBL=$(echo "${ENTRY}" | awk '{print $1}')
+        if [[ ! "${LBL}" < "${GROUP_START}" && ! "${LBL}" > "${GROUP_END}" ]]; then
+            FILTERED_LIST+=("${ENTRY}")
+        fi
+    done
+    MONTH_LIST=("${FILTERED_LIST[@]}")
+    TOTAL_MONTHS=${#MONTH_LIST[@]}
+fi
+
+# Per-group run log; falls back to fullperiod_run_log.txt for ungrouped runs.
+case "${GROUP_ID}" in
+    A) GLOBAL_LOG="${MANIFEST_DIR}/group_a_run_log.txt" ;;
+    B) GLOBAL_LOG="${MANIFEST_DIR}/group_b_run_log.txt" ;;
+    C) GLOBAL_LOG="${MANIFEST_DIR}/group_c_run_log.txt" ;;
+    *)  GLOBAL_LOG="${MANIFEST_DIR}/fullperiod_run_log.txt" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 
 echo "============================================================"
 echo "Flash-NH Stage 1 Forcing — FULL PERIOD"
 echo "============================================================"
-echo "Months:    ${TOTAL_MONTHS} (2020-10 through 2025-12)"
+echo "Group:     ${GROUP_ID:-ALL (no group filter)}"
+_month_range="${GROUP_START:-2020-10} – ${GROUP_END:-2025-12}"
+echo "Months:    ${TOTAL_MONTHS}  (${_month_range})"
 echo "Basins:    2,752 (from ${BASIN_LIST})"
 echo "Workers:   ${DOWNLOAD_WORKERS}"
 echo "RTMA mode: ${RTMA_MODE}"
 echo "Output:    ${FORCING_ROOT}"
+echo "Run log:   ${GLOBAL_LOG}"
+echo "TMPDIR:    ${TMPDIR}"
 echo "Started:   $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "============================================================"
+
+# ---------------------------------------------------------------------------
+# Dry-run mode
+# ---------------------------------------------------------------------------
+
+if [ "${DRY_RUN}" = "1" ]; then
+    echo ""
+    echo "DRY_RUN=1 — printing plan; no extraction will run."
+    echo ""
+    echo "Month list (${TOTAL_MONTHS} months):"
+    for ENTRY in "${MONTH_LIST[@]}"; do
+        _lbl=$(echo "${ENTRY}" | awk '{print $1}')
+        _s=$(echo   "${ENTRY}" | awk '{print $2}')
+        _e=$(echo   "${ENTRY}" | awk '{print $3}')
+        printf "  %-10s  %s  →  %s\n" "${_lbl}" "${_s}" "${_e}"
+    done
+    echo ""
+    echo "Per-month extractor command template:"
+    echo "  python scripts/extract_stage1_forcing_chunk.py \\"
+    echo "      --start <START> --end <END> \\"
+    echo "      --basin-manifest ${BASIN_LIST} \\"
+    echo "      --mrms-weights   ${MRMS_WEIGHTS} \\"
+    echo "      --rtma-weights   ${RTMA_WEIGHTS} \\"
+    echo "      --out-dir        ${FORCING_ROOT} \\"
+    echo "      --chunk-label    <YYYY-MM> \\"
+    echo "      --download-workers ${DOWNLOAD_WORKERS} \\"
+    echo "      --rtma-mode      ${RTMA_MODE} \\"
+    echo "      --resume --no-plots"
+    echo ""
+    exit 0
+fi
 
 # Source conda shell integration unconditionally — 'conda activate' requires the
 # shell function registered by conda.sh, not just the conda binary being in PATH.
@@ -291,7 +381,9 @@ for fpath in "${BASIN_LIST}" "${MRMS_WEIGHTS}" "${RTMA_WEIGHTS}"; do
 done
 
 # Output dirs
+mkdir -p "${FLASHNH_TMPDIR}"
 mkdir -p "${MANIFEST_DIR}"
+mkdir -p "${FORCING_ROOT}/logs"
 mkdir -p "${FORCING_ROOT}/raw/mrms"
 mkdir -p "${FORCING_ROOT}/raw/rtma"
 mkdir -p "${FORCING_ROOT}/staging/mrms"
@@ -311,7 +403,6 @@ N_SKIPPED=0
 N_FAILED=0
 N_PASSED=0
 FAILED_MONTHS=()
-GLOBAL_LOG="${MANIFEST_DIR}/fullperiod_run_log.txt"
 
 echo "Full-period run started $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GLOBAL_LOG}"
 

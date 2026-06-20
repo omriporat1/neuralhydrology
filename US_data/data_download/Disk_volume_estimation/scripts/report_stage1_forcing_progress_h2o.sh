@@ -53,16 +53,21 @@ echo ""
 # Section 1: Full-period run log
 # ---------------------------------------------------------------------------
 
-echo "--- [1] Full-period run log ---"
-if [ -f "${GLOBAL_LOG}" ]; then
-    # Show last 10 lines of the log for recent activity
-    echo "  (showing last 10 lines of fullperiod_run_log.txt)"
-    tail -10 "${GLOBAL_LOG}" | sed 's/^/  /'
-    TOTAL_LOG_LINES=$(wc -l < "${GLOBAL_LOG}")
-    echo "  Total log entries: ${TOTAL_LOG_LINES}"
-else
-    echo "  NOT FOUND: ${GLOBAL_LOG}"
-    echo "  The full-period launcher has not been started yet."
+echo "--- [1] Group run logs ---"
+_any_log=0
+for _logname in group_a_run_log.txt group_b_run_log.txt group_c_run_log.txt fullperiod_run_log.txt; do
+    _logpath="${MANIFEST_DIR}/${_logname}"
+    if [ -f "${_logpath}" ]; then
+        _any_log=1
+        _lines=$(wc -l < "${_logpath}")
+        echo "  ${_logname} (${_lines} entries — last 5):"
+        tail -5 "${_logpath}" | sed 's/^/    /'
+        echo ""
+    fi
+done
+if [ "${_any_log}" -eq 0 ]; then
+    echo "  No run logs found in ${MANIFEST_DIR}"
+    echo "  No group launcher has been started yet."
 fi
 echo ""
 

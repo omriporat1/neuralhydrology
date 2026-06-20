@@ -253,40 +253,48 @@ a dedicated `screen` session, and let all three run concurrently.
 **Pre-launch (once, on h2o):**
 
 ```bash
-cd /data42/omrip/Flash-NH/repo
+cd /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation
 git pull --ff-only
-head -60 scripts/run_stage1_forcing_fullperiod_h2o.sh   # review MONTHS_A/B/C config
 ```
+
+**Dry-run first (confirm month lists before committing to a multi-day run):**
+
+```bash
+GROUP_ID=A DRY_RUN=1 bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+GROUP_ID=B DRY_RUN=1 bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+GROUP_ID=C DRY_RUN=1 bash scripts/run_stage1_forcing_fullperiod_h2o.sh
+```
+
+Each dry-run prints the group's month list and the per-month extractor command template, then exits without downloading anything.
 
 **Launch all three groups:**
 
 ```bash
-# Group A
+# Group A (21 months: 2020-10 → 2022-06; 2020-10 auto-skipped — already all_pass=true)
 screen -dmS flashnh-group-a bash -c "
-  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group A \
-      --download-workers 6 \
+  GROUP_ID=A DOWNLOAD_WORKERS=6 \
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh \
       2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_a.log"
 
-# Group B
+# Group B (19 months: 2022-07 → 2024-01)
 screen -dmS flashnh-group-b bash -c "
-  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group B \
-      --download-workers 6 \
+  GROUP_ID=B DOWNLOAD_WORKERS=6 \
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh \
       2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_b.log"
 
-# Group C
+# Group C (23 months: 2024-02 → 2025-12)
 screen -dmS flashnh-group-c bash -c "
-  bash scripts/run_stage1_forcing_fullperiod_h2o.sh --group C \
-      --download-workers 6 \
+  GROUP_ID=C DOWNLOAD_WORKERS=6 \
+  bash scripts/run_stage1_forcing_fullperiod_h2o.sh \
       2>&1 | tee /data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/logs/group_c.log"
 
 # Verify all three are running:
 screen -ls
 ```
 
-> **Note:** `run_stage1_forcing_fullperiod_h2o.sh` does not yet have a `--group` flag. If the
-> launcher remains a single sequential script, run it three times with different `MONTHS_*`
-> environment overrides, or create separate scripts for each group. The outer-parallel launcher
-> design is the recommended next implementation milestone before launching Phase 2.
+Group run logs are written to `manifests/group_{a,b,c}_run_log.txt` (one per group, independent).
+The `STOP_AFTER_MONTH` stop-file works per-group: create it while a group is running and that group
+exits cleanly after its current month. Restart just that group's screen session to resume.
 
 **Monitor:**
 
@@ -326,12 +334,14 @@ Transfer manifests and CSVs only — no Parquets or GRIB2.
 ```bash
 # On h2o — quarterly bundle (e.g., after 2021-03 completes):
 MANIFEST_DIR=/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/manifests
-tar czf /tmp/stage1_q1_2021_evidence.tar.gz \
+EXPORT_DIR=/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/evidence_exports
+mkdir -p "${EXPORT_DIR}"
+tar czf "${EXPORT_DIR}/stage1_q1_2021_evidence.tar.gz" \
   -C "${MANIFEST_DIR}" \
   2020-10_manifest.json 2020-11_manifest.json 2020-12_manifest.json \
   2021-01_manifest.json 2021-02_manifest.json 2021-03_manifest.json \
-  fullperiod_run_log.txt
-scp flashnh-h2o:/tmp/stage1_q1_2021_evidence.tar.gz tmp/
+  group_a_run_log.txt group_b_run_log.txt group_c_run_log.txt
+scp "flashnh-h2o:${EXPORT_DIR}/stage1_q1_2021_evidence.tar.gz" tmp/
 ```
 
 ---
@@ -397,7 +407,7 @@ MRMS coverage from 2020-10-14T21Z onward is nearly complete; gaps after this dat
 | Script | Purpose |
 |---|---|
 | `scripts/run_stage1_forcing_onemonth_h2o.sh` | Phase 1 one-month launcher (default: Oct 2020) |
-| `scripts/run_stage1_forcing_fullperiod_h2o.sh` | Phase 2 full 63-month loop (sequential; extend for --group) |
+| `scripts/run_stage1_forcing_fullperiod_h2o.sh` | Phase 2 full 63-month loop; `GROUP_ID=A/B/C` selects month sub-range; `DRY_RUN=1` prints plan |
 | `scripts/run_stage1_forcing_smoke_h2o.sh` | 2K-B smoke test (48h × 10 basins; already PASS) |
 | `scripts/extract_stage1_forcing_chunk.py` | Core extractor (called by all launchers) |
 | `scripts/build_stage1_basin_weights.py` | Weight builder (2K-A; already complete) |
