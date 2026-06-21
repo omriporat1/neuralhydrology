@@ -992,179 +992,236 @@ def main() -> int:
             chunk_parquets[key] = p
             LOGGER.info("Written: %s (%d rows, %.1f MB)", fname_tpl, len(df_out), p.stat().st_size / 1e6)
 
-    # Preview CSVs
-    for df_out, fname in [(mrms_df, f"preview_mrms.csv"), (rtma_df, f"preview_rtma.csv")]:
-        if len(df_out) > 0:
-            try:
-                df_out.head(5).to_csv(chunk_dir / fname, index=False)
-            except Exception:
-                pass
-
     # ---------------------------------------------------------------------------
-    # Metrics and summary CSVs
+    # Post-combine finalization  (preview → metrics → completeness → manifest)
+    # Phase-tracked try/finally writes a diagnostic JSON on any interruption.
     # ---------------------------------------------------------------------------
 
-    metrics_df = pd.DataFrame(metrics_rows)
-    if len(metrics_df) > 0:
-        metrics_df.to_csv(prov_dir / f"{chunk_label}_hourly_runtime_and_volume.csv", index=False)
-
-    # hourly_file_status
-    status_rows = []
-    for dt in all_hours:
-        dt_str_s = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        for product in products:
-            matches = [r for r in metrics_rows if r["valid_time_utc"] == dt_str_s and r["product"] == product]
-            s = matches[0]["status"] if matches else "not_processed"
-            status_rows.append({"valid_time_utc": dt_str_s, "product": product, "status": s})
-    pd.DataFrame(status_rows).to_csv(prov_dir / f"{chunk_label}_hourly_file_status.csv", index=False)
-
-    if missing_rows:
-        pd.DataFrame(missing_rows).to_csv(prov_dir / f"{chunk_label}_missing_files.csv", index=False)
-        LOGGER.warning("%d missing/failed hour-products written to missing_files.csv", len(missing_rows))
-
-    # Product summary
-    product_summary: dict[str, dict] = {}
-    for product in products:
-        pm_all = [r for r in metrics_rows if r["product"] == product]
-        pm_ok  = [r for r in pm_all if r["status"] == "success"]
-        raw_sizes = [r["raw_file_size_bytes"] for r in pm_ok if r.get("raw_file_size_bytes")]
-        tot_times = [r["total_processing_time_s"] for r in pm_ok if r.get("total_processing_time_s")]
-        pq_bytes  = [r["output_parquet_bytes"] for r in pm_ok if r.get("output_parquet_bytes")]
-        ok_h = len(pm_ok)
-        product_summary[product] = {
-            "expected_hours":           n_hours,
-            "successful_hours":         ok_h,
-            "missing_failed_hours":     len(pm_all) - ok_h,
-            "total_raw_bytes":          sum(raw_sizes),
-            "median_raw_bytes_per_hour": float(np.median(raw_sizes)) if raw_sizes else 0.0,
-            "total_output_parquet_bytes": sum(pq_bytes),
-            "total_output_rows":        sum(r["n_output_rows"] for r in pm_ok),
-            "median_total_processing_time_s": float(np.median(tot_times)) if tot_times else 0.0,
-        }
-    pd.DataFrame([{"product": k, **v} for k, v in product_summary.items()]).to_csv(
-        prov_dir / f"{chunk_label}_product_summary.csv", index=False
-    )
-
-    # Variable completeness (RTMA)
-    if len(rtma_df) > 0 and _RTMA_PRODUCT in products:
-        ok_rtma_h = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 1)
-        var_rows = []
-        for var in sorted(rtma_df["variable"].unique()):
-            vdf = rtma_df[rtma_df["variable"] == var]
-            var_rows.append({
-                "variable": var,
-                "n_rows": len(vdf),
-                "expected_rows": ok_rtma_h * len(staids),
-                "completeness_pct": len(vdf) / max(ok_rtma_h * len(staids), 1) * 100,
-            })
-        pd.DataFrame(var_rows).to_csv(prov_dir / f"{chunk_label}_variable_completeness.csv", index=False)
-
-    # Basin completeness
-    if len(combined_df) > 0:
-        basin_rows = []
-        for staid in staids:
-            for product in products:
-                ok_h = product_summary.get(product, {}).get("successful_hours", 1)
-                pbd  = combined_df[(combined_df["STAID"] == staid) & (combined_df["product"] == product)]
-                n_present = pbd["valid_time_utc"].nunique()
-                basin_rows.append({
-                    "STAID": staid, "product": product,
-                    "n_hours_present": n_present, "expected_hours": ok_h,
-                    "completeness_pct": n_present / max(ok_h, 1) * 100,
-                })
-        pd.DataFrame(basin_rows).to_csv(prov_dir / f"{chunk_label}_basin_completeness.csv", index=False)
-
-    # ---------------------------------------------------------------------------
-    # Validation
-    # ---------------------------------------------------------------------------
-
-    ok_mrms_hours = product_summary.get(_MRMS_PRODUCT, {}).get("successful_hours", 0)
-    ok_rtma_hours = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 0)
-
-    validation = _run_validation(
-        mrms_df=mrms_df, rtma_df=rtma_df,
-        staids=staids, products=products,
-        ok_mrms_hours=ok_mrms_hours, ok_rtma_hours=ok_rtma_hours,
-        chunk_dir=chunk_dir, chunk_label=chunk_label,
-    )
-    all_pass = all(bool(v) for v in validation.values() if isinstance(v, bool))
-
-    # ---------------------------------------------------------------------------
-    # QC plots (optional)
-    # ---------------------------------------------------------------------------
-
-    plot_files: list[str] = []
-    if not args.no_plots:
-        plot_files = _make_qc_plots(
-            qc_dir=qc_dir,
-            chunk_label=chunk_label,
-            metrics_rows=metrics_rows,
-            combined_df=combined_df if len(combined_df) > 0 else None,
-            products=products,
-        )
-
-    # ---------------------------------------------------------------------------
-    # Manifest / provenance
-    # ---------------------------------------------------------------------------
-
-    t_elapsed = time.perf_counter() - t_wall_start
-
+    _finalization_phase = "init"
+    _finalization_ok = False
     try:
-        import subprocess
-        git_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), stderr=subprocess.DEVNULL
-        ).decode().strip()
-    except Exception:
-        git_sha = "unknown"
+        # Preview CSVs
+        _finalization_phase = "preview_csvs"
+        LOGGER.info("Post-combine [preview_csvs]: writing preview CSVs ...")
+        for df_out, fname in [(mrms_df, f"preview_mrms.csv"), (rtma_df, f"preview_rtma.csv")]:
+            if len(df_out) > 0:
+                try:
+                    df_out.head(5).to_csv(chunk_dir / fname, index=False)
+                except Exception:
+                    pass
 
-    summary = {
-        "chunk_label":           chunk_label,
-        "start":                 all_hours[0].isoformat() + "Z",
-        "end":                   all_hours[-1].isoformat() + "Z",
-        "n_hours_scheduled":     n_hours,
-        "n_basins":              len(staids),
-        "products":              products,
-        "rtma_mode":             args.rtma_mode,
-        "download_workers":      args.download_workers,
-        "resume":                args.resume,
-        "run_start_utc":         _run_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "wall_clock_seconds":    round(t_elapsed, 1),
-        "product_summary":       product_summary,
-        "validation":            validation,
-        "all_pass":              all_pass,
-        "git_commit":            git_sha,
-        "mrms_weights_path":     str(mrms_weights_path),
-        "rtma_weights_path":     str(rtma_weights_path),
-        "basin_manifest":        str(basin_manifest),
-        "chunk_dir":             str(chunk_dir),
-        "n_missing_failed":      len(missing_rows),
-        "qc_plots_written":      plot_files,
-    }
+        # Metrics and summary CSVs
+        _finalization_phase = "metrics_csv"
+        LOGGER.info("Post-combine [metrics_csv]: writing hourly runtime CSV (%d rows) ...", len(metrics_rows))
+        metrics_df = pd.DataFrame(metrics_rows)
+        if len(metrics_df) > 0:
+            metrics_df.to_csv(prov_dir / f"{chunk_label}_hourly_runtime_and_volume.csv", index=False)
+        LOGGER.info("Post-combine [metrics_csv]: written.")
 
-    with open(prov_dir / f"{chunk_label}_manifest.json", "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2, default=str)
+        # hourly_file_status
+        _finalization_phase = "hourly_file_status"
+        LOGGER.info("Post-combine [hourly_file_status]: writing hourly file status ...")
+        status_rows = []
+        for dt in all_hours:
+            dt_str_s = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            for product in products:
+                matches = [r for r in metrics_rows if r["valid_time_utc"] == dt_str_s and r["product"] == product]
+                s = matches[0]["status"] if matches else "not_processed"
+                status_rows.append({"valid_time_utc": dt_str_s, "product": product, "status": s})
+        pd.DataFrame(status_rows).to_csv(prov_dir / f"{chunk_label}_hourly_file_status.csv", index=False)
+        LOGGER.info("Post-combine [hourly_file_status]: written (%d rows).", len(status_rows))
 
-    # Human-readable summary
-    mrms_ok = product_summary.get(_MRMS_PRODUCT, {}).get("successful_hours", 0)
-    rtma_ok = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 0)
-    n_missing = len(missing_rows)
-    summary_md = (
-        f"# Forcing Extraction Chunk: {chunk_label}\n\n"
-        f"**Status:** {'PASS' if all_pass else 'FAIL'}\n"
-        f"**Period:** {all_hours[0].isoformat()}Z – {all_hours[-1].isoformat()}Z\n"
-        f"**Hours:** {n_hours}  **Basins:** {len(staids)}\n"
-        f"**Products:** {', '.join(products)}\n\n"
-        f"| Product | OK hours | Missing/failed |\n"
-        f"|---------|----------|----------------|\n"
-        f"| MRMS QPE | {mrms_ok}/{n_hours} | {n_hours - mrms_ok} |\n"
-        f"| RTMA CONUS | {rtma_ok}/{n_hours} | {n_hours - rtma_ok} |\n\n"
-        f"**Missing/failed hour-products:** {n_missing}\n"
-        f"**Wall clock:** {_format_duration(t_elapsed)}\n"
-        f"**Downloaded:** {_format_bytes(_prog['bytes_downloaded'])}\n\n"
-        f"## Validation\n\n"
-        + "\n".join(f"- {'PASS' if v else 'FAIL'}  {k}" for k, v in validation.items() if isinstance(v, bool))
-    )
-    (prov_dir / f"{chunk_label}_summary.md").write_text(summary_md, encoding="utf-8")
+        _finalization_phase = "missing_files"
+        if missing_rows:
+            pd.DataFrame(missing_rows).to_csv(prov_dir / f"{chunk_label}_missing_files.csv", index=False)
+            LOGGER.warning("%d missing/failed hour-products written to missing_files.csv", len(missing_rows))
+
+        # Product summary
+        _finalization_phase = "product_summary"
+        LOGGER.info("Post-combine [product_summary]: computing product summary ...")
+        product_summary: dict[str, dict] = {}
+        for product in products:
+            pm_all = [r for r in metrics_rows if r["product"] == product]
+            pm_ok  = [r for r in pm_all if r["status"] == "success"]
+            raw_sizes = [r["raw_file_size_bytes"] for r in pm_ok if r.get("raw_file_size_bytes")]
+            tot_times = [r["total_processing_time_s"] for r in pm_ok if r.get("total_processing_time_s")]
+            pq_bytes  = [r["output_parquet_bytes"] for r in pm_ok if r.get("output_parquet_bytes")]
+            ok_h = len(pm_ok)
+            product_summary[product] = {
+                "expected_hours":           n_hours,
+                "successful_hours":         ok_h,
+                "missing_failed_hours":     len(pm_all) - ok_h,
+                "total_raw_bytes":          sum(raw_sizes),
+                "median_raw_bytes_per_hour": float(np.median(raw_sizes)) if raw_sizes else 0.0,
+                "total_output_parquet_bytes": sum(pq_bytes),
+                "total_output_rows":        sum(r["n_output_rows"] for r in pm_ok),
+                "median_total_processing_time_s": float(np.median(tot_times)) if tot_times else 0.0,
+            }
+        pd.DataFrame([{"product": k, **v} for k, v in product_summary.items()]).to_csv(
+            prov_dir / f"{chunk_label}_product_summary.csv", index=False
+        )
+        LOGGER.info("Post-combine [product_summary]: written.")
+
+        # Variable completeness (RTMA) — vectorized groupby replaces per-var boolean filter
+        _finalization_phase = "variable_completeness"
+        LOGGER.info("Post-combine [variable_completeness]: computing variable completeness ...")
+        if len(rtma_df) > 0 and _RTMA_PRODUCT in products:
+            ok_rtma_h = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 1)
+            var_counts = rtma_df.groupby("variable").size()
+            var_rows = []
+            for var in sorted(var_counts.index):
+                n_rows = int(var_counts[var])
+                var_rows.append({
+                    "variable": var,
+                    "n_rows": n_rows,
+                    "expected_rows": ok_rtma_h * len(staids),
+                    "completeness_pct": n_rows / max(ok_rtma_h * len(staids), 1) * 100,
+                })
+            pd.DataFrame(var_rows).to_csv(prov_dir / f"{chunk_label}_variable_completeness.csv", index=False)
+            LOGGER.info("Post-combine [variable_completeness]: written (%d variables).", len(var_rows))
+
+        # Basin completeness — vectorized groupby on per-product DFs (not combined_df)
+        # Replaces O(basins×hours) boolean scans of the 24M-row combined DataFrame.
+        _finalization_phase = "basin_completeness"
+        LOGGER.info("Post-combine [basin_completeness]: computing basin completeness (groupby) ...")
+        if len(combined_df) > 0:
+            basin_rows = []
+            for product, df_p in [(_MRMS_PRODUCT, mrms_df), (_RTMA_PRODUCT, rtma_df)]:
+                if product not in products or len(df_p) == 0:
+                    continue
+                ok_h = product_summary.get(product, {}).get("successful_hours", 1)
+                counts = df_p.groupby("STAID")["valid_time_utc"].nunique()
+                for staid in staids:
+                    n_present = int(counts.get(staid, 0))
+                    basin_rows.append({
+                        "STAID": staid, "product": product,
+                        "n_hours_present": n_present, "expected_hours": ok_h,
+                        "completeness_pct": n_present / max(ok_h, 1) * 100,
+                    })
+            pd.DataFrame(basin_rows).to_csv(prov_dir / f"{chunk_label}_basin_completeness.csv", index=False)
+            LOGGER.info("Post-combine [basin_completeness]: written (%d rows).", len(basin_rows))
+
+        # Validation
+        _finalization_phase = "validation"
+        LOGGER.info("Post-combine [validation]: running validation checks ...")
+        ok_mrms_hours = product_summary.get(_MRMS_PRODUCT, {}).get("successful_hours", 0)
+        ok_rtma_hours = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 0)
+
+        validation = _run_validation(
+            mrms_df=mrms_df, rtma_df=rtma_df,
+            staids=staids, products=products,
+            ok_mrms_hours=ok_mrms_hours, ok_rtma_hours=ok_rtma_hours,
+            chunk_dir=chunk_dir, chunk_label=chunk_label,
+        )
+        all_pass = all(bool(v) for v in validation.values() if isinstance(v, bool))
+        LOGGER.info("Post-combine [validation]: done — all_pass=%s.", all_pass)
+
+        # QC plots (optional)
+        _finalization_phase = "qc_plots"
+        plot_files: list[str] = []
+        if not args.no_plots:
+            LOGGER.info("Post-combine [qc_plots]: generating QC plots ...")
+            plot_files = _make_qc_plots(
+                qc_dir=qc_dir,
+                chunk_label=chunk_label,
+                metrics_rows=metrics_rows,
+                combined_df=combined_df if len(combined_df) > 0 else None,
+                products=products,
+            )
+            LOGGER.info("Post-combine [qc_plots]: written (%d files).", len(plot_files))
+
+        # Manifest / provenance
+        _finalization_phase = "manifest_write"
+        LOGGER.info("Post-combine [manifest_write]: writing manifest JSON ...")
+        t_elapsed = time.perf_counter() - t_wall_start
+
+        try:
+            import subprocess
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            git_sha = "unknown"
+
+        summary = {
+            "chunk_label":           chunk_label,
+            "start":                 all_hours[0].isoformat() + "Z",
+            "end":                   all_hours[-1].isoformat() + "Z",
+            "n_hours_scheduled":     n_hours,
+            "n_basins":              len(staids),
+            "products":              products,
+            "rtma_mode":             args.rtma_mode,
+            "download_workers":      args.download_workers,
+            "resume":                args.resume,
+            "run_start_utc":         _run_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wall_clock_seconds":    round(t_elapsed, 1),
+            "product_summary":       product_summary,
+            "validation":            validation,
+            "all_pass":              all_pass,
+            "git_commit":            git_sha,
+            "mrms_weights_path":     str(mrms_weights_path),
+            "rtma_weights_path":     str(rtma_weights_path),
+            "basin_manifest":        str(basin_manifest),
+            "chunk_dir":             str(chunk_dir),
+            "n_missing_failed":      len(missing_rows),
+            "qc_plots_written":      plot_files,
+        }
+
+        with open(prov_dir / f"{chunk_label}_manifest.json", "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2, default=str)
+        LOGGER.info("Post-combine [manifest_write]: manifest written.")
+
+        # Human-readable summary
+        _finalization_phase = "summary_md"
+        LOGGER.info("Post-combine [summary_md]: writing summary markdown ...")
+        mrms_ok = product_summary.get(_MRMS_PRODUCT, {}).get("successful_hours", 0)
+        rtma_ok = product_summary.get(_RTMA_PRODUCT, {}).get("successful_hours", 0)
+        n_missing = len(missing_rows)
+        summary_md = (
+            f"# Forcing Extraction Chunk: {chunk_label}\n\n"
+            f"**Status:** {'PASS' if all_pass else 'FAIL'}\n"
+            f"**Period:** {all_hours[0].isoformat()}Z – {all_hours[-1].isoformat()}Z\n"
+            f"**Hours:** {n_hours}  **Basins:** {len(staids)}\n"
+            f"**Products:** {', '.join(products)}\n\n"
+            f"| Product | OK hours | Missing/failed |\n"
+            f"|---------|----------|----------------|\n"
+            f"| MRMS QPE | {mrms_ok}/{n_hours} | {n_hours - mrms_ok} |\n"
+            f"| RTMA CONUS | {rtma_ok}/{n_hours} | {n_hours - rtma_ok} |\n\n"
+            f"**Missing/failed hour-products:** {n_missing}\n"
+            f"**Wall clock:** {_format_duration(t_elapsed)}\n"
+            f"**Downloaded:** {_format_bytes(_prog['bytes_downloaded'])}\n\n"
+            f"## Validation\n\n"
+            + "\n".join(f"- {'PASS' if v else 'FAIL'}  {k}" for k, v in validation.items() if isinstance(v, bool))
+        )
+        (prov_dir / f"{chunk_label}_summary.md").write_text(summary_md, encoding="utf-8")
+        LOGGER.info("Post-combine [summary_md]: written.")
+
+        _finalization_ok = True
+
+    finally:
+        if not _finalization_ok:
+            LOGGER.error(
+                "Post-combine finalization INTERRUPTED at phase %r — writing diagnostic JSON",
+                _finalization_phase,
+            )
+            try:
+                _diag: dict[str, Any] = {
+                    "chunk_label":       chunk_label,
+                    "interrupted_phase": _finalization_phase,
+                    "combined_rows":     len(combined_df),
+                    "mrms_rows":         len(mrms_df),
+                    "rtma_rows":         len(rtma_df),
+                    "n_hours":           n_hours,
+                    "n_basins":          len(staids),
+                    "all_pass":          False,
+                    "timestamp_utc":     datetime.utcnow().isoformat() + "Z",
+                }
+                _diag_path = prov_dir / f"{chunk_label}_diagnostic.json"
+                with open(_diag_path, "w", encoding="utf-8") as fh:
+                    json.dump(_diag, fh, indent=2, default=str)
+                LOGGER.error("Diagnostic JSON: %s", _diag_path)
+            except Exception as _de:
+                LOGGER.error("Could not write diagnostic JSON: %s", _de)
 
     # ---------------------------------------------------------------------------
     # Final console report
