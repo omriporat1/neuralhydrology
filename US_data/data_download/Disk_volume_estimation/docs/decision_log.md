@@ -147,3 +147,36 @@ Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pi
 - `report_stage1_forcing_progress_h2o.sh` Section 1 updated to scan all three group logs.
 
 **Decision:** Do not launch extraction until this commit is on h2o and dry-run is confirmed PASS.
+
+## 2026-06-24 Stage 1 Forcing — Full-Period Extraction Audit Acceptance
+
+**Decision:** Accept the full-period MRMS+RTMA forcing extraction as **PASS_WITH_CAVEATS**.
+No rerun required.
+
+**Basis:**
+
+- 63/63 monthly chunks `all_pass=True`; 0 failures across Groups A/B/C (PASS=21/19/23).
+- 1,509,422,464 combined rows; 0 row-count formula mismatches (11 RTMA vars x n_basins x successful_hours).
+- Schema: `rtma_10wdir_absent=True` and `rtma_orog_absent=True` confirmed for all 63 months.
+- 138 missing hour-products across 20 months; all `not_in_s3` (permanent S3 archive absences).
+  MRMS: 136 hours; RTMA: 2 hours (2020-11-12T09Z and T10Z - newly discovered in audit).
+- 0 product-synchronized gaps; 0 unexpected warnings.
+- MRMS 24h window impact: 949 / 45,697 possible windows (2.08%).
+- Evidence: `tmp/stage1_forcing_fullperiod_evidence_20260624T060504Z.tar.gz` (local, not committed).
+- Audit tables: `tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/` (local, not committed).
+
+**Caveats recorded:**
+
+1. **Two-commit provenance:** 2020-10 used extractor commit `194a489` (Phase 1 run);
+   62 other months used `7e43760` (D1-optimized full-period extractor). Both pass all 12
+   validation checks - documentation caveat only, no functional inconsistency.
+2. **MRMS not_in_s3 gaps:** 136 missing MRMS hours are permanent S3 absences. Gap policy:
+   preserve as NaN in raw curated product; isolated 1h gaps may be interpolated in derived
+   package layers only (per `docs/stage1_forcing_fullperiod_postrun_audit_plan.md section 6`).
+3. **RTMA gap discovery:** 2 RTMA hours missing in 2020-11. Not anticipated prior to audit.
+   Month remains `all_pass=True`; no corrective action warranted.
+
+**This acceptance does not authorize** curated forcing product v001 assembly (requires
+visual QC gate) or NeuralHydrology package assembly or model training.
+
+**Full result:** `docs/stage1_forcing_fullperiod_audit.md`

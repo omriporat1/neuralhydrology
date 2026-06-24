@@ -1,8 +1,11 @@
 # Stage 1 Forcing — Full-Period Post-Run Audit and Package-Readiness Plan
 
 **Created:** 2026-06-23  
-**Status:** Design — extraction in progress on h2o; this plan applies after a terminal state is reached  
+**Status:** Audit complete — see result document below  
 **Supersedes:** Nothing — companion document to `stage1_forcing_fullperiod_launch_plan.md`
+
+> **Audit result (2026-06-24):** PASS_WITH_CAVEATS.
+> Full result and generated tables: `docs/stage1_forcing_fullperiod_audit.md`.
 
 ---
 

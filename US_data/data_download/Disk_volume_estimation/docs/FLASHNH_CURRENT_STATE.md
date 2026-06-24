@@ -1,8 +1,33 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-20
+Last updated: 2026-06-24
 
 ## Current milestone
+
+**Milestone 2K-E COMPLETE (2026-06-24): Full-period forcing extraction audit — PASS_WITH_CAVEATS.**
+
+Full-period MRMS+RTMA basin-average forcing extraction (63 months, 2020-10 → 2025-12,
+2,752 basins) is complete on h2o. Post-run audit finished locally.
+
+**Audit result summary:**
+- 63/63 months `all_pass=True`, 0 failures
+- 1,509,422,464 combined rows (125,447,168 MRMS + 1,383,975,296 RTMA); 0 row-count mismatches
+- 11 RTMA variables, uniform; `rtma_10wdir_absent` and `rtma_orog_absent` confirmed all months
+- 138 missing hour-products across 20 months (136 MRMS + 2 RTMA), all `not_in_s3`
+- MRMS 24h window impact: 949 / 45,697 windows (2.08%); RTMA: 25 / 45,697 (0.05%)
+- 0 basin×product pairs incomplete across all months
+- 0 unexpected warnings
+- Caveat: two-commit provenance (2020-10 → `194a489`; 2020-11 → 2025-12 → `7e43760`); documentation only
+- **No rerun required**
+
+**Full audit result:** `docs/stage1_forcing_fullperiod_audit.md`  
+**Audit plan:** `docs/stage1_forcing_fullperiod_postrun_audit_plan.md`  
+**Generated audit tables (not committed):** `tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/`
+
+**Next step:** Visual/event QC case selection → curated forcing product v001 design →
+small forcing-to-NH smoke test on Moriah. Not model training yet.
+
+---
 
 Stage 1 full 2,843-basin USGS IV target acquisition structurally complete (2026-06-13).
 Target policy configured (`config/stage1_target_policy.yaml`, 2026-06-15).
@@ -11,9 +36,16 @@ Target package builder + auditor implemented, smoke-tested, and h2o policy-smoke
 **v001 target package (2,752 basins) built and audited on h2o (2026-06-16): PASS — 0 errors, 0 warnings.**
 **Milestone 2K-A COMPLETE (2026-06-18): v001 basin-weight tables built on h2o — 2,752/2,752 basins, PASS.**
 **Milestone 2K-B COMPLETE (2026-06-18): forcing extraction smoke test — PASS. RTMA 48/48 h; MRMS 27/48 h (21 `not_in_s3`, expected early archive gap).**
-**Milestone 2K-C COMPLETE (2026-06-18): October 2020 one-month run — PASS. 432h, 2,752 basins, 396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period extraction PAUSED — 66.5-day projected wall time requires 2K-D optimization.**
-**Milestone 2K-D COMPLETE (2026-06-20): D1 serial extraction optimization → 24.7× speedup (91.9 s → 2.17 s/hr, commit `3ff4965`). Outer-parallelism benchmark 3×dw6 → 3.04 days projected (commit `a275296`). D2 process-workers deferred. x4 not recommended. Decision: full-period launch using 3 concurrent chunks × 6 download workers.**
-**Milestone 2K-E pre-launch patch COMPLETE (2026-06-20): `GROUP_ID=A/B/C` and `DRY_RUN=1` added to fullperiod launcher; path safety guard and per-group logs; reporter updated. Dry-run validation pending on h2o. Full-period extraction NOT yet launched.**
+**Milestone 2K-C COMPLETE (2026-06-18): October 2020 one-month run — PASS.
+432h, 2,752 basins, 396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall.
+Full-period extraction PAUSED — 66.5-day projected wall time requires 2K-D optimization.**
+**Milestone 2K-D COMPLETE (2026-06-20): D1 serial optimization → 24.7× speedup
+(91.9 s → 2.17 s/hr, commit `3ff4965`). Outer-parallelism x3×dw6 → 3.04 days projected
+(commit `a275296`). D2 deferred. x4 not recommended.
+Decision: full-period launch — 3 concurrent chunks × 6 download workers.**
+**Milestone 2K-E pre-launch patch COMPLETE (2026-06-20): `GROUP_ID=A/B/C` and `DRY_RUN=1`
+added to fullperiod launcher; path safety guard and per-group logs; reporter updated.
+Dry-run validation pending on h2o. Full-period extraction NOT yet launched.**
 
 See `docs/stage1_hpc_transition_preflight.md` for the full audit summary and
 `docs/stage1_target_policy.md` for target-policy rationale.
@@ -97,7 +129,7 @@ Input preflight and v001 basin-weight table build on h2o. **PASS — 2,752/2,752
 | Item | Path | Notes |
 |---|---|---|
 | v001 basin list CSV | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/v001_basin_list.csv` | 2,752 rows excl. header |
-| CAMELSH shapefile | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp` | 2,752/2,752 real polygons; `.prj` absent → EPSG:4326 assumed |
+| CAMELSH shapefile | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/02_basin_geometries/camelsh/shapefiles/CAMELSH_shapefile.shp` | 2,752 polygons; no `.prj`, EPSG:4326 |
 | MRMS grid def | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions/mrms_grid_definition.json` | v001 flat layout (not pilot path) |
 | RTMA grid def | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/grid_definitions/rtma_grid_definition.json` | same |
 
@@ -316,24 +348,29 @@ Projection: 45720 × 826 / (3 × 48) / 86400 = **3.035 days — USEFUL GREEN.**
 The v001 target package is **streamflow-only**. Full NeuralHydrology training requires
 forcing data and package assembly on h2o before any Moriah transfer.
 
-1. **Push 2K-E pre-launch patch and pull on h2o** — `git push`, then on h2o:
-   `git pull --ff-only` in the repo root, then confirm dry-runs pass:
-   `GROUP_ID=A DRY_RUN=1 bash scripts/run_stage1_forcing_fullperiod_h2o.sh` (and B, C).
+1. ~~**Push 2K-E pre-launch patch and pull on h2o**~~ — **COMPLETE (2026-06-20).**
 2. ~~**Stage 1 forcing acquisition plan + weight build (2K-A)**~~ — **COMPLETE (2026-06-18).**
-   See "Stage 1 forcing — Milestone 2K-A" section above.
 3. ~~**Milestone 2K-B — forcing extraction smoke test**~~ — **COMPLETE (2026-06-18): PASS.**
-   Run via direct extractor (launcher activation was broken). Evidence: `tmp/stage1_forcing_smoke_evidence/`.
-   See "Stage 1 forcing — Milestone 2K-B" section above.
 4. ~~**Milestone 2K-C — October 2020 one-month run**~~ — **COMPLETE (2026-06-18): PASS.**
-   396/432 MRMS, 432/432 RTMA, 14,167,296 rows, 15h 05m wall. Full-period **PAUSED** — 66.5 days projected.
-   See "Stage 1 forcing — Milestone 2K-C" section above.
 4b. ~~**Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark**~~ — **COMPLETE (2026-06-20): PASS.**
-    D1 serial optimization 24.7×; outer-parallelism x3×dw6 → 3.035 days projected. D2 deferred. x4 not recommended.
-    See "Stage 1 forcing — Milestone 2K-D" section above.
-4c. **Milestone 2K-E — full-period forcing extraction (63 monthly chunks, 3-way outer parallelism).**
-    Launch 3 concurrent chunk processes × 6 download workers each, covering non-overlapping month groups
-    (~21 months per group). All outputs under `/data42/omrip/Flash-NH/`. Notify PI before launch.
-    See `docs/stage1_forcing_fullperiod_launch_plan.md` for Phase 2 outer-parallel launch strategy.
+4c. ~~**Milestone 2K-E — full-period forcing extraction**~~ — **COMPLETE and AUDITED (2026-06-24): PASS_WITH_CAVEATS.**
+    63/63 months, 1.51B rows, 0 failures. See `docs/stage1_forcing_fullperiod_audit.md`.
+5. **Visual / event QC case selection** — select 12–24 animation cases stratified by
+   gap/no-gap and event category per `docs/stage1_forcing_fullperiod_postrun_audit_plan.md §7`.
+   Record in `visual_qc_case_selection.csv`.
+6. **Curated forcing product v001 design** — per-basin Parquet layout, gap-flag companion
+   columns, dataset manifest per `audit_plan.md §9`. Does not require h2o.
+7. **Small forcing-to-NH smoke test on Moriah** — assemble one month's per-basin forcing NC,
+   run 5-basin NeuralHydrology smoke. Prerequisite before full NH package assembly.
+8. **Basin-average per-NC assembly on h2o** — assemble per-basin forcing NCs from monthly
+   chunk Parquets; `scripts/build_stage1_forcing_basin_ncs.py` (not yet written).
+9. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
+   basin-average forcings, static attributes, and train/val/test splits into an audited
+   NH-compatible package.
+10. **Moriah transfer layout and checksum-verified transfer** — define directory structure
+    and `rsync`/`scp` transfer procedure; verify checksums on arrival before training.
+11. **Moriah training environment and config** — only after the assembled package passes
+    audit on Moriah. NeuralHydrology training remains designated for Moriah cluster.
 
 #### 2K-C pre-launch checklist and caution
 
