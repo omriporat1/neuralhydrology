@@ -109,6 +109,7 @@ MANIFEST_FIELDS = [
     "max_mrms_hour_utc", "max_mrms_basin_mean_mm",
     "grib_path_max_hour", "grib_exists_max_hour",
     "snapshot_path", "acc6h_path", "acc24h_path",
+    "basin_overlay", "gauge_overlay",
     "status", "error", "runtime_s",
 ]
 
@@ -335,6 +336,21 @@ def load_shapefile(shapefile: str) -> "gpd.GeoDataFrame":
     if not HAS_GPD:
         raise ImportError("geopandas is required: pip install geopandas")
     gdf = gpd.read_file(shapefile)
+    bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+    print(f"  Shapefile CRS:   {gdf.crs}")
+    print(f"  Total bounds:    x=[{bounds[0]:.3f}, {bounds[2]:.3f}]  "
+          f"y=[{bounds[1]:.3f}, {bounds[3]:.3f}]")
+    if gdf.crs is None:
+        if bounds[0] >= -180 and bounds[2] <= 180 and bounds[1] >= -90 and bounds[3] <= 90:
+            print("  CRS missing; bounds look geographic; assuming EPSG:4326")
+            gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+        else:
+            raise ValueError(
+                f"Shapefile CRS is None and bounds are not geographic "
+                f"(x=[{bounds[0]:.1f}, {bounds[2]:.1f}], "
+                f"y=[{bounds[1]:.1f}, {bounds[3]:.1f}]). "
+                f"Set CRS manually before running."
+            )
     return gdf
 
 
@@ -426,7 +442,7 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
                   extent: list,
                   basin_row, gauge_lat: float, gauge_lon: float,
                   basin_mean_mm: float,
-                  case: dict, title_suffix: str, out_path: Path, dpi: int):
+                  case: dict, title_suffix: str, out_path: Path, dpi: int) -> tuple:
     """
     Render one MRMS QPE raster snapshot with basin polygon and gauge point.
 
@@ -435,6 +451,8 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
 
     Cartopy enhances coastlines/state borders but is fully optional.
     GeoPandas basin overlay works independently of Cartopy.
+
+    Returns (basin_overlay: bool, gauge_overlay: bool).
     """
     cid   = case["case_id"]
     staid = case["STAID"]
@@ -469,12 +487,17 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
         print(f"  WARNING: cropped max ({crop_max:.3f} mm) near zero but "
               f"basin-mean is {basin_mean_mm:.3f} mm — possible misalignment")
 
+    basin_drawn = False
+    gauge_drawn = False
+
     # Build title
     cartopy_note = "" if HAS_CARTOPY else "  [cartopy unavailable]"
     title = (f"{cid}  STAID {staid}  |  {cat}\n"
              f"{name}  |  {area} km²  |  {title_suffix}{cartopy_note}")
 
-    # Reproject basin polygon to EPSG:4326 for overlay (independent of Cartopy)
+    # Reproject basin polygon to EPSG:4326 for overlay (independent of Cartopy).
+    # The shapefile CRS was already resolved to EPSG:4326 in load_shapefile when
+    # CRS metadata was absent, so to_crs("EPSG:4326") is a no-op in that case.
     basin_4326 = None
     if HAS_GPD and basin_row is not None:
         try:
@@ -489,7 +512,7 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
                                subplot_kw={"projection": proj})
         fig.suptitle(title, fontsize=8.5, fontweight="bold")
 
-        # Raster: pcolormesh with PlateCarree transform
+        # Raster
         ax.pcolormesh(lons_c, lats_c, data_c, transform=proj,
                       cmap=_MRMS_CMAP, norm=_MRMS_NORM, shading="nearest", zorder=2)
 
@@ -505,13 +528,7 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
                         [geom], crs=proj,
                         facecolor="none", edgecolor="black", linewidth=2.5, zorder=5,
                     )
-                # Manual legend entry
-                from matplotlib.patches import Patch
-                ax.legend(
-                    handles=[Patch(facecolor="none", edgecolor="black", linewidth=2,
-                                   label=f"Basin {staid}")],
-                    fontsize=7, loc="lower right",
-                )
+                basin_drawn = True
             except Exception as e:
                 print(f"  WARNING: basin polygon overlay failed: {e}")
 
@@ -520,6 +537,24 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
             ax.plot(gauge_lon, gauge_lat, transform=proj,
                     marker="*", color="gold", markersize=14,
                     markeredgecolor="black", markeredgewidth=0.8, zorder=6)
+            gauge_drawn = True
+
+        # Legend
+        from matplotlib.patches import Patch
+        legend_handles = []
+        if basin_drawn:
+            legend_handles.append(
+                Patch(facecolor="none", edgecolor="black", linewidth=2,
+                      label=f"Basin {staid}")
+            )
+        if gauge_drawn:
+            import matplotlib.lines as mlines
+            legend_handles.append(
+                mlines.Line2D([], [], marker="*", color="gold", markersize=10,
+                              markeredgecolor="black", linestyle="None", label="Gauge")
+            )
+        if legend_handles:
+            ax.legend(handles=legend_handles, fontsize=7, loc="lower right")
 
         ax.set_extent(extent, crs=proj)
         ax.gridlines(draw_labels=True, linewidth=0.4, color="gray",
@@ -530,18 +565,17 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
         fig, ax = plt.subplots(figsize=(10, 8), dpi=dpi)
         fig.suptitle(title, fontsize=8.5, fontweight="bold")
 
-        # Raster: pcolormesh on plain lon/lat axes
+        # Raster on plain lon/lat axes
         ax.pcolormesh(lons_c, lats_c, data_c,
                       cmap=_MRMS_CMAP, norm=_MRMS_NORM, shading="nearest", zorder=2)
 
-        # Basin polygon via geopandas (works on plain matplotlib axes)
+        # Basin polygon via geopandas (works on plain matplotlib axes in EPSG:4326)
         if basin_4326 is not None:
             try:
                 basin_4326.boundary.plot(
                     ax=ax, color="black", linewidth=2.5, zorder=5,
-                    label=f"Basin {staid}",
                 )
-                ax.legend(fontsize=7, loc="lower right")
+                basin_drawn = True
             except Exception as e:
                 print(f"  WARNING: basin polygon overlay failed: {e}")
 
@@ -549,9 +583,25 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
         if gauge_lat is not None and gauge_lon is not None:
             ax.plot(gauge_lon, gauge_lat,
                     marker="*", color="gold", markersize=14,
-                    markeredgecolor="black", markeredgewidth=0.8, zorder=6,
-                    label="Gauge")
-            ax.legend(fontsize=7, loc="lower right")
+                    markeredgecolor="black", markeredgewidth=0.8, zorder=6)
+            gauge_drawn = True
+
+        # Legend
+        from matplotlib.patches import Patch
+        import matplotlib.lines as mlines
+        legend_handles = []
+        if basin_drawn:
+            legend_handles.append(
+                Patch(facecolor="none", edgecolor="black", linewidth=2,
+                      label=f"Basin {staid}")
+            )
+        if gauge_drawn:
+            legend_handles.append(
+                mlines.Line2D([], [], marker="*", color="gold", markersize=10,
+                              markeredgecolor="black", linestyle="None", label="Gauge")
+            )
+        if legend_handles:
+            ax.legend(handles=legend_handles, fontsize=7, loc="lower right")
 
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
@@ -566,6 +616,9 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
     plt.tight_layout()
     fig.savefig(str(out_path), bbox_inches="tight", dpi=dpi)
     plt.close(fig)
+
+    print(f"  Overlay: basin={basin_drawn}  gauge={gauge_drawn}")
+    return basin_drawn, gauge_drawn
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +735,7 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
         "max_mrms_hour_utc": "", "max_mrms_basin_mean_mm": "",
         "grib_path_max_hour": "", "grib_exists_max_hour": "",
         "snapshot_path": "", "acc6h_path": "", "acc24h_path": "",
+        "basin_overlay": "N", "gauge_overlay": "N",
         "status": "PENDING", "error": "", "runtime_s": 0.0,
     }
 
@@ -721,6 +775,10 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
             basin_row = get_basin_polygon(basin_gdf, staid_col, staid)
             if basin_row is None:
                 print(f"  WARNING: STAID {staid} not found in shapefile column '{staid_col}'")
+            else:
+                bb = basin_row.geometry.values[0].bounds
+                print(f"  Basin bounds:  x=[{bb[0]:.3f}, {bb[2]:.3f}]  "
+                      f"y=[{bb[1]:.3f}, {bb[3]:.3f}]")
 
         # Basin-mean MRMS series from Parquet
         print(f"  Loading MRMS series from Parquet …")
@@ -791,9 +849,11 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
         title = (f"MRMS 1h QPE max hour: {max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                  f"Basin mean: {max_val:.2f} mm")
         print(f"  Rendering max-hour snapshot …")
-        plot_snapshot(data, lats, lons, extent, basin_row, gauge_lat, gauge_lon,
-                      max_val, case, title, snap_path, dpi)
+        b_ov, g_ov = plot_snapshot(data, lats, lons, extent, basin_row, gauge_lat, gauge_lon,
+                                   max_val, case, title, snap_path, dpi)
         result["snapshot_path"] = str(snap_path)
+        result["basin_overlay"] = "Y" if b_ov else "N"
+        result["gauge_overlay"] = "Y" if g_ov else "N"
         print(f"  Saved: {snap_path}")
 
         # 6h accumulation
@@ -809,7 +869,7 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
                           f"{max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                           f"({t6_start.strftime('%H:00')} – {max_ts.strftime('%H:00 UTC')})")
                 plot_snapshot(acc6_data, acc6_lats, acc6_lons, extent, basin_row,
-                              gauge_lat, gauge_lon, max_val, case, title6, acc6_path, dpi)
+                              gauge_lat, gauge_lon, max_val, case, title6, acc6_path, dpi)  # noqa: overlay ignored for acc
                 result["acc6h_path"] = str(acc6_path)
                 print(f"  Saved: {acc6_path}")
             else:
@@ -827,13 +887,18 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
                            f"{max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                            f"({t24_start.strftime('%m-%d %H:00')} – {max_ts.strftime('%m-%d %H:00 UTC')})")
                 plot_snapshot(acc24_data, acc24_lats, acc24_lons, extent, basin_row,
-                              gauge_lat, gauge_lon, max_val, case, title24, acc24_path, dpi)
+                              gauge_lat, gauge_lon, max_val, case, title24, acc24_path, dpi)  # noqa: overlay ignored for acc
                 result["acc24h_path"] = str(acc24_path)
                 print(f"  Saved: {acc24_path}")
             else:
                 print(f"  WARNING: skipping {ACC_HOURS_LONG}h accumulation (missing files)")
 
-        result["status"] = "OK"
+        if result["basin_overlay"] == "N" and basin_row is not None:
+            result["status"] = "WARN"
+            result["error"]  = "Raster rendered OK but basin polygon overlay failed"
+            print(f"  WARN: raster saved but basin overlay missing")
+        else:
+            result["status"] = "OK"
 
     except Exception as e:
         print(f"  FAILED: {e}")
@@ -864,15 +929,16 @@ def write_manifest(out_dir: Path, results: list):
 
 def write_summary(out_dir: Path, results: list, elapsed_s: float):
     n_ok   = sum(1 for r in results if r["status"] == "OK")
+    n_warn = sum(1 for r in results if r["status"] == "WARN")
     n_fail = sum(1 for r in results if r["status"] == "FAIL")
     lines = [
         "# Stage 1 Forcing — Spatial MRMS QC Snapshots",
         "",
-        f"**Cases:** {len(results)}  **OK:** {n_ok}  **FAIL:** {n_fail}  "
-        f"**Runtime:** {elapsed_s:.0f}s  ",
+        f"**Cases:** {len(results)}  **OK:** {n_ok}  **WARN:** {n_warn}  "
+        f"**FAIL:** {n_fail}  **Runtime:** {elapsed_s:.0f}s  ",
         "",
-        "| Case | STAID | Max hour | Max mm | Snapshot | 6h acc | 24h acc | Status |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Case | STAID | Max hour | Max mm | Snapshot | 6h acc | 24h acc | Basin | Gauge | Status |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         lines.append(
@@ -881,6 +947,8 @@ def write_summary(out_dir: Path, results: list, elapsed_s: float):
             f"{'Y' if r['snapshot_path'] else ''} | "
             f"{'Y' if r['acc6h_path'] else ''} | "
             f"{'Y' if r['acc24h_path'] else ''} | "
+            f"{r.get('basin_overlay', '?')} | "
+            f"{r.get('gauge_overlay', '?')} | "
             f"{r['status']} |"
         )
     lines += [
@@ -972,17 +1040,20 @@ def main():
     smd  = write_summary(out_dir, results, elapsed)
 
     print(f"\n{'=' * 64}")
-    n_ok = sum(1 for r in results if r["status"] == "OK")
+    n_ok   = sum(1 for r in results if r["status"] == "OK")
+    n_warn = sum(1 for r in results if r["status"] == "WARN")
+    n_fail = sum(1 for r in results if r["status"] == "FAIL")
     for r in results:
         print(f"  {r['case_id']}  {r['status']:8s}  "
               f"max={r['max_mrms_basin_mean_mm']} mm @ {r['max_mrms_hour_utc']}  "
+              f"basin={r.get('basin_overlay','?')} gauge={r.get('gauge_overlay','?')}  "
               f"{r['runtime_s']:.0f}s")
-    print(f"\n  {n_ok}/{len(results)} OK   elapsed: {elapsed:.0f}s")
+    print(f"\n  {n_ok}/{len(results)} OK   {n_warn} WARN   {n_fail} FAIL   "
+          f"elapsed: {elapsed:.0f}s")
     print(f"  Manifest: {mcsv}")
     print(f"  Summary:  {smd}")
     print(f"{'=' * 64}")
 
-    n_fail = sum(1 for r in results if r["status"] == "FAIL")
     return 0 if n_fail == 0 else 1
 
 
