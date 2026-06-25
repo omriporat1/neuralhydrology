@@ -374,7 +374,7 @@ def get_basin_polygon(gdf: "gpd.GeoDataFrame", staid_col: str, staid: str):
 
 
 # ---------------------------------------------------------------------------
-# Plotting
+# Plotting helpers
 # ---------------------------------------------------------------------------
 _MRMS_CMAP = mcolors.LinearSegmentedColormap.from_list(
     "mrms_qpe",
@@ -386,21 +386,55 @@ _MRMS_NORM = mcolors.BoundaryNorm(
 )
 
 
-def _map_extent_from_basin(basin_row, buffer_deg: float = MAP_BUFFER_DEG):
+def _normalize_lons(lons: np.ndarray) -> np.ndarray:
+    """Return a copy of lons with 0–360 values shifted to -180–180 convention."""
+    lons = lons.copy().astype(float)
+    lons[lons > 180.0] -= 360.0
+    return lons
+
+
+def _map_extent_from_basin(basin_row, buffer_deg: float = MAP_BUFFER_DEG) -> list:
     """Return [lon_min, lon_max, lat_min, lat_max] with buffer around basin bbox."""
-    bbox = basin_row.geometry.values[0].bounds  # (minx, miny, maxx, maxy)
+    bbox = basin_row.geometry.values[0].bounds  # (minx, miny, maxx, maxy) in CRS units
     return [
         bbox[0] - buffer_deg, bbox[2] + buffer_deg,
         bbox[1] - buffer_deg, bbox[3] + buffer_deg,
     ]
 
 
+def _crop_to_extent(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
+                    extent: list) -> tuple:
+    """
+    Crop (data, lats, lons) to extent = [lon_min, lon_max, lat_min, lat_max].
+    Expects 1D lats/lons (regular grid); lats may be monotonically decreasing.
+    Returns (data_crop, lats_crop, lons_crop) or (None, None, None) if crop is empty.
+    """
+    lon_min, lon_max, lat_min, lat_max = extent
+    lon_mask = (lons >= lon_min) & (lons <= lon_max)
+    lat_mask = (lats >= lat_min) & (lats <= lat_max)
+    if not lon_mask.any() or not lat_mask.any():
+        return None, None, None
+    data_crop = data[np.ix_(lat_mask, lon_mask)]
+    return data_crop, lats[lat_mask], lons[lon_mask]
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
 def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
+                  extent: list,
                   basin_row, gauge_lat: float, gauge_lon: float,
+                  basin_mean_mm: float,
                   case: dict, title_suffix: str, out_path: Path, dpi: int):
     """
     Render one MRMS QPE raster snapshot with basin polygon and gauge point.
-    Uses cartopy if available, falls back to plain matplotlib.
+
+    lons must already be normalized to -180–180 (call _normalize_lons first).
+    extent = [lon_min, lon_max, lat_min, lat_max] in -180–180 convention.
+
+    Cartopy enhances coastlines/state borders but is fully optional.
+    GeoPandas basin overlay works independently of Cartopy.
     """
     cid   = case["case_id"]
     staid = case["STAID"]
@@ -408,85 +442,126 @@ def plot_snapshot(data: np.ndarray, lats: np.ndarray, lons: np.ndarray,
     cat   = case["selection_category"]
     area  = case.get("drain_sqkm", "?")
 
-    title = (f"{cid}  STAID {staid}  |  {cat}\n"
-             f"{name}  |  {area} km²  |  {title_suffix}")
-
-    extent = None
-    if basin_row is not None:
-        try:
-            extent = _map_extent_from_basin(basin_row)
-        except Exception:
-            pass
-
-    if HAS_CARTOPY and HAS_GPD:
-        proj = ccrs.PlateCarree()
-        fig, ax = plt.subplots(
-            figsize=(10, 7), dpi=dpi,
-            subplot_kw={"projection": proj}
+    # Crop raster to the map extent before rendering
+    if lats.ndim != 1 or lons.ndim != 1:
+        raise ValueError(f"Expected 1D lat/lon arrays; got shapes {lats.shape}, {lons.shape}")
+    data_c, lats_c, lons_c = _crop_to_extent(data, lats, lons, extent)
+    if data_c is None:
+        raise ValueError(
+            f"Empty crop for extent {extent}. "
+            f"Lon range (normalized): [{lons.min():.2f}, {lons.max():.2f}]"
         )
+
+    n_finite  = int(np.isfinite(data_c).sum())
+    n_pos     = int((np.nan_to_num(data_c) > 0).sum())
+    crop_max  = float(np.nanmax(data_c)) if n_finite > 0 else 0.0
+
+    print(f"  Crop {data_c.shape}:  finite={n_finite}  pos={n_pos}  "
+          f"max={crop_max:.3f} mm  basin_mean={basin_mean_mm:.3f} mm")
+
+    if n_finite == 0:
+        raise ValueError(
+            f"Zero finite values in cropped raster. "
+            f"extent={extent}  lon_range=[{lons.min():.2f},{lons.max():.2f}]  "
+            f"lat_range=[{lats.min():.2f},{lats.max():.2f}]"
+        )
+    if crop_max < 0.01 and basin_mean_mm > 0.1:
+        print(f"  WARNING: cropped max ({crop_max:.3f} mm) near zero but "
+              f"basin-mean is {basin_mean_mm:.3f} mm — possible misalignment")
+
+    # Build title
+    cartopy_note = "" if HAS_CARTOPY else "  [cartopy unavailable]"
+    title = (f"{cid}  STAID {staid}  |  {cat}\n"
+             f"{name}  |  {area} km²  |  {title_suffix}{cartopy_note}")
+
+    # Reproject basin polygon to EPSG:4326 for overlay (independent of Cartopy)
+    basin_4326 = None
+    if HAS_GPD and basin_row is not None:
+        try:
+            basin_4326 = basin_row.to_crs("EPSG:4326")
+        except Exception as e:
+            print(f"  WARNING: basin CRS reprojection failed: {e}")
+
+    # --- Plot ---
+    if HAS_CARTOPY:
+        proj = ccrs.PlateCarree()
+        fig, ax = plt.subplots(figsize=(10, 8), dpi=dpi,
+                               subplot_kw={"projection": proj})
         fig.suptitle(title, fontsize=8.5, fontweight="bold")
 
-        # MRMS raster
-        if lats.ndim == 1 and lons.ndim == 1:
-            # Regular grid: use pcolormesh with meshgrid
-            LON, LAT = np.meshgrid(lons, lats)
-        else:
-            LON, LAT = lons, lats
-        ax.pcolormesh(LON, LAT, data, transform=proj,
-                      cmap=_MRMS_CMAP, norm=_MRMS_NORM,
-                      shading="auto", zorder=1)
-        sm = plt.cm.ScalarMappable(cmap=_MRMS_CMAP, norm=_MRMS_NORM)
-        sm.set_array([])
-        plt.colorbar(sm, ax=ax, shrink=0.6, pad=0.02, label="QPE (mm)")
+        # Raster: pcolormesh with PlateCarree transform
+        ax.pcolormesh(lons_c, lats_c, data_c, transform=proj,
+                      cmap=_MRMS_CMAP, norm=_MRMS_NORM, shading="nearest", zorder=2)
 
-        # Map features
+        # State borders
         ax.add_feature(cfeature.STATES.with_scale("10m"),
-                       edgecolor="gray", linewidth=0.7, zorder=2)
-        ax.add_feature(cfeature.RIVERS.with_scale("10m"),
-                       edgecolor="steelblue", linewidth=0.5, alpha=0.6, zorder=2)
+                       edgecolor="#888888", linewidth=0.7, zorder=3)
 
-        # Basin polygon
-        if basin_row is not None:
+        # Basin polygon via add_geometries (cartopy-compatible)
+        if basin_4326 is not None:
             try:
-                basin_row.to_crs("EPSG:4326").plot(
-                    ax=ax, transform=proj,
-                    facecolor="none", edgecolor="black", linewidth=2.0, zorder=4,
-                    label=f"STAID {staid}"
+                for geom in basin_4326.geometry:
+                    ax.add_geometries(
+                        [geom], crs=proj,
+                        facecolor="none", edgecolor="black", linewidth=2.5, zorder=5,
+                    )
+                # Manual legend entry
+                from matplotlib.patches import Patch
+                ax.legend(
+                    handles=[Patch(facecolor="none", edgecolor="black", linewidth=2,
+                                   label=f"Basin {staid}")],
+                    fontsize=7, loc="lower right",
                 )
             except Exception as e:
-                print(f"  WARNING: basin polygon plot failed: {e}")
+                print(f"  WARNING: basin polygon overlay failed: {e}")
 
         # Gauge point
-        if gauge_lat and gauge_lon:
+        if gauge_lat is not None and gauge_lon is not None:
             ax.plot(gauge_lon, gauge_lat, transform=proj,
-                    marker="*", color="gold", markersize=12, markeredgecolor="black",
-                    markeredgewidth=0.7, zorder=5, label="Gauge")
-            ax.legend(fontsize=6.5, loc="lower right")
+                    marker="*", color="gold", markersize=14,
+                    markeredgecolor="black", markeredgewidth=0.8, zorder=6)
 
-        if extent:
-            ax.set_extent(extent, crs=proj)
+        ax.set_extent(extent, crs=proj)
         ax.gridlines(draw_labels=True, linewidth=0.4, color="gray",
                      alpha=0.5, linestyle="--", zorder=0)
 
     else:
-        # Fallback: plain imshow without basemap
-        fig, ax = plt.subplots(figsize=(10, 7), dpi=dpi)
-        fig.suptitle(title + "\n(cartopy/geopandas not available — no basemap)", fontsize=8.5)
-        if lats.ndim == 1 and lons.ndim == 1:
-            ax.imshow(data, origin="upper",
-                      extent=[lons.min(), lons.max(), lats.min(), lats.max()],
-                      cmap=_MRMS_CMAP, norm=_MRMS_NORM, aspect="auto", zorder=1)
-        else:
-            ax.imshow(data, cmap=_MRMS_CMAP, norm=_MRMS_NORM,
-                      origin="upper", aspect="auto", zorder=1)
-        if extent:
-            ax.set_xlim(extent[0], extent[1])
-            ax.set_ylim(extent[2], extent[3])
+        # Plain matplotlib axes — fully functional without Cartopy
+        fig, ax = plt.subplots(figsize=(10, 8), dpi=dpi)
+        fig.suptitle(title, fontsize=8.5, fontweight="bold")
+
+        # Raster: pcolormesh on plain lon/lat axes
+        ax.pcolormesh(lons_c, lats_c, data_c,
+                      cmap=_MRMS_CMAP, norm=_MRMS_NORM, shading="nearest", zorder=2)
+
+        # Basin polygon via geopandas (works on plain matplotlib axes)
+        if basin_4326 is not None:
+            try:
+                basin_4326.boundary.plot(
+                    ax=ax, color="black", linewidth=2.5, zorder=5,
+                    label=f"Basin {staid}",
+                )
+                ax.legend(fontsize=7, loc="lower right")
+            except Exception as e:
+                print(f"  WARNING: basin polygon overlay failed: {e}")
+
+        # Gauge point
+        if gauge_lat is not None and gauge_lon is not None:
+            ax.plot(gauge_lon, gauge_lat,
+                    marker="*", color="gold", markersize=14,
+                    markeredgecolor="black", markeredgewidth=0.8, zorder=6,
+                    label="Gauge")
+            ax.legend(fontsize=7, loc="lower right")
+
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
-        sm = plt.cm.ScalarMappable(cmap=_MRMS_CMAP, norm=_MRMS_NORM)
-        sm.set_array([])
-        plt.colorbar(sm, ax=ax, shrink=0.6, label="QPE (mm)")
+        ax.grid(linewidth=0.4, color="gray", alpha=0.4, linestyle="--")
+
+    sm = plt.cm.ScalarMappable(cmap=_MRMS_CMAP, norm=_MRMS_NORM)
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, shrink=0.55, pad=0.02, label="QPE (mm/h)")
 
     plt.tight_layout()
     fig.savefig(str(out_path), bbox_inches="tight", dpi=dpi)
@@ -667,17 +742,57 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
 
         print(f"  Loading GRIB2: {grib_p.name} …")
         data, lats, lons = read_mrms_grib_gz(grib_p)
-        print(f"  GRIB2 grid: {data.shape}  lat [{np.nanmin(lats):.2f}, {np.nanmax(lats):.2f}]"
-              f"  lon [{np.nanmin(lons):.2f}, {np.nanmax(lons):.2f}]")
-        print(f"  MRMS raster: max={np.nanmax(data):.2f} mm  "
-              f"NaN fraction={np.isnan(data).mean():.3f}")
+
+        # --- Raster diagnostics ---
+        lon_conv = "0-360" if lons.max() > 180.0 else "-180-180"
+        n_finite_raw = int(np.isfinite(data).sum())
+        print(f"  GRIB2 raw:  shape={data.shape}  "
+              f"lat=[{np.nanmin(lats):.2f}, {np.nanmax(lats):.2f}]  "
+              f"lon=[{np.nanmin(lons):.2f}, {np.nanmax(lons):.2f}] ({lon_conv})  "
+              f"finite={n_finite_raw}  max={np.nanmax(data):.3f}")
+
+        # Normalize longitudes to -180–180
+        if lon_conv == "0-360":
+            lons = _normalize_lons(lons)
+            print(f"  Normalized: lon=[{lons.min():.2f}, {lons.max():.2f}]")
+
+        # Compute map extent from basin polygon or gauge
+        if basin_row is not None:
+            try:
+                extent = _map_extent_from_basin(basin_row)
+            except Exception as e:
+                print(f"  WARNING: could not compute basin extent: {e}")
+                extent = None
+        else:
+            extent = None
+        if extent is None and gauge_lat is not None and gauge_lon is not None:
+            buf = MAP_BUFFER_DEG
+            extent = [gauge_lon - buf, gauge_lon + buf,
+                      gauge_lat - buf, gauge_lat + buf]
+        if extent is None:
+            raise ValueError("Cannot determine map extent: no basin polygon and no gauge coordinates")
+
+        print(f"  Extent:     lon=[{extent[0]:.2f}, {extent[1]:.2f}]  "
+              f"lat=[{extent[2]:.2f}, {extent[3]:.2f}]")
+
+        # Fail-fast: check that the crop has finite data
+        dc_check, _, _ = _crop_to_extent(data, lats, lons, extent)
+        if dc_check is None or np.isfinite(dc_check).sum() == 0:
+            raise ValueError(
+                f"FAIL: Zero finite MRMS values in cropped extent {extent}. "
+                f"Lon range after normalization: [{lons.min():.2f}, {lons.max():.2f}]. "
+                f"Check that the GRIB2 grid covers CONUS and lon normalization succeeded."
+            )
+        n_pos_check = int((np.nan_to_num(dc_check) > 0).sum())
+        print(f"  Crop check: shape={dc_check.shape}  finite={np.isfinite(dc_check).sum()}  "
+              f"pos={n_pos_check}  max={np.nanmax(dc_check):.3f}")
 
         # Max-hour snapshot
         title = (f"MRMS 1h QPE max hour: {max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                  f"Basin mean: {max_val:.2f} mm")
         print(f"  Rendering max-hour snapshot …")
-        plot_snapshot(data, lats, lons, basin_row, gauge_lat, gauge_lon,
-                      case, title, snap_path, dpi)
+        plot_snapshot(data, lats, lons, extent, basin_row, gauge_lat, gauge_lon,
+                      max_val, case, title, snap_path, dpi)
         result["snapshot_path"] = str(snap_path)
         print(f"  Saved: {snap_path}")
 
@@ -687,12 +802,14 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
             acc6_result = load_acc_mrms_raster(raw_mrms_root, max_ts, ACC_HOURS_SHORT)
             if acc6_result is not None:
                 acc6_data, acc6_lats, acc6_lons = acc6_result
+                if acc6_lons.max() > 180.0:
+                    acc6_lons = _normalize_lons(acc6_lons)
                 t6_start = max_ts - pd.Timedelta(hours=ACC_HOURS_SHORT - 1)
                 title6 = (f"MRMS {ACC_HOURS_SHORT}h accumulated QPE ending "
                           f"{max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                           f"({t6_start.strftime('%H:00')} – {max_ts.strftime('%H:00 UTC')})")
-                plot_snapshot(acc6_data, acc6_lats, acc6_lons, basin_row,
-                              gauge_lat, gauge_lon, case, title6, acc6_path, dpi)
+                plot_snapshot(acc6_data, acc6_lats, acc6_lons, extent, basin_row,
+                              gauge_lat, gauge_lon, max_val, case, title6, acc6_path, dpi)
                 result["acc6h_path"] = str(acc6_path)
                 print(f"  Saved: {acc6_path}")
             else:
@@ -703,12 +820,14 @@ def process_case(case: dict, raw_mrms_root: Path, chunks_root: Path,
             acc24_result = load_acc_mrms_raster(raw_mrms_root, max_ts, ACC_HOURS_LONG)
             if acc24_result is not None:
                 acc24_data, acc24_lats, acc24_lons = acc24_result
+                if acc24_lons.max() > 180.0:
+                    acc24_lons = _normalize_lons(acc24_lons)
                 t24_start = max_ts - pd.Timedelta(hours=ACC_HOURS_LONG - 1)
                 title24 = (f"MRMS {ACC_HOURS_LONG}h accumulated QPE ending "
                            f"{max_ts.strftime('%Y-%m-%d %H:00 UTC')}  "
                            f"({t24_start.strftime('%m-%d %H:00')} – {max_ts.strftime('%m-%d %H:00 UTC')})")
-                plot_snapshot(acc24_data, acc24_lats, acc24_lons, basin_row,
-                              gauge_lat, gauge_lon, case, title24, acc24_path, dpi)
+                plot_snapshot(acc24_data, acc24_lats, acc24_lons, extent, basin_row,
+                              gauge_lat, gauge_lon, max_val, case, title24, acc24_path, dpi)
                 result["acc24h_path"] = str(acc24_path)
                 print(f"  Saved: {acc24_path}")
             else:
