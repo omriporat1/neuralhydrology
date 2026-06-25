@@ -1,7 +1,7 @@
 # Stage 1 Forcing — Full-Period Visual QC Animation Plan
 
 **Created:** 2026-06-25  
-**Status:** Scripts ready; pending h2o run  
+**Status:** 6-case basin-timeseries pilot TECHNICAL PASS; spatial QC pending  
 **Depends on:** `docs/stage1_forcing_fullperiod_visual_qc_selection.md`
 
 ---
@@ -15,27 +15,69 @@ They are **not committed to git** and must stay under `tmp/`.
 
 ---
 
-## Why Animations (Not Static Maps)
+## QC Status
 
-The January 2023 pilot animations (`scripts/generate_january_event_animations.py`)
-used raw GRIB2 spatial maps and local CAMELSH shapefiles. For the full-period run:
+### Phase 1 — Basin time-series pilot (TECHNICAL PASS)
 
-- Raw GRIB2 files are **deleted from h2o** after extraction to save disk space.
-- Spatial weights survive (per-basin CSV), but there is no per-pixel hourly raster.
-- Basin-average time series (combined Parquet) are the only forcing data available
-  for arbitrary basins and months.
+The 6-case basin time-series pilot ran on h2o using a direct Python binary
+workaround (`${ENV_PATH}/bin/python`). The conda activate path was bypassed.
 
-The full-period animations therefore use a **3-panel time-series figure** with
-no spatial map panel. This is sufficient for the QC goals:
+**Result: TECHNICAL PASS** for time-series and gap rendering:
 
-| Goal | Covered by |
+| Goal | Result |
 |---|---|
-| NaN / gap rendering at gap hours | MRMS bars: gray placeholder at gap timesteps |
-| Period-boundary clip (VQC-001) | Explicit red shading + text annotation |
-| Precipitation magnitude plausibility | MRMS QPE bars (basin mean mm/h) |
-| Temperature context (winter, monsoon) | RTMA 2m temperature line |
-| Streamflow response to event | qobs_m3s hydrograph |
-| Animation cursor validation | Red vertical line sweeps across all panels |
+| NaN / gap rendering at gap hours | PASS — gray bars rendered correctly for MRMS gaps |
+| Period-boundary clip (VQC-001) | PASS — render window starts at period start; 21h NaN labeled |
+| Precipitation magnitude plausibility | PARTIAL — only basin-mean scalar; no spatial context |
+| Temperature context | PASS — RTMA 2m temperature line rendered |
+| Streamflow response | PASS — qobs_m3s hydrograph rendered |
+| Animation cursor | PASS — per-frame red cursor sweeps correctly |
+
+**Limitation:** Basin-mean time series cannot confirm spatial placement of
+precipitation relative to the basin. For scientifically meaningful spatial QC,
+raster-level MRMS data is required.
+
+### Phase 2 — Spatial MRMS QC (pending)
+
+**Correction (2026-06-25):** Raw MRMS GRIB2 files were NOT deleted. They remain
+on h2o under:
+```
+/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/raw/mrms/CONUS/
+  MultiSensor_QPE_01H_Pass1_00.00/{YYYYMMDD}/
+    MRMS_MultiSensor_QPE_01H_Pass1_00.00_{YYYYMMDD}-{HH}0000.grib2.gz
+```
+
+This makes targeted spatial MRMS QC feasible. The script
+`scripts/generate_fullperiod_spatial_mrms_qc.py` implements a targeted
+smoke test for VQC-009 (SW monsoon, AZ) and VQC-012 (small flashy basin).
+
+**Do not render the remaining 15 basin-timeseries animations yet.**
+Complete spatial QC first for the two highest-value event cases, then
+assess whether remaining 15 cases require spatial review.
+
+---
+
+## Why Time-Series Animations (Not Spatial Maps) — Original Rationale
+
+The January 2023 pilot animations used raw GRIB2 spatial maps. For the
+full-period run, raw GRIB2 files were initially believed deleted. The
+3-panel time-series design was adopted for that reason:
+
+- Basin-average time series (combined Parquet) are available for all cases.
+- No per-pixel hourly raster assumed available.
+
+This remains the design for the **basin time-series animations**. The new
+spatial QC script (`generate_fullperiod_spatial_mrms_qc.py`) is a separate,
+targeted complement — not a replacement.
+
+| QC dimension | Covered by time-series animations | Covered by spatial QC |
+|---|---|---|
+| NaN / gap rendering | Yes | No |
+| Period-boundary clip | Yes | No |
+| Precipitation magnitude | Basin mean only | Full raster |
+| Spatial placement over basin | No | Yes |
+| Temperature context | Yes | No |
+| Streamflow response | Yes | No |
 
 ---
 
@@ -161,8 +203,8 @@ Streamflow is loaded with `xarray.open_dataset()` and sliced to the render windo
 | VQC-001 | 01170100 | MRMS_GAP_ADJACENT | 2020-10-14T00Z | 34 | **YES** |
 | VQC-004 | 01440000 | RTMA_GAP_ADJACENT | 2020-11-12T08Z | 72 | no |
 | VQC-007 | 10343500 | WINTER_MIXED_PRECIP | 2024-01-21T21Z | 72 | no |
-| VQC-009 | 09484000 | WARM_SEASON_CONVECTIVE | 2023-08-27T16Z | 72 | no |
-| VQC-012 | 05540275 | SMALL_FLASHY_BASIN | 2022-03-12T17Z | 72 | no |
+| VQC-009 | 09484000 | WARM_SEASON_CONVECTIVE | 2023-08-08T20Z | 72 | no |
+| VQC-012 | 08155541 | SMALL_FLASHY_BASIN | 2022-03-19T20Z | 72 | no |
 | VQC-020 | 03021350 | RANDOM_CONTROL | 2025-03-01T12Z | 72 | no |
 
 VQC-001 is a **boundary-stress case**: its render window starts at the forcing

@@ -159,40 +159,19 @@ log "Repo root:    ${REPO_ROOT}"
 log "Case IDs:     ${CASE_IDS}"
 
 # ---------------------------------------------------------------------------
-# Python environment — conda prefix activation
+# Python environment — direct binary (conda prefix, no activate required)
 # ---------------------------------------------------------------------------
-CONDA_INIT_SCRIPT="/opt/conda/etc/profile.d/conda.sh"
+PYTHON_BIN="${ENV_PATH}/bin/python"
 
-if [[ ! -f "${CONDA_INIT_SCRIPT}" ]]; then
-    log "ERROR: conda init script not found: ${CONDA_INIT_SCRIPT}"
-    log "  h2o is expected to have conda at /opt/conda."
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+    log "ERROR: Python binary not found or not executable: ${PYTHON_BIN}"
+    log "  Verify the conda prefix env exists: ls ${ENV_PATH}/bin/python"
     exit 1
 fi
 
-# shellcheck source=/dev/null
-source "${CONDA_INIT_SCRIPT}"
-
-if ! conda activate "${ENV_PATH}" 2>&1 | tee -a "${LOG}"; then
-    log "ERROR: 'conda activate ${ENV_PATH}' failed."
-    log "  Verify the env prefix exists: ls ${ENV_PATH}/bin/python"
-    exit 1
-fi
-
-PYTHON_BIN="$(command -v python)"
-
-# Sanity-check: python must be under the activated env prefix
-if [[ "${PYTHON_BIN}" != "${ENV_PATH}"* ]]; then
-    log "ERROR: python binary is not under env prefix."
-    log "  Expected prefix: ${ENV_PATH}"
-    log "  Got:             ${PYTHON_BIN}"
-    log "  conda activate may have silently failed."
-    exit 1
-fi
-
-log "Conda init:   ${CONDA_INIT_SCRIPT}"
 log "Python env:   ${ENV_PATH}"
 log "Python bin:   ${PYTHON_BIN}"
-log "Python ver:   $(python --version 2>&1)"
+log "Python ver:   $("${PYTHON_BIN}" --version 2>&1)"
 
 # ---------------------------------------------------------------------------
 # Verify committed scripts exist
