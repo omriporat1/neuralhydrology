@@ -159,25 +159,40 @@ log "Repo root:    ${REPO_ROOT}"
 log "Case IDs:     ${CASE_IDS}"
 
 # ---------------------------------------------------------------------------
-# Python environment
+# Python environment — conda prefix activation
 # ---------------------------------------------------------------------------
-if [[ -d "${ENV_PATH}" ]]; then
-    # shellcheck source=/dev/null
-    source "${ENV_PATH}/bin/activate"
-    PYTHON_BIN="$(command -v python)"
-    log "Python env:   ${ENV_PATH}"
-    log "Python bin:   ${PYTHON_BIN}"
-    log "Python ver:   $(python --version 2>&1)"
-elif command -v python &>/dev/null; then
-    PYTHON_BIN="$(command -v python)"
-    log "WARNING: env ${ENV_PATH} not found — using system python: ${PYTHON_BIN}"
-elif command -v python3 &>/dev/null; then
-    PYTHON_BIN="$(command -v python3)"
-    log "WARNING: env ${ENV_PATH} not found — using system python3: ${PYTHON_BIN}"
-else
-    log "ERROR: no Python found on PATH and ${ENV_PATH} does not exist"
+CONDA_INIT_SCRIPT="/opt/conda/etc/profile.d/conda.sh"
+
+if [[ ! -f "${CONDA_INIT_SCRIPT}" ]]; then
+    log "ERROR: conda init script not found: ${CONDA_INIT_SCRIPT}"
+    log "  h2o is expected to have conda at /opt/conda."
     exit 1
 fi
+
+# shellcheck source=/dev/null
+source "${CONDA_INIT_SCRIPT}"
+
+if ! conda activate "${ENV_PATH}" 2>&1 | tee -a "${LOG}"; then
+    log "ERROR: 'conda activate ${ENV_PATH}' failed."
+    log "  Verify the env prefix exists: ls ${ENV_PATH}/bin/python"
+    exit 1
+fi
+
+PYTHON_BIN="$(command -v python)"
+
+# Sanity-check: python must be under the activated env prefix
+if [[ "${PYTHON_BIN}" != "${ENV_PATH}"* ]]; then
+    log "ERROR: python binary is not under env prefix."
+    log "  Expected prefix: ${ENV_PATH}"
+    log "  Got:             ${PYTHON_BIN}"
+    log "  conda activate may have silently failed."
+    exit 1
+fi
+
+log "Conda init:   ${CONDA_INIT_SCRIPT}"
+log "Python env:   ${ENV_PATH}"
+log "Python bin:   ${PYTHON_BIN}"
+log "Python ver:   $(python --version 2>&1)"
 
 # ---------------------------------------------------------------------------
 # Verify committed scripts exist
