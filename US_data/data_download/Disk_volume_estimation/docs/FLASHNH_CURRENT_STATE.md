@@ -25,7 +25,9 @@ Full-period MRMS+RTMA basin-average forcing extraction (63 months, 2020-10 → 2
 **Generated audit tables (not committed):** `tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/`
 
 **Next step:** Visual/event QC case selection → curated forcing product v001 design →
-small forcing-to-NH smoke test on Moriah. Not model training yet.
+small forcing-to-NH smoke test on Moriah. Not model training yet.  
+Visual QC case selection (21 cases, seed=42) generated 2026-06-25 — pending review
+and animation generation. See `docs/stage1_forcing_fullperiod_visual_qc_selection.md`.
 
 ---
 
@@ -355,9 +357,10 @@ forcing data and package assembly on h2o before any Moriah transfer.
 4b. ~~**Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark**~~ — **COMPLETE (2026-06-20): PASS.**
 4c. ~~**Milestone 2K-E — full-period forcing extraction**~~ — **COMPLETE and AUDITED (2026-06-24): PASS_WITH_CAVEATS.**
     63/63 months, 1.51B rows, 0 failures. See `docs/stage1_forcing_fullperiod_audit.md`.
-5. **Visual / event QC case selection** — select 12–24 animation cases stratified by
-   gap/no-gap and event category per `docs/stage1_forcing_fullperiod_postrun_audit_plan.md §7`.
-   Record in `visual_qc_case_selection.csv`.
+5. **Visual / event QC case selection** — 21 cases generated (2026-06-25, seed=42).
+   `docs/stage1_forcing_fullperiod_visual_qc_selection.md` (tracked).
+   Output: `tmp/stage1_forcing_fullperiod_visual_qc_selection_20260625T081859Z/` (not committed).
+   **Pending: human review and animation generation. Animations not yet generated.**
 6. **Curated forcing product v001 design** — per-basin Parquet layout, gap-flag companion
    columns, dataset manifest per `audit_plan.md §9`. Does not require h2o.
 7. **Small forcing-to-NH smoke test on Moriah** — assemble one month's per-basin forcing NC,
