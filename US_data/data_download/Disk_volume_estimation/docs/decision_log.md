@@ -180,3 +180,44 @@ No rerun required.
 visual QC gate) or NeuralHydrology package assembly or model training.
 
 **Full result:** `docs/stage1_forcing_fullperiod_audit.md`
+
+## 2026-06-25/28 Stage 1 Forcing — Pilot Visual QC PASS
+
+**Decision:** Accept the pilot visual QC evidence as **PASS** for the 6-case basin-timeseries
+pilot and the 2-case spatial MRMS smoke. This is a technical/rendering PASS and a scientific
+QC evidence improvement. It is **not a final full forcing certification**.
+
+**Basin-timeseries pilot (6/6 OK, 2026-06-25):**
+
+- Cases: VQC-001, VQC-004, VQC-007, VQC-009, VQC-012, VQC-020.
+- Time-series rendering, MRMS gap labeling (gray bars), RTMA gap labeling (orange shading),
+  qobs hydrograph alignment, VQC-001 period-boundary clip annotation — all pass.
+- h2o output: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_visual_qc_pilot_20260625T123337Z`
+- Generated GIF/PNG/CSV/manifest outputs are not committed.
+
+**Spatial MRMS smoke (VQC-009 + VQC-012, 2026-06-25/28):**
+
+- Script: `scripts/generate_fullperiod_spatial_mrms_qc.py`
+- Both cases: `basin=Y`, `gauge=Y` (basin polygon and gauge marker rendered).
+- Cartopy unavailable on h2o — plain lon/lat axes with pcolormesh raster used. No basemap.
+  This is sufficient for spatial placement QC; not a rendering blocker.
+- MRMS lon normalization (0–360 → −180–180) applied in script; CAMELSH CRS auto-assigned
+  EPSG:4326 (shapefile has no `.prj`; bounds confirmed geographic).
+
+| Case | Observation | Interpretation |
+|---|---|---|
+| VQC-012 (08155541, small flashy TX) | Strong near-basin rainfall at max-hour | Consistent with sharp qobs response; no alignment failure |
+| VQC-009 (09484000, SW monsoon AZ) | Patchy convective rainfall near/partly over Sabino Creek | Weak qobs response plausible (partial spatial overlap); not an extraction failure |
+
+**h2o output directories:**
+- VQC-012: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_spatial_mrms_qc_smoke_20260625T142012Z`
+- VQC-009: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_spatial_mrms_qc_smoke_20260625T142332Z/VQC-009/`
+
+**Scope of this acceptance:**
+- Authorizes proceeding to curated forcing product v001 design.
+- Does **not** authorize skipping the remaining 15 cases if reviewer finds the pilot evidence
+  insufficient for full certification.
+- Does **not** authorize NeuralHydrology package assembly or model training.
+- Generated PNG/GIF/CSV/summary outputs remain under `tmp/` and must not be committed.
+
+**Full evidence:** `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`

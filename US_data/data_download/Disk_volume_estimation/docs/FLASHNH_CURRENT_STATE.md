@@ -1,6 +1,6 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-24
+Last updated: 2026-06-28
 
 ## Current milestone
 
@@ -24,10 +24,20 @@ Full-period MRMS+RTMA basin-average forcing extraction (63 months, 2020-10 → 2
 **Audit plan:** `docs/stage1_forcing_fullperiod_postrun_audit_plan.md`  
 **Generated audit tables (not committed):** `tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/`
 
-**Next step:** Visual/event QC case selection → curated forcing product v001 design →
-small forcing-to-NH smoke test on Moriah. Not model training yet.  
-Visual QC case selection (21 cases, seed=42) generated 2026-06-25 — pending review
-and animation generation. See `docs/stage1_forcing_fullperiod_visual_qc_selection.md`.
+**Next step:** Curated forcing product v001 design → small forcing-to-NH smoke test
+on Moriah. Not model training yet.
+
+**Pilot visual QC PASS (2026-06-25/28):**
+- Basin-timeseries pilot: 6/6 cases OK (VQC-001, -004, -007, -009, -012, -020).
+  Time-series rendering, gap labeling, VQC-001 boundary clip, and qobs alignment all pass.
+  h2o output: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_visual_qc_pilot_20260625T123337Z`
+- Spatial MRMS smoke (VQC-012, VQC-009): basin=Y, gauge=Y. Raster placement consistent
+  with observed qobs responses. No extraction or alignment failures detected.
+  h2o output (VQC-012): `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_spatial_mrms_qc_smoke_20260625T142012Z`
+- This is a technical/rendering PASS and scientific QC evidence improvement.
+  It is **not a final full forcing certification** — 15 of 21 cases not yet animated.
+- Generated outputs (PNG/GIF/CSV/summary) remain under `tmp/` and are not committed.
+- See `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md` for full evidence.
 
 ---
 
@@ -357,10 +367,11 @@ forcing data and package assembly on h2o before any Moriah transfer.
 4b. ~~**Milestone 2K-D — extraction optimization + h2o CPU-parallel benchmark**~~ — **COMPLETE (2026-06-20): PASS.**
 4c. ~~**Milestone 2K-E — full-period forcing extraction**~~ — **COMPLETE and AUDITED (2026-06-24): PASS_WITH_CAVEATS.**
     63/63 months, 1.51B rows, 0 failures. See `docs/stage1_forcing_fullperiod_audit.md`.
-5. **Visual / event QC case selection** — 21 cases generated (2026-06-25, seed=42).
-   `docs/stage1_forcing_fullperiod_visual_qc_selection.md` (tracked).
-   Output: `tmp/stage1_forcing_fullperiod_visual_qc_selection_20260625T081859Z/` (not committed).
-   **Pending: human review and animation generation. Animations not yet generated.**
+5. ~~**Visual / event QC case selection + pilot animation + spatial MRMS QC**~~ — **PILOT VISUAL QC PASS (2026-06-25/28).**
+   21 cases generated (seed=42). Basin-timeseries pilot 6/6 OK. Spatial MRMS smoke VQC-009/VQC-012 PASS (basin=Y, gauge=Y).
+   Case selection: `docs/stage1_forcing_fullperiod_visual_qc_selection.md`.
+   Animation plan and evidence: `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`.
+   Outputs under `tmp/` (not committed). 15 remaining cases not yet animated — not a final certification.
 6. **Curated forcing product v001 design** — per-basin Parquet layout, gap-flag companion
    columns, dataset manifest per `audit_plan.md §9`. Does not require h2o.
 7. **Small forcing-to-NH smoke test on Moriah** — assemble one month's per-basin forcing NC,

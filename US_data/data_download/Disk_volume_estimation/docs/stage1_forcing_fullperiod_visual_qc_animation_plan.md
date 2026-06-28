@@ -1,7 +1,9 @@
 # Stage 1 Forcing — Full-Period Visual QC Animation Plan
 
 **Created:** 2026-06-25  
-**Status:** 6-case basin-timeseries pilot TECHNICAL PASS; spatial QC pending  
+**Updated:** 2026-06-28  
+**Status:** Pilot visual QC PASS (basin-timeseries 6/6 OK; spatial MRMS VQC-009 + VQC-012 PASS).
+Not a final full-forcing certification — 15 of 21 cases not yet animated.  
 **Depends on:** `docs/stage1_forcing_fullperiod_visual_qc_selection.md`
 
 ---
@@ -22,7 +24,12 @@ They are **not committed to git** and must stay under `tmp/`.
 The 6-case basin time-series pilot ran on h2o using a direct Python binary
 workaround (`${ENV_PATH}/bin/python`). The conda activate path was bypassed.
 
-**Result: TECHNICAL PASS** for time-series and gap rendering:
+**Result: TECHNICAL PASS** — 6/6 cases OK, 0 FAIL.
+
+**h2o output directory:**
+`/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_visual_qc_pilot_20260625T123337Z`
+
+*Do not commit GIF/PNG/manifest outputs from this directory.*
 
 | Goal | Result |
 |---|---|
@@ -37,7 +44,7 @@ workaround (`${ENV_PATH}/bin/python`). The conda activate path was bypassed.
 precipitation relative to the basin. For scientifically meaningful spatial QC,
 raster-level MRMS data is required.
 
-### Phase 2 — Spatial MRMS QC (pending)
+### Phase 2 — Spatial MRMS QC (PASS — VQC-009 and VQC-012)
 
 **Correction (2026-06-25):** Raw MRMS GRIB2 files were NOT deleted. They remain
 on h2o under:
@@ -47,13 +54,41 @@ on h2o under:
     MRMS_MultiSensor_QPE_01H_Pass1_00.00_{YYYYMMDD}-{HH}0000.grib2.gz
 ```
 
-This makes targeted spatial MRMS QC feasible. The script
-`scripts/generate_fullperiod_spatial_mrms_qc.py` implements a targeted
-smoke test for VQC-009 (SW monsoon, AZ) and VQC-012 (small flashy basin).
+The script `scripts/generate_fullperiod_spatial_mrms_qc.py` ran targeted spatial
+MRMS QC for VQC-009 (SW monsoon, AZ) and VQC-012 (small flashy basin, TX).
 
-**Do not render the remaining 15 basin-timeseries animations yet.**
-Complete spatial QC first for the two highest-value event cases, then
-assess whether remaining 15 cases require spatial review.
+**Result: PASS — basin=Y gauge=Y for both cases.**
+
+**h2o output directories:**
+
+| Case | h2o output directory |
+|---|---|
+| VQC-012 (08155541, small flashy TX) | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_spatial_mrms_qc_smoke_20260625T142012Z` |
+| VQC-009 (09484000, SW monsoon AZ) | `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod_spatial_mrms_qc_smoke_20260625T142332Z/VQC-009/` |
+
+*Do not commit PNG/manifest outputs from these directories.*
+
+**Technical notes:**
+- Cartopy is unavailable on h2o — no coastlines/state borders in output PNGs.
+  Plain lon/lat axes with pcolormesh raster + basin boundary + gauge marker are
+  functional and sufficient for spatial QC purposes.
+- CAMELSH shapefile has no `.prj` CRS metadata. `load_shapefile` auto-assigns
+  EPSG:4326 when total bounds are geographic (confirmed safe for CAMELSH).
+- MRMS CONUS GRIB2 longitudes are 0–360; script normalizes to −180–180 before
+  cropping and rendering.
+
+**Scientific QC evidence (cautious interpretation):**
+
+| Case | Observation | Interpretation |
+|---|---|---|
+| VQC-012 (small flashy TX) | Strong near-basin rainfall at max-hour; sharp basin polygon visible | Spatial placement consistent with the sharp qobs response; no obvious extraction/rendering failure |
+| VQC-009 (SW monsoon AZ) | Patchy convective rainfall near/partly over Sabino Creek watershed | Weak qobs response is plausible (partial spatial overlap); not an extraction or alignment failure |
+
+This is a technical/rendering PASS and a scientific QC evidence improvement.
+It is **not a final full forcing certification** — 15 of 21 cases are not yet animated or spatially reviewed.
+
+**Do not render the remaining 15 basin-timeseries animations yet** unless the
+reviewer requests them after assessing the Phase 1 + Phase 2 pilot evidence.
 
 ---
 
