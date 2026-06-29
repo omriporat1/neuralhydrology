@@ -221,3 +221,54 @@ QC evidence improvement. It is **not a final full forcing certification**.
 - Generated PNG/GIF/CSV/summary outputs remain under `tmp/` and must not be committed.
 
 **Full evidence:** `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`
+
+## 2026-06-29 Stage 1 Forcing — Milestone 2K-F-A: Curated Product v001 Design
+
+**Decision:** Freeze the curated forcing product v001 contract. No data is built in this
+milestone. Builder and auditor implementation are deferred to Milestone 2K-F-B.
+
+**Design decisions (all binding for v001):**
+
+1. **Format: wide Parquet per basin.** One row per hour; one column per variable. The monthly
+   extraction Parquets (long format) remain unchanged. The per-basin product is a separate
+   derived format chosen for NH DataLoader compatibility.
+2. **Schema: 12 data columns + 2 gap-flag columns.** 1 MRMS variable (`mrms_qpe_1h_mm`) +
+   11 RTMA variables (9 dynamic + `vis` + `ceil`). Gap flags: `mrms_qpe_1h_mm_gap` (bool)
+   and `rtma_gap` (bool). `10wdir` and `orog` excluded (absent from S3 in all 63 months).
+3. **Gap policy: NaN preserved, no imputation, no row dropping.** Known gaps (136 MRMS hours,
+   2 RTMA hours) are NaN in value columns and `True` in gap-flag columns. Every gap hour
+   has a complete row in the hourly index.
+4. **Smoke test month: 2020-11.** Chosen because it contains the 2 known RTMA gap hours
+   (2020-11-12T09Z/T10Z) and 0 MRMS gaps — best stress test of RTMA gap handling.
+5. **Product name and path confirmed:** `stage1_basin_hourly_forcings_v001` under
+   `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001/`
+   (full build); smoke under `tmp/stage1_basin_hourly_forcings_v001_smoke_<TIMESTAMP>/`.
+
+**All five open choices resolved (2026-06-29 follow-up patch).**
+
+**Full design:** `docs/stage1_curated_forcing_product_v001_design.md`
+
+## 2026-06-29 Stage 1 Forcing — Milestone 2K-F-A: Open Choices Resolved
+
+**OC-1 — Script naming:** Builder: `scripts/build_stage1_curated_forcing_basin_parquets.py`;
+auditor: `scripts/audit_stage1_curated_forcing_basin_parquets.py`. Legacy name
+`build_stage1_forcing_basin_ncs.py` is retired. Rationale: product format is wide Parquet;
+the future NH-package builder (separate milestone) will create NetCDFs.
+
+**OC-2 — Full-build output location:** First build stays under
+`/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001/`.
+Promotion to `/data42/hydrolab/Data/Flash-NH_data/` is a separate explicit gate after
+full audit, checksums, and evidence-bundle review.
+
+**OC-3 — RTMA gap flag granularity:** One shared `rtma_gap` boolean column for v001.
+Known RTMA gaps are whole-product-hour absences (2020-11-12T09Z/T10Z), not variable-specific
+decode failures. The auditor must check per-variable completeness and fail if variable-specific
+missingness appears outside known product-hour gaps.
+
+**OC-4 — `vis` and `ceil` inclusion:** Include all 11 extracted RTMA variables in the
+curated product. Curated product preservation and first-model-input variable selection are
+separate decisions; the first NH smoke config may use a narrower subset without changing v001.
+
+**OC-5 — Remaining 15 VQC cases:** Not required before the 2K-F-B smoke test or the full
+2,752-basin build. Gate for full build: 2K-F-B smoke PASS + no schema/gap/provenance failures.
+Render 2–3 additional targeted VQC cases only if the smoke or design review reveals a concern.

@@ -1,8 +1,11 @@
 # Stage 1 Forcing — Full-Period Visual QC Case Selection
 
-**Created:** 2026-06-25  
-**Status:** Cases generated; pending human review and animation generation  
+**Created:** 2026-06-25
+**Updated:** 2026-06-28
+**Status:** Pilot visual QC PASS (6/6 basin-timeseries + spatial MRMS smoke VQC-009/VQC-012).
+Remaining 15/21 cases are **on hold** — not forgotten; not yet animated.
 **Audit plan reference:** `docs/stage1_forcing_fullperiod_postrun_audit_plan.md §7`
+**Full evidence:** `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`
 
 ---
 
@@ -16,7 +19,9 @@ set of cases spanning gap contexts, event types, basin types, and geographic reg
 The case-selection table is a **reproducibility record** — it does not certify the
 forcing product by itself.
 
-**Animations are not generated yet.** This document covers case selection only.
+**Pilot animations generated and reviewed (2026-06-25/28):** 6/6 basin-timeseries cases OK;
+spatial MRMS smoke passed for VQC-009 and VQC-012. See `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`.
+Remaining 15/21 cases are on hold. This document covers case selection and reproducibility.
 
 ---
 
@@ -155,10 +160,18 @@ Seasonal/event category labels are **hypotheses**, not verified observations:
 
 ---
 
-## Next Step
+## QC Gate Status
 
-Generate pilot animations for the HIGH-priority cases (VQC-001 through VQC-004,
-VQC-011, VQC-017) and review before animating the full 21-case set.
+**Pilot QC closed (2026-06-28):** Basin-timeseries pilot PASS (VQC-001, -004, -007, -009, -012, -020).
+Spatial MRMS smoke PASS (VQC-009, VQC-012). Authorized proceeding to curated forcing product
+v001 design. See `docs/decision_log.md §2026-06-25/28`.
+
+**Remaining 15 cases (VQC-002, -003, -005, -006, -008, -010, -011, -013 through -021 excluding
+the 6 pilot cases):** On hold per `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`.
+Do not animate unless the reviewer explicitly requests full gate closure.
+
+**Next step for this gate:** Curated forcing product v001 smoke test (Milestone 2K-F-B).
+Full animation of all 21 cases is not required before the smoke test.
 
 Acceptance taxonomy per `audit_plan.md §7`:
 PASS / PASS_WITH_CAVEATS / NEEDS_TARGETED_REPAIR / NEEDS_RERUN_FOR_SELECTED_MONTHS / FAIL

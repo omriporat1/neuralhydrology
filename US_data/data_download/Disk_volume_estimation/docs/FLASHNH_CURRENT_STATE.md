@@ -1,8 +1,18 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-28
+Last updated: 2026-06-29
 
 ## Current milestone
+
+**Milestone 2K-F-A COMPLETE (2026-06-29): Curated forcing product v001 design + documentation cleanup.**
+
+Product contract frozen: wide-format per-basin Parquet, gap-flag columns, manifest/provenance/audit
+requirements, smoke-test plan (5 basins, 2020-11). Builder and auditor deferred to Milestone 2K-F-B.
+**Design doc:** `docs/stage1_curated_forcing_product_v001_design.md`
+
+**Next step:** Milestone 2K-F-B — implement builder + auditor + run smoke test on h2o.
+
+---
 
 **Milestone 2K-E COMPLETE (2026-06-24): Full-period forcing extraction audit — PASS_WITH_CAVEATS.**
 
@@ -24,8 +34,8 @@ Full-period MRMS+RTMA basin-average forcing extraction (63 months, 2020-10 → 2
 **Audit plan:** `docs/stage1_forcing_fullperiod_postrun_audit_plan.md`  
 **Generated audit tables (not committed):** `tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/`
 
-**Next step:** Curated forcing product v001 design → small forcing-to-NH smoke test
-on Moriah. Not model training yet.
+**Next step:** Milestone 2K-F-B — curated forcing product v001 builder + 5-basin smoke test on h2o.
+Design frozen in `docs/stage1_curated_forcing_product_v001_design.md`. Not model training yet.
 
 **Pilot visual QC PASS (2026-06-25/28):**
 - Basin-timeseries pilot: 6/6 cases OK (VQC-001, -004, -007, -009, -012, -020).
@@ -372,12 +382,17 @@ forcing data and package assembly on h2o before any Moriah transfer.
    Case selection: `docs/stage1_forcing_fullperiod_visual_qc_selection.md`.
    Animation plan and evidence: `docs/stage1_forcing_fullperiod_visual_qc_animation_plan.md`.
    Outputs under `tmp/` (not committed). 15 remaining cases not yet animated — not a final certification.
-6. **Curated forcing product v001 design** — per-basin Parquet layout, gap-flag companion
-   columns, dataset manifest per `audit_plan.md §9`. Does not require h2o.
-7. **Small forcing-to-NH smoke test on Moriah** — assemble one month's per-basin forcing NC,
-   run 5-basin NeuralHydrology smoke. Prerequisite before full NH package assembly.
-8. **Basin-average per-NC assembly on h2o** — assemble per-basin forcing NCs from monthly
-   chunk Parquets; `scripts/build_stage1_forcing_basin_ncs.py` (not yet written).
+6. ~~**Curated forcing product v001 design (Milestone 2K-F-A)**~~ — **COMPLETE (2026-06-29).**
+   Product contract frozen: wide-format per-basin Parquet, gap-flag columns, manifest, provenance.
+   Design doc: `docs/stage1_curated_forcing_product_v001_design.md`.
+7. **Curated forcing product v001 — builder + smoke test (Milestone 2K-F-B)** — implement
+   `scripts/build_stage1_curated_forcing_basin_parquets.py` and
+   `scripts/audit_stage1_curated_forcing_basin_parquets.py`;
+   run 5-basin / 2020-11 smoke test on h2o (tests known RTMA 2-hour gap NaN handling).
+   Prerequisite before full 2,752-basin build.
+8. **Curated forcing product v001 — full 2,752-basin build on h2o** — run builder across all
+   basins and months; verify checksums; produce audited product under
+   `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001/`.
 9. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
    basin-average forcings, static attributes, and train/val/test splits into an audited
    NH-compatible package.
@@ -439,15 +454,6 @@ Before any 2K-C run, confirm all of the following:
   are skipped automatically.
 - Each completed monthly chunk is independent; re-running a month re-uses cached raw files and
   skips already-extracted hours.
-5. **Basin-average per-NC assembly on h2o** (pending 2K-C) — assemble per-basin forcing NCs
-   from monthly chunk Parquets; `scripts/build_stage1_forcing_basin_ncs.py` (not yet written).
-6. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
-   basin-average forcings, static attributes (`attributes_full.csv`), and train/val/test
-   splits into an audited NH-compatible package.
-7. **Moriah transfer layout and checksum-verified transfer** — define directory structure
-   and `rsync`/`scp` transfer procedure; verify checksums on arrival before training.
-8. **Moriah training environment and config** — only after the assembled package passes
-   audit on Moriah. NeuralHydrology training remains designated for Moriah cluster.
 
 **Special-review disposition (02299472/04073468)** — open for future v002, not a blocker
 for steps 3–8 above. 02299472: 2,605 neg; 04073468: 2,054 neg.
