@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Audit the Stage 1 curated forcing product v001 per-basin Parquet files.
 
-Checks the output of build_stage1_curated_forcing_basin_parquets.py for:
+Checks the output of build_stage1_curated_forcing_basin_parquets.py (single-month)
+or build_stage1_curated_forcing_fullperiod.py (full period) for:
   - metadata file existence and completeness;
   - per-basin Parquet readability and hourly index integrity;
   - expected column set (curated names present, forbidden absent);
   - gap-flag consistency at known RTMA gap hours;
-  - SHA-256 checksum verification.
+  - per-basin MRMS and RTMA gap counts (full-period mode);
+  - SHA-256 checksum verification;
+  - audit_summary.md written to product directory (full-period mode).
 
 Exits 0 if all checks pass, 1 on any failure.
 
@@ -19,6 +22,7 @@ import hashlib
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -42,18 +46,28 @@ _FORBIDDEN_COLS:    set[str]  = {
     "10wdir", "orog",
 }
 
-# Known RTMA gap timestamps for 2020-11 (both absent from S3 archive)
-_KNOWN_RTMA_GAPS_2020_11 = [
+# Known RTMA gap timestamps — same for single-month and full-period audits
+_KNOWN_RTMA_GAP_TIMESTAMPS = [
     pd.Timestamp("2020-11-12 09:00:00", tz="UTC"),
     pd.Timestamp("2020-11-12 10:00:00", tz="UTC"),
 ]
+# Backward-compat alias used by single-month 2020-11 checks
+_KNOWN_RTMA_GAPS_2020_11 = _KNOWN_RTMA_GAP_TIMESTAMPS
 
-# Hours in each month used for row-count validation
+# Hours in each month used for row-count validation (single-month mode)
 _MONTH_HOURS: dict[str, int] = {
-    "2020-10": 18 * 24 + 10,   # 2020-10-14T00Z → 2020-10-31T23Z = 432 h
-    "2020-11": 30 * 24,         # 720
-    "2020-12": 31 * 24,         # 744
+    "2020-10": 18 * 24,          # 2020-10-14T00Z → 2020-10-31T23Z = 432 h
+    "2020-11": 30 * 24,          # 720
+    "2020-12": 31 * 24,          # 744
 }
+
+# Full-period constants (must match builder)
+_PERIOD_START           = pd.Timestamp("2020-10-14 00:00:00", tz="UTC")
+_PERIOD_END             = pd.Timestamp("2025-12-31 23:00:00", tz="UTC")
+_FULL_PERIOD_HOURS      = 45_720
+_FULL_PERIOD_MRMS_GAPS  = 136
+_FULL_PERIOD_RTMA_GAPS  = 2
+PRODUCT_NAME            = "stage1_basin_hourly_forcings_v001"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +103,26 @@ def _parse_args() -> argparse.Namespace:
         "--strict-rtma-gaps", action="store_true",
         help="For 2020-11: require rtma_gap=True at exactly the two known gap timestamps "
              "and False everywhere else. Enabled by default for 2020-11.",
+    )
+    # Full-period mode
+    p.add_argument(
+        "--full-period", action="store_true",
+        help="Audit a full-period product (45,720 rows/basin, 136 MRMS gaps, 2 RTMA gaps). "
+             "Sets --expected-rows, --expected-mrms-gaps, --expected-rtma-gaps automatically. "
+             "Writes audit_summary.md to the product directory.",
+    )
+    p.add_argument(
+        "--expected-rows", type=int, default=None,
+        help="Expected row count per basin (overrides month-based lookup). "
+             "Set to 45720 for the full-period product.",
+    )
+    p.add_argument(
+        "--expected-mrms-gaps", type=int, default=None,
+        help="Expected MRMS gap-hours per basin. If set, each basin is checked exactly.",
+    )
+    p.add_argument(
+        "--expected-rtma-gaps", type=int, default=None,
+        help="Expected RTMA gap-hours per basin. If set, each basin is checked exactly.",
     )
     return p.parse_args()
 
@@ -205,6 +239,8 @@ def check_basin_parquet(
     full_index: pd.DatetimeIndex,
     month: str,
     strict_rtma_gaps: bool,
+    expected_mrms_gaps: int | None = None,
+    expected_rtma_gaps: int | None = None,
 ) -> bool:
     """Run all per-basin Parquet checks."""
     ok = True
@@ -260,8 +296,8 @@ def check_basin_parquet(
             ok &= _check(f"{staid} {flag_col} dtype bool",
                          df[flag_col].dtype == bool or pd.api.types.is_bool_dtype(df[flag_col]))
 
-    # RTMA gap timestamps for 2020-11
-    if strict_rtma_gaps or month == "2020-11":
+    # RTMA gap timestamps — applies to 2020-11 single-month and full-period audits
+    if strict_rtma_gaps or month == "2020-11" or expected_rtma_gaps is not None:
         _check_rtma_gaps_2020_11(staid, df)
 
     # NaN consistency: at rtma_gap=True hours, ALL RTMA data cols should be NaN
@@ -281,17 +317,33 @@ def check_basin_parquet(
             ok &= _check(f"{staid} mrms_qpe_1h_mm NaN at mrms_gap hours", all_nan,
                          f"{(~mrms_gap_rows['mrms_qpe_1h_mm'].isna()).sum()} non-NaN at gap hours" if not all_nan else "")
 
-    # MRMS not falsely flagged at RTMA gap hours (for 2020-11 these are distinct)
-    if month == "2020-11" and "mrms_qpe_1h_mm_gap" in df.columns:
-        rtma_gap_ts = set(_KNOWN_RTMA_GAPS_2020_11)
+    # MRMS not falsely flagged at the known RTMA-only gap hours
+    if (month == "2020-11" or expected_mrms_gaps is not None) and \
+            "mrms_qpe_1h_mm_gap" in df.columns:
+        rtma_gap_ts   = set(_KNOWN_RTMA_GAP_TIMESTAMPS)
         rtma_gap_rows = df[df["valid_time_utc"].isin(rtma_gap_ts)]
-        if len(rtma_gap_rows) > 0 and "mrms_qpe_1h_mm_gap" in df.columns:
+        if len(rtma_gap_rows) > 0:
             mrms_false_flag = rtma_gap_rows["mrms_qpe_1h_mm_gap"].any()
             ok &= _check(
                 f"{staid} MRMS not falsely flagged at RTMA gap hours",
                 not mrms_false_flag,
                 "mrms_qpe_1h_mm_gap=True at RTMA-only gap hours" if mrms_false_flag else "",
             )
+
+    # Per-basin gap count checks (full-period mode)
+    if expected_mrms_gaps is not None:
+        ok &= _check_gap_count(staid, df, "mrms_qpe_1h_mm_gap",
+                               expected_mrms_gaps, "MRMS")
+    if expected_rtma_gaps is not None:
+        ok &= _check_gap_count(staid, df, "rtma_gap",
+                               expected_rtma_gaps, "RTMA")
+
+    # No product-synchronized gaps (full-period mode)
+    if expected_mrms_gaps is not None and expected_rtma_gaps is not None:
+        if "mrms_qpe_1h_mm_gap" in df.columns and "rtma_gap" in df.columns:
+            synced = int((df["mrms_qpe_1h_mm_gap"] & df["rtma_gap"]).sum())
+            ok &= _check(f"{staid} no synchronized MRMS+RTMA gaps",
+                         synced == 0, f"{synced} synchronized gap hours" if synced else "")
 
     return ok
 
@@ -324,6 +376,78 @@ def _check_rtma_gaps_2020_11(staid: str, df: pd.DataFrame) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Full-period helpers
+# ---------------------------------------------------------------------------
+
+def _fullperiod_index() -> pd.DatetimeIndex:
+    """Return the 45,720-hour full-period hourly UTC index."""
+    return pd.date_range(_PERIOD_START, _PERIOD_END, freq="h")
+
+
+def _check_gap_count(
+    staid: str,
+    df: pd.DataFrame,
+    flag_col: str,
+    expected: int,
+    label: str,
+) -> bool:
+    actual = int(df[flag_col].sum()) if flag_col in df.columns else -1
+    if actual == -1:
+        return _check(f"{staid} {label} gap_count ({flag_col} present)", False,
+                      "column missing")
+    return _check(f"{staid} {label} gap_count",
+                  actual == expected,
+                  f"got {actual}, expected {expected}" if actual != expected else "")
+
+
+def write_audit_summary(
+    product_dir: Path,
+    all_pass: bool,
+    n_basins_expected: int,
+    n_basins_checked: int,
+    mode: str,
+    expected_rows: int,
+    expected_mrms_gaps: int | None,
+    expected_rtma_gaps: int | None,
+) -> None:
+    """Write audit_summary.md to the product directory."""
+    result_str = "PASS" if all_pass else "FAIL"
+    lines = [
+        f"# Audit Summary — {PRODUCT_NAME}\n",
+        f"**Date:** {datetime.now(timezone.utc).isoformat()}",
+        f"**Product directory:** {product_dir}",
+        f"**Audit mode:** {mode}",
+        f"**Expected basins:** {n_basins_expected}",
+        f"**Basins checked:** {n_basins_checked}",
+        f"**Expected rows per basin:** {expected_rows}",
+    ]
+    if expected_mrms_gaps is not None:
+        lines.append(f"**Expected MRMS gap-hours per basin:** {expected_mrms_gaps}")
+        lines.append(
+            f"**Expected MRMS gap-hours total:** {expected_mrms_gaps} × "
+            f"{n_basins_checked} = {expected_mrms_gaps * n_basins_checked}"
+        )
+    if expected_rtma_gaps is not None:
+        lines.append(f"**Expected RTMA gap-hours per basin:** {expected_rtma_gaps}")
+        lines.append(
+            f"**Expected RTMA gap-hours total:** {expected_rtma_gaps} × "
+            f"{n_basins_checked} = {expected_rtma_gaps * n_basins_checked}"
+        )
+    lines += [
+        f"**Known RTMA gap timestamps:** "
+        f"{', '.join(str(t) for t in _KNOWN_RTMA_GAP_TIMESTAMPS)}",
+        f"\n## Result: {result_str}",
+        "",
+        f"Audit exited with result **{result_str}**. "
+        "See the accompanying build.log / smoke.log for per-check detail.",
+    ]
+    summary_path = product_dir / "audit_summary.md"
+    with open(summary_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    log.info("Wrote %s", summary_path)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -331,16 +455,33 @@ def main() -> None:
     args = _parse_args()
 
     product_dir = Path(args.product_dir)
-    month       = args.month
-    strict_rtma = args.strict_rtma_gaps or (month == "2020-11")
-
     if not product_dir.exists():
         log.error("Product directory does not exist: %s", product_dir)
         sys.exit(1)
 
-    full_index = _month_full_index(month)
-    log.info("Auditing curated product: %s", product_dir)
-    log.info("Month %s: %d hourly slots", month, len(full_index))
+    # ---- Determine audit mode ----
+    full_period_mode = args.full_period
+    if full_period_mode:
+        month               = "full-period"
+        full_index          = _fullperiod_index()
+        expected_mrms_gaps  = args.expected_mrms_gaps  if args.expected_mrms_gaps  is not None \
+                              else _FULL_PERIOD_MRMS_GAPS
+        expected_rtma_gaps  = args.expected_rtma_gaps  if args.expected_rtma_gaps  is not None \
+                              else _FULL_PERIOD_RTMA_GAPS
+        if args.expected_rows is not None:
+            full_index = pd.date_range(_PERIOD_START, periods=args.expected_rows, freq="h")
+        strict_rtma = True
+        log.info("Auditing curated product (FULL-PERIOD mode): %s", product_dir)
+        log.info("Full-period index: %d hourly slots (%s → %s)",
+                 len(full_index), full_index[0], full_index[-1])
+    else:
+        month               = args.month
+        strict_rtma         = args.strict_rtma_gaps or (month == "2020-11")
+        full_index          = _month_full_index(month)
+        expected_mrms_gaps  = args.expected_mrms_gaps
+        expected_rtma_gaps  = args.expected_rtma_gaps
+        log.info("Auditing curated product: %s", product_dir)
+        log.info("Month %s: %d hourly slots", month, len(full_index))
 
     all_pass = True
 
@@ -376,7 +517,11 @@ def main() -> None:
         for bp in basin_paths:
             staid = bp.stem
             log.info("Checking STAID=%s …", staid)
-            basin_ok = check_basin_parquet(staid, bp, full_index, month, strict_rtma)
+            basin_ok = check_basin_parquet(
+                staid, bp, full_index, month, strict_rtma,
+                expected_mrms_gaps=expected_mrms_gaps,
+                expected_rtma_gaps=expected_rtma_gaps,
+            )
             all_pass &= basin_ok
 
     # ---- Cross-check: manifest STAIDs match files ----
@@ -390,6 +535,18 @@ def main() -> None:
             f"files only: {file_staids - manifest_staids}" if manifest_staids != file_staids else "",
         )
 
+    # ---- Full-period: verify expected basin count ----
+    n_basins_checked = len(list(ts_dir.glob("*.parquet"))) if ts_dir.exists() else 0
+    if full_period_mode:
+        expected_n = args.expected_basins or (len(manifest) if manifest else 0)
+        if expected_n:
+            all_pass &= _check(
+                "expected basin count",
+                n_basins_checked == expected_n,
+                f"found {n_basins_checked}, expected {expected_n}"
+                if n_basins_checked != expected_n else "",
+            )
+
     # ---- Final verdict ----
     log.info("=" * 60)
     if all_pass:
@@ -397,6 +554,19 @@ def main() -> None:
     else:
         log.error("AUDIT RESULT: FAIL — see errors above")
     log.info("=" * 60)
+
+    # ---- Write audit_summary.md (full-period mode or when explicitly in any mode) ----
+    if full_period_mode:
+        write_audit_summary(
+            product_dir   = product_dir,
+            all_pass      = all_pass,
+            n_basins_expected = args.expected_basins or n_basins_checked,
+            n_basins_checked  = n_basins_checked,
+            mode          = "full-period" if full_period_mode else f"single-month/{month}",
+            expected_rows = len(full_index),
+            expected_mrms_gaps = expected_mrms_gaps,
+            expected_rtma_gaps = expected_rtma_gaps,
+        )
 
     sys.exit(0 if all_pass else 1)
 

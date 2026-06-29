@@ -350,22 +350,22 @@ The builder is accompanied by an auditor script
 
 ## 9. Builder and Auditor Scripts
 
-| Script | Status |
-|---|---|
-| `scripts/build_stage1_curated_forcing_basin_parquets.py` | **Implemented — smoke PASS (2026-06-29, h2o, commit `6f4de49`)** |
-| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | **Implemented — smoke PASS (2026-06-29, h2o, commit `6f4de49`)** |
-| `scripts/run_stage1_curated_forcing_smoke_h2o.sh` | **Implemented — smoke launcher used for 2K-F-B run** |
+| Script | Purpose | Status |
+|---|---|---|
+| `scripts/build_stage1_curated_forcing_basin_parquets.py` | Single-month smoke builder | **Implemented — smoke PASS (2026-06-29, commit `6f4de49`)** |
+| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | Auditor (single-month + full-period) | **Implemented — smoke PASS; full-period mode added (2K-F-C-A)** |
+| `scripts/run_stage1_curated_forcing_smoke_h2o.sh` | Smoke launcher (h2o) | **Implemented — smoke launcher used for 2K-F-B** |
+| `scripts/build_stage1_curated_forcing_fullperiod.py` | Full-period builder (63 months) | **Implemented — pending h2o dry-run (2K-F-C-A)** |
+| `scripts/run_stage1_curated_forcing_fullperiod_h2o.sh` | Full-period launcher (h2o) | **Implemented — pending h2o dry-run (2K-F-C-A)** |
 
-Script names use the `_curated_forcing_basin_parquets` infix to distinguish this product
-from the earlier January-pilot scripts and from any future NH-package NetCDF builder.
-The legacy name `build_stage1_forcing_basin_ncs.py` (from prior docs) is retired; all
-future references must use the names above (OC-1 resolved — see §12).
+Script names use the `_curated_forcing_basin_parquets` infix (single-month) and
+`_curated_forcing_fullperiod` (full-period) to distinguish them from the earlier
+January-pilot scripts and from any future NH-package NetCDF builder.
+The legacy name `build_stage1_forcing_basin_ncs.py` (from prior docs) is retired.
 
-**audit_summary.md gap:** The auditor currently writes its pass/fail verdict to stdout,
-which is captured in `smoke.log` during the smoke run. It does not write a standalone
-`audit_summary.md` to the product directory. For the full 2,752-basin build (Milestone
-2K-F-C), the auditor must be extended to write `audit_summary.md` before the product
-directory is considered complete. This is a pre-build requirement, not blocking the smoke.
+**audit_summary.md:** The auditor now writes `audit_summary.md` to the product directory
+when invoked with `--full-period`. For the smoke run, the PASS record remains in
+`smoke.log` only (no `--full-period` flag was used for single-month smoke).
 
 ---
 
@@ -496,6 +496,7 @@ The following are explicitly out of scope for v001 and this milestone:
 
 ---
 
-*Design frozen in Milestone 2K-F-A (2026-06-28). Builder and auditor implemented and smoke-tested in*
-*Milestone 2K-F-B (2026-06-29). Full 2,752-basin build is Milestone 2K-F-C (not yet authorized).*
+*Design frozen in Milestone 2K-F-A (2026-06-28). Smoke builder/auditor/launcher implemented (2K-F-B, 2026-06-29).*
+*Full-period builder, extended auditor, and full-period launcher implemented (2K-F-C-A, 2026-06-29).*
+*Next step: h2o dry-run with `--dry-run` flag, then full 2,752-basin build after user authorization.*
 *All generated outputs remain under `tmp/` and must not be committed.*
