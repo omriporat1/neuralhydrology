@@ -1,8 +1,9 @@
 # Stage 1 — Curated Forcing Product v001 Design
 
-**Created:** 2026-06-28
-**Milestone:** 2K-F-A — design and documentation only; no builder implementation yet.
-**Status:** DESIGN FROZEN — pending implementation in a future milestone.
+**Created:** 2026-06-28  
+**Updated:** 2026-06-29 — builder, auditor, and launcher implemented; smoke PASS (Milestone 2K-F-B).  
+**Milestone:** 2K-F-A — design frozen; 2K-F-B — scripts implemented and smoke-tested.  
+**Status:** DESIGN FROZEN — implementation COMPLETE; smoke PASS (2026-06-29, h2o).  
 **Depends on:** `docs/stage1_forcing_fullperiod_audit.md` (PASS_WITH_CAVEATS, 2026-06-24),
 `docs/stage1_forcing_fullperiod_postrun_audit_plan.md §9`, pilot visual QC PASS (2026-06-28).
 
@@ -87,22 +88,27 @@ docs, and manifests (if small and plaintext) are committed.
 
 ```
 stage1_basin_hourly_forcings_v001/
-├── manifest.csv                     # Per-basin: STAID, n_hours, n_gap_mrms, n_gap_rtma,
+├── manifest.json                    # Per-basin: STAID, n_hours, n_gap_mrms, n_gap_rtma,
 │                                    #   n_valid_hours, coverage_fraction, sha256
 ├── checksums.sha256                 # SHA-256 for every per-basin forcing Parquet
-├── dataset_config.yaml              # Variable list, units, period, basin count, schema version
-├── source_git_commit.txt            # Git hash of this repo at builder run time
+├── dataset_config.json              # Variable list, units, period, basin count, schema version
 ├── run_provenance.json              # Builder version, run date, input paths, env name
-├── audit_summary.md                 # Condensed audit result reference and acceptance status
-├── gap_policy.md                    # Gap policy (versioned from §6 of audit plan)
-├── variable_policy.md               # Included/excluded variables with rationale
-└── {STAID}/
-    └── {STAID}_hourly_forcings.parquet
+├── build_summary.md                 # Per-basin summary table; wall time; smoke flag
+├── audit_summary.md                 # Condensed audit result (REQUIRED for full build;
+│                                    #   NOT yet written by auditor — for smoke, PASS
+│                                    #   is captured in smoke.log; see §9)
+└── time_series/
+    └── {STAID}.parquet
 ```
 
-All files are flat (no recursive subdirectory nesting). The `{STAID}/` subdirectory
-holds exactly one file per basin. STAID is preserved as-is (no zero-padding added
-or removed; consistent with v001 target package and monthly Parquet `STAID` column).
+All data files are under `time_series/` (flat, no per-basin subdirectory). STAID is
+preserved as-is (no zero-padding added or removed; consistent with v001 target package
+and monthly Parquet `STAID` column).
+
+> **Implementation note (2K-F-B):** The implementation uses JSON for manifest and config
+> (not `.csv`/`.yaml` as originally planned) and a flat `time_series/{STAID}.parquet`
+> path (not `{STAID}/{STAID}_hourly_forcings.parquet`). These deviations are binding
+> for the full build.
 
 ---
 
@@ -259,7 +265,7 @@ raw curated product (v001) is immutable once built and checksummed.
 
 ## 8. Manifest, Checksums, Provenance, and Audit
 
-### 8.1 manifest.csv
+### 8.1 manifest.json
 
 Per-basin record written by the builder. Required columns:
 
@@ -281,38 +287,29 @@ Per-basin record written by the builder. Required columns:
 
 One line per file: `<sha256>  <relative_path>`. Verifiable with `sha256sum -c`.
 
-### 8.3 dataset_config.yaml
+### 8.3 dataset_config.json
 
-```yaml
-product_name: stage1_basin_hourly_forcings_v001
-schema_version: "1.0"
-period_start_utc: "2020-10-14T00:00:00Z"
-period_end_utc: "2025-12-31T23:00:00Z"
-n_hours_expected: 45720
-n_basins: 2752
-mrms_product: MRMS_MultiSensor_QPE_01H_Pass1
-rtma_product: RTMA_CONUS_2.5km
-variables:
-  - mrms_qpe_1h_mm
-  - rtma_2t_K
-  - rtma_2d_K
-  - rtma_2sh_kgkg
-  - rtma_sp_Pa
-  - rtma_10u_ms
-  - rtma_10v_ms
-  - rtma_tcc_pct
-  - rtma_vis_m
-  - rtma_gust_ms
-  - rtma_weasd_kgm2
-  - rtma_ceil_m
-gap_flag_columns:
-  - mrms_qpe_1h_mm_gap
-  - rtma_gap
-excluded_variables:
-  - rtma_10wdir  # absent from S3 in all 63 months
-  - rtma_orog    # absent from S3 in all 63 months
-gap_policy: raw_preserve_nan_no_interpolation
-source_audit: docs/stage1_forcing_fullperiod_audit.md
+```json
+{
+  "product_name": "stage1_basin_hourly_forcings_v001",
+  "schema_version": "1.0",
+  "month": "YYYY-MM",
+  "period_start_utc": "2020-10-14T00:00:00+00:00",
+  "period_end_utc": "2025-12-31T23:00:00+00:00",
+  "n_hours_expected": 45720,
+  "n_basins": 2752,
+  "mrms_product": "mrms_qpe_1h_pass1",
+  "rtma_product": "rtma_conus_aws_2p5km",
+  "variables": [
+    "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg", "rtma_sp_Pa",
+    "rtma_10u_ms", "rtma_10v_ms", "rtma_tcc_pct", "rtma_vis_m",
+    "rtma_gust_ms", "rtma_weasd_kgm2", "rtma_ceil_m", "mrms_qpe_1h_mm"
+  ],
+  "gap_flag_columns": ["mrms_qpe_1h_mm_gap", "rtma_gap"],
+  "excluded_variables": ["10wdir", "orog"],
+  "gap_policy": "raw_preserve_nan_no_interpolation",
+  "smoke_build": false
+}
 ```
 
 ### 8.4 run_provenance.json
@@ -351,20 +348,24 @@ The builder is accompanied by an auditor script
 
 ---
 
-## 9. Builder and Auditor Scripts (Not Yet Implemented)
+## 9. Builder and Auditor Scripts
 
 | Script | Status |
 |---|---|
-| `scripts/build_stage1_curated_forcing_basin_parquets.py` | **Not yet implemented** — design frozen here |
-| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | **Not yet implemented** — design frozen here |
-
-**No stub or skeleton is added in this milestone.** Implementation is deferred to Milestone
-2K-F-B. The builder and auditor are designed here; coding begins in the next milestone.
+| `scripts/build_stage1_curated_forcing_basin_parquets.py` | **Implemented — smoke PASS (2026-06-29, h2o, commit `6f4de49`)** |
+| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | **Implemented — smoke PASS (2026-06-29, h2o, commit `6f4de49`)** |
+| `scripts/run_stage1_curated_forcing_smoke_h2o.sh` | **Implemented — smoke launcher used for 2K-F-B run** |
 
 Script names use the `_curated_forcing_basin_parquets` infix to distinguish this product
 from the earlier January-pilot scripts and from any future NH-package NetCDF builder.
 The legacy name `build_stage1_forcing_basin_ncs.py` (from prior docs) is retired; all
 future references must use the names above (OC-1 resolved — see §12).
+
+**audit_summary.md gap:** The auditor currently writes its pass/fail verdict to stdout,
+which is captured in `smoke.log` during the smoke run. It does not write a standalone
+`audit_summary.md` to the product directory. For the full 2,752-basin build (Milestone
+2K-F-C), the auditor must be extended to write `audit_summary.md` before the product
+directory is considered complete. This is a pre-build requirement, not blocking the smoke.
 
 ---
 
@@ -403,15 +404,41 @@ here to avoid coupling the design doc to a specific run.
 
 | Check | Criterion |
 |---|---|
-| Files written | 5 Parquets, manifest.csv, checksums.sha256, dataset_config.yaml |
+| Files written | 5 Parquets, `manifest.json`, `checksums.sha256`, `dataset_config.json` |
 | Rows per basin | 720 (Nov has 720 hours) |
 | Column set | Exactly the 14 columns from §5.2 (12 variables + 2 gap flags) |
 | `valid_time_utc` | Contiguous hourly index, 2020-11-01T00Z to 2020-11-30T23Z, UTC-aware |
 | RTMA gap flags | `rtma_gap=True` for T09Z and T10Z on 2020-11-12, for all 5 basins |
 | MRMS gap flags | `mrms_qpe_1h_mm_gap=False` for all rows (no MRMS gaps in Nov 2020) |
 | NaN consistency | NaN in `rtma_2t_K` (and all RTMA cols) for the 2 gap rows |
-| SHA-256 | manifest.csv `sha256` matches computed hash of each Parquet |
+| SHA-256 | `manifest.json` `sha256` matches computed hash of each Parquet |
 | Auditor result | `audit_pass=True`; 0 errors; expected gap counts confirmed |
+
+### 10.4 Smoke test result (2026-06-29) — PASS
+
+Smoke run on h2o: `bash scripts/run_stage1_curated_forcing_smoke_h2o.sh` at commit `6f4de49`.
+
+| Metric | Value |
+|---|---|
+| Month | 2020-11 |
+| Basins | 5 (`01440000`, `03021350`, `08155541`, `09484000`, `01019000`) |
+| Hours per basin | 720 |
+| MRMS gaps (total) | 0 |
+| RTMA gaps (total) | 10 (2/basin at 2020-11-12T09Z and T10Z) |
+| Coverage fraction | 0.9972 (718 valid combined hours / 720) |
+| Auditor exit | 0 (PASS) |
+| Wall time | 0.1 s |
+| h2o output | `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z` |
+| Commit at run | `6f4de498f1326e5e6fcd3de8157ba410ad28a6a9` |
+
+All 9 acceptance checks from §10.3 passed. RTMA gaps at both known timestamps confirmed
+`True`; all 11 RTMA columns NaN at those hours; MRMS not falsely flagged at RTMA-only
+gap hours.
+
+**Prior failed explicit-basin run:** `02231000` was passed via `--staids` but is absent
+from the 2020-11 monthly source chunk. Builder correctly halted with 0 basins built
+rather than silently skipping. Not a smoke failure; the builder's per-basin abort-on-miss
+behavior is correct. Basin replaced by `01019000` for the passing run.
 
 ---
 
@@ -469,6 +496,6 @@ The following are explicitly out of scope for v001 and this milestone:
 
 ---
 
-*This is a design document. No builder implementation is present in this milestone.*
-*Builder implementation: Milestone 2K-F-B (not yet started).*
+*Design frozen in Milestone 2K-F-A (2026-06-28). Builder and auditor implemented and smoke-tested in*
+*Milestone 2K-F-B (2026-06-29). Full 2,752-basin build is Milestone 2K-F-C (not yet authorized).*
 *All generated outputs remain under `tmp/` and must not be committed.*

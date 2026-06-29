@@ -1,16 +1,23 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-29
+Last updated: 2026-06-29 (2K-F-B COMPLETE)
 
 ## Current milestone
 
-**Milestone 2K-F-A COMPLETE (2026-06-29): Curated forcing product v001 design + documentation cleanup.**
+**Milestone 2K-F-B COMPLETE (2026-06-29): Curated forcing product v001 builder + smoke test — PASS.**
 
-Product contract frozen: wide-format per-basin Parquet, gap-flag columns, manifest/provenance/audit
-requirements, smoke-test plan (5 basins, 2020-11). Builder and auditor deferred to Milestone 2K-F-B.
+Builder (`build_stage1_curated_forcing_basin_parquets.py`), auditor
+(`audit_stage1_curated_forcing_basin_parquets.py`), and h2o launcher implemented and committed
+(`6f4de49`). 5-basin / 2020-11 smoke test run on h2o: all 9 acceptance criteria PASS.
+- 5/5 basins (`01440000`, `03021350`, `08155541`, `09484000`, `01019000`); 720 h each
+- 0 MRMS gap-hours; 10 RTMA gap-hours (2/basin) at 2020-11-12T09Z/T10Z
+- Coverage 0.9972; `rtma_gap=True` confirmed at both known timestamps; MRMS not falsely flagged
+- Auditor exit 0; SHA-256 checksums verified; commit at run `6f4de498`
+- Note: `02231000` attempted but absent from 2020-11 source; builder correctly halted; not a failure
+- h2o output: `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z`
 **Design doc:** `docs/stage1_curated_forcing_product_v001_design.md`
 
-**Next step:** Milestone 2K-F-B — implement builder + auditor + run smoke test on h2o.
+**Next step:** Milestone 2K-F-C — full 2,752-basin curated forcing build on h2o (not yet authorized).
 
 ---
 
@@ -385,12 +392,10 @@ forcing data and package assembly on h2o before any Moriah transfer.
 6. ~~**Curated forcing product v001 design (Milestone 2K-F-A)**~~ — **COMPLETE (2026-06-29).**
    Product contract frozen: wide-format per-basin Parquet, gap-flag columns, manifest, provenance.
    Design doc: `docs/stage1_curated_forcing_product_v001_design.md`.
-7. **Curated forcing product v001 — builder + smoke test (Milestone 2K-F-B)** — implement
-   `scripts/build_stage1_curated_forcing_basin_parquets.py` and
-   `scripts/audit_stage1_curated_forcing_basin_parquets.py`;
-   run 5-basin / 2020-11 smoke test on h2o (tests known RTMA 2-hour gap NaN handling).
-   Prerequisite before full 2,752-basin build.
-8. **Curated forcing product v001 — full 2,752-basin build on h2o** — run builder across all
+7. ~~**Curated forcing product v001 — builder + smoke test (Milestone 2K-F-B)**~~ — **COMPLETE (2026-06-29): PASS.**
+   5/5 basins, 720 h, 0 MRMS gaps, 10 RTMA gap-hours (coverage 0.9972). Scripts: commit `6f4de49`.
+   h2o output: `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z/`.
+8. **Curated forcing product v001 — full 2,752-basin build on h2o (Milestone 2K-F-C)** — run builder across all
    basins and months; verify checksums; produce audited product under
    `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001/`.
 9. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,

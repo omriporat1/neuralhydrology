@@ -272,3 +272,48 @@ separate decisions; the first NH smoke config may use a narrower subset without 
 **OC-5 — Remaining 15 VQC cases:** Not required before the 2K-F-B smoke test or the full
 2,752-basin build. Gate for full build: 2K-F-B smoke PASS + no schema/gap/provenance failures.
 Render 2–3 additional targeted VQC cases only if the smoke or design review reveals a concern.
+
+## 2026-06-29 Stage 1 Forcing — Milestone 2K-F-B: Curated Forcing v001 Builder + Smoke PASS
+
+**Decision:** Milestone 2K-F-B is COMPLETE. Builder, auditor, and h2o launcher implemented
+and smoke-tested. Commit `6f4de498f1326e5e6fcd3de8157ba410ad28a6a9`.
+
+**Smoke test result (h2o, 2026-06-29T13:27:57Z):**
+
+| Metric | Value |
+|---|---|
+| Month | 2020-11 |
+| Basins | 5 (`01440000`, `03021350`, `08155541`, `09484000`, `01019000`) |
+| Hours per basin | 720 |
+| MRMS gap-hours | 0 (correct — 2020-11 has no MRMS S3 gaps) |
+| RTMA gap-hours | 10 total (2/basin at `2020-11-12T09:00:00Z` and `T10:00:00Z`) |
+| Coverage fraction | 0.9972 (718 valid combined hours / 720) |
+| Auditor | PASS — exit 0; all metadata, checksum, schema, and gap-flag checks passed |
+| Wall time | 0.1 s |
+| h2o output | `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z` |
+
+**Gap verification:**
+- `rtma_gap=True` at both known gap timestamps for all 5 basins — confirmed
+- All 11 RTMA data columns NaN at gap hours — confirmed
+- `mrms_qpe_1h_mm_gap=False` at RTMA-only gap hours (no false flagging) — confirmed
+- SHA-256 verified for all 5 Parquets
+
+**Prior failed explicit-basin run (same session):**
+`02231000` was passed via `--staids` but is absent from the 2020-11 monthly source chunk.
+Builder correctly halted with 0 basins built rather than silently skipping. Not a smoke
+failure. Basin replaced by `01019000` for the passing 5-basin run.
+
+**audit_summary.md gap:**
+The auditor writes its verdict to stdout (captured in `smoke.log`). It does not write a
+standalone `audit_summary.md`. For the full build (Milestone 2K-F-C), the auditor must
+write `audit_summary.md` to the product directory before the build is closed.
+This is a pre-build implementation requirement, not a blocker for closing 2K-F-B.
+
+**Implementation decisions binding for 2K-F-C (full build):**
+1. Metadata in JSON: `manifest.json`, `dataset_config.json`, `run_provenance.json` (not `.csv`/`.yaml`).
+2. Per-basin files: flat `time_series/{STAID}.parquet` (not `{STAID}/{STAID}_hourly_forcings.parquet`).
+3. Gap detection by row absence from source Parquet — consistent with `not_in_s3` semantics.
+4. RTMA variable aliases: `sh2`/`2sh` → `rtma_2sh_kgkg`; `gust`/`i10fg` → `rtma_gust_ms`.
+5. Path safety guard in launcher: `OUT_DIR` must begin with `/data42/omrip/Flash-NH/`.
+
+**Authorization:** Full 2,752-basin build (Milestone 2K-F-C) requires explicit authorization.
