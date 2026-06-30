@@ -1,12 +1,13 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-06-30 (Milestone 2K-G-B — builder + auditor implemented)
+**Updated:** 2026-06-30 (Milestone 2K-G-B — h2o validation PASS)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
-**2K-G-B status:** SCRIPTS IMPLEMENTED (2026-06-30) — builder + auditor syntax-validated locally.
-Pending: h2o run against 5-basin corrected pilot + auditor PASS before 2K-G-B is marked complete.
+**2K-G-B status:** COMPLETE (2026-06-30) — 5-basin pilot package built on h2o; audit PASS
+(0 errors, 5 warnings, 217 OK). Package at `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/`.
+Next: 2K-G-C — Moriah transfer + NH environment preflight + Smoke 0.
 
 ---
 
@@ -103,9 +104,17 @@ standard dynamic inputs; do not hide them.
 
 ---
 
-### 4. Package builder (Milestone 2K-G-B — implemented 2026-06-30)
+### 4. Package builder (Milestone 2K-G-B — COMPLETE 2026-06-30)
 
-`scripts/build_stage1_nh_package.py` implemented. Pending: h2o 5-basin pilot run + audit PASS.
+`scripts/build_stage1_nh_package.py` implemented and validated on h2o (audit PASS 2026-06-30).
+
+**h2o validation summary:**
+- 5/5 basins PASS; 0 errors, 5 expected warnings (qobs NaN counts, normal)
+- 45,720 rows/basin; MRMS gap=136, RTMA gap=2 (all exact); all forcing non-null after gap-fill
+- `rtma_2d_K` non-null == 45,720 (dewpoint fix confirmed); `rtma_weasd_kgm2` absent (confirmed)
+- Static attribute source: `/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (staged manually;
+  not committed to git — cleanup required before full 2,752-basin package generation)
+
 Scope:
 
 1. Read per-basin forcing Parquets from the curated library
@@ -531,50 +540,46 @@ GAGES-II + derived pipeline from Milestone 2G.
 
 | Gap | Status | Milestone |
 |---|---|---|
-| Corrected forcing library v001 (full 2,752 basins) | Running on h2o | Not blocking 2K-G-B pilot |
+| Corrected forcing library v001 (full 2,752 basins) | Running on h2o | Not blocking pilot |
 | 5-basin pilot forcing pilot (5 basins, corrected) | **PASS** on h2o (2026-06-30) | 2K-F-C-B ✓ |
-| Package builder `build_stage1_nh_package.py` | Not yet implemented | **2K-G-B — can start now** |
-| 5-basin NH pilot package built on h2o | Not yet | 2K-G-B |
+| Package builder `build_stage1_nh_package.py` | **COMPLETE** — h2o audit PASS (2026-06-30) | 2K-G-B ✓ |
+| 5-basin NH pilot package built on h2o | **PASS** (2026-06-30) | 2K-G-B ✓ |
+| Static attribute source canonical | **Pending cleanup** — staged at h2o `tmp/`, not committed | Before full package |
 | Transfer pilot package to Moriah | Not yet | 2K-G-C |
-| Moriah NH environment installed | Not yet | 2K-G-D |
-| NH YAML config (Smoke 0) finalized | Draft in §10.4 | 2K-G-D |
-| Slurm job script written and tested | Draft in §10.5 | 2K-G-D |
-| Moriah GPU partition name confirmed | Unknown — check wiki | 2K-G-D |
-| Moriah CUDA version confirmed | Unknown — check `nvidia-smi` | 2K-G-D |
+| Moriah NH environment installed | Not yet | 2K-G-C |
+| NH YAML config (Smoke 0) finalized | In package: `configs/stage1_smoke0_nh.yml` | 2K-G-B ✓ |
+| Slurm job script written | In package: `slurm/smoke0.sh` | 2K-G-B ✓ |
+| Moriah GPU partition name confirmed | Unknown — check wiki / `sinfo -s` | 2K-G-C |
+| Moriah CUDA version confirmed | Unknown — check `nvidia-smi` on GPU node | 2K-G-C |
 
-**Full 2,752-basin rebuild is NOT a prerequisite for 2K-G-B.**
-The 5-basin NH pilot package can be built from the already-passing corrected 5-basin
-forcing pilot. Full-scale NH package generation (all 2,752 basins) must wait for the
-corrected full rebuild PASS, but the pilot builder implementation and 5-basin test
-can proceed immediately.
+Full 2,752-basin NH package generation waits for: (1) corrected full forcing rebuild PASS;
+(2) attribute-source cleanup. Pilot package and Moriah Smoke 0 are unblocked.
 
 ---
 
-### 13. Next concrete actions (after this preflight)
+### 13. Next concrete actions (2K-G-C)
 
-In order:
+2K-G-B is complete. Remaining steps to Smoke 0:
 
-1. **Implement `scripts/build_stage1_nh_package.py`** (Milestone 2K-G-B — unblocked now).
-   Input for the 5-basin pilot: the already-passing corrected 5-basin forcing pilot
-   (`time_series/01019000.parquet` … `01049500.parquet`) + target package v001 NCs.
-   Output: 5-basin NH pilot package with the gap-fill policy from §8.
-   **Do not wait for the full 2,752-basin forcing rebuild** to start this step.
+1. **Transfer pilot package to Moriah** (~25 MB; `scp` is sufficient):
+   ```bash
+   scp -r omripo@h2o.es.huji.ac.il:/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/ \
+       /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/
+   ```
+   Or push from h2o. Verify file count on Moriah after transfer.
 
-2. **Build and audit the 5-basin NH pilot package on h2o.**
-   Transfer the compact package (~25 MB) to Moriah.
+2. **Confirm Moriah GPU partition name and CUDA version.**
+   On a GPU node (via `sinteractive --gres=gpu:1`): `sinfo -s`, `nvidia-smi`.
+   Update `slurm/smoke0.sh` partition and PyTorch CUDA index URL before env install.
 
-3. **(Parallel, can overlap)** Monitor corrected full-period rebuild on h2o.
-   Check: `tail -f ${PRODUCT}/build.log`. When complete: run auditor with `--full-period`,
-   copy evidence bundle locally, then document as the corrected v001 certification.
-
-4. **Confirm Moriah GPU partition name and CUDA version.**
-   SSH into Moriah: `sinfo -s`, `nvidia-smi` (on a GPU node via `srun --gres=gpu:1`).
-   Update Slurm script partition and PyTorch CUDA version before env install.
-
-5. **Install `flashnh-moriah` conda env on Moriah** (via Slurm job or `sinteractive`).
+3. **Install `flashnh-moriah` conda env on Moriah** (Slurm job or `sinteractive`).
    Verify: `python -c "import torch; print(torch.cuda.is_available())"` → `True`.
 
-6. **Run Smoke 0 on Moriah** (Slurm job, 1–2 epochs, 5 basins, `seq_length: 24`).
+4. **Run Smoke 0** (Slurm: `sbatch slurm/smoke0.sh`; seq_length=24, 2 epochs, 5 basins).
+   Pass criteria: NH loads, training loss is finite after epoch 1, Slurm exit 0.
+
+5. **(Parallel)** Monitor corrected full-period rebuild on h2o.
+   Resolve attribute-source provenance before full 2,752-basin package generation.
    Pass criteria: finite loss after epoch 1, checkpoint written, Slurm exit 0.
 
 7. **Run Smoke 1** (`seq_length: 72` or `168`; add 5 RTMA vars; verify `rtma_2d_K` non-null).

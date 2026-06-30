@@ -1,38 +1,60 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-30 (2K-G-B implementation)
+Last updated: 2026-06-30 (2K-G-B COMPLETE)
 
 ## Current milestone
 
-**Milestone 2K-G-B IN PROGRESS (2026-06-30): NeuralHydrology pilot package builder + auditor implemented.**
+**Milestone 2K-G-B COMPLETE (2026-06-30): NeuralHydrology pilot package built and audited on h2o.**
 
-Scripts implemented and syntax-validated locally:
-- `scripts/build_stage1_nh_package.py` — merges forcing Parquets + target NCs → per-basin GenericDataset NCs
-- `scripts/audit_stage1_nh_package.py` — 16-check auditor; exits 0/1; writes audit_summary.md
+h2o audit result: **PASS** — 0 errors, 5 warnings, 217 OK checks.
+Build time: 4.2 s. Audit timestamp: 2026-06-30T12:38:40Z.
+Package: `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/`
+Evidence: `tmp/stage1_nh_pilot_v001_evidence/` (not committed)
 
-Not yet complete: builder and auditor must be run against the 5-basin corrected pilot on h2o and PASS.
-2K-G-B is complete when the h2o audit exits 0.
+**5-basin audit summary (all pass):**
 
-**Package structure produced by builder:**
+| Basin | Rows | MRMS gap | RTMA gap | qobs NaN | qobs coverage |
+|---|---|---|---|---|---|
+| 01019000 | 45,720 | 136 | 2 | 515 | 98.87% |
+| 01022500 | 45,720 | 136 | 2 | 6,751 | 85.23% |
+| 01033000 | 45,720 | 136 | 2 | 12,088 | 73.56% |
+| 01038000 | 45,720 | 136 | 2 | 3,035 | 93.36% |
+| 01049500 | 45,720 | 136 | 2 | 6 | 99.99% |
+
+**5 warnings (all expected):** one per basin — qobs NaN counts logged (normal; NH loss-masks missing targets).
+No forcing NaN warnings. All forcing variables non-null after gap-fill.
+
+**Key checks confirmed:**
+- All 14 variables present per NC (11 forcing + 2 gap flags + qobs_m3s)
+- `rtma_weasd_kgm2` absent (forbidden — confirmed)
+- `rtma_2d_K` non-null == 45,720 (confirms 2K-F-C-B dewpoint mapping fix carried through)
+- `mrms_qpe_1h_mm_gap sum == 136` per basin; `rtma_gap sum == 2` per basin
+- Gap fill: MRMS 136 NaN → 0.0 mm/basin; RTMA 2 NaN → linear interp per variable/basin
+
+**Static attribute caveat (cleanup required before full-scale package):**
+`reports/flashnh_basin_screening_v001/all_basins_merged.parquet` is **not tracked in git**
+(verified with `git ls-files` on h2o). The h2o builder used a manually staged copy at
+`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet`.
+The 5-basin pilot PASS is valid. Before full 2,752-basin NH package generation, this file
+must be made canonical: committed to the repo or documented as a stable h2o-resident input
+with explicit provenance. This is a cleanup gate, not a blocker for Moriah transfer.
+
+**Package structure (on h2o):**
 ```
-stage1_nh_pilot_v001/
-  time_series/{STAID}.nc     # 14 vars: 11 forcing + 2 gap flags + qobs_m3s
-  attributes.csv             # gauge_id, DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE + all available cols
+/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/
+  time_series/{STAID}.nc     # 5 NCs; 14 vars; 45,720 rows; float32; _FillValue=-9999.0
+  attributes.csv             # 5 basins × 47 cols
   basins/smoke{0,1}_{train,val,test}.txt
   configs/stage1_smoke{0,1}_nh.yml
-  slurm/smoke{0,1}.sh
-  manifests/dataset_manifest.json + variable_schema.csv + gap_fill_report.csv + per_basin_summary.csv
-  run_provenance.json + README.md
+  slurm/smoke{0,1}.sh        # Moriah Slurm job templates
+  manifests/                 # dataset_manifest.json + variable_schema.csv + gap_fill_report.csv + per_basin_summary.csv
+  run_provenance.json + README.md + audit_summary.md
 ```
 
-**Gap-fill applied in builder (Smoke 0/1 pilot policy only):**
-- MRMS (136 h/basin): fillna(0.0); gap flag retained as float32 1.0
-- RTMA (2 h/basin): linear interpolation; gap flag retained as float32 1.0
-- qobs_m3s: NaN preserved exactly
-
-**Attribute source (committed to repo):**
-`reports/flashnh_basin_screening_v001/all_basins_merged.parquet`
-All 5 pilot basins confirmed present with `DRAIN_SQKM`, `LAT_GAGE`, `LNG_GAGE`, `BFI_AVE`.
+**Next: 2K-G-C — Moriah transfer + environment preflight + Smoke 0.**
+Transfer pilot package (`scp`), confirm NH conda env on GPU node, run Smoke 0 (seq_length=24, 2 epochs).
+No NH training has run yet. Full 2,752-basin NH package generation waits for:
+(1) corrected full forcing rebuild PASS on h2o; (2) attribute-source cleanup.
 
 ---
 

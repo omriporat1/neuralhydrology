@@ -2,6 +2,47 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-G-B h2o validation: NH pilot package PASS
+
+Audit result: PASS — 0 errors, 5 warnings, 217 OK checks.
+Package: `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/`
+Build time: 4.2 s; wall timestamp: 2026-06-30T12:38:35Z.
+
+**Findings and decisions:**
+
+**1. 5-basin corrected pilot is sufficient for package-builder validation.**
+All 5 basins pass all structural, gap-count, and dewpoint-fix checks. The builder and
+auditor are validated. Full 2,752-basin package generation is a separate, authorized step.
+
+**2. Gap-fill report matches expected counts exactly.**
+MRMS: 136 NaN → 0.0 mm per basin (all 5). RTMA: 2 NaN → linear interp per variable per
+basin (all 10 RTMA variables, all 5 basins). No unexpected gaps introduced by reindex.
+
+**3. qobs NaN preserved exactly; 5 warnings are expected.**
+Warnings are informational: qobs NaN counts of 515, 6,751, 12,088, 3,035, 6 for the five
+basins. These are the missing-discharge gaps from the target package v001. NH loss-masks
+these at training time. No action needed.
+
+**4. rtma_2d_K non-null == 45,720 confirmed per NC.**
+The 2K-F-C-B dewpoint mapping fix (`d2m` → `2d` in the forcing builder) is confirmed to
+have propagated correctly into the NH package. This check is retained in the auditor
+permanently for any future package rebuild.
+
+**5. Static attribute file not committed to git — cleanup gate established.**
+`reports/flashnh_basin_screening_v001/all_basins_merged.parquet` is not tracked in git
+(confirmed with `git ls-files` on h2o). Builder used a manually staged copy at
+`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet`. The pilot PASS is valid.
+Resolution options before full-scale packaging:
+  (a) Commit the parquet to the repo (adds ~1–2 MB to git history; clean path).
+  (b) Document it as a canonical h2o-resident file at a fixed path, with explicit
+      provenance note in `--attributes-csv` docs and run_provenance.json.
+This is a cleanup gate, not a scientific blocker.
+
+**6. Next milestone is 2K-G-C: Moriah transfer + NH environment preflight + Smoke 0.**
+Package is ready. Transfer via `scp`. No scientific training; Smoke 0 is plumbing/ingestion
+verification (seq_length=24, 2 epochs, 5 basins, rain-only). Smoke 0 PASS = NH environment
+and package format confirmed compatible.
+
 ## 2026-06-30 Milestone 2K-G-B: NH package builder and auditor design decisions
 
 Scripts implemented: `scripts/build_stage1_nh_package.py`, `scripts/audit_stage1_nh_package.py`.
