@@ -1,10 +1,26 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-30 (2K-F-C-B — schema correction)
+Last updated: 2026-06-30 (2K-G-A preflight)
 
 ## Current milestone
 
-**Milestone 2K-F-C-B IN PROGRESS (2026-06-30): Curated forcing schema/mapping correction.**
+**Milestone 2K-G-A COMPLETE (2026-06-30): NeuralHydrology pilot package preflight design.**
+
+Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I):
+- NH package format: GenericDataset single-NC-per-basin, `date` coord, float32, `_FillValue=-9999.0`
+- Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 2 epochs)
+- Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v})
+- Gap-fill policy: MRMS gaps → 0.0 mm; RTMA gaps → linear interpolation; gap flags retained
+- Moriah layout: `/sci/labs/efratmorin/omripo/Flash-NH/{repos,envs,data,runs,logs,slurm,evidence}`
+- NH setup: clean upstream `neuralhydrology` clone; no fork until specific limitation demonstrated
+- Next milestone: 2K-G-B — implement `scripts/build_stage1_nh_package.py` and build 5-basin pilot
+
+**Blocking: corrected full-period forcing rebuild still running on h2o (started 2026-06-30).**
+**Do not start 2K-G-B until corrected rebuild completes and 5-basin pilot audit PASS is confirmed.**
+
+---
+
+**Milestone 2K-F-C-B COMPLETE (2026-06-30): Curated forcing schema/mapping correction.**
 
 Full-period build structurally PASS on h2o (2026-06-30, 2,752 basins, 45,720 h, 14.49 h wall),
 but post-build non-null check found two all-NaN variables. Build is **schema-superseded**;
@@ -425,9 +441,15 @@ forcing data and package assembly on h2o before any Moriah transfer.
    corrected in 2K-F-C-B (2026-06-30): dewpoint mapping fixed, `rtma_weasd_kgm2` removed.
    Next: corrected 5-basin full-period pilot on h2o (`--max-basins 5 --overwrite`), then
    full 2,752-basin rebuild authorization. Full rebuild NOT yet authorized.
-9. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
-   basin-average forcings, static attributes, and train/val/test splits into an audited
-   NH-compatible package.
+9. **Milestone 2K-G-B — NH pilot package builder** — implement `scripts/build_stage1_nh_package.py`
+   on h2o: merge corrected forcing Parquets + target NCs into 5-basin GenericDataset NCs,
+   apply gap-fill policy (MRMS→0.0, RTMA→interp), write `attributes.csv` and basin lists.
+   Transfer pilot package (~25 MB) to Moriah.
+9a. **Milestone 2K-G-C — Moriah environment + Smoke 0** — install `flashnh-moriah` conda env
+    (PyTorch+CUDA, NH), run Smoke 0 Slurm job (5 basins, 2 epochs, mrms_qpe_1h_mm only),
+    confirm finite loss and checkpoint.
+9b. **Milestone 2K-G-D — Smoke 1** — add RTMA meteorology, confirm `rtma_2d_K` non-null.
+    Preflight design: `docs/stage1_neuralhydrology_preflight.md`.
 10. **Moriah transfer layout and checksum-verified transfer** — define directory structure
     and `rsync`/`scp` transfer procedure; verify checksums on arrival before training.
 11. **Moriah training environment and config** — only after the assembled package passes

@@ -2,6 +2,44 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-G-A: NeuralHydrology Pilot Package Preflight Design
+
+Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I). Key decisions:
+
+**1. Package format: GenericDataset single NC per basin.**
+One NC per basin with all dynamic vars (forcings + gap flags) + `qobs_m3s` target on
+a shared `date` coordinate. Matches Milestone 2G format proven with NH, avoids a
+custom dataset class. Float32 values, `_FillValue=-9999.0`, no tz offset in coordinate.
+
+**2. Gap-fill policy for NH package (binding for v001).**
+- MRMS gaps (136 h / basin, 0.30%): fill with 0.0 mm (conservative no-rain assumption)
+- RTMA gaps (2 h / basin, 0.004%): fill with linear interpolation (2 hours; both neighbors always available)
+- Gap flags (`mrms_qpe_1h_mm_gap`, `rtma_gap`) retained as explicit dynamic inputs
+- Do NOT rely on NH `nan_handling_method` as the primary strategy; pre-fill in the package builder
+- Rationale: transparency — NaN in dynamic inputs is dangerous in LSTM by default; pre-fill is
+  auditable in the package file; gap flags preserve the information signal
+
+**3. Smoke levels.**
+- Smoke 0 (rain-only technical): mrms_qpe_1h_mm + gap flag; 5 basins; 2 epochs; purpose is
+  NH load/train verification only, not a scientific model
+- Smoke 1 (minimal meteorology): + rtma_{2t,2d,2sh,10u,10v} + rtma_gap
+- rtma_sp_Pa: include in NC file (for future use), exclude from Smoke 1 dynamic_inputs
+  (large magnitude ~70k–101k Pa; defer normalization review to Smoke 2)
+
+**4. Train/val/test split.**
+Train: 2020-10-14 – 2022-12-31 | Val: 2023 | Test: 2024-2025
+Rationale: 2024–2025 is the quasi-operational period; hold out entirely. Val is 2023
+for generalization monitoring; contains varied seasonality.
+
+**5. NH setup: clean upstream clone, no fork until specific limitation demonstrated.**
+Old Flash-NH fork is abandoned. All custom logic lives in: NH YAML configs (in this repo),
+package builder script, and future `src/flashnh/` custom classes. Fork only when a
+config-layer workaround is exhausted.
+
+**6. Moriah layout.**
+`/sci/labs/efratmorin/omripo/Flash-NH/{repos,envs,data,runs,logs,slurm,evidence}`
+Blocking unknown: GPU partition name, CUDA version — must check Moriah wiki and `sinfo`.
+
 ## 2026-06-30 Milestone 2K-F-C-B: Curated Forcing v001 Schema/Mapping Correction
 
 Full-period build (2,752 basins × 45,720 h) structurally passed on h2o (2026-06-30,
