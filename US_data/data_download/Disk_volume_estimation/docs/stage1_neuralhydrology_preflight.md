@@ -422,8 +422,9 @@ is explicitly confirmed first)
 **Install template (NOT YET RUN):** `scripts/setup_flashnh_moriah_env.sbatch`
 (repo root, prepared 2026-06-30). Uses the confirmed `catfish` partition, the confirmed
 module names (`miniconda3/24.3.0`, `nvidia/580.95.05`, `cuda/12.8.1`), and creates the
-env as a `-p` prefix env under the Flash-NH lab project root. The PyTorch CUDA wheel is
-left as an explicit TODO in the script — see §10.6 for why.
+env as a `-p` prefix env under the Flash-NH lab project root. PyTorch choice finalized
+2026-06-30: `torch==2.7.0` from the `cu128` wheel index (closest official match to the
+loaded `cuda/12.8.1` toolkit), with strict CUDA-availability verification after install.
 
 **Do not run environment installation on the Moriah login node.** A working interactive
 GPU allocation command was confirmed (§10.6); use it for any ad-hoc verification, but

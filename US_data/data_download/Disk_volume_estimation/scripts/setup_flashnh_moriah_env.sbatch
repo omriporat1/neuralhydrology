@@ -52,24 +52,32 @@ which python
 python --version
 
 echo "=== install PyTorch (CUDA build) ==="
-# CUDA 12.8.1 / driver 580.95.05 confirmed on catfish-05 (2026-06-30).
-# TODO(2K-G-C-A): the exact PyTorch CUDA wheel index has NOT been verified against
-# this CUDA toolkit version. Do not guess a wheel tag (e.g. cu121/cu124) without
-# checking https://pytorch.org/get-started/locally/ for a build compatible with
-# CUDA 12.8 at install time. Conservative placeholder below is commented out.
-#
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
-#
-echo "TODO: confirm PyTorch CUDA wheel for CUDA 12.8.1 before installing torch."
-echo "Would install something equivalent to:"
-echo "  pip install torch --index-url https://download.pytorch.org/whl/<cuXXX>"
+# CUDA 12.8.1 toolkit / driver 580.95.05 (CUDA 13.0) confirmed on catfish-05 (2026-06-30).
+# PyTorch 2.7.0 ships pre-built CUDA 12.8 wheels (cu128) per upstream release notes —
+# this is the closest official match to the loaded 12.8.1 toolkit. torchvision/torchaudio
+# are not installed; NeuralHydrology does not require them and Smoke 0 only needs torch.
+pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+
+echo "=== verify CUDA (strict — fails the job if unavailable) ==="
+python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("torch.version.cuda", torch.version.cuda)
+print("cuda_available", torch.cuda.is_available())
+print("device_count", torch.cuda.device_count())
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is not available to PyTorch")
+print("device0", torch.cuda.get_device_name(0))
+PY
 
 echo "=== install NeuralHydrology + minimal deps ==="
-pip install neuralhydrology
-pip install pandas pyarrow xarray netcdf4 tensorboard
+pip install neuralhydrology pandas pyarrow xarray netcdf4 tensorboard
+
+echo "=== verify nh-run entry point ==="
+which nh-run
+nh-run --help | head -40
 
 echo "=== verify ==="
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
 python -c "
 import neuralhydrology
 v = getattr(neuralhydrology, '__version__', None)
