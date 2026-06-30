@@ -2,6 +2,39 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-G-B: NH package builder and auditor design decisions
+
+Scripts implemented: `scripts/build_stage1_nh_package.py`, `scripts/audit_stage1_nh_package.py`.
+Status: IMPLEMENTED (local syntax PASS); h2o run pending.
+
+**1. Attribute source: `reports/flashnh_basin_screening_v001/all_basins_merged.parquet`.**
+This file is committed to the repo and all 5 pilot basins confirmed present with required
+columns (`DRAIN_SQKM`, `LAT_GAGE`, `LNG_GAGE`, `BFI_AVE`). `--attributes-csv` accepts
+`.parquet` or `.csv`; STAID column (int64) normalized to 8-char zero-padded string.
+All available columns (not just the 4 required) are written to `attributes.csv` — NH
+reads only the columns listed in `static_attributes` config at runtime.
+
+**2. All 14 NC variables: 11 forcing data + 2 gap flags + qobs_m3s.**
+`rtma_sp_Pa` is included in the NC (not excluded) so it is available for Smoke 2 without
+rebuilding the package. It is excluded from the `dynamic_inputs` list in `stage1_smoke1_nh.yml`.
+
+**3. Gap flags stored as float32 (0.0/1.0), not bool.**
+NH GenericDataset expects numeric input arrays. Bool xarray variables may cause issues with
+NH normalization. Explicitly converting gap flags to float32 in the builder.
+
+**4. Atomic NC writes (tmp + rename).**
+Same pattern as target builder: write to `{STAID}.nc.tmp`, then rename. Avoids partial-write
+files if the builder is interrupted.
+
+**5. Auditor checks mrms_qpe_1h_mm_gap sum == 136 and rtma_gap sum == 2 per basin.**
+These are the expected gap counts from the corrected v001 forcing library. A mismatch would
+indicate a gap-fill bug or a wrong forcing source directory.
+
+**6. Auditor checks rtma_2d_K non-null == 45720 explicitly.**
+This check directly confirms that the 2K-F-C-B dewpoint mapping fix (`d2m` → `2d`) was
+correctly carried through to the NH package NC files. If the old mapping bug recurs in a
+future rebuild, this check will catch it.
+
 ## 2026-06-30 Milestone 2K-G-A corrections: Smoke design and gap-fill policy revision
 
 Corrections to the 2K-G-A preflight design (commit `fa6754b`) before 2K-G-B implementation.

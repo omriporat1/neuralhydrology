@@ -1,11 +1,12 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-06-30 (Milestone 2K-G-A — full-period pilot design + corrections)
+**Updated:** 2026-06-30 (Milestone 2K-G-B — builder + auditor implemented)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
-Next: 2K-G-B — implement package builder using 5-basin corrected pilot as input.
+**2K-G-B status:** SCRIPTS IMPLEMENTED (2026-06-30) — builder + auditor syntax-validated locally.
+Pending: h2o run against 5-basin corrected pilot + auditor PASS before 2K-G-B is marked complete.
 
 ---
 
@@ -102,10 +103,10 @@ standard dynamic inputs; do not hide them.
 
 ---
 
-### 4. Package builder (to be implemented: Milestone 2K-G-B)
+### 4. Package builder (Milestone 2K-G-B — implemented 2026-06-30)
 
-A new script `scripts/build_stage1_nh_package.py` is needed. It is **not yet
-implemented**. Scope:
+`scripts/build_stage1_nh_package.py` implemented. Pending: h2o 5-basin pilot run + audit PASS.
+Scope:
 
 1. Read per-basin forcing Parquets from the curated library
    (`time_series/{STAID}.parquet`, wide format, `valid_time_utc` as index)

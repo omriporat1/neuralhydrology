@@ -1,24 +1,52 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-30 (2K-G-A corrections)
+Last updated: 2026-06-30 (2K-G-B implementation)
 
 ## Current milestone
+
+**Milestone 2K-G-B IN PROGRESS (2026-06-30): NeuralHydrology pilot package builder + auditor implemented.**
+
+Scripts implemented and syntax-validated locally:
+- `scripts/build_stage1_nh_package.py` — merges forcing Parquets + target NCs → per-basin GenericDataset NCs
+- `scripts/audit_stage1_nh_package.py` — 16-check auditor; exits 0/1; writes audit_summary.md
+
+Not yet complete: builder and auditor must be run against the 5-basin corrected pilot on h2o and PASS.
+2K-G-B is complete when the h2o audit exits 0.
+
+**Package structure produced by builder:**
+```
+stage1_nh_pilot_v001/
+  time_series/{STAID}.nc     # 14 vars: 11 forcing + 2 gap flags + qobs_m3s
+  attributes.csv             # gauge_id, DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE + all available cols
+  basins/smoke{0,1}_{train,val,test}.txt
+  configs/stage1_smoke{0,1}_nh.yml
+  slurm/smoke{0,1}.sh
+  manifests/dataset_manifest.json + variable_schema.csv + gap_fill_report.csv + per_basin_summary.csv
+  run_provenance.json + README.md
+```
+
+**Gap-fill applied in builder (Smoke 0/1 pilot policy only):**
+- MRMS (136 h/basin): fillna(0.0); gap flag retained as float32 1.0
+- RTMA (2 h/basin): linear interpolation; gap flag retained as float32 1.0
+- qobs_m3s: NaN preserved exactly
+
+**Attribute source (committed to repo):**
+`reports/flashnh_basin_screening_v001/all_basins_merged.parquet`
+All 5 pilot basins confirmed present with `DRAIN_SQKM`, `LAT_GAGE`, `LNG_GAGE`, `BFI_AVE`.
+
+---
 
 **Milestone 2K-G-A COMPLETE (2026-06-30): NeuralHydrology pilot package preflight design + corrections.**
 
 Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I), with corrections applied
 after initial commit `fa6754b`:
 - NH package format: GenericDataset single-NC-per-basin, `date` coord, float32, `_FillValue=-9999.0`
-- Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 1–2 epochs); **`seq_length: 24`**, `predict_last_n: 1`
+- Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 1–2 epochs); `seq_length: 24`, `predict_last_n: 1`
 - Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v}); `seq_length: 72` or `168`
 - Gap-fill policy (Smoke 0/1 pilot policy only): MRMS gaps → 0.0 mm; RTMA gaps → linear interp; gap flags retained
 - Final training gap policy: window-exclusion preferred over silent fill; to be decided after Smoke 1
 - Moriah layout: `/sci/labs/efratmorin/omripo/Flash-NH/{repos,envs,data,runs,logs,slurm,evidence}`
 - NH setup: clean upstream `neuralhydrology` clone; no fork until specific limitation demonstrated
-- Next milestone: 2K-G-B — implement `scripts/build_stage1_nh_package.py` (unblocked; use 5-basin pilot)
-
-**2K-G-B is UNBLOCKED**: 5-basin corrected forcing pilot already PASS. Full 2,752-basin rebuild
-is NOT a prerequisite for implementing and testing the package builder.
 
 ---
 
