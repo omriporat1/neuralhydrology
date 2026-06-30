@@ -2,6 +2,37 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-G-A corrections: Smoke design and gap-fill policy revision
+
+Corrections to the 2K-G-A preflight design (commit `fa6754b`) before 2K-G-B implementation.
+No code changes; docs-only patch.
+
+**1. Smoke 0 `seq_length`: 336 h → 24 h; add `predict_last_n: 1`.**
+Smoke 0 is a pure plumbing/ingestion test, not a scientific baseline. 14-day lookback is
+unnecessary overhead for verifying that NH loads the package and produces finite loss.
+24 h minimises runtime and memory before package-loading is proven. `seq_length: 336` is
+reserved for later hyperparameter testing.
+
+**2. Smoke 1 `seq_length`: not locked to 336 h.**
+First meteorology smoke uses `seq_length: 72` or `168` h as the next step. 336 h is a
+later candidate, not the first default.
+
+**3. MRMS gap-fill policy: Smoke 0/1 pilot policy only — not final scientific training policy.**
+Precipitation is the primary forcing driver; silently treating archive gaps as true no-rain
+must not carry into scientific baseline training. For final training, evaluate:
+- window/sample exclusion (exclude training windows that intersect MRMS gap hours —
+  do NOT remove rows from the NC file; the 45,720-h `date` coordinate stays aligned);
+- or a deliberately tested NH `nan_handling_method`.
+The 0.0 mm fill + gap flag strategy is accepted for Smoke 0/1 only.
+
+**4. RTMA gap-fill: linear interpolation (2 hours) is accepted as pilot/package policy;
+review before final scientific training.**
+
+**5. 2K-G-B unblocked from full rebuild wait.**
+The 5-basin NH pilot package builder can be implemented and tested now, using the
+already-passing corrected 5-basin forcing pilot. Full-scale package generation (2,752
+basins) waits for the full rebuild PASS, but the 5-basin builder and audit do not.
+
 ## 2026-06-30 Milestone 2K-G-A: NeuralHydrology Pilot Package Preflight Design
 
 Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I). Key decisions:

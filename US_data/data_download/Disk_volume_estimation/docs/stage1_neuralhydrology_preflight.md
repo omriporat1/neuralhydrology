@@ -1,10 +1,11 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-06-30 (Milestone 2K-G-A — full-period pilot design)
+**Updated:** 2026-06-30 (Milestone 2K-G-A — full-period pilot design + corrections)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
-**2K-G-A status:** DESIGN IN PROGRESS — full-period (2020-2025) pilot preflight; no package built yet.
+**2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
+Next: 2K-G-B — implement package builder using 5-basin corrected pilot as input.
 
 ---
 
@@ -163,9 +164,10 @@ and completes training epochs without crashing. Not a scientific baseline.
 **Period:** full (2020-10-14 – 2025-12-31)
 **NH model:** `cudalstm` (default; uses GPU on Moriah)
 **Hidden size:** 64 (smallest practical; reduce memory footprint)
-**Sequence length:** 336 h (14 days)
+**Sequence length:** 24 h (1 day — minimal for plumbing verification)
+**Predict last n:** 1 (single-step prediction per window)
 **Batch size:** 256
-**Epochs:** 2 (enough to confirm gradient flow, loss decreasing, no NaN loss)
+**Epochs:** 1–2 (enough to confirm finite loss; not a scientific run)
 
 **Dynamic inputs (1 variable):**
 ```yaml
@@ -223,6 +225,11 @@ establish that RTMA meteorology loads and trains. Include `rtma_sp_Pa` in the
 per-basin NC file (so it is available), but exclude it from `dynamic_inputs` in the
 Smoke 1 NH config. Add it in Smoke 2 with explicit normalization review.
 
+**Sequence length for Smoke 1:** step up from Smoke 0. Use `seq_length: 72` (3 days)
+or `seq_length: 168` (7 days) as the next technical step. `seq_length: 336` (14 days)
+is a later candidate for hyperparameter testing once Smoke 1 passes; do not use it
+as the first meteorology smoke default.
+
 **Pass criteria for Smoke 1:** same as Smoke 0, plus:
 - All 6 RTMA variables have sensible normalization statistics (mean/std logged by NH)
 - `rtma_2d_K` non-null counts match expected 45,718/45,720 per basin (confirms dewpoint
@@ -235,10 +242,10 @@ Smoke 1 NH config. Add it in Smoke 2 with explicit normalization review.
 
 #### 8.1 Target NaNs (`qobs_m3s`)
 
-NH **natively handles target NaN**. Timesteps where `qobs_m3s` is NaN are excluded
-from the loss computation during training and validation. No pre-filling of target NaN
-is required or recommended. Preserve NaN in the per-basin NC exactly as it appears in
-the target package v001.
+NH **handles missing target values by loss-masking**. Timesteps where `qobs_m3s` is NaN
+are ignored (masked out) during loss computation in training and validation — they do not
+contribute to the gradient. No pre-filling of target NaN is required or recommended.
+Preserve NaN in the per-basin NC exactly as it appears in the target package v001.
 
 Expected target NaN rates from the v001 build:
 - 3,880,742 NaN hours total across 2,752 basins
@@ -247,32 +254,41 @@ Expected target NaN rates from the v001 build:
 
 #### 8.2 Dynamic input NaNs (forcing gaps)
 
-NH **does not silently handle NaN in dynamic inputs** by default. Raw NaN propagates
-through LSTM cell state and produces NaN loss, crashing training.
+Raw dynamic-input NaNs are risky unless handled deliberately through package
+preprocessing or NH `nan_handling_method`. For Smoke 0/1, we prefer preprocessed
+forcing inputs with explicit gap flags rather than relying on raw NaNs reaching the
+LSTM. This makes the gap-handling policy auditable and transparent.
 
 Known gap rates in the corrected v001 forcing library:
 - MRMS gaps: 136 hours / basin (0.30% of 45,720)
 - RTMA gaps: 2 hours / basin (0.004% of 45,720)
 
-**Gap-fill policy for the NH package (binding for v001):**
+**Gap-fill policy for the NH pilot package (Smoke 0/1 technical policy — not final
+scientific training policy):**
 
 | Source | Gap hours | Fill strategy | Rationale |
 |---|---|---|---|
-| MRMS QPE | 136 | Fill with **0.0 mm** | S3 archive absence (`not_in_s3`); conservative no-rain assumption. Model sees gap flag = True. |
-| RTMA all-vars | 2 | Fill with **linear interpolation** between adjacent hours | Only 2 hours; both neighbors are always available in a 45,720-hour series. Gap flag = True retained. |
+| MRMS QPE | 136 | Fill with **0.0 mm** for Smoke 0/1 | S3 archive absence; plumbing smoke only. Gap flag retained. **See below for final training.** |
+| RTMA all-vars | 2 | Fill with **linear interpolation** between adjacent hours | 2 hours; both neighbors always available. Gap flag retained. Review before final training. |
+
+**MRMS gap policy note — not final scientific training policy.**
+Precipitation is the primary forcing driver. Filling MRMS archive gaps with 0.0 mm
+is a safe, auditable technical choice for Smoke 0/1, but it must not be carried
+unchanged into scientific baseline training. Before baseline training, evaluate:
+- **Window/sample exclusion:** exclude any training window that contains an MRMS gap
+  hour in its input sequence or prediction horizon. Do not remove rows from the per-basin
+  NC file (the 45,720-hour `date` coordinate must stay aligned between forcing and
+  `qobs_m3s`); instead, exclude those windows during NH batch sampling.
+- **Or:** use a deliberately tested NH `nan_handling_method` (e.g., `masked_mean`)
+  so the gap-handling behavior is explicit and reproducible.
 
 The gap flags (`mrms_qpe_1h_mm_gap`, `rtma_gap`) are retained as explicit dynamic
-inputs so the model can learn to discount filled hours. Do not remove them.
+inputs so the model can potentially learn to act on data-quality information.
 
-**Do not use NH `nan_handling_method`** as the primary gap strategy. It computes
-means over the training set in a way that is not transparent to the package audit
-and loses the gap-flag signal. Pre-fill in the package builder instead, with the
-policy above documented here.
-
-**If NH `nan_handling_method` is needed:** A valid fallback is
-`nan_handling_method: mean` in the NH config, which replaces NaN with the
-training-period feature mean. Use this only if a pre-fill bug is discovered after
-the package is on Moriah. Do not combine pre-fill + `nan_handling_method`.
+**Do not use NH `nan_handling_method`** as the primary gap strategy for Smoke 0.
+Pre-fill in the package builder is more transparent and auditable. If a pre-fill bug
+is discovered after the package is on Moriah, `nan_handling_method: mean` is a valid
+fallback; do not combine pre-fill + `nan_handling_method`.
 
 #### 8.3 Normalization of gap flags
 
@@ -448,9 +464,10 @@ static_attributes:
 
 model: cudalstm
 hidden_size: 64
-seq_length: 336          # 14 days lookback
+seq_length: 24           # 1 day — minimal for plumbing verification
+predict_last_n: 1        # single-step prediction per window
 batch_size: 256
-num_epochs: 2
+num_epochs: 2            # 1–2 epochs; not a scientific run
 
 log_interval: 10
 log_tensorboard: False
@@ -471,7 +488,7 @@ save_validation_results: True
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=02:00:00            # generous for 5-basin 2-epoch smoke
+#SBATCH --time=01:00:00            # generous for 5-basin 1–2-epoch smoke with seq_length=24
 #SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.out
 #SBATCH --error=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.err
 
@@ -513,9 +530,9 @@ GAGES-II + derived pipeline from Milestone 2G.
 
 | Gap | Status | Milestone |
 |---|---|---|
-| Corrected forcing library v001 (full 2,752 basins) | Running on h2o | — (wait for completion) |
-| 5-basin pilot forcing pilot (5 basins, corrected) | PASS on h2o (2026-06-30) | 2K-F-C-B ✓ |
-| Package builder `build_stage1_nh_package.py` | Not yet implemented | 2K-G-B |
+| Corrected forcing library v001 (full 2,752 basins) | Running on h2o | Not blocking 2K-G-B pilot |
+| 5-basin pilot forcing pilot (5 basins, corrected) | **PASS** on h2o (2026-06-30) | 2K-F-C-B ✓ |
+| Package builder `build_stage1_nh_package.py` | Not yet implemented | **2K-G-B — can start now** |
 | 5-basin NH pilot package built on h2o | Not yet | 2K-G-B |
 | Transfer pilot package to Moriah | Not yet | 2K-G-C |
 | Moriah NH environment installed | Not yet | 2K-G-D |
@@ -524,34 +541,45 @@ GAGES-II + derived pipeline from Milestone 2G.
 | Moriah GPU partition name confirmed | Unknown — check wiki | 2K-G-D |
 | Moriah CUDA version confirmed | Unknown — check `nvidia-smi` | 2K-G-D |
 
+**Full 2,752-basin rebuild is NOT a prerequisite for 2K-G-B.**
+The 5-basin NH pilot package can be built from the already-passing corrected 5-basin
+forcing pilot. Full-scale NH package generation (all 2,752 basins) must wait for the
+corrected full rebuild PASS, but the pilot builder implementation and 5-basin test
+can proceed immediately.
+
 ---
 
 ### 13. Next concrete actions (after this preflight)
 
 In order:
 
-1. **Wait for corrected full-period rebuild to complete on h2o.**
-   Check: `tail -f ${PRODUCT}/build.log` in the screen session.
-   When complete: run auditor with `--full-period` flag, copy evidence bundle locally.
-
-2. **Implement `scripts/build_stage1_nh_package.py`** (Milestone 2K-G-B).
-   Inputs: corrected forcing library + target package v001 on h2o.
+1. **Implement `scripts/build_stage1_nh_package.py`** (Milestone 2K-G-B — unblocked now).
+   Input for the 5-basin pilot: the already-passing corrected 5-basin forcing pilot
+   (`time_series/01019000.parquet` … `01049500.parquet`) + target package v001 NCs.
    Output: 5-basin NH pilot package with the gap-fill policy from §8.
+   **Do not wait for the full 2,752-basin forcing rebuild** to start this step.
 
-3. **Build and audit the 5-basin pilot package on h2o.**
+2. **Build and audit the 5-basin NH pilot package on h2o.**
    Transfer the compact package (~25 MB) to Moriah.
 
+3. **(Parallel, can overlap)** Monitor corrected full-period rebuild on h2o.
+   Check: `tail -f ${PRODUCT}/build.log`. When complete: run auditor with `--full-period`,
+   copy evidence bundle locally, then document as the corrected v001 certification.
+
 4. **Confirm Moriah GPU partition name and CUDA version.**
-   SSH into Moriah: `sinfo -s`, `nvidia-smi` (on a node via `srun --gres=gpu:1`).
-   Update Slurm script partition and PyTorch CUDA version.
+   SSH into Moriah: `sinfo -s`, `nvidia-smi` (on a GPU node via `srun --gres=gpu:1`).
+   Update Slurm script partition and PyTorch CUDA version before env install.
 
 5. **Install `flashnh-moriah` conda env on Moriah** (via Slurm job or `sinteractive`).
    Verify: `python -c "import torch; print(torch.cuda.is_available())"` → `True`.
 
-6. **Run Smoke 0 on Moriah** (Slurm job with 2-epoch training, 5 basins).
+6. **Run Smoke 0 on Moriah** (Slurm job, 1–2 epochs, 5 basins, `seq_length: 24`).
    Pass criteria: finite loss after epoch 1, checkpoint written, Slurm exit 0.
 
-7. **Run Smoke 1** (add 5 RTMA vars, verify dewpoint `rtma_2d_K` non-null).
+7. **Run Smoke 1** (`seq_length: 72` or `168`; add 5 RTMA vars; verify `rtma_2d_K` non-null).
+
+8. **After corrected full rebuild PASS:** extend package builder to all 2,752 basins
+   for full-scale NH package generation.
 
 ---
 

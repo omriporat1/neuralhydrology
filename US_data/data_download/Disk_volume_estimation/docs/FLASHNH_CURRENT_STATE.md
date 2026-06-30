@@ -1,22 +1,24 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-30 (2K-G-A preflight)
+Last updated: 2026-06-30 (2K-G-A corrections)
 
 ## Current milestone
 
-**Milestone 2K-G-A COMPLETE (2026-06-30): NeuralHydrology pilot package preflight design.**
+**Milestone 2K-G-A COMPLETE (2026-06-30): NeuralHydrology pilot package preflight design + corrections.**
 
-Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I):
+Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I), with corrections applied
+after initial commit `fa6754b`:
 - NH package format: GenericDataset single-NC-per-basin, `date` coord, float32, `_FillValue=-9999.0`
-- Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 2 epochs)
-- Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v})
-- Gap-fill policy: MRMS gaps → 0.0 mm; RTMA gaps → linear interpolation; gap flags retained
+- Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 1–2 epochs); **`seq_length: 24`**, `predict_last_n: 1`
+- Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v}); `seq_length: 72` or `168`
+- Gap-fill policy (Smoke 0/1 pilot policy only): MRMS gaps → 0.0 mm; RTMA gaps → linear interp; gap flags retained
+- Final training gap policy: window-exclusion preferred over silent fill; to be decided after Smoke 1
 - Moriah layout: `/sci/labs/efratmorin/omripo/Flash-NH/{repos,envs,data,runs,logs,slurm,evidence}`
 - NH setup: clean upstream `neuralhydrology` clone; no fork until specific limitation demonstrated
-- Next milestone: 2K-G-B — implement `scripts/build_stage1_nh_package.py` and build 5-basin pilot
+- Next milestone: 2K-G-B — implement `scripts/build_stage1_nh_package.py` (unblocked; use 5-basin pilot)
 
-**Blocking: corrected full-period forcing rebuild still running on h2o (started 2026-06-30).**
-**Do not start 2K-G-B until corrected rebuild completes and 5-basin pilot audit PASS is confirmed.**
+**2K-G-B is UNBLOCKED**: 5-basin corrected forcing pilot already PASS. Full 2,752-basin rebuild
+is NOT a prerequisite for implementing and testing the package builder.
 
 ---
 
