@@ -2,6 +2,52 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-G-C-A: Moriah GPU/Conda/Slurm preflight facts recorded
+
+**Decision:** Record real Moriah/HURCS facts gathered via interactive `ssh`/`srun`
+reconnaissance, and prepare (but not run) two Slurm templates. This is **preflight
+documentation and script preparation only** — no job was run on Moriah, the env is not
+installed, the pilot package was not transferred, and Smoke 0 was not attempted. 2K-G-C
+is not complete; only 2K-G-C-A.
+
+**Facts recorded (see `docs/stage1_neuralhydrology_preflight.md` §10.6 for full detail):**
+1. Login node `moriah-gw-01`; lab storage `/sci/labs/efratmorin/omripo/Flash-NH` with
+   subdirs `repos, envs, data, runs, logs, slurm, evidence`. Do not rely on
+   `/sci/home/omripo` inside Slurm jobs.
+2. Slurm partitions confirmed via `sinfo`: `catfish` (L4, 7-day limit, chosen for
+   Smoke 0), `salmon` (L40S), `goldfish` (H200), `dogfish` (A100, drained at check time),
+   `glacier` (CPU default).
+3. Working interactive allocation:
+   `srun --partition=catfish --gres=gpu:l4:1 --cpus-per-task=4 --mem=16G --time=00:10:00 --pty bash`.
+4. On allocated node `catfish-05`: L4 GPU, 23034 MiB; `nvidia-smi` requires
+   `module load nvidia/580.95.05` (reports driver 580.95.05 / CUDA 13.0); toolkit
+   `module load cuda/12.8.1` confirmed (`nvcc` → 12.8, V12.8.93).
+5. Conda is module-gated; compute allocations auto-load `miniconda3/24.3.0-gcc-iqeknet`.
+   Moriah env must be a **prefix env** (`conda create -p ...`) under the Flash-NH project
+   root, not a named env and not under `/sci/home`.
+
+**Scripts prepared (not run):**
+- `scripts/setup_flashnh_moriah_env.sbatch` — env install on `catfish`. Leaves the
+  PyTorch CUDA wheel choice as an explicit TODO rather than guessing a wheel tag, since
+  the driver-reported CUDA (13.0) and loaded toolkit (12.8.1) differ and the actual
+  compatible wheel was not verified.
+- `scripts/run_stage1_smoke0_moriah.sbatch` — Smoke 0 on `catfish`. Chooses
+  `nh-run train --config-file ...` (upstream NH console-script entry point) as the first
+  invocation to try, with `python -m neuralhydrology.nh_run train` documented as the
+  fallback. Explicitly does **not** use `python -m neuralhydrology.training` — the
+  invocation baked into `scripts/build_stage1_nh_package.py`'s `_write_slurm` helper —
+  which is flagged as likely incorrect and unverified. Reconciling that generator
+  function is a follow-up, not done in this milestone.
+
+**Transfer procedure documented (not executed):** `scp` from h2o
+`/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/` to Moriah
+`/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/`, verified by NC file count
+(expect 5), `run_provenance.json` presence, and package size (~25 MB). No checksum
+manifest exists for this package, so file-count/manifest-presence is the practical check.
+
+**Not done:** h2o jobs, Moriah jobs, env install, package transfer, Smoke 0, 2K-G-C
+completion.
+
 ## 2026-06-30 Milestone 2K-G-B h2o validation: NH pilot package PASS
 
 Audit result: PASS — 0 errors, 5 warnings, 217 OK checks.

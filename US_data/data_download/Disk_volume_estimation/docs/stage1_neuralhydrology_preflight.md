@@ -1,13 +1,18 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-06-30 (Milestone 2K-G-B — h2o validation PASS)
+**Updated:** 2026-06-30 (Milestone 2K-G-C-A — Moriah preflight facts recorded)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
 **2K-G-B status:** COMPLETE (2026-06-30) — 5-basin pilot package built on h2o; audit PASS
 (0 errors, 5 warnings, 217 OK). Package at `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/`.
-Next: 2K-G-C — Moriah transfer + NH environment preflight + Smoke 0.
+**2K-G-C-A status:** PREFLIGHT FACTS RECORDED (2026-06-30) — Moriah login, storage, Slurm
+partitions, GPU, and conda facts confirmed via interactive reconnaissance (see §10.6). Two
+new Slurm templates prepared (`scripts/setup_flashnh_moriah_env.sbatch`,
+`scripts/run_stage1_smoke0_moriah.sbatch`). **No job has been run on Moriah. The env is not
+installed. The pilot package has not been transferred. Smoke 0 has not been attempted.**
+This is documentation/script-preparation only; 2K-G-C is not complete.
 
 ---
 
@@ -409,35 +414,20 @@ Fork protocol (when needed):
 
 #### 10.3 Moriah environment
 
-**Name:** `flashnh-moriah`
+**Name:** `flashnh-moriah` (conda **prefix env**, not a named env — see §10.6)
 **Location:** `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah/`
-**Python:** 3.11 (match h2o env for consistency)
-**Install approach (Slurm job recommended for heavy installs):**
+**Python:** 3.11 (match h2o env for consistency; 3.12 only if NH/PyTorch compatibility
+is explicitly confirmed first)
 
-```bash
-#!/usr/bin/env bash
-#SBATCH --job-name=flashnh-env-install
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=01:00:00
-#SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/env-install-%j.out
+**Install template (NOT YET RUN):** `scripts/setup_flashnh_moriah_env.sbatch`
+(repo root, prepared 2026-06-30). Uses the confirmed `catfish` partition, the confirmed
+module names (`miniconda3/24.3.0`, `nvidia/580.95.05`, `cuda/12.8.1`), and creates the
+env as a `-p` prefix env under the Flash-NH lab project root. The PyTorch CUDA wheel is
+left as an explicit TODO in the script — see §10.6 for why.
 
-source /opt/conda/etc/profile.d/conda.sh   # adjust to Moriah conda init
-conda create -y -n flashnh-moriah python=3.11 -c conda-forge
-conda activate flashnh-moriah
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118  # confirm CUDA ver
-pip install neuralhydrology
-pip install pandas pyarrow xarray netcdf4
-```
-
-**CUDA version:** confirm with `nvidia-smi` on a Moriah GPU node before installing.
-Common options: cu118 (CUDA 11.8) or cu121 (CUDA 12.1). Ask lab wiki or `sinfo --long`.
-
-**Do not run environment installation on the Moriah login node.** Submit as a Slurm job
-or use an interactive session: `sinteractive --gres=gpu:1 --mem=16G --time=01:00:00`
-(check Moriah/HURCS wiki for the exact `sinteractive` command).
+**Do not run environment installation on the Moriah login node.** A working interactive
+GPU allocation command was confirmed (§10.6); use it for any ad-hoc verification, but
+the heavy install itself should go through `sbatch scripts/setup_flashnh_moriah_env.sbatch`.
 
 #### 10.4 NH YAML config skeleton (Smoke 0)
 
@@ -488,34 +478,105 @@ save_validation_results: True
 # Do NOT set nan_handling_method here for Smoke 0; inputs are pre-cleaned
 ```
 
-#### 10.5 Slurm job script skeleton (Smoke 0)
+#### 10.5 Slurm job script (Smoke 0)
 
+**Template (NOT YET RUN):** `scripts/run_stage1_smoke0_moriah.sbatch` (repo root, prepared
+2026-06-30). Supersedes the generic skeleton previously sketched here (`--partition=gpu`,
+`python nh_run.py train`) — that invocation and partition name were placeholders and are
+no longer accurate. The new template uses:
+- Confirmed partition: `--partition=catfish --gres=gpu:l4:1` (§10.6)
+- Confirmed modules: `miniconda3/24.3.0`, `nvidia/580.95.05`, `cuda/12.8.1`
+- A preflight block (`hostname`, `nvidia-smi`, CUDA-availability check, config existence,
+  NC file count) before invoking NH
+- NH invocation: `nh-run train --config-file "$CONFIG"` (console-script entry point per
+  upstream NeuralHydrology quick-start docs), with `python -m neuralhydrology.nh_run train`
+  documented as the fallback if `nh-run` is not on `PATH`. **Neither has been run yet** —
+  this is the chosen candidate for the *first* test, not a verified-working invocation.
+  The old `python -m neuralhydrology.training` invocation (still present in
+  `scripts/build_stage1_nh_package.py`'s `_write_slurm` helper, which writes
+  `slurm/smoke0.sh`/`smoke1.sh` inside generated packages) is flagged as likely wrong and
+  should not be used as-is; reconciling that generator function is a follow-up, not done here.
+
+**Check Moriah/HURCS wiki** (`https://wiki.rcs.huji.ac.il/hurcs`) for anything not already
+confirmed in §10.6 (e.g. storage quotas on `/sci/labs/efratmorin/`).
+
+---
+
+### 10.6 Moriah reconnaissance facts (Milestone 2K-G-C-A, 2026-06-30)
+
+Recorded as **preflight facts only** — none of this implies Smoke 0 has been attempted or
+that 2K-G-C is complete. Facts gathered via interactive `ssh`/`srun` sessions on Moriah.
+
+**Login and storage:**
+- Login node: `moriah-gw-01`, user `omripo`, login home `/sci/home/omripo`
+- Lab path: `/sci/labs/efratmorin/omripo`
+- Flash-NH project root created: `/sci/labs/efratmorin/omripo/Flash-NH` with subdirs
+  `repos, envs, data, runs, logs, slurm, evidence`
+- Mounted storage: `/sci/labs`, `/sci/nosnap`, `/sci/backup`
+- `/sci/labs/efratmorin/omripo` is writable by user `omripo` / group `efratmorin_lab`
+- **Use the Flash-NH project root for all job I/O. Do not rely on `/sci/home/omripo`
+  inside Slurm jobs** (home is not guaranteed to be the job's working directory or to
+  have the same visibility/quota characteristics as lab storage).
+
+**Slurm partitions (from `sinfo`):**
+
+| Partition | GPU | GRES | Time limit | Notes |
+|---|---|---|---|---|
+| `catfish` | L4 | `gpu:l4:8` | 7 days | One idle node at check time — **used for Smoke 0** |
+| `salmon` | L40S | `gpu:l40s:8` | 7 days | Multiple idle nodes |
+| `goldfish` | H200 | `gpu:h200:8` | — | — |
+| `dogfish` | A100 | `gpu:a100:8` | — | Drained at check time |
+| `glacier` | CPU | none | — | Default partition, no GRES |
+
+**Working interactive allocation command (confirmed):**
 ```bash
-#!/usr/bin/env bash
-# slurm/smoke0.sh
-#SBATCH --job-name=flashnh-smoke0
-#SBATCH --partition=gpu            # confirm partition name on Moriah
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=01:00:00            # generous for 5-basin 1–2-epoch smoke with seq_length=24
-#SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.out
-#SBATCH --error=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.err
-
-source /opt/conda/etc/profile.d/conda.sh
-conda activate /sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah
-
-NH_REPO=/sci/labs/efratmorin/omripo/Flash-NH/repos/neuralhydrology
-CONFIG=/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/configs/stage1_smoke0_nh.yml
-
-python "${NH_REPO}/neuralhydrology/nh_run.py" train --config-file "${CONFIG}"
+srun --partition=catfish --gres=gpu:l4:1 --cpus-per-task=4 --mem=16G --time=00:10:00 --pty bash
 ```
 
-**Check Moriah/HURCS wiki** (`https://wiki.rcs.huji.ac.il/hurcs`) for:
-- actual GPU partition names (`sinfo -s`)
-- GPU memory per node (A100, V100, etc.)
-- per-job time limits
-- storage quotas on `/sci/labs/efratmorin/`
+**GPU-node facts (allocated node `catfish-05`):**
+- GPU: NVIDIA L4, 23034 MiB GPU memory, `CUDA_VISIBLE_DEVICES=0`
+- `nvidia-smi` is not on `PATH` until `module load nvidia/580.95.05`; after loading it
+  reports `NVIDIA-SMI 580.95.05`, Driver Version `580.95.05`, CUDA Version `13.0`
+- `module load cuda/12.8.1` tested; `nvcc --version` → CUDA compilation tools release
+  12.8, V12.8.93
+- Note the version split: driver-reported CUDA (13.0, via `nvidia-smi`) is the maximum
+  CUDA the driver supports; the loaded toolkit (`cuda/12.8.1`) is what `nvcc` and any
+  PyTorch CUDA build should target. This is why the PyTorch wheel choice in
+  `scripts/setup_flashnh_moriah_env.sbatch` is left as an explicit TODO rather than
+  guessed — confirm the actual installed wheel's CUDA build against 12.8.x at install time.
+
+**Conda facts:**
+- `conda` is not on the login-node `PATH` before module context
+- A compute allocation (e.g. the `srun` above) auto-loads miniconda
+- On `catfish-05`: `conda` resolves to
+  `/usr/local/spack/opt/spack/linux-debian12-x86_64/gcc-12.2.0/miniconda3-24.3.0-iqeknetqo7ngpr57d6gmu3dg4rzlcgk6/bin/conda`
+- `conda --version` → `24.3.0`; `conda info --base` → same prefix path
+- `module list` on that allocation shows `miniconda3/24.3.0-gcc-iqeknet`
+- **Moriah env must be a prefix env** (`conda create -p ...`) at
+  `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah` — **do not** put conda envs
+  under `/sci/home`
+
+**Transfer procedure (h2o → Moriah, documented but not yet executed):**
+```bash
+# On Moriah, after the env and directories above exist:
+scp -r omripo@h2o.es.huji.ac.il:/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/ \
+    /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/
+```
+Verification after transfer (no checksums were generated for the h2o package, so use
+file-count + manifest presence as the practical check):
+1. `find /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/time_series -name '*.nc' | wc -l`
+   → expect **5**
+2. `test -f /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/run_provenance.json`
+   → expect present
+3. `du -sh /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001` → expect ~25 MB,
+   consistent with the h2o-side package size noted in `docs/FLASHNH_CURRENT_STATE.md`
+
+**New Slurm templates prepared this milestone (not run):**
+- `scripts/setup_flashnh_moriah_env.sbatch` — env install (§10.3)
+- `scripts/run_stage1_smoke0_moriah.sbatch` — Smoke 0 (§10.5)
+
+**Explicitly not done in this milestone:** no h2o job run, no Moriah job run, env not
+installed, package not transferred, Smoke 0 not attempted, 2K-G-C not complete.
 
 ---
 
@@ -545,46 +606,57 @@ GAGES-II + derived pipeline from Milestone 2G.
 | Package builder `build_stage1_nh_package.py` | **COMPLETE** — h2o audit PASS (2026-06-30) | 2K-G-B ✓ |
 | 5-basin NH pilot package built on h2o | **PASS** (2026-06-30) | 2K-G-B ✓ |
 | Static attribute source canonical | **Pending cleanup** — staged at h2o `tmp/`, not committed | Before full package |
-| Transfer pilot package to Moriah | Not yet | 2K-G-C |
-| Moriah NH environment installed | Not yet | 2K-G-C |
+| Transfer pilot package to Moriah | Not yet — procedure documented (§10.6) | 2K-G-C |
+| Moriah NH environment installed | Not yet — template prepared, not run (§10.3) | 2K-G-C |
 | NH YAML config (Smoke 0) finalized | In package: `configs/stage1_smoke0_nh.yml` | 2K-G-B ✓ |
-| Slurm job script written | In package: `slurm/smoke0.sh` | 2K-G-B ✓ |
-| Moriah GPU partition name confirmed | Unknown — check wiki / `sinfo -s` | 2K-G-C |
-| Moriah CUDA version confirmed | Unknown — check `nvidia-smi` on GPU node | 2K-G-C |
+| Slurm job script written | `scripts/run_stage1_smoke0_moriah.sbatch` (repo root) | 2K-G-C-A ✓ |
+| Moriah GPU partition name confirmed | **`catfish` (L4, `gpu:l4:8`, 7-day limit)** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
+| Moriah CUDA version confirmed | **Driver 580.95.05 / CUDA 13.0 (`nvidia-smi`); toolkit `cuda/12.8.1` (`nvcc`)** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
+| Moriah conda env strategy confirmed | **Prefix env at `envs/flashnh-moriah` via `miniconda3/24.3.0`** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 
 Full 2,752-basin NH package generation waits for: (1) corrected full forcing rebuild PASS;
-(2) attribute-source cleanup. Pilot package and Moriah Smoke 0 are unblocked.
+(2) attribute-source cleanup. Pilot package and Moriah Smoke 0 are unblocked, but **no
+Moriah job has been run** — env install and Smoke 0 are still pending execution.
 
 ---
 
 ### 13. Next concrete actions (2K-G-C)
 
-2K-G-B is complete. Remaining steps to Smoke 0:
+2K-G-B is complete. 2K-G-C-A (this milestone) recorded the Moriah facts below as preflight
+documentation and prepared two Slurm templates — neither has been run. Remaining steps to
+Smoke 0:
 
 1. **Transfer pilot package to Moriah** (~25 MB; `scp` is sufficient):
    ```bash
    scp -r omripo@h2o.es.huji.ac.il:/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/ \
        /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/
    ```
-   Or push from h2o. Verify file count on Moriah after transfer.
+   Or push from h2o. Verify file count + `run_provenance.json` presence on Moriah after
+   transfer (see §10.6 for the exact verification commands).
 
-2. **Confirm Moriah GPU partition name and CUDA version.**
-   On a GPU node (via `sinteractive --gres=gpu:1`): `sinfo -s`, `nvidia-smi`.
-   Update `slurm/smoke0.sh` partition and PyTorch CUDA index URL before env install.
+2. **Install `flashnh-moriah` conda env on Moriah:**
+   ```bash
+   sbatch scripts/setup_flashnh_moriah_env.sbatch
+   ```
+   Confirm the PyTorch CUDA wheel choice (left as a TODO in the script — see §10.6 for
+   why) before this is run for real. Verify:
+   `python -c "import torch; print(torch.cuda.is_available())"` → `True`.
 
-3. **Install `flashnh-moriah` conda env on Moriah** (Slurm job or `sinteractive`).
-   Verify: `python -c "import torch; print(torch.cuda.is_available())"` → `True`.
-
-4. **Run Smoke 0** (Slurm: `sbatch slurm/smoke0.sh`; seq_length=24, 2 epochs, 5 basins).
+3. **Run Smoke 0:**
+   ```bash
+   sbatch scripts/run_stage1_smoke0_moriah.sbatch
+   ```
    Pass criteria: NH loads, training loss is finite after epoch 1, Slurm exit 0.
+   The NH invocation (`nh-run train --config-file ...`) has not been verified to work —
+   confirm it during this run; fall back to `python -m neuralhydrology.nh_run train` if
+   `nh-run` is not on `PATH` after activation.
 
-5. **(Parallel)** Monitor corrected full-period rebuild on h2o.
+4. **(Parallel)** Monitor corrected full-period rebuild on h2o.
    Resolve attribute-source provenance before full 2,752-basin package generation.
-   Pass criteria: finite loss after epoch 1, checkpoint written, Slurm exit 0.
 
-7. **Run Smoke 1** (`seq_length: 72` or `168`; add 5 RTMA vars; verify `rtma_2d_K` non-null).
+5. **Run Smoke 1** (`seq_length: 72` or `168`; add 5 RTMA vars; verify `rtma_2d_K` non-null).
 
-8. **After corrected full rebuild PASS:** extend package builder to all 2,752 basins
+6. **After corrected full rebuild PASS:** extend package builder to all 2,752 basins
    for full-scale NH package generation.
 
 ---
