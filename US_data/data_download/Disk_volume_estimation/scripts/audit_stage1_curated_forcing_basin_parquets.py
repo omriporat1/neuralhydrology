@@ -34,7 +34,7 @@ import pandas as pd
 _CURATED_RTMA_COLS: list[str] = [
     "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg", "rtma_sp_Pa",
     "rtma_10u_ms", "rtma_10v_ms", "rtma_tcc_pct", "rtma_vis_m",
-    "rtma_gust_ms", "rtma_weasd_kgm2", "rtma_ceil_m",
+    "rtma_gust_ms", "rtma_ceil_m",
 ]
 _CURATED_DATA_COLS: list[str] = ["mrms_qpe_1h_mm"] + _CURATED_RTMA_COLS
 _CURATED_FLAG_COLS: list[str] = ["mrms_qpe_1h_mm_gap", "rtma_gap"]
@@ -44,6 +44,8 @@ _FORBIDDEN_COLS:    set[str]  = {
     "rtma_10wdir", "rtma_10wdir_deg", "rtma_orog", "rtma_orog_m",
     # source short names if they somehow leaked through
     "10wdir", "orog",
+    # removed from v001 schema: weasd absent from all 63 months (2K-F-C-B)
+    "rtma_weasd_kgm2",
 }
 
 # Known RTMA gap timestamps — same for single-month and full-period audits
@@ -344,6 +346,30 @@ def check_basin_parquet(
             synced = int((df["mrms_qpe_1h_mm_gap"] & df["rtma_gap"]).sum())
             ok &= _check(f"{staid} no synchronized MRMS+RTMA gaps",
                          synced == 0, f"{synced} synchronized gap hours" if synced else "")
+
+    # Non-null coverage checks
+    # Full-period mode: exact expected counts (gaps → NaN → known non-null count)
+    # Other modes: at-least-one-non-null guard against silent all-NaN mapping bugs
+    if expected_mrms_gaps is not None and expected_rtma_gaps is not None:
+        exp_mrms_nn = n_expected - expected_mrms_gaps
+        exp_rtma_nn = n_expected - expected_rtma_gaps
+        if "mrms_qpe_1h_mm" in df.columns:
+            actual_nn = int(df["mrms_qpe_1h_mm"].notna().sum())
+            ok &= _check(f"{staid} mrms_qpe_1h_mm non-null count",
+                         actual_nn == exp_mrms_nn,
+                         f"got {actual_nn}, expected {exp_mrms_nn}" if actual_nn != exp_mrms_nn else "")
+        for col in _CURATED_RTMA_COLS:
+            if col in df.columns:
+                actual_nn = int(df[col].notna().sum())
+                ok &= _check(f"{staid} {col} non-null count",
+                             actual_nn == exp_rtma_nn,
+                             f"got {actual_nn}, expected {exp_rtma_nn}" if actual_nn != exp_rtma_nn else "")
+    else:
+        for col in _CURATED_DATA_COLS:
+            if col in df.columns:
+                all_nan = df[col].isna().all()
+                ok &= _check(f"{staid} {col} not all-NaN", not all_nan,
+                             "all values NaN — likely a source mapping error" if all_nan else "")
 
     return ok
 

@@ -38,25 +38,25 @@ _RTMA_PRODUCT_ID = "rtma_conus_aws_2p5km"
 # to curated column name.  Includes both known alias spellings.
 _RTMA_SRC_TO_CURATED: dict[str, str] = {
     "2t":    "rtma_2t_K",
-    "d2m":   "rtma_2d_K",
-    "sh2":   "rtma_2sh_kgkg",    # primary name observed in production
-    "2sh":   "rtma_2sh_kgkg",    # alternate name (same variable)
+    "2d":    "rtma_2d_K",         # source var is "2d" (dewpoint 2m), not "d2m"
+    "sh2":   "rtma_2sh_kgkg",     # primary name observed in production
+    "2sh":   "rtma_2sh_kgkg",     # alternate name (same variable)
     "sp":    "rtma_sp_Pa",
     "10u":   "rtma_10u_ms",
     "10v":   "rtma_10v_ms",
     "tcc":   "rtma_tcc_pct",
     "vis":   "rtma_vis_m",
-    "gust":  "rtma_gust_ms",     # primary name
-    "i10fg": "rtma_gust_ms",     # alternate name (wind gust)
-    "weasd": "rtma_weasd_kgm2",
+    "gust":  "rtma_gust_ms",      # primary name
+    "i10fg": "rtma_gust_ms",      # alternate name (wind gust)
     "ceil":  "rtma_ceil_m",
+    # "weasd" removed: absent from all 63 months; no RTMA precip in source chunks
 }
 
-# Curated RTMA value column names in canonical order (11 variables)
+# Curated RTMA value column names in canonical order (10 variables)
 _CURATED_RTMA_COLS: list[str] = [
     "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg", "rtma_sp_Pa",
     "rtma_10u_ms", "rtma_10v_ms", "rtma_tcc_pct", "rtma_vis_m",
-    "rtma_gust_ms", "rtma_weasd_kgm2", "rtma_ceil_m",
+    "rtma_gust_ms", "rtma_ceil_m",
 ]
 
 # Full ordered column list for per-basin Parquet (excluding index)

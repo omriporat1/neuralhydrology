@@ -1,9 +1,9 @@
 # Stage 1 — Curated Forcing Product v001 Design
 
 **Created:** 2026-06-28  
-**Updated:** 2026-06-29 — builder, auditor, and launcher implemented; smoke PASS (Milestone 2K-F-B).  
-**Milestone:** 2K-F-A — design frozen; 2K-F-B — scripts implemented and smoke-tested.  
-**Status:** DESIGN FROZEN — implementation COMPLETE; smoke PASS (2026-06-29, h2o).  
+**Updated:** 2026-06-30 — schema corrected: dewpoint mapping fixed (`2d`), `rtma_weasd_kgm2` removed (Milestone 2K-F-C-B).  
+**Milestone:** 2K-F-A — design frozen; 2K-F-B — scripts implemented and smoke-tested; 2K-F-C-B — schema corrected.  
+**Status:** SCHEMA CORRECTED — v001 corrected rebuild required; full-period structural build PASS (2026-06-30) superseded by schema correction.  
 **Depends on:** `docs/stage1_forcing_fullperiod_audit.md` (PASS_WITH_CAVEATS, 2026-06-24),
 `docs/stage1_forcing_fullperiod_postrun_audit_plan.md §9`, pilot visual QC PASS (2026-06-28).
 
@@ -24,8 +24,8 @@ next milestone.
 **Scope:**
 - 2,752 v001 basins (same set as `docs/stage1_target_package_builder.md`)
 - Period: 2020-10-14T00:00:00Z – 2025-12-31T23:00:00Z (45,720 hours)
-- Source products: MRMS QPE 1h Pass1 + RTMA CONUS 2.5 km (11 variables, excluding `10wdir`
-  and `orog`)
+- Source products: MRMS QPE 1h Pass1 + RTMA CONUS 2.5 km (10 variables, excluding `10wdir`,
+  `orog`, and `weasd`; dewpoint mapped from source variable `2d`, not `d2m`)
 - All known gaps preserved as NaN; no imputation; no interpolation in the raw product
 
 ---
@@ -155,7 +155,6 @@ for the full period; fewer for a smoke run).
 | `rtma_tcc_pct` | float32 | % | RTMA total cloud cover |
 | `rtma_vis_m` | float32 | m | RTMA visibility |
 | `rtma_gust_ms` | float32 | m/s | RTMA wind gust |
-| `rtma_weasd_kgm2` | float32 | kg/m² | RTMA water equivalent accumulated snow depth |
 | `rtma_ceil_m` | float32 | m | RTMA cloud ceiling |
 | `rtma_gap` | bool | — | True if this hour is a gap in any RTMA variable |
 
@@ -184,23 +183,27 @@ needed to interpret units. The MRMS variable is prefixed with `mrms_` and named
 
 ## 6. RTMA Variable Policy
 
-### 6.1 Included variables (9 dynamic + 2 diagnostic)
+### 6.1 Included variables (8 dynamic + 2 diagnostic)
 
-Confirmed present in all 63 months of the audit (uniform schema):
+Confirmed present in all 63 months of the source inventory (uniform schema).
+Source variable names are from the `variable` column of the monthly long-format Parquets.
 
-| ECMWF short name | Description | Product column |
+| Source variable | Description | Product column |
 |---|---|---|
 | `2t` | 2m temperature | `rtma_2t_K` |
-| `d2m` | 2m dewpoint | `rtma_2d_K` |
+| `2d` | 2m dewpoint | `rtma_2d_K` |
 | `sh2` (or `2sh`) | 2m specific humidity | `rtma_2sh_kgkg` |
 | `sp` | Surface pressure | `rtma_sp_Pa` |
 | `10u` | 10m U-wind | `rtma_10u_ms` |
 | `10v` | 10m V-wind | `rtma_10v_ms` |
 | `tcc` | Total cloud cover | `rtma_tcc_pct` |
+| `gust` (or `i10fg`) | Wind gust | `rtma_gust_ms` |
 | `vis` | Visibility | `rtma_vis_m` |
-| `gust` | Wind gust | `rtma_gust_ms` |
-| `weasd` | Water equivalent accum. snow depth | `rtma_weasd_kgm2` |
 | `ceil` | Cloud ceiling | `rtma_ceil_m` |
+
+**Dewpoint mapping correction (2K-F-C-B):** The source variable name for 2m dewpoint
+is `2d`, not `d2m`. The original builder incorrectly looked for `d2m`, producing an
+all-NaN `rtma_2d_K` column. The corrected mapping is `"2d" → "rtma_2d_K"`.
 
 `vis` and `ceil` are diagnostic variables confirmed present in the RTMA CONUS 2.5 km
 product used for extraction. They are retained in v001 because they are already
@@ -209,14 +212,18 @@ meteorological context for flooding events.
 
 ### 6.2 Excluded variables (binding decision)
 
-| ECMWF short name | Reason for exclusion |
+| Source variable | Reason for exclusion |
 |---|---|
-| `10wdir` | Absent from S3 in all 63 months (`rtma_10wdir_absent=True`; confirmed in audit) |
-| `orog` | Absent from S3 in all 63 months (`rtma_orog_absent=True`; confirmed in audit) |
+| `10wdir` | Absent from S3 in all 63 months (`rtma_10wdir_absent=True`; confirmed in extraction audit) |
+| `orog` | Absent from S3 in all 63 months (`rtma_orog_absent=True`; confirmed in extraction audit) |
+| `weasd` | Absent from all 63 monthly source chunks (confirmed by post-build source inventory, 2026-06-30). RTMA precipitation (`ACPC01`) is not present in the RTMA CONUS source. Precipitation is supplied by MRMS QPE, not RTMA. |
 
-These two variables are **not present in the curated product**. No placeholder columns
-or NaN columns are added for them. If they become available in future RTMA vintages,
-they require a new product version tag (`v002`) and a fresh extraction.
+These variables are **not present in the curated product**. No placeholder or all-NaN
+columns are added. If they become available in future RTMA vintages, they require a new
+product version tag (`v002`) and a fresh extraction.
+
+**`rtma_weasd_kgm2` is schema-forbidden in v001.** The auditor treats its presence in
+any per-basin output as a FAIL (added to `_FORBIDDEN_COLS` in 2K-F-C-B).
 
 ---
 
@@ -303,10 +310,10 @@ One line per file: `<sha256>  <relative_path>`. Verifiable with `sha256sum -c`.
   "variables": [
     "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg", "rtma_sp_Pa",
     "rtma_10u_ms", "rtma_10v_ms", "rtma_tcc_pct", "rtma_vis_m",
-    "rtma_gust_ms", "rtma_weasd_kgm2", "rtma_ceil_m", "mrms_qpe_1h_mm"
+    "rtma_gust_ms", "rtma_ceil_m", "mrms_qpe_1h_mm"
   ],
   "gap_flag_columns": ["mrms_qpe_1h_mm_gap", "rtma_gap"],
-  "excluded_variables": ["10wdir", "orog"],
+  "excluded_variables": ["10wdir", "orog", "weasd"],
   "gap_policy": "raw_preserve_nan_no_interpolation",
   "smoke_build": false
 }
@@ -352,11 +359,11 @@ The builder is accompanied by an auditor script
 
 | Script | Purpose | Status |
 |---|---|---|
-| `scripts/build_stage1_curated_forcing_basin_parquets.py` | Single-month smoke builder | **Implemented — smoke PASS (2026-06-29, commit `6f4de49`)** |
-| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | Auditor (single-month + full-period) | **Implemented — smoke PASS; full-period mode added (2K-F-C-A)** |
+| `scripts/build_stage1_curated_forcing_basin_parquets.py` | Single-month smoke builder | **Schema corrected (2K-F-C-B, 2026-06-30): `2d` mapping, `weasd` removed** |
+| `scripts/audit_stage1_curated_forcing_basin_parquets.py` | Auditor (single-month + full-period) | **Schema corrected (2K-F-C-B): `weasd` forbidden, non-null checks added** |
 | `scripts/run_stage1_curated_forcing_smoke_h2o.sh` | Smoke launcher (h2o) | **Implemented — smoke launcher used for 2K-F-B** |
-| `scripts/build_stage1_curated_forcing_fullperiod.py` | Full-period builder (63 months) | **Implemented — pending h2o dry-run (2K-F-C-A)** |
-| `scripts/run_stage1_curated_forcing_fullperiod_h2o.sh` | Full-period launcher (h2o) | **Implemented — pending h2o dry-run (2K-F-C-A)** |
+| `scripts/build_stage1_curated_forcing_fullperiod.py` | Full-period builder (63 months) | **Schema corrected (2K-F-C-B): `2d` mapping, `weasd` removed; corrected 5-basin pilot pending** |
+| `scripts/run_stage1_curated_forcing_fullperiod_h2o.sh` | Full-period launcher (h2o) | **Implemented — corrected 5-basin bounded pilot pending on h2o** |
 
 Script names use the `_curated_forcing_basin_parquets` infix (single-month) and
 `_curated_forcing_fullperiod` (full-period) to distinguish them from the earlier
@@ -406,11 +413,11 @@ here to avoid coupling the design doc to a specific run.
 |---|---|
 | Files written | 5 Parquets, `manifest.json`, `checksums.sha256`, `dataset_config.json` |
 | Rows per basin | 720 (Nov has 720 hours) |
-| Column set | Exactly the 14 columns from §5.2 (12 variables + 2 gap flags) |
+| Column set | Exactly the 13 columns from §5.2 (11 variables + 2 gap flags) |
 | `valid_time_utc` | Contiguous hourly index, 2020-11-01T00Z to 2020-11-30T23Z, UTC-aware |
 | RTMA gap flags | `rtma_gap=True` for T09Z and T10Z on 2020-11-12, for all 5 basins |
 | MRMS gap flags | `mrms_qpe_1h_mm_gap=False` for all rows (no MRMS gaps in Nov 2020) |
-| NaN consistency | NaN in `rtma_2t_K` (and all RTMA cols) for the 2 gap rows |
+| NaN consistency | NaN in `rtma_2t_K` (and all 10 RTMA cols) for the 2 gap rows; `rtma_2d_K` non-null elsewhere |
 | SHA-256 | `manifest.json` `sha256` matches computed hash of each Parquet |
 | Auditor result | `audit_pass=True`; 0 errors; expected gap counts confirmed |
 
@@ -498,5 +505,7 @@ The following are explicitly out of scope for v001 and this milestone:
 
 *Design frozen in Milestone 2K-F-A (2026-06-28). Smoke builder/auditor/launcher implemented (2K-F-B, 2026-06-29).*
 *Full-period builder, extended auditor, and full-period launcher implemented (2K-F-C-A, 2026-06-29).*
-*Next step: h2o dry-run with `--dry-run` flag, then full 2,752-basin build after user authorization.*
+*Schema correction (2K-F-C-B, 2026-06-30): dewpoint mapping `d2m`→`2d` fixed; `rtma_weasd_kgm2` removed.*
+*Full-period structural build structurally PASS (2026-06-30, 2,752 basins, 45,720 h) but schema-superseded.*
+*Next h2o action: corrected 5-basin full-period pilot (`--max-basins 5 --overwrite`), then full rebuild authorization.*
 *All generated outputs remain under `tmp/` and must not be committed.*

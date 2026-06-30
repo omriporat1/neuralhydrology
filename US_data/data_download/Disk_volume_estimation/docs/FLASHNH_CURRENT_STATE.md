@@ -1,8 +1,37 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-29 (2K-F-B COMPLETE)
+Last updated: 2026-06-30 (2K-F-C-B — schema correction)
 
 ## Current milestone
+
+**Milestone 2K-F-C-B IN PROGRESS (2026-06-30): Curated forcing schema/mapping correction.**
+
+Full-period build structurally PASS on h2o (2026-06-30, 2,752 basins, 45,720 h, 14.49 h wall),
+but post-build non-null check found two all-NaN variables. Build is **schema-superseded**;
+corrected rebuild required before final certification.
+
+**Schema issues found and corrected in code:**
+- `rtma_2d_K` (dewpoint): all-NaN because builder mapped source `d2m` → `rtma_2d_K`, but
+  actual source variable is `2d`. Fixed: `"2d" → "rtma_2d_K"` in both builders.
+- `rtma_weasd_kgm2`: all-NaN because `weasd` is absent from all 63 monthly source chunks.
+  RTMA precipitation (`ACPC01`) is not present. Removed from schema entirely.
+- `rtma_2d_K` is **retained** (source `2d` confirmed present in all sampled months with
+  `variable_standard_name=dewpoint_temperature_2m`).
+
+**Corrected v001 schema:** 1 MRMS variable + 10 RTMA variables + 2 gap flags = 13 columns.
+
+**Full-period structural build evidence (schema-superseded, not committed):**
+- Period: 2020-10-14T00Z – 2025-12-31T23Z
+- 63/63 months, 2,752 basins, 45,720 rows/basin, 374,272 MRMS gap-hrs, 5,504 RTMA gap-hrs
+- Full-period audit: PASS (structural); wall time 14.49 h; commit at run `addfdd2`
+- Note: accidental second launch was stopped early; post-interruption audit PASS confirmed
+  product not corrupted. `build.log` may contain aborted-rerun lines after first PASS.
+- Evidence under `tmp/stage1_curated_forcing_v001_schema_issue_evidence/` (not committed)
+
+**Next h2o action:** corrected 5-basin full-period pilot, then full rebuild authorization.
+**Design doc:** `docs/stage1_curated_forcing_product_v001_design.md`
+
+---
 
 **Milestone 2K-F-B COMPLETE (2026-06-29): Curated forcing product v001 builder + smoke test — PASS.**
 
@@ -15,9 +44,6 @@ Builder (`build_stage1_curated_forcing_basin_parquets.py`), auditor
 - Auditor exit 0; SHA-256 checksums verified; commit at run `6f4de498`
 - Note: `02231000` attempted but absent from 2020-11 source; builder correctly halted; not a failure
 - h2o output: `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z`
-**Design doc:** `docs/stage1_curated_forcing_product_v001_design.md`
-
-**Next step:** Milestone 2K-F-C — full 2,752-basin curated forcing build on h2o (not yet authorized).
 
 ---
 
@@ -395,9 +421,10 @@ forcing data and package assembly on h2o before any Moriah transfer.
 7. ~~**Curated forcing product v001 — builder + smoke test (Milestone 2K-F-B)**~~ — **COMPLETE (2026-06-29): PASS.**
    5/5 basins, 720 h, 0 MRMS gaps, 10 RTMA gap-hours (coverage 0.9972). Scripts: commit `6f4de49`.
    h2o output: `/data42/omrip/Flash-NH/tmp/stage1_curated_forcing_smoke_20260629T132757Z/`.
-8. **Curated forcing product v001 — full 2,752-basin build on h2o (Milestone 2K-F-C)** — run builder across all
-   basins and months; verify checksums; produce audited product under
-   `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001/`.
+8. **Curated forcing product v001 — corrected schema build (Milestone 2K-F-C)** — schema
+   corrected in 2K-F-C-B (2026-06-30): dewpoint mapping fixed, `rtma_weasd_kgm2` removed.
+   Next: corrected 5-basin full-period pilot on h2o (`--max-basins 5 --overwrite`), then
+   full 2,752-basin rebuild authorization. Full rebuild NOT yet authorized.
 9. **Full NeuralHydrology package assembly on h2o** — combine v001 streamflow targets,
    basin-average forcings, static attributes, and train/val/test splits into an audited
    NH-compatible package.

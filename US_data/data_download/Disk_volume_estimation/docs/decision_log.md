@@ -2,6 +2,50 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-06-30 Milestone 2K-F-C-B: Curated Forcing v001 Schema/Mapping Correction
+
+Full-period build (2,752 basins × 45,720 h) structurally passed on h2o (2026-06-30,
+commit `addfdd2`, 14.49 h wall). Post-build non-null check found two all-NaN variables,
+triggering a schema correction before certification.
+
+**Schema findings:**
+
+| Variable | Non-null (5 sampled basins) | Decision |
+|---|---|---|
+| `rtma_2d_K` | 0 / 45,720 | **Retain** — mapping bug fixed (`d2m`→`2d`) |
+| `rtma_weasd_kgm2` | 0 / 45,720 | **Remove** — `weasd` absent from all 63 source months |
+| `rtma_2t_K` | 45,718 / 45,720 | Retain (normal) |
+| `rtma_sp_Pa` | 45,718 / 45,720 | Retain (normal) |
+
+**Decisions (all binding for v001):**
+
+1. **Dewpoint retained, mapping corrected.** Source variable is `2d` (`dewpoint_temperature_2m`),
+   not `d2m`. Confirmed present with `recommended_for_initial_model=True` in all 5 sampled months.
+   Both builders updated: `"2d" → "rtma_2d_K"`.
+
+2. **`rtma_weasd_kgm2` removed from v001 schema.** `weasd` is absent from all 63 monthly
+   source chunks. RTMA precipitation (`ACPC01`) is not present in the RTMA CONUS source.
+   Precipitation is supplied by MRMS QPE; no RTMA precip column is added. `rtma_weasd_kgm2`
+   is now in `_FORBIDDEN_COLS` in the auditor — its presence in output is a FAIL.
+
+3. **Full-period structural build is schema-superseded, not failed.** Gap counts (136 MRMS,
+   2 RTMA per basin), row counts (45,720), and checksums were correct. The product correctly
+   reflects the source data; the errors were a missing dewpoint (now fixed) and a spurious
+   NaN column (now removed). A corrected 5-basin full-period pilot on h2o is required before
+   the full 2,752-basin rebuild is authorized.
+
+4. **Auditor non-null coverage checks added.** Full-period mode now verifies exact non-null
+   counts: `mrms_qpe_1h_mm` → 45,584; each RTMA var → 45,718. Single-month mode: not-all-NaN
+   guard for all data variables.
+
+5. **`build.log` caveat.** An accidental second launch was stopped early after the first PASS.
+   Post-interruption full-period audit PASS confirmed the product was not corrupted. `build.log`
+   may contain aborted-rerun lines after the first complete PASS block.
+
+**Corrected v001 schema:** 1 MRMS + 10 RTMA + 2 gap flags = 13 columns total (was 14).
+
+**Evidence:** `tmp/stage1_curated_forcing_v001_schema_issue_evidence/` (not committed).
+
 ## 2026-05-06
 
 - Confirmed GFS `.idx` byte-range extraction end-to-end; the acquisition path is validated and frozen except for plotting.

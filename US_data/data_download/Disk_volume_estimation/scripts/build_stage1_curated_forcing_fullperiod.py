@@ -51,7 +51,7 @@ _RTMA_PRODUCT_ID = "rtma_conus_aws_2p5km"
 
 _RTMA_SRC_TO_CURATED: dict[str, str] = {
     "2t":    "rtma_2t_K",
-    "d2m":   "rtma_2d_K",
+    "2d":    "rtma_2d_K",       # source var is "2d" (dewpoint 2m), not "d2m"
     "sh2":   "rtma_2sh_kgkg",
     "2sh":   "rtma_2sh_kgkg",
     "sp":    "rtma_sp_Pa",
@@ -61,14 +61,14 @@ _RTMA_SRC_TO_CURATED: dict[str, str] = {
     "vis":   "rtma_vis_m",
     "gust":  "rtma_gust_ms",
     "i10fg": "rtma_gust_ms",
-    "weasd": "rtma_weasd_kgm2",
     "ceil":  "rtma_ceil_m",
+    # "weasd" removed: absent from all 63 months; no RTMA precip in source chunks
 }
 
 _CURATED_RTMA_COLS: list[str] = [
     "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg", "rtma_sp_Pa",
     "rtma_10u_ms", "rtma_10v_ms", "rtma_tcc_pct", "rtma_vis_m",
-    "rtma_gust_ms", "rtma_weasd_kgm2", "rtma_ceil_m",
+    "rtma_gust_ms", "rtma_ceil_m",
 ]
 
 _CURATED_COLS: list[str] = (
