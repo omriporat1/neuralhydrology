@@ -8,10 +8,12 @@
 #SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.out
 #SBATCH --error=/sci/labs/efratmorin/omripo/Flash-NH/logs/smoke0-%j.err
 #
-# 2K-G-C-A preflight template — NOT YET RUN.
-# Runs Smoke 0 (rain-only plumbing test) against the NH pilot package once it has
-# been transferred to Moriah and the flashnh-moriah env has been installed.
-# Do not submit until both of those steps are confirmed done.
+# Smoke 0 — ready to submit as of 2026-07-01.
+# Pre-conditions confirmed:
+#   - flashnh-moriah env installed (job 45365952 PASS; nh-run at envs/flashnh-moriah/bin/nh-run)
+#   - pilot package transferred: /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001
+#     (5 NCs, run_provenance.json, configs/stage1_smoke0_nh.yml, attributes.csv, 19 MB)
+# Module fixes from env-install job applied here too (same non-interactive shell issue).
 
 set -euo pipefail
 
@@ -22,7 +24,20 @@ CONFIG="${DATA}/configs/stage1_smoke0_nh.yml"
 
 cd "${FLASHNH_BASE}"
 
-module load miniconda3/24.3.0
+# Initialize module system for non-interactive Slurm shells (same fix as env-install job).
+if ! type module &>/dev/null; then
+    for _modinit in \
+        /etc/profile.d/modules.sh \
+        /usr/share/lmod/lmod/init/bash \
+        /etc/profile.d/lmod.sh
+    do
+        [ -f "${_modinit}" ] && { source "${_modinit}"; break; }
+    done
+    unset _modinit
+fi
+
+module load spack/all
+module load miniconda3/24.3.0-gcc-iqeknet
 module load nvidia/580.95.05
 module load cuda/12.8.1
 
@@ -38,22 +53,11 @@ test -f "${CONFIG}" && echo "config OK: ${CONFIG}" || { echo "MISSING config: ${
 echo "NC files in package: $(find "${DATA}/time_series" -name '*.nc' | wc -l)"
 
 echo "=== run Smoke 0 ==="
-# NH invocation — NOT YET VERIFIED on Moriah (env has not been installed/tested).
-# Candidate A (primary choice for the first test): console-script entry point,
-# installed automatically by `pip install neuralhydrology` per upstream docs
-# (https://neuralhydrology.readthedocs.io quick-start: `nh-run train --config-file ...`).
-#   nh-run train --config-file "${CONFIG}"
-#
-# Candidate B (fallback if `nh-run` is not on PATH after activation):
+# nh-run confirmed present after env install (job 45365952):
+#   /sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah/bin/nh-run
+#   nh-run --help prints valid usage with train/continue_training/finetune/evaluate.
+# Fallback if nh-run is somehow not on PATH after activation:
 #   python -m neuralhydrology.nh_run train --config-file "${CONFIG}"
-#
-# Do NOT use `python -m neuralhydrology.training` — this was the previously
-# generated invocation (scripts/build_stage1_nh_package.py _write_slurm) and is
-# unverified/likely wrong; neuralhydrology.training is not documented as a CLI
-# entry module upstream.
-#
-# Chosen for first test: Candidate A. Fall back to Candidate B only if `nh-run`
-# is confirmed absent after env install.
 nh-run train --config-file "${CONFIG}"
 
 echo "=== done ==="

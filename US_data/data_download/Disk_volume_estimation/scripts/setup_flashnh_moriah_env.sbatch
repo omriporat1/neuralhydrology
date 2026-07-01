@@ -8,10 +8,11 @@
 #SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/env-install-%j.out
 #SBATCH --error=/sci/labs/efratmorin/omripo/Flash-NH/logs/env-install-%j.err
 #
-# 2K-G-C-A preflight template — NOT YET RUN.
-# Installs the flashnh-moriah conda prefix env on a Moriah catfish (L4 GPU) node.
-# Facts below (modules, paths, partition) were confirmed via interactive `srun`
-# reconnaissance on 2026-06-30; the env install itself has not been executed.
+# 2K-G-C-A — Moriah env install. Slurm job 45365952 PASS (2026-07-01).
+# Module fixes applied after initial failure in non-interactive sbatch:
+#   1. module system must be initialized before any `module load` call
+#   2. spack/all must be loaded before miniconda3
+#   3. exact module name is miniconda3/24.3.0-gcc-iqeknet (not miniconda3/24.3.0)
 
 set -euo pipefail
 
@@ -24,11 +25,23 @@ cd "${FLASHNH_BASE}"
 echo "=== preflight ==="
 hostname
 
-# Modules confirmed present on a catfish-05 GPU allocation (2026-06-30):
-#   module avail showed: miniconda3/24.3.0-gcc-iqeknet
-#   nvidia-smi requires:  module load nvidia/580.95.05
-#   nvcc requires:        module load cuda/12.8.1
-module load miniconda3/24.3.0
+# Initialize module system for non-interactive Slurm shells (module not in PATH by default).
+# Tries common Lmod/modules init paths; the first one found is sourced.
+if ! type module &>/dev/null; then
+    for _modinit in \
+        /etc/profile.d/modules.sh \
+        /usr/share/lmod/lmod/init/bash \
+        /etc/profile.d/lmod.sh
+    do
+        [ -f "${_modinit}" ] && { source "${_modinit}"; break; }
+    done
+    unset _modinit
+fi
+
+# spack/all must be loaded first so that Spack-managed modules (miniconda3, nvidia, cuda)
+# become visible. Exact module names confirmed on catfish-05 (2026-06-30/07-01).
+module load spack/all
+module load miniconda3/24.3.0-gcc-iqeknet
 module load nvidia/580.95.05
 module load cuda/12.8.1
 

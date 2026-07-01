@@ -2,6 +2,74 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-01 Moriah env install PASS + pilot package transfer PASS
+
+**Decision:** Accept Moriah env install (Slurm job `45365952`) and pilot package transfer
+as PASS. Both are confirmed done. Smoke 0 is the next step (not done yet; 2K-G-C not yet
+complete). Generated evidence (logs) remain on Moriah, not committed locally.
+
+**Env install (job 45365952):**
+- Script: `scripts/setup_flashnh_moriah_env.sbatch` (after manual module fixes, see below)
+- Env prefix: `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah`
+- `nh-run` confirmed at `envs/flashnh-moriah/bin/nh-run`; `nh-run --help` lists valid modes
+  (`train`, `continue_training`, `finetune`, `evaluate`)
+- `neuralhydrology` imports OK; no `__version__` attribute (expected)
+- Log ended with `=== done ===`. Matplotlib font cache message in stderr is harmless.
+
+**Module fixes (binding for all future Moriah Slurm scripts):**
+Initial sbatch run failed because `module` is not in PATH in non-interactive Slurm shells,
+and `miniconda3` requires `spack/all` to be loaded first. Three corrections applied:
+1. Source a module-system init file at job start if `module` is not already in scope.
+2. `module load spack/all` before any other module.
+3. Use exact module name `miniconda3/24.3.0-gcc-iqeknet` (not `miniconda3/24.3.0`).
+Both `scripts/setup_flashnh_moriah_env.sbatch` and `scripts/run_stage1_smoke0_moriah.sbatch`
+updated in this commit.
+
+**Pilot package transfer (h2o → Moriah):**
+- Source: `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/`
+- Destination: `/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001`
+- Verified: 5 NC files under `time_series/`, `run_provenance.json` present,
+  `configs/stage1_smoke0_nh.yml` present, `attributes.csv` present, size 19 MB.
+
+## 2026-07-01 Milestone 2K-F-C: Corrected full-period curated forcing v001 PASS
+
+**Decision:** Accept the corrected full-period curated forcing product v001 rebuild as PASS.
+This closes the 2K-F-C-B schema correction loop and unblocks full 2,752-basin NH package
+generation (pending Smoke 0 PASS and attribute-source cleanup — see separate gates).
+
+**Build facts (from evidence bundle, locally at `tmp/stage1_curated_forcing_v001_corrected_fullperiod_evidence/`):**
+- Product: `stage1_basin_hourly_forcings_v001`
+- h2o location: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001`
+- Period: 2020-10-14T00:00:00Z – 2025-12-31T23:00:00Z
+- Months processed: 63 / 63; basins built: 2,752 / 2,752; 0 failed
+- Rows per basin: 45,720 (full period)
+- Total MRMS gap-hours: 374,272 (= 136 × 2,752 — exact match)
+- Total RTMA gap-hours: 5,504 (= 2 × 2,752 — exact match)
+- Wall time: 51,932.6 s (14.43 h)
+- Run start: 2026-06-30T10:08:53Z; run end: 2026-07-01T00:34:26Z
+- Repo commit at run: `5f07d4b`
+
+**Audit result (full-period mode): PASS**
+- 2,752 / 2,752 basins checked; 45,720 rows per basin
+- MRMS gap-hours/basin = 136 ✓; RTMA gap-hours/basin = 2 ✓
+- Known RTMA gap timestamps: 2020-11-12T09Z and T10Z ✓
+
+**Sample20 diagnostic: ALL PASS**
+- 20 Parquets spot-checked; each 45,720 rows
+- `mrms_qpe_1h_mm` non-null = 45,584 (= 45,720 − 136 MRMS gaps) ✓
+- All RTMA variables non-null = 45,718 (= 45,720 − 2 RTMA gaps) ✓
+- `rtma_2d_K` populated ✓ (confirms 2K-F-C-B dewpoint mapping fix)
+- `rtma_weasd_kgm2` absent ✓ (confirms 2K-F-C-B schema removal)
+
+**Generated evidence (not committed):**
+- `tmp/stage1_curated_forcing_v001_corrected_fullperiod_evidence/` (local archive)
+- Includes `build_summary.md`, `audit_summary.md`, `run_provenance.json`, `manifest.json`,
+  `checksums.sha256`, `dataset_config.json`, `build.log`
+
+**What this unblocks:** Full 2,752-basin NH package generation now has a valid corrected
+forcing library input. Remaining gates before full NH package: (1) Smoke 0 PASS;
+(2) attribute-source cleanup (staged `all_basins_merged.parquet` not committed).
+
 ## 2026-06-30 Milestone 2K-G-C-A: Moriah GPU/Conda/Slurm preflight facts recorded
 
 **Decision:** Record real Moriah/HURCS facts gathered via interactive `ssh`/`srun`

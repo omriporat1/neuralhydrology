@@ -1,46 +1,70 @@
 # Flash-NH Current State
 
-Last updated: 2026-06-30 (2K-G-C-A — Moriah preflight facts recorded)
+Last updated: 2026-07-01 (Moriah env install PASS + corrected forcing v001 PASS)
 
 ## Current milestone
 
-**Milestone 2K-G-C-A PREFLIGHT FACTS RECORDED (2026-06-30): Moriah GPU/Conda/Slurm
-reconnaissance + two new Slurm templates.**
+**Milestone 2K-G-C — Smoke 0 PENDING (next step after 2026-07-01 closures).**
 
-This is documentation and script preparation only. **No job has been run on Moriah, the
-flashnh-moriah env is not installed, the pilot package has not been transferred, and
-Smoke 0 has not been attempted.** 2K-G-C is not complete — only this preflight sub-step.
+Pre-conditions completed 2026-07-01:
+- Moriah `flashnh-moriah` env installed (Slurm job `45365952` PASS)
+- Pilot NH package transferred to Moriah (5 NCs, 19 MB, all manifests present)
+- Corrected full-period curated forcing v001 built on h2o (PASS — see below)
 
-**Facts confirmed via interactive `ssh`/`srun` reconnaissance:**
-- Login node `moriah-gw-01`; project root `/sci/labs/efratmorin/omripo/Flash-NH`
-  (`repos, envs, data, runs, logs, slurm, evidence`). Do not rely on `/sci/home/omripo`
-  inside Slurm jobs.
-- Slurm partitions (`sinfo`): `catfish` (L4, `gpu:l4:8`, 7-day limit — **chosen for
-  Smoke 0**), `salmon` (L40S), `goldfish` (H200), `dogfish` (A100, drained), `glacier`
-  (CPU default).
-- Interactive allocation confirmed working:
-  `srun --partition=catfish --gres=gpu:l4:1 --cpus-per-task=4 --mem=16G --time=00:10:00 --pty bash`.
-- GPU node `catfish-05`: L4, 23034 MiB; `nvidia-smi` needs `module load nvidia/580.95.05`
-  (driver 580.95.05, CUDA 13.0); `module load cuda/12.8.1` confirmed (`nvcc` → 12.8.93).
-- Conda is module-gated (`miniconda3/24.3.0-gcc-iqeknet`); Moriah env must be a **prefix
-  env** under the Flash-NH project root, not a named env, not under `/sci/home`.
+**Ready to submit:** `sbatch scripts/run_stage1_smoke0_moriah.sbatch` (after `git pull` on Moriah).
+Not yet submitted. 2K-G-C is not complete.
 
-**New templates prepared (not run):**
-- `scripts/setup_flashnh_moriah_env.sbatch` — env install; PyTorch CUDA wheel left as an
-  explicit TODO (driver CUDA 13.0 vs. toolkit 12.8.1 — exact compatible wheel unverified).
-- `scripts/run_stage1_smoke0_moriah.sbatch` — Smoke 0; chooses `nh-run train
-  --config-file ...` as the first invocation to try (upstream NH console-script entry
-  point), with `python -m neuralhydrology.nh_run train` as documented fallback.
-  Explicitly avoids the unverified `python -m neuralhydrology.training` invocation still
-  present in `scripts/build_stage1_nh_package.py`'s `_write_slurm` helper.
+---
 
-**Transfer procedure documented (not executed):** `scp` h2o
-`/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/` → Moriah
-`/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/`; verify via NC file count
-(5), `run_provenance.json` presence, package size (~25 MB).
+**Moriah env install PASS (2026-07-01): Slurm job `45365952`.**
+
+- Env prefix: `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah`
+- `torch==2.7.0+cu128` installed; `nh-run` present at `envs/flashnh-moriah/bin/nh-run`
+- `nh-run --help` confirmed: valid modes `train`, `continue_training`, `finetune`, `evaluate`
+- `neuralhydrology` import OK (no `__version__` attribute — expected)
+- Log ended with `=== done ===`
+
+**Module fixes applied to both Moriah sbatch scripts** (initial non-interactive shell failure resolved):
+1. Source module-system init file if `module` not in PATH
+2. `module load spack/all` before any other module
+3. Exact module name `miniconda3/24.3.0-gcc-iqeknet` (not `miniconda3/24.3.0`)
+
+**Pilot package transfer to Moriah PASS (2026-07-01):**
+- Path: `/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001`
+- Verified: 5 NC files, `run_provenance.json`, `configs/stage1_smoke0_nh.yml`,
+  `attributes.csv` — all present; size 19 MB.
+
+---
+
+**Corrected full-period curated forcing v001 PASS (2026-07-01): 2,752 basins × 45,720 h.**
+
+Build facts (evidence bundle: `tmp/stage1_curated_forcing_v001_corrected_fullperiod_evidence/`):
+- h2o path: `/data42/omrip/Flash-NH/tmp/stage1_forcing_fullperiod/stage1_basin_hourly_forcings_v001`
+- 63/63 months; 2,752/2,752 basins; 45,720 rows/basin; 0 failures
+- MRMS gap-hours: 374,272 (= 136/basin × 2,752 — exact); RTMA gap-hours: 5,504 (= 2/basin × 2,752 — exact)
+- Wall time: 14.43 h (2026-06-30T10:09Z → 2026-07-01T00:34Z); repo commit at run: `5f07d4b`
+
+Audit (full-period mode): **PASS** — 2,752/2,752 basins checked; all row/gap counts exact.
+Sample20 diagnostic: **ALL PASS** — `rtma_2d_K` populated ✓; `rtma_weasd_kgm2` absent ✓.
+Generated evidence not committed (local: `tmp/stage1_curated_forcing_v001_corrected_fullperiod_evidence/`).
+
+This closes the 2K-F-C-B corrected-rebuild loop. Full 2,752-basin NH package generation
+is unblocked from the forcing side; remaining gates: Smoke 0 PASS + attribute-source cleanup.
+
+---
+
+**Milestone 2K-G-C-A COMPLETE (2026-06-30): Moriah GPU/Conda/Slurm preflight documented.**
+
+Facts confirmed via `ssh`/`srun` reconnaissance on 2026-06-30:
+- Login `moriah-gw-01`; project root `/sci/labs/efratmorin/omripo/Flash-NH`
+- Partitions: `catfish` (L4, `gpu:l4:8`, 7-day) — chosen for Smoke 0; `salmon` (L40S);
+  `goldfish` (H200); `dogfish` (A100, drained); `glacier` (CPU default)
+- GPU node `catfish-05`: NVIDIA L4, 23034 MiB; driver 580.95.05 / CUDA 13.0;
+  toolkit `cuda/12.8.1` (`nvcc` → 12.8.93)
+- Conda module-gated; prefix env pattern under Flash-NH project root confirmed
+- Two Slurm templates prepared (`setup_flashnh_moriah_env.sbatch`, `run_stage1_smoke0_moriah.sbatch`)
 
 Full detail: `docs/stage1_neuralhydrology_preflight.md` §10.6.
-Decisions: `docs/decision_log.md` (2026-06-30 Milestone 2K-G-C-A entry).
 
 ---
 
@@ -136,7 +160,7 @@ corrected rebuild required before final certification.
   product not corrupted. `build.log` may contain aborted-rerun lines after first PASS.
 - Evidence under `tmp/stage1_curated_forcing_v001_schema_issue_evidence/` (not committed)
 
-**Next h2o action:** corrected 5-basin full-period pilot, then full rebuild authorization.
+**Corrected full-period rebuild:** PASS (2026-07-01) — see current milestone block above.
 **Design doc:** `docs/stage1_curated_forcing_product_v001_design.md`
 
 ---
