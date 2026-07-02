@@ -1,7 +1,7 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-07-02 (NH 1.13 compat patch — source now generates correct configs/layout)
+**Updated:** 2026-07-02 (Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
@@ -12,8 +12,10 @@ env installed (Slurm job `45365952` PASS); pilot package transferred (5 NCs, 19 
 `nh-run` confirmed at `envs/flashnh-moriah/bin/nh-run`. Module fix applied to both sbatch
 scripts (`spack/all` + `miniconda3/24.3.0-gcc-iqeknet`).
 **NH 1.13 compat patch (2026-07-02):** Builder now emits correct configs and `attributes/`
-layout. Pilot package on Moriah is stale (pre-patch). Must regenerate → re-audit → re-transfer
-before Smoke 0. **Smoke 0 not yet submitted. 2K-G-C is not complete.**
+layout. Package regenerated on h2o; h2o audit PASS.
+**2K-G-C status: COMPLETE (2026-07-02) — Smoke 0 PASS on Moriah (Slurm job 45370683).**
+Technical plumbing pass: finite training loss both epochs; validation completed; model weights
+saved. NOT a scientific baseline. Next: Smoke 1 (meteorology forcing).
 
 ---
 
@@ -624,21 +626,21 @@ GAGES-II + derived pipeline from Milestone 2G.
 | Static attribute source canonical | **Pending cleanup** — staged at h2o `tmp/`, not committed | Before full package |
 | Transfer pilot package to Moriah | **PASS (2026-07-01)** — 5 NCs, 19 MB, verified | 2K-G-C-A ✓ |
 | Moriah NH environment installed | **PASS (2026-07-01)** — job `45365952`; `nh-run` confirmed | 2K-G-C-A ✓ |
-| NH YAML config (Smoke 0) finalized | **NH 1.13 compat patch applied (2026-07-02)** — regenerate package | 2K-G-B + patch ✓ |
-| Slurm job script written | `scripts/run_stage1_smoke0_moriah.sbatch` (repo root) | 2K-G-C-A ✓ |
+| NH YAML config (Smoke 0) finalized | **PASS** — source-built config used for Smoke 0 (job 45370683) | 2K-G-B + patch ✓ |
+| Slurm job script written | **PASS** — `scripts/run_stage1_smoke0_moriah.sbatch` ran successfully | 2K-G-C-A ✓ |
 | Moriah GPU partition name confirmed | **`catfish` (L4, `gpu:l4:8`, 7-day limit)** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 | Moriah CUDA version confirmed | **Driver 580.95.05 / CUDA 13.0 (`nvidia-smi`); toolkit `cuda/12.8.1` (`nvcc`)** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 | Moriah conda env strategy confirmed | **Prefix env at `envs/flashnh-moriah` via `miniconda3/24.3.0`** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 
-Full 2,752-basin NH package generation waits for: (1) corrected full forcing rebuild PASS (done);
-(2) attribute-source cleanup. Pilot package must be regenerated with the 2026-07-02 NH 1.13
-compat patch before Smoke 0 can succeed. The Moriah env is installed and ready.
+**Smoke 0 COMPLETE (2026-07-02).** Full 2,752-basin NH package generation waits for:
+(1) attribute-source cleanup (staged parquet not committed); (2) Smoke 1 PASS.
+Forcing v001 PASS (2026-07-01); Moriah env ready; NH package format confirmed working.
 
 ---
 
 ### 13. Next concrete actions (2K-G-C)
 
-Steps 1–2 COMPLETE (2026-07-01). NH 1.13 compat patch applied (2026-07-02). Steps 3–5 updated.
+**Steps 1–5 ALL COMPLETE (2026-07-02). Milestone 2K-G-C CLOSED. Next: Smoke 1.**
 
 1. ~~**Transfer pilot package to Moriah**~~ — **DONE (2026-07-01).** 5 NCs, 19 MB,
    all manifests verified at `/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001`.
@@ -647,41 +649,35 @@ Steps 1–2 COMPLETE (2026-07-01). NH 1.13 compat patch applied (2026-07-02). St
    PASS. `nh-run` confirmed at `envs/flashnh-moriah/bin/nh-run`. Module init + `spack/all` fix
    applied to both sbatch scripts.
 
-3. **Regenerate pilot package on h2o** (package on Moriah is pre-patch; stale):
-   ```bash
-   python scripts/build_stage1_nh_package.py \
-     --forcing-dir .../stage1_basin_hourly_forcings_v001_5basin_corrected_pilot_.../ \
-     --target-dir  .../stage1_target_package_v001/ \
-     --out-dir     .../stage1_nh_pilot_v001/ \
-     --staids 01019000,01022500,01033000,01038000,01049500 \
-     --attributes-csv .../all_basins_merged.parquet \
-     --expected-basins 5 --force
-   python scripts/audit_stage1_nh_package.py --package-dir .../stage1_nh_pilot_v001/ \
-     --expected-basins 5 --expected-rows 45720
-   ```
-   Audit must reach PASS on check [6] (Config NH 1.13 compatibility).
+3. ~~**Regenerate pilot package on h2o**~~ — **DONE (2026-07-02).** NH 1.13 compat patch
+   applied to `build_stage1_nh_package.py`; package rebuilt on h2o; h2o audit PASS (0 errors,
+   5 expected qobs-NaN warnings). Source-built config accepted by Moriah NH 1.13 runtime.
 
-4. **Re-transfer to Moriah; run preflight:**
-   ```bash
-   # Delete stale package first — current Moriah has both root-level attributes.csv
-   # (from original transfer) AND attributes/attributes.csv (manually added during
-   # diagnostics).  A fresh rm -rf ensures only the new canonical layout lands.
-   ssh moriah "rm -rf /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001"
-   scp -r h2o:.../stage1_nh_pilot_v001/ moriah:.../data/stage1_pilot_v001/
-   python scripts/check_stage1_nh_preflight.py \
-     --package-dir /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001 --smoke 0
-   ```
+4. ~~**Re-transfer to Moriah; run preflight**~~ — **DONE (2026-07-02).** Stale package removed
+   (`rm -rf`), clean transfer executed, `attributes/attributes.csv` layout confirmed correct.
 
-5. **Submit Smoke 0** (`git pull` on Moriah first to get all patches):
-   ```bash
-   sbatch scripts/run_stage1_smoke0_moriah.sbatch
-   ```
-   Pass criteria: NH loads, training loss is finite after epoch 1, Slurm exit 0.
+5. ~~**Submit Smoke 0**~~ — **DONE (2026-07-02). PASS.**
+   Slurm job `45370683`; node `catfish-05`; exit 0:0; wall time 00:01:55.
+   PyTorch 2.7.0+cu128; CUDA available; NVIDIA L4.
+   Epoch 1 avg_loss 0.00577 (finite); epoch 2 avg_loss 0.00556 (finite).
+   Validation completed both epochs. Model weights saved (77 KB each).
+   Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`.
+   **This is a technical plumbing PASS only — not a scientific baseline.**
 
-6. **Run Smoke 1** (`seq_length: 72`; add 5 RTMA vars; verify `rtma_2d_K` non-null).
+6. **Run Smoke 1** (`seq_length: 72`; add 6 RTMA vars alongside MRMS precip; verify
+   `rtma_2d_K` non-null counts match expected 45,718/45,720 per basin; same pass criteria
+   as Smoke 0 plus finite loss with richer inputs). Config: `configs/stage1_smoke1_nh.yml`.
 
-7. **After Smoke 0 PASS + attribute-source cleanup:** extend package builder to all 2,752
+7. **After Smoke 1 PASS + attribute-source cleanup:** extend package builder to all 2,752
    basins for full-scale NH package generation. Forcing v001 PASS (2026-07-01) — not blocking.
+   Attribute-source cleanup required (staged parquet at h2o `tmp/`, not committed to git)
+   before full-scale build. This gate is independent of Smoke 1.
+
+**Remaining known issues before scientific baseline:**
+- `scripts/check_stage1_nh_preflight.py` has conditional PyYAML import (graceful skip if not
+  installed on Moriah). Install `pyyaml` in `flashnh-moriah` env to enable full config checks.
+- Attribute provenance: `all_basins_merged.parquet` staged at h2o `tmp/`, not committed.
+  Must resolve provenance and commit a tracked attributes source before full 2,752-basin build.
 
 ---
 

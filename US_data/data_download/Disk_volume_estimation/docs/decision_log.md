@@ -2,6 +2,40 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-02 Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah
+
+**Decision:** Accept Smoke 0 as a technical plumbing PASS. Milestone 2K-G-C is closed.
+This is NOT a scientific baseline — training parameters (2 epochs, `seq_length: 24`, 1
+dynamic input) are chosen for plumbing verification only.
+
+**Evidence (Slurm job 45370683):**
+- Node: `catfish-05`; State: COMPLETED; ExitCode: 0:0; Wall time: 00:01:55
+- PyTorch 2.7.0+cu128; CUDA available; NVIDIA L4 (23034 MiB)
+- Package: `attributes/attributes.csv` found; 5 NC files found (h2o audit PASS, 0 errors)
+- Config accepted by NH 1.13: `dataset: generic`, `head: regression`,
+  `output_activation: linear`, `epochs: 2`, dates in `DD/MM/YYYY`
+- Epoch 1 avg_loss 0.00577 (finite); validation PASS
+- Epoch 2 avg_loss 0.00556 (finite); validation PASS
+- Model weights saved: `model_epoch001.pt` + `model_epoch002.pt` (~77 KB each)
+- Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`
+- Slurm stdout ended with `=== done ===` (preflight + training + validation complete)
+
+**h2o package audit facts (2026-07-02T11:44:43Z):**
+- Package: `/data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001`
+- Result: PASS; Errors: 0; Warnings: 5 (qobs_m3s NaN counts per basin — expected)
+
+**Technical plumbing PASS means:**
+- NH GenericDataset loads the Flash-NH package format without error
+- Forward pass, loss computation, and backward pass complete for all 5 basins
+- Slurm/module/CUDA/env stack confirmed end-to-end on Moriah `catfish` partition
+- Loss values are not scientifically meaningful (2 epochs, rain-only LSTM input)
+
+**Remaining before scientific baseline training:**
+1. **Smoke 1** — add 6 RTMA meteorology variables; `seq_length: 72`; confirm non-null RTMA
+2. **Attribute-source cleanup** — `all_basins_merged.parquet` staged at h2o `tmp/`, not committed
+3. **PyYAML on Moriah** — install in `flashnh-moriah` to enable preflight config checks
+4. **Full 2,752-basin package** — after Smoke 1 PASS + attribute cleanup
+
 ## 2026-07-02 NH 1.13 compatibility patch — builder, auditor, preflight helper
 
 **Decision:** Patch the Flash-NH Stage 1 NH pilot package generator to emit

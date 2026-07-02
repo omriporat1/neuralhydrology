@@ -1,32 +1,40 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-02 (NH 1.13 compat patch — source now generates correct configs/layout)
+Last updated: 2026-07-02 (Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah)
 
 ## Current milestone
 
-**Milestone 2K-G-C — Smoke 0 PENDING (requires package regeneration after NH compat patch).**
+**Milestone 2K-G-C COMPLETE (2026-07-02) — Smoke 0 technical plumbing PASS.**
 
-**Next actions (in order):**
-1. On h2o: regenerate pilot package with patched builder
-   ```
-   python scripts/build_stage1_nh_package.py \
-     --forcing-dir .../stage1_basin_hourly_forcings_v001_5basin_corrected_pilot_.../ \
-     --target-dir  .../stage1_target_package_v001/ \
-     --out-dir     .../stage1_nh_pilot_v001/ \
-     --staids 01019000,01022500,01033000,01038000,01049500 \
-     --attributes-csv .../all_basins_merged.parquet \
-     --expected-basins 5 --force
-   ```
-2. On h2o: re-audit — `python scripts/audit_stage1_nh_package.py --package-dir ... --expected-basins 5`
-3. Transfer to Moriah; run preflight — `python scripts/check_stage1_nh_preflight.py --package-dir ...`
-4. Submit Smoke 0 — `sbatch scripts/run_stage1_smoke0_moriah.sbatch`
+**This is a technical plumbing pass, not a scientific baseline.**
+Rain-only (`mrms_qpe_1h_mm` + `mrms_qpe_1h_mm_gap`), `seq_length=24`, 5 basins, 2 epochs.
+Purpose: confirm NH loads the source-built package and produces finite training loss.
+
+**Smoke 0 facts (Slurm job 45370683, 2026-07-02):**
+- Node: `catfish-05` (NVIDIA L4, `catfish` partition); wall time: 00:01:55; exit 0:0
+- Package regenerated on h2o (2026-07-02T11:43:53Z) with patched builder; h2o audit PASS
+- Config: `dataset: generic`, DD/MM/YYYY dates, `epochs: 2`, `head: regression`,
+  `output_activation: linear` — all from source (not manual edits)
+- `attributes/attributes.csv: OK` (new canonical layout)
+- Epoch 1 avg loss: 0.00577 (finite ✓); Epoch 2 avg loss: 0.00556 (finite ✓); validation completed
+- Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`
+- Artefacts: `model_epoch001.pt`, `model_epoch002.pt` (~77 KB each), optimizer states, TensorBoard events
+
+**Next: Smoke 1 (meteorology) — richer forcing before scientific baseline training.**
+
+**Remaining known issues before Smoke 1 / full-scale training:**
+- `check_stage1_nh_preflight.py`: PyYAML import now conditional (follow-up commit) — verify script runs on Moriah
+- Attribute provenance cleanup: `all_basins_merged.parquet` is staged at h2o `tmp/`, not committed.
+  Must be committed or formally locked before full 2,752-basin NH package generation.
+- Smoke 1 config (`stage1_smoke1_nh.yml`) is ready in source (source-built from patched builder).
+  No Moriah jobs run for Smoke 1 yet.
 
 ---
 
-**NH 1.13 compatibility patch applied 2026-07-02.**
+**NH 1.13 compatibility patch applied 2026-07-02 (commits 5e8a334 + 60fce38).**
 
-Manual Smoke 0 attempts on Moriah revealed that the pilot package builder generated
-NH 1.13 incompatible configs and layout. Source now corrected:
+Manual Smoke 0 diagnostic attempts revealed NH 1.13 config/layout incompatibilities in
+the original builder. Source corrected; regenerated package passed h2o audit and Moriah Smoke 0:
 - `dataset: generic` (was `GenericDataset`)
 - All `_date` fields: `DD/MM/YYYY` (was ISO `YYYY-MM-DD`)
 - `epochs` key (was `num_epochs`; rejected by NH 1.13)
@@ -35,13 +43,9 @@ NH 1.13 incompatible configs and layout. Source now corrected:
 - `attributes/attributes.csv` canonical layout (was root-level `attributes.csv`)
 - Package-internal `slurm/` no longer generated; repo-level sbatch is the Slurm entry point
 
-Scripts changed: `build_stage1_nh_package.py`, `audit_stage1_nh_package.py`,
-`check_stage1_nh_preflight.py` (new), `run_stage1_smoke0_moriah.sbatch`.
-No generated outputs committed. Pilot package on Moriah must be regenerated and re-transferred.
-
 ---
 
-Pre-conditions completed 2026-07-01 (still valid for env; package must be regenerated):
+Pre-conditions completed 2026-07-01:
 - Moriah `flashnh-moriah` env installed (Slurm job `45365952` PASS)
 - Corrected full-period curated forcing v001 built on h2o (PASS — see below)
 

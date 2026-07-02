@@ -28,7 +28,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
-import yaml
+
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _yaml = None  # type: ignore
+    _YAML_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # NH import guard
@@ -76,7 +82,7 @@ def _fail(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config checks (no NH required — uses PyYAML only)
+# Config checks (no NH required — uses PyYAML if available)
 # ---------------------------------------------------------------------------
 
 _DDMMYYYY = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -91,8 +97,12 @@ def _check_config(pkg: Path, smoke: int) -> dict:
         _fail(f"config not found: {cfg_path}")
         return {}
 
+    if not _YAML_AVAILABLE:
+        _fail("PyYAML not installed; config checks skipped (pip install pyyaml)")
+        return {}
+
     with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
+        cfg = _yaml.safe_load(f)
     _ok(f"config loaded: {cfg_path.name}")
 
     # NH 1.13 compatibility checks
