@@ -1,7 +1,7 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-07-02 (Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah)
+**Updated:** 2026-07-02 (Smoke 1 meteorology PASS on Moriah)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
@@ -15,7 +15,11 @@ scripts (`spack/all` + `miniconda3/24.3.0-gcc-iqeknet`).
 layout. Package regenerated on h2o; h2o audit PASS.
 **2K-G-C status: COMPLETE (2026-07-02) — Smoke 0 PASS on Moriah (Slurm job 45370683).**
 Technical plumbing pass: finite training loss both epochs; validation completed; model weights
-saved. NOT a scientific baseline. Next: Smoke 1 (meteorology forcing).
+saved. NOT a scientific baseline.
+**Smoke 1 status: PASS (2026-07-02) — meteorology ingestion confirmed (Slurm job 45370873).**
+6 RTMA vars + MRMS QPE, `seq_length: 24`, 3 epochs, loss NSE 0.00422→0.00335 (finite,
+decreasing). `rtma_2d_K` non-null confirms dewpoint fix. NOT a scientific baseline.
+Next: lookback-expansion tests (72/168/336 h) and attribute-source cleanup.
 
 ---
 
@@ -634,15 +638,16 @@ GAGES-II + derived pipeline from Milestone 2G.
 | Moriah CUDA version confirmed | **Driver 580.95.05 / CUDA 13.0 (`nvidia-smi`); toolkit `cuda/12.8.1` (`nvcc`)** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 | Moriah conda env strategy confirmed | **Prefix env at `envs/flashnh-moriah` via `miniconda3/24.3.0`** — confirmed 2026-06-30 | 2K-G-C-A ✓ |
 
-**Smoke 0 COMPLETE (2026-07-02).** Full 2,752-basin NH package generation waits for:
-(1) attribute-source cleanup (staged parquet not committed); (2) Smoke 1 PASS.
-Forcing v001 PASS (2026-07-01); Moriah env ready; NH package format confirmed working.
+**Smoke 0 COMPLETE (2026-07-02); Smoke 1 COMPLETE (2026-07-02).** Full 2,752-basin NH
+package generation waits for: (1) attribute-source cleanup (staged parquet not committed);
+(2) lookback-expansion smoke (seq_length 72/168 h) — separate milestone after attribute cleanup.
+Forcing v001 PASS; Moriah env + package format confirmed end-to-end.
 
 ---
 
 ### 13. Next concrete actions (2K-G-C)
 
-**Steps 1–5 ALL COMPLETE (2026-07-02). Milestone 2K-G-C CLOSED. Next: Smoke 1.**
+**Steps 1–6 ALL COMPLETE (2026-07-02). Smoke 0 + Smoke 1 PASS. Next: attribute cleanup + lookback-expansion.**
 
 1. ~~**Transfer pilot package to Moriah**~~ — **DONE (2026-07-01).** 5 NCs, 19 MB,
    all manifests verified at `/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001`.
@@ -666,21 +671,30 @@ Forcing v001 PASS (2026-07-01); Moriah env ready; NH package format confirmed wo
    Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`.
    **This is a technical plumbing PASS only — not a scientific baseline.**
 
-6. **Run Smoke 1** (`seq_length: 24` — same as Smoke 0; isolates input expansion from
-   lookback change; add 6 RTMA vars alongside MRMS; verify `rtma_2d_K` non-null per basin;
-   finite loss with richer inputs). Config: `configs/stage1_smoke1_nh.yml`.
-   Lookback expansion (72/168 h) is a separate post-Smoke-1 test, not part of this step.
+6. ~~**Run Smoke 1**~~ — **DONE (2026-07-02). PASS.**
+   Slurm job `45370873`; node `catfish-04`; exit 0:0; wall time 00:01:41; MaxRSS ~1.35 GB.
+   `seq_length: 24`; 8 dynamic inputs (6 RTMA + MRMS QPE + 2 gap flags); 3 epochs; loss NSE.
+   Epoch 1: 0.00422; Epoch 2: 0.00360; Epoch 3: 0.00335 — all finite, monotonically decreasing.
+   `rtma_2d_K` non-null confirmed (dewpoint fix carried through). Validation all 3 epochs.
+   Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`.
+   **Technical meteorology-ingestion PASS only — not a scientific baseline.**
 
-7. **After Smoke 1 PASS + attribute-source cleanup:** extend package builder to all 2,752
-   basins for full-scale NH package generation. Forcing v001 PASS (2026-07-01) — not blocking.
-   Attribute-source cleanup required (staged parquet at h2o `tmp/`, not committed to git)
-   before full-scale build. This gate is independent of Smoke 1.
+7. **After attribute-source cleanup:** extend package builder to all 2,752 basins for
+   full-scale NH package generation. Forcing v001 PASS (2026-07-01) — not blocking.
+   Attribute-source cleanup required first: `all_basins_merged.parquet` staged at h2o `tmp/`,
+   not committed to git. This gate is independent of lookback-expansion smokes.
 
-**Remaining known issues before scientific baseline:**
-- `scripts/check_stage1_nh_preflight.py` has conditional PyYAML import (graceful skip if not
-  installed on Moriah). Install `pyyaml` in `flashnh-moriah` env to enable full config checks.
+8. **Lookback-expansion smokes** (separate milestone): `seq_length: 72` → `168` → `336 h`
+   after Smoke 1 PASS (done) and before scientific baseline training. Run after attribute
+   cleanup and full-package rebuild, not before.
+
+**Remaining gates before scientific baseline:**
 - Attribute provenance: `all_basins_merged.parquet` staged at h2o `tmp/`, not committed.
   Must resolve provenance and commit a tracked attributes source before full 2,752-basin build.
+- Lookback-expansion smokes (seq_length 72/168/336 h) — separate milestone.
+- Slurm templates hard-pinned to `catfish/L4`. Future improvement: parameterize
+  `--partition` and `--gres` so jobs can target `salmon` or `goldfish` without script edits.
+  Defer until reproducibility baseline is established.
 
 ---
 

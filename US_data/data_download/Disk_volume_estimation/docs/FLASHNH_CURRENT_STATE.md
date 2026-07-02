@@ -1,14 +1,43 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-02 (Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah)
+Last updated: 2026-07-02 (Smoke 1 meteorology PASS on Moriah)
 
 ## Current milestone
 
-**Milestone 2K-G-C COMPLETE (2026-07-02) — Smoke 0 technical plumbing PASS.**
+**Smoke 1 PASS (2026-07-02) — meteorology ingestion confirmed.**
 
-**This is a technical plumbing pass, not a scientific baseline.**
+**This is a technical meteorology-ingestion PASS, not a scientific baseline.**
+6 RTMA vars + MRMS QPE + 2 gap flags, `seq_length=24` (same as Smoke 0 — isolates input
+expansion from lookback change), 5 basins, 3 epochs, loss NSE.
+Purpose: confirm RTMA meteorology loads, normalizes, and trains without error.
+
+**Smoke 1 facts (Slurm job 45370873, 2026-07-02):**
+- Node: `catfish-04` (NVIDIA L4, `catfish` partition); wall time: 00:01:41; exit 0:0
+- MaxRSS: 1,380,944 KB (~1.35 GB batch step)
+- Same package as Smoke 0 (h2o audit 2026-07-02T11:44:43Z — PASS, 0 errors)
+- Config: `seq_length: 24`, `epochs: 3`, `loss: NSE`, 8 dynamic inputs — all source-built
+- `rtma_2t_K`, `rtma_2d_K`, `rtma_2sh_kgkg`, `rtma_10u_ms`, `rtma_10v_ms` all non-null ✓
+- `rtma_2d_K` non-null confirms 2K-F-C-B dewpoint fix carried through correctly
+- Epoch 1: 0.00422 (finite ✓); Epoch 2: 0.00360 (finite ✓); Epoch 3: 0.00335 (finite ✓)
+- All 3 epochs show monotonically decreasing loss; validation completed each epoch
+- Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
+- Artefacts: `model_epoch001/002/003.pt` (~83 KB each), optimizer states, TensorBoard events
+
+**Next: lookback-expansion tests (seq_length 72/168/336) or move to full 2,752-basin package.**
+
+**Remaining gates before full 2,752-basin NH package + scientific baseline:**
+- Attribute provenance cleanup: `all_basins_merged.parquet` staged at h2o `tmp/`, not committed.
+  Must be committed or formally locked before full 2,752-basin NH package generation.
+- Slurm templates (smoke0/1 sbatch) are hard-pinned to `catfish/L4`. Future improvement:
+  make GPU partition and GRES configurable so runs can target `salmon` or `goldfish` without
+  editing the script. Defer until reproducibility baseline (scientific baseline) is established.
+- Lookback-expansion smoke (seq_length 72 h) is a separate next milestone after attribute cleanup.
+
+---
+
+**Smoke 0 PASS (2026-07-02) — technical plumbing confirmed (retained for reference).**
+
 Rain-only (`mrms_qpe_1h_mm` + `mrms_qpe_1h_mm_gap`), `seq_length=24`, 5 basins, 2 epochs.
-Purpose: confirm NH loads the source-built package and produces finite training loss.
 
 **Smoke 0 facts (Slurm job 45370683, 2026-07-02):**
 - Node: `catfish-05` (NVIDIA L4, `catfish` partition); wall time: 00:01:55; exit 0:0
@@ -19,15 +48,6 @@ Purpose: confirm NH loads the source-built package and produces finite training 
 - Epoch 1 avg loss: 0.00577 (finite ✓); Epoch 2 avg loss: 0.00556 (finite ✓); validation completed
 - Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`
 - Artefacts: `model_epoch001.pt`, `model_epoch002.pt` (~77 KB each), optimizer states, TensorBoard events
-
-**Next: Smoke 1 (meteorology) — richer forcing before scientific baseline training.**
-
-**Remaining known issues before Smoke 1 / full-scale training:**
-- `check_stage1_nh_preflight.py`: PyYAML import now conditional (follow-up commit) — verify script runs on Moriah
-- Attribute provenance cleanup: `all_basins_merged.parquet` is staged at h2o `tmp/`, not committed.
-  Must be committed or formally locked before full 2,752-basin NH package generation.
-- Smoke 1 config (`stage1_smoke1_nh.yml`) is ready in source (source-built from patched builder).
-  No Moriah jobs run for Smoke 1 yet.
 
 ---
 

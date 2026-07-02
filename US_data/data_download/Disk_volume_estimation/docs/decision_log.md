@@ -2,6 +2,51 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-02 Smoke 1 PASS — meteorology ingestion confirmed on Moriah
+
+**Decision:** Accept Smoke 1 as a technical meteorology-ingestion PASS. This is NOT a
+scientific baseline — seq_length, epochs, and basin count are chosen for verification only.
+
+**Evidence (Slurm job 45370873):**
+- Node: `catfish-04`; State: COMPLETED; ExitCode: 0:0; Elapsed: 00:01:41; MaxRSS: 1,380,944 KB
+- Preflight before submission: PASS 72 OK / 0 FAIL
+- Config accepted by NH 1.13: `dataset: generic`, `seq_length: 24`, `epochs: 3`, `loss: NSE`,
+  8 dynamic inputs (`mrms_qpe_1h_mm`, `rtma_2t_K`, `rtma_2d_K`, `rtma_2sh_kgkg`,
+  `rtma_10u_ms`, `rtma_10v_ms`, `mrms_qpe_1h_mm_gap`, `rtma_gap`)
+- All 5 RTMA variables non-null for all 5 basins (confirmed in preflight)
+- `rtma_2d_K` non-null confirms 2K-F-C-B dewpoint mapping fix carried through correctly
+- Epoch 1: avg_loss 0.00422; Epoch 2: avg_loss 0.00360; Epoch 3: avg_loss 0.00335
+  — all finite, monotonically decreasing; validation completed each epoch
+- Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
+- Model weights: `model_epoch001/002/003.pt` (~83 KB each); optimizer states; TensorBoard events
+- h2o audit (same package as Smoke 0): PASS, 0 errors, 5 expected qobs-NaN warnings
+
+**seq_length: 24 rationale (confirmed working):**
+Smoke 1 kept `seq_length: 24` (identical to Smoke 0) to isolate the dynamic-input expansion
+(2 inputs → 8 inputs) from any lookback-window change. This makes failures easier to attribute.
+The choice is validated: all 8 inputs load, normalize, and produce decreasing finite loss.
+Lookback-expansion tests (`seq_length: 72`, `168`, `336 h`) are separate later milestones.
+
+**Config comment discrepancy (minor):**
+The config in the evidence bundle carries the stale comment
+`# seq_length=72 (3 days): first step up from Smoke 0's 24 h.` — this comment was from a
+build done before the comment patch (commit c3ce5df). The actual `seq_length: 24` value is
+correct (confirmed by NH runtime log: `seq_length: 24` printed at training start). The
+corrected builder now emits the accurate comment; any future package rebuild will be clean.
+
+**Future Slurm improvement (deferred):**
+Both sbatch templates (`run_stage1_smoke0/1_moriah.sbatch`) hard-pin `--partition=catfish
+--gres=gpu:l4:1`. This prevents running on `salmon` (L40S) or `goldfish` (H200) without
+editing the script. Record for future: add `PARTITION` and `GRES` variables at the top of
+each sbatch so the GPU target can be changed without touching the rest of the script. Defer
+until the reproducibility baseline (scientific baseline training) is established — changing
+GPU hardware before that would add a confound.
+
+**Remaining before scientific baseline:**
+1. Attribute-source cleanup — `all_basins_merged.parquet` staged at h2o `tmp/`, not committed
+2. Lookback-expansion smokes — seq_length 72/168/336 h (separate milestone, after attr cleanup)
+3. Full 2,752-basin NH package — after attribute cleanup + lookback smoke PASS
+
 ## 2026-07-02 Smoke 1 operational corrections — preflight signature fix + seq_length policy
 
 **Correction 1 — `load_attributes` keyword argument fix in preflight helper.**
