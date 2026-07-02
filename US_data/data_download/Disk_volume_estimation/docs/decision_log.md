@@ -64,7 +64,7 @@ dynamic input) are chosen for plumbing verification only.
 - Loss values are not scientifically meaningful (2 epochs, rain-only LSTM input)
 
 **Remaining before scientific baseline training:**
-1. **Smoke 1** — add 6 RTMA meteorology variables; `seq_length: 72`; confirm non-null RTMA
+1. **Smoke 1** — add 6 RTMA meteorology variables; `seq_length: 24`; confirm non-null RTMA
 2. **Attribute-source cleanup** — `all_basins_merged.parquet` staged at h2o `tmp/`, not committed
 3. **PyYAML on Moriah** — install in `flashnh-moriah` to enable preflight config checks
 4. **Full 2,752-basin package** — after Smoke 1 PASS + attribute cleanup
@@ -306,9 +306,10 @@ unnecessary overhead for verifying that NH loads the package and produces finite
 24 h minimises runtime and memory before package-loading is proven. `seq_length: 336` is
 reserved for later hyperparameter testing.
 
-**2. Smoke 1 `seq_length`: not locked to 336 h.**
-First meteorology smoke uses `seq_length: 72` or `168` h as the next step. 336 h is a
-later candidate, not the first default.
+**2. Smoke 1 `seq_length`: 24 h (revised — see 2026-07-02 correction entry).**
+First meteorology smoke keeps `seq_length: 24` to isolate input expansion from lookback
+change. `seq_length: 72`/`168` are later dedicated lookback-expansion tests; 336 h is a
+later hyperparameter candidate after those pass.
 
 **3. MRMS gap-fill policy: Smoke 0/1 pilot policy only — not final scientific training policy.**
 Precipitation is the primary forcing driver; silently treating archive gaps as true no-rain
