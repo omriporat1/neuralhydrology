@@ -663,6 +663,10 @@ Steps 1–2 COMPLETE (2026-07-01). NH 1.13 compat patch applied (2026-07-02). St
 
 4. **Re-transfer to Moriah; run preflight:**
    ```bash
+   # Delete stale package first — current Moriah has both root-level attributes.csv
+   # (from original transfer) AND attributes/attributes.csv (manually added during
+   # diagnostics).  A fresh rm -rf ensures only the new canonical layout lands.
+   ssh moriah "rm -rf /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001"
    scp -r h2o:.../stage1_nh_pilot_v001/ moriah:.../data/stage1_pilot_v001/
    python scripts/check_stage1_nh_preflight.py \
      --package-dir /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001 --smoke 0

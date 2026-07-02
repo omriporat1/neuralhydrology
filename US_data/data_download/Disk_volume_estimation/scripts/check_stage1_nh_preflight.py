@@ -244,7 +244,10 @@ def _check_nh_level(pkg: Path, smoke: int) -> None:
         _fail(f"datasetzoo.get_dataset import failed: {exc}")
         return
 
-    # Load attributes via NH's attribute loader (safe — does not need train_dir)
+    # Load attributes via NH's attribute loader (safe — does not need train_dir; avoids
+    # the cfg.train_dir is None trap that occurs when calling get_dataset standalone).
+    # Import path is for NH 1.13 on Moriah (job 45365952).  If ImportError, check whether
+    # load_attributes moved (e.g. neuralhydrology.utils.attribute_utils in other NH versions).
     try:
         from neuralhydrology.datasetzoo.genericdataset import load_attributes  # type: ignore
         basin_file = pkg / "basins" / f"smoke{smoke}_train.txt"
@@ -255,6 +258,8 @@ def _check_nh_level(pkg: Path, smoke: int) -> None:
             basins=basins,
         )
         _ok(f"load_attributes: shape={df_attr.shape}, index[:3]={list(df_attr.index[:3])}")
+    except ImportError as exc:
+        _fail(f"load_attributes ImportError — verify import path for NH 1.13: {exc}")
     except Exception as exc:
         _fail(f"load_attributes failed: {exc}")
 
