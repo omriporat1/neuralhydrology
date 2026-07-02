@@ -463,7 +463,8 @@ def _write_configs(configs_dir: Path) -> None:
         # Flash-NH Stage 1 — Smoke 1: Minimal meteorology smoke
         # PURPOSE: Verify 6 core RTMA forcing variables load and train correctly.
         # rtma_sp_Pa is in the NC but excluded here (deferred to Smoke 2 — normalization review).
-        # seq_length=72 (3 days): first step up from Smoke 0's 24 h.
+        # seq_length=24: same as Smoke 0 to isolate input expansion from lookback change.
+        # Lookback-expansion tests (72/168 h) are a separate post-Smoke-1 milestone.
         # NeuralHydrology 1.13 compatibility: dataset=generic, DD/MM/YYYY dates, epochs key.
         experiment_name: flashnh_stage1_smoke1
 
@@ -472,7 +473,7 @@ def _write_configs(configs_dir: Path) -> None:
         test_basin_file: {moriah_data}/basins/smoke1_test.txt
 
     """) + common_head + textwrap.dedent("""\
-        seq_length: 72
+        seq_length: 24
         epochs: 3
 
         dynamic_inputs:

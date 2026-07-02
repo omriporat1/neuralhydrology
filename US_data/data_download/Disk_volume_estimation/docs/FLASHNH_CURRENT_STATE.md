@@ -163,7 +163,8 @@ Design frozen in `docs/stage1_neuralhydrology_preflight.md` (Part I), with corre
 after initial commit `fa6754b`:
 - NH package format: GenericDataset single-NC-per-basin, `date` coord, float32, `_FillValue=-9999.0`
 - Smoke 0: rain-only (mrms_qpe_1h_mm + gap flag, 5 basins, 1–2 epochs); `seq_length: 24`, `predict_last_n: 1`
-- Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v}); `seq_length: 72` or `168`
+- Smoke 1: minimal meteorology (6 forcings: mrms + rtma_{2t,2d,2sh,10u,10v}); `seq_length: 24`
+  (same as Smoke 0 — isolate input expansion from lookback change; 72/168 h are later separate tests)
 - Gap-fill policy (Smoke 0/1 pilot policy only): MRMS gaps → 0.0 mm; RTMA gaps → linear interp; gap flags retained
 - Final training gap policy: window-exclusion preferred over silent fill; to be decided after Smoke 1
 - Moriah layout: `/sci/labs/efratmorin/omripo/Flash-NH/{repos,envs,data,runs,logs,slurm,evidence}`

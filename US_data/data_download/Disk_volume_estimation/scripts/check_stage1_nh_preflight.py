@@ -21,6 +21,7 @@ Usage (local, no NH installed):
 from __future__ import annotations
 
 import argparse
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -258,16 +259,30 @@ def _check_nh_level(pkg: Path, smoke: int) -> None:
     # the cfg.train_dir is None trap that occurs when calling get_dataset standalone).
     # Import path is for NH 1.13 on Moriah (job 45365952).  If ImportError, check whether
     # load_attributes moved (e.g. neuralhydrology.utils.attribute_utils in other NH versions).
+    #
+    # NH 1.13 on Moriah does NOT accept `attribute_names=` kwarg (confirmed Smoke 1 preflight
+    # failure).  Use inspect.signature to branch: pass attribute_names only when accepted;
+    # otherwise load all attributes and verify required ones are present as columns.
     try:
         from neuralhydrology.datasetzoo.genericdataset import load_attributes  # type: ignore
         basin_file = pkg / "basins" / f"smoke{smoke}_train.txt"
         basins = [b.strip() for b in basin_file.read_text().splitlines() if b.strip()]
-        df_attr = load_attributes(
-            data_dir=pkg,
-            attribute_names=cfg.static_attributes,
-            basins=basins,
-        )
+        sig = inspect.signature(load_attributes)
+        if "attribute_names" in sig.parameters:
+            df_attr = load_attributes(
+                data_dir=pkg,
+                attribute_names=cfg.static_attributes,
+                basins=basins,
+            )
+        else:
+            # NH 1.13 Moriah signature: load_attributes(data_dir, basins) — no attribute_names.
+            df_attr = load_attributes(data_dir=pkg, basins=basins)
         _ok(f"load_attributes: shape={df_attr.shape}, index[:3]={list(df_attr.index[:3])}")
+        missing = [a for a in cfg.static_attributes if a not in df_attr.columns]
+        if missing:
+            _fail(f"load_attributes: missing required static_attributes: {missing}")
+        else:
+            _ok(f"load_attributes: required static_attributes present: {cfg.static_attributes}")
     except ImportError as exc:
         _fail(f"load_attributes ImportError — verify import path for NH 1.13: {exc}")
     except Exception as exc:

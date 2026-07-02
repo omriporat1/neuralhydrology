@@ -2,6 +2,39 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-02 Smoke 1 operational corrections — preflight signature fix + seq_length policy
+
+**Correction 1 — `load_attributes` keyword argument fix in preflight helper.**
+
+During Smoke 1 preflight on Moriah, `scripts/check_stage1_nh_preflight.py` failed with:
+```
+load_attributes() got an unexpected keyword argument 'attribute_names'
+```
+Moriah NH 1.13's `neuralhydrology.datasetzoo.genericdataset.load_attributes` does not
+accept `attribute_names=` as a positional keyword — the signature differs from what was
+assumed when the script was written. Fix: use `inspect.signature(load_attributes)` to
+detect whether `attribute_names` is a valid parameter. If present, pass it (forward-compat);
+if absent (NH 1.13 Moriah), call `load_attributes(data_dir=pkg, basins=basins)` and verify
+that all `cfg.static_attributes` appear as columns in the returned DataFrame.
+Explicit column-presence check added regardless of which branch is taken.
+Changed files: `scripts/check_stage1_nh_preflight.py` (source only).
+
+**Correction 2 — Smoke 1 `seq_length` policy: keep 24 h, defer 72/168 h.**
+
+Prior docs specified `seq_length: 72` for Smoke 1. Corrected policy: Smoke 1 keeps
+`seq_length: 24` (identical to Smoke 0) so that only the dynamic-input variable set
+changes between Smoke 0 and Smoke 1. This isolates the input-expansion change from
+a lookback-window change, making failures easier to diagnose. Lookback-expansion
+tests (`seq_length: 72`, `seq_length: 168`) are now separate named milestones after
+Smoke 1 PASS, not part of Smoke 1 itself.
+Changed files: `scripts/build_stage1_nh_package.py` (Smoke 1 config template),
+`docs/stage1_neuralhydrology_preflight.md` (§7 seq_length note, §13 step 6),
+`docs/FLASHNH_CURRENT_STATE.md` (2K-G-A milestone line).
+
+**Note:** The Smoke 1 config currently on Moriah (generated from pre-patch builder) has
+`seq_length: 72`. The package must be regenerated on h2o and re-transferred before
+submitting Smoke 1 sbatch.
+
 ## 2026-07-02 Milestone 2K-G-C COMPLETE — Smoke 0 PASS on Moriah
 
 **Decision:** Accept Smoke 0 as a technical plumbing PASS. Milestone 2K-G-C is closed.

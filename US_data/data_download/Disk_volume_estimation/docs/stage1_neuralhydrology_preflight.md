@@ -243,10 +243,12 @@ establish that RTMA meteorology loads and trains. Include `rtma_sp_Pa` in the
 per-basin NC file (so it is available), but exclude it from `dynamic_inputs` in the
 Smoke 1 NH config. Add it in Smoke 2 with explicit normalization review.
 
-**Sequence length for Smoke 1:** step up from Smoke 0. Use `seq_length: 72` (3 days)
-or `seq_length: 168` (7 days) as the next technical step. `seq_length: 336` (14 days)
-is a later candidate for hyperparameter testing once Smoke 1 passes; do not use it
-as the first meteorology smoke default.
+**Sequence length for Smoke 1:** **Keep `seq_length: 24`** — same as Smoke 0. Smoke 1
+isolates the input-variable expansion (6 RTMA vars added) from any lookback increase.
+Changing both simultaneously makes failures harder to diagnose. Use `seq_length: 72`
+(3 days) or `seq_length: 168` (7 days) only after Smoke 1 PASS, as dedicated
+lookback-expansion tests. `seq_length: 336` (14 days) remains a later hyperparameter
+candidate after lookback tests pass.
 
 **Pass criteria for Smoke 1:** same as Smoke 0, plus:
 - All 6 RTMA variables have sensible normalization statistics (mean/std logged by NH)
@@ -664,9 +666,10 @@ Forcing v001 PASS (2026-07-01); Moriah env ready; NH package format confirmed wo
    Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke0_0207_153320`.
    **This is a technical plumbing PASS only — not a scientific baseline.**
 
-6. **Run Smoke 1** (`seq_length: 72`; add 6 RTMA vars alongside MRMS precip; verify
-   `rtma_2d_K` non-null counts match expected 45,718/45,720 per basin; same pass criteria
-   as Smoke 0 plus finite loss with richer inputs). Config: `configs/stage1_smoke1_nh.yml`.
+6. **Run Smoke 1** (`seq_length: 24` — same as Smoke 0; isolates input expansion from
+   lookback change; add 6 RTMA vars alongside MRMS; verify `rtma_2d_K` non-null per basin;
+   finite loss with richer inputs). Config: `configs/stage1_smoke1_nh.yml`.
+   Lookback expansion (72/168 h) is a separate post-Smoke-1 test, not part of this step.
 
 7. **After Smoke 1 PASS + attribute-source cleanup:** extend package builder to all 2,752
    basins for full-scale NH package generation. Forcing v001 PASS (2026-07-01) — not blocking.
