@@ -186,6 +186,12 @@ def _full_period_grid() -> pd.DatetimeIndex:
     return grid
 
 
+def _yyyymmdd_to_ddmmyyyy(s: str) -> str:
+    """Convert ISO date string YYYY-MM-DD to NH 1.13 required DD/MM/YYYY format."""
+    y, m, d = s.split("-")
+    return f"{d}/{m}/{y}"
+
+
 # ---------------------------------------------------------------------------
 # Input loading
 # ---------------------------------------------------------------------------
@@ -385,17 +391,25 @@ def _write_configs(configs_dir: Path) -> None:
     moriah_data = "/sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001"
     moriah_runs = "/sci/labs/efratmorin/omripo/Flash-NH/runs"
 
+    # NH 1.13 requires DD/MM/YYYY for all _date fields (not ISO YYYY-MM-DD).
+    _train_s = _yyyymmdd_to_ddmmyyyy("2020-10-14")
+    _train_e = _yyyymmdd_to_ddmmyyyy(_TRAIN_END)
+    _val_s   = _yyyymmdd_to_ddmmyyyy(_VAL_START)
+    _val_e   = _yyyymmdd_to_ddmmyyyy(_VAL_END)
+    _test_s  = _yyyymmdd_to_ddmmyyyy(_TEST_START)
+    _test_e  = _yyyymmdd_to_ddmmyyyy(_TEST_END)
+
     common_head = textwrap.dedent(f"""\
         run_dir: {moriah_runs}
         data_dir: {moriah_data}
-        dataset: GenericDataset
+        dataset: generic
 
-        train_start_date: "2020-10-14"
-        train_end_date: "{_TRAIN_END}"
-        validation_start_date: "{_VAL_START}"
-        validation_end_date: "{_VAL_END}"
-        test_start_date: "{_TEST_START}"
-        test_end_date: "{_TEST_END}"
+        train_start_date: "{_train_s}"
+        train_end_date: "{_train_e}"
+        validation_start_date: "{_val_s}"
+        validation_end_date: "{_val_e}"
+        test_start_date: "{_test_s}"
+        test_end_date: "{_test_e}"
 
         target_variables:
           - qobs_m3s
@@ -408,6 +422,8 @@ def _write_configs(configs_dir: Path) -> None:
 
         model: cudalstm
         hidden_size: 64
+        head: regression
+        output_activation: linear
         predict_last_n: 1
         batch_size: 256
 
@@ -421,14 +437,13 @@ def _write_configs(configs_dir: Path) -> None:
         validate_n_random_basins: 5
         log_interval: 50
         num_workers: 4
-        shuffle: true
-        log_n_basins: 5
     """)
 
     smoke0 = textwrap.dedent(f"""\
         # Flash-NH Stage 1 — Smoke 0: Rain-only technical smoke
         # PURPOSE: Verify NH loads the package and produces finite loss.
         # NOT a scientific baseline. seq_length=24 chosen for minimal plumbing overhead.
+        # NeuralHydrology 1.13 compatibility: dataset=generic, DD/MM/YYYY dates, epochs key.
         experiment_name: flashnh_stage1_smoke0
 
         train_basin_file: {moriah_data}/basins/smoke0_train.txt
@@ -437,7 +452,7 @@ def _write_configs(configs_dir: Path) -> None:
 
     """) + common_head + textwrap.dedent("""\
         seq_length: 24
-        num_epochs: 2
+        epochs: 2
 
         dynamic_inputs:
           - mrms_qpe_1h_mm
@@ -448,7 +463,8 @@ def _write_configs(configs_dir: Path) -> None:
         # Flash-NH Stage 1 — Smoke 1: Minimal meteorology smoke
         # PURPOSE: Verify 6 core RTMA forcing variables load and train correctly.
         # rtma_sp_Pa is in the NC but excluded here (deferred to Smoke 2 — normalization review).
-        # seq_length=72 (3 days): first step up from Smoke 0's 24 h; try 168 h as optional next.
+        # seq_length=72 (3 days): first step up from Smoke 0's 24 h.
+        # NeuralHydrology 1.13 compatibility: dataset=generic, DD/MM/YYYY dates, epochs key.
         experiment_name: flashnh_stage1_smoke1
 
         train_basin_file: {moriah_data}/basins/smoke1_train.txt
@@ -457,7 +473,7 @@ def _write_configs(configs_dir: Path) -> None:
 
     """) + common_head + textwrap.dedent("""\
         seq_length: 72
-        num_epochs: 3
+        epochs: 3
 
         dynamic_inputs:
           - mrms_qpe_1h_mm
@@ -639,30 +655,32 @@ def _write_readme(out_dir: Path, staids: list[str]) -> None:
 
         ## Usage
 
-        Smoke 0 (plumbing — NH loads package, loss is finite):
-          cd /sci/labs/efratmorin/omripo/Flash-NH/repos/neuralhydrology
-          python -m neuralhydrology.training --config-file \\
+        Smoke 0 — via Moriah Slurm (preferred):
+          sbatch scripts/run_stage1_smoke0_moriah.sbatch
+
+        Smoke 0 — direct nh-run invocation:
+          nh-run train --config-file \\
             /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/configs/stage1_smoke0_nh.yml
 
-        Smoke 1 (meteorology — 6 RTMA vars load and train):
-          python -m neuralhydrology.training --config-file \\
+        Smoke 1:
+          nh-run train --config-file \\
             /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001/configs/stage1_smoke1_nh.yml
 
-        Via Slurm:
-          sbatch slurm/smoke0.sh
-          sbatch slurm/smoke1.sh
-
-        Audit:
+        Audit (on h2o before transfer):
           python scripts/audit_stage1_nh_package.py \\
             --package-dir <this_dir> --expected-basins 5 --expected-rows 45720
+
+        Preflight (on Moriah after transfer):
+          python scripts/check_stage1_nh_preflight.py \\
+            --package-dir /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001 --smoke 0
 
         ## Files
 
           time_series/          Per-basin NCs (GenericDataset format)
-          attributes.csv        Static attributes (gauge_id + all available attrs)
+          attributes/           Static attributes directory (NH GenericDataset canonical path)
+            attributes.csv      gauge_id + all available attrs
           basins/               Basin lists: smoke0/1 × train/val/test
           configs/              NH YAML configs: stage1_smoke0_nh.yml, stage1_smoke1_nh.yml
-          slurm/                Moriah Slurm job scripts: smoke0.sh, smoke1.sh
           manifests/            dataset_manifest.json, variable_schema.csv,
                                 gap_fill_report.csv, per_basin_summary.csv
           run_provenance.json   Build provenance
@@ -727,11 +745,12 @@ def main() -> None:
     # ---- Build output layout ----
     out_dir.mkdir(parents=True, exist_ok=True)
     ts_dir        = out_dir / "time_series"
+    attrs_dir     = out_dir / "attributes"
     basins_dir    = out_dir / "basins"
     configs_dir   = out_dir / "configs"
-    slurm_dir     = out_dir / "slurm"
     manifests_dir = out_dir / "manifests"
     ts_dir.mkdir(parents=True, exist_ok=True)
+    attrs_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Per-basin build ----
     basin_summaries:  list[dict] = []
@@ -775,10 +794,10 @@ def main() -> None:
                  staid, n_mrms_gap, n_rtma_gap, n_qobs_nan, sha[:12])
 
     # ---- Package-level outputs ----
-    _write_attributes(attrs, out_dir / "attributes.csv")
+    # attributes/ subdir is the canonical NH GenericDataset path (data_dir/attributes/*.csv)
+    _write_attributes(attrs, attrs_dir / "attributes.csv")
     _write_basin_lists(basins_dir, staids)
     _write_configs(configs_dir)
-    _write_slurm(slurm_dir)
     _write_manifests(manifests_dir, basin_summaries, gap_fill_reports)
     _write_provenance(out_dir, args, staids, _time.time() - t0)
     _write_readme(out_dir, staids)

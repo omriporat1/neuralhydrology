@@ -13,11 +13,14 @@ Checks:
   9.  rtma_gap: sum == 2 per basin.
   10. mrms_qpe_1h_mm non-null == expected_rows (confirms MRMS fill applied).
   11. rtma_2d_K non-null == expected_rows (confirms dewpoint mapping fix propagated).
-  12. attributes.csv: has 'gauge_id' index, required cols, expected number of basins.
+  12. attributes/attributes.csv: has 'gauge_id' index, required cols, expected STAIDs.
   13. Basin list files: smoke0/1 × train/val/test exist, contain valid 8-char STAIDs.
   14. Smoke configs exist.
   15. Manifests directory and dataset_manifest.json exist and are parseable.
-  16. Writes audit_summary.md to package root.
+  16. Config NH 1.13 compatibility: dataset=generic, DD/MM/YYYY dates, epochs key,
+      no num_epochs/shuffle/log_n_basins, head=regression, output_activation=linear,
+      correct dynamic_inputs and target_variables for Smoke 0.
+  17. Writes audit_summary.md to package root.
 
 Exit code: 0 = PASS, 1 = FAIL.
 
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time as _time
 from datetime import datetime, timezone
@@ -39,6 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+import yaml
 
 CREATED_UTC = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 t0 = _time.time()
@@ -149,16 +154,16 @@ def check_structure(pkg: Path, expected_basins: int) -> bool:
 
     required_dirs = [
         pkg / "time_series",
+        pkg / "attributes",
         pkg / "basins",
         pkg / "configs",
-        pkg / "slurm",
         pkg / "manifests",
     ]
     for d in required_dirs:
         result &= chk(f"dir {d.name}/ exists", d.exists())
 
     required_files = [
-        pkg / "attributes.csv",
+        pkg / "attributes" / "attributes.csv",
         pkg / "run_provenance.json",
         pkg / "README.md",
         pkg / "manifests" / "dataset_manifest.json",
@@ -167,8 +172,6 @@ def check_structure(pkg: Path, expected_basins: int) -> bool:
         pkg / "manifests" / "per_basin_summary.csv",
         pkg / "configs" / "stage1_smoke0_nh.yml",
         pkg / "configs" / "stage1_smoke1_nh.yml",
-        pkg / "slurm" / "smoke0.sh",
-        pkg / "slurm" / "smoke1.sh",
     ]
     for fp in required_files:
         result &= chk(f"file {fp.relative_to(pkg)} exists", fp.exists())
@@ -301,24 +304,25 @@ def check_basin_nc(nc_path: Path, expected_rows: int) -> bool:
 
 def check_attributes(pkg: Path, staids: list[str]) -> bool:
     print("\n[3] Attributes ...")
-    attr_path = pkg / "attributes.csv"
+    # NH GenericDataset canonical path: data_dir/attributes/*.csv
+    attr_path = pkg / "attributes" / "attributes.csv"
     if not attr_path.exists():
-        return err("attributes.csv missing")
+        return err("attributes/attributes.csv missing (NH expects data_dir/attributes/*.csv)")
 
     try:
         df = pd.read_csv(attr_path, index_col="gauge_id", dtype=str)
     except Exception as exc:
-        return err(f"attributes.csv unreadable: {exc}")
+        return err(f"attributes/attributes.csv unreadable: {exc}")
 
     result = True
-    result &= chk(f"attributes.csv row count == {len(staids)}",
+    result &= chk(f"attributes/attributes.csv row count == {len(staids)}",
                   len(df) == len(staids), f"got {len(df)}")
 
     for col in _REQUIRED_ATTR_COLS:
         result &= chk(f"required col '{col}' present", col in df.columns)
 
     missing_basins = [s for s in staids if s not in df.index]
-    result &= chk("all expected STAIDs in attributes.csv",
+    result &= chk("all expected STAIDs in attributes/attributes.csv",
                   not missing_basins,
                   f"missing: {missing_basins}" if missing_basins else "")
     return result
@@ -343,6 +347,69 @@ def check_basin_lists(pkg: Path, staids: list[str]) -> bool:
                 len(lines) == len(staids) and not invalid,
                 f"got {len(lines)} lines, invalid={invalid}" if invalid or len(lines) != len(staids) else "",
             )
+    return result
+
+
+_DDMMYYYY = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+_SMOKE0_EXPECTED_DYNAMIC = ["mrms_qpe_1h_mm", "mrms_qpe_1h_mm_gap"]
+_EXPECTED_STATIC_ATTRS   = ["DRAIN_SQKM", "LAT_GAGE", "LNG_GAGE", "BFI_AVE"]
+_BANNED_KEYS             = ("num_epochs", "shuffle", "log_n_basins")
+
+
+def check_configs(pkg: Path) -> bool:
+    """Validate NH 1.13 compatibility of generated YAML configs (Smoke 0 config)."""
+    print("\n[6] Config NH 1.13 compatibility ...")
+    result = True
+
+    cfg_path = pkg / "configs" / "stage1_smoke0_nh.yml"
+    if not cfg_path.exists():
+        return err("configs/stage1_smoke0_nh.yml missing; skipping config checks")
+
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+    except Exception as exc:
+        return err(f"configs/stage1_smoke0_nh.yml unreadable: {exc}")
+
+    # Dataset registry key
+    result &= chk("dataset == 'generic' (NH 1.13 registry key)",
+                  cfg.get("dataset") == "generic",
+                  f"got: {cfg.get('dataset')!r}")
+
+    # All _date fields must be DD/MM/YYYY
+    date_keys = sorted(k for k in cfg if k.endswith("_date"))
+    for k in date_keys:
+        v = str(cfg[k])
+        result &= chk(f"{k} is DD/MM/YYYY",
+                      bool(_DDMMYYYY.match(v)), f"got: {v!r}")
+
+    # epochs key present; legacy keys absent
+    result &= chk("'epochs' key present", "epochs" in cfg,
+                  f"keys: {list(cfg)}")
+    for bad in _BANNED_KEYS:
+        result &= chk(f"'{bad}' absent (NH 1.13 rejects it)", bad not in cfg)
+
+    # head / output
+    result &= chk("head == 'regression'",
+                  cfg.get("head") == "regression",
+                  f"got: {cfg.get('head')!r}")
+    result &= chk("output_activation == 'linear'",
+                  cfg.get("output_activation") == "linear",
+                  f"got: {cfg.get('output_activation')!r}")
+
+    # Smoke 0 specific: dynamic inputs and target
+    di = list(cfg.get("dynamic_inputs", []))
+    result &= chk(f"dynamic_inputs == {_SMOKE0_EXPECTED_DYNAMIC}",
+                  di == _SMOKE0_EXPECTED_DYNAMIC, f"got: {di}")
+
+    tv = list(cfg.get("target_variables", []))
+    result &= chk("target_variables == ['qobs_m3s']",
+                  tv == ["qobs_m3s"], f"got: {tv}")
+
+    sa = list(cfg.get("static_attributes", []))
+    result &= chk(f"static_attributes == {_EXPECTED_STATIC_ATTRS}",
+                  sa == _EXPECTED_STATIC_ATTRS, f"got: {sa}")
+
     return result
 
 
@@ -448,7 +515,10 @@ def main() -> None:
     # [5] Manifests
     mfst_ok = check_manifests(pkg, args.expected_basins)
 
-    overall_pass = all([struct_ok, nc_ok, attr_ok, basin_ok, mfst_ok])
+    # [6] Config NH 1.13 compatibility
+    cfg_ok = check_configs(pkg)
+
+    overall_pass = all([struct_ok, nc_ok, attr_ok, basin_ok, mfst_ok, cfg_ok])
 
     elapsed = _time.time() - t0
     print("\n" + "=" * 70)

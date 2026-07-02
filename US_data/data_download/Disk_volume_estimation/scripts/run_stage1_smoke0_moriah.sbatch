@@ -12,7 +12,9 @@
 # Pre-conditions confirmed:
 #   - flashnh-moriah env installed (job 45365952 PASS; nh-run at envs/flashnh-moriah/bin/nh-run)
 #   - pilot package transferred: /sci/labs/efratmorin/omripo/Flash-NH/data/stage1_pilot_v001
-#     (5 NCs, run_provenance.json, configs/stage1_smoke0_nh.yml, attributes.csv, 19 MB)
+#     (5 NCs, run_provenance.json, configs/stage1_smoke0_nh.yml, attributes/attributes.csv)
+#   - package regenerated with NH 1.13 compat: dataset=generic, DD/MM/YYYY dates, epochs key,
+#     head=regression, output_activation=linear, attributes/ canonical subdir layout
 # Module fixes from env-install job applied here too (same non-interactive shell issue).
 
 set -euo pipefail
@@ -47,10 +49,24 @@ which python
 
 echo "=== preflight ==="
 hostname
+date -u
+echo "SLURM_JOB_ID: ${SLURM_JOB_ID}"
+which nh-run
 nvidia-smi
-python -c "import torch; print('cuda available:', torch.cuda.is_available())"
+python -u -c "
+import sys, torch
+print('Python:', sys.version.split()[0], flush=True)
+print('PyTorch:', torch.__version__, flush=True)
+cuda_ok = torch.cuda.is_available()
+print('cuda available:', cuda_ok, flush=True)
+if cuda_ok:
+    print('cuda device:', torch.cuda.get_device_name(0), flush=True)
+else:
+    raise SystemExit('CUDA not available — check module loads and GPU allocation')
+"
 test -f "${CONFIG}" && echo "config OK: ${CONFIG}" || { echo "MISSING config: ${CONFIG}"; exit 1; }
 echo "NC files in package: $(find "${DATA}/time_series" -name '*.nc' | wc -l)"
+echo "attributes/attributes.csv: $(test -f "${DATA}/attributes/attributes.csv" && echo OK || echo MISSING)"
 
 echo "=== run Smoke 0 ==="
 # nh-run confirmed present after env install (job 45365952):

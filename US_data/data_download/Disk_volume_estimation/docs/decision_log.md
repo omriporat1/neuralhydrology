@@ -2,6 +2,44 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-02 NH 1.13 compatibility patch — builder, auditor, preflight helper
+
+**Decision:** Patch the Flash-NH Stage 1 NH pilot package generator to emit
+NeuralHydrology 1.13 GenericDataset-compatible configs and package layout.
+Manual Moriah-side edits were diagnostic only; the source is now the authoritative
+emitter of correct configs. No generated outputs are committed.
+
+**Root cause:** Manual Smoke 0 attempts on Moriah revealed that `build_stage1_nh_package.py`
+generated several NH 1.13 incompatibilities:
+- `dataset: GenericDataset` → NH 1.13 registry key is `dataset: generic`
+- ISO date strings (`YYYY-MM-DD`) → NH 1.13 requires `DD/MM/YYYY` for all `_date` fields
+- `num_epochs` → NH 1.13 uses `epochs`; `num_epochs` is a rejected key
+- `shuffle: true`, `log_n_basins: 5` → rejected by NH 1.13
+- Missing `head: regression`, `output_activation: linear` → required at train startup
+- `attributes.csv` at package root → NH GenericDataset expects `data_dir/attributes/*.csv`
+- Package-internal `slurm/` scripts used wrong partition (`gpu`), wrong invocation
+  (`python -m neuralhydrology.training`); repo-level `scripts/run_stage1_smoke0_moriah.sbatch`
+  is the correct Slurm entry point
+
+**NH provenance note:** Local Python environment has no `neuralhydrology` installation.
+Moriah NH 1.13 (installed via Slurm job `45365952`) is the sole authoritative runtime.
+All compatibility targeting is based on Moriah NH 1.13 behavior confirmed interactively.
+
+**Changes (source/scripts/docs only — no generated outputs):**
+- `scripts/build_stage1_nh_package.py`: `_write_configs` now emits NH 1.13 compat configs;
+  `_write_attributes` writes to canonical `attributes/attributes.csv` path; `_write_slurm`
+  no longer called from `main()` (repo-level sbatch is the Slurm entry point)
+- `scripts/audit_stage1_nh_package.py`: new `check_configs` section validates all NH compat
+  keys; `check_structure`/`check_attributes` updated for `attributes/` canonical layout;
+  `slurm/` checks removed
+- `scripts/check_stage1_nh_preflight.py`: new lightweight diagnostic for Moriah post-transfer
+  verification; NH-level checks (Config, load_attributes) guarded by import check; usable
+  locally (structural/data only) and on Moriah (full NH checks)
+- `scripts/run_stage1_smoke0_moriah.sbatch`: enhanced preflight block (`which nh-run`, date,
+  SLURM_JOB_ID, Python/PyTorch versions, `attributes/attributes.csv` existence check)
+
+**Next step:** Regenerate pilot package on h2o, re-audit, re-transfer, re-submit Smoke 0.
+
 ## 2026-07-01 Moriah env install PASS + pilot package transfer PASS
 
 **Decision:** Accept Moriah env install (Slurm job `45365952`) and pilot package transfer

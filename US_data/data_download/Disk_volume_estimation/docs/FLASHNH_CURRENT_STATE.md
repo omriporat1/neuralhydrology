@@ -1,18 +1,49 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-01 (Moriah env install PASS + corrected forcing v001 PASS)
+Last updated: 2026-07-02 (NH 1.13 compat patch — source now generates correct configs/layout)
 
 ## Current milestone
 
-**Milestone 2K-G-C — Smoke 0 PENDING (next step after 2026-07-01 closures).**
+**Milestone 2K-G-C — Smoke 0 PENDING (requires package regeneration after NH compat patch).**
 
-Pre-conditions completed 2026-07-01:
+**Next actions (in order):**
+1. On h2o: regenerate pilot package with patched builder
+   ```
+   python scripts/build_stage1_nh_package.py \
+     --forcing-dir .../stage1_basin_hourly_forcings_v001_5basin_corrected_pilot_.../ \
+     --target-dir  .../stage1_target_package_v001/ \
+     --out-dir     .../stage1_nh_pilot_v001/ \
+     --staids 01019000,01022500,01033000,01038000,01049500 \
+     --attributes-csv .../all_basins_merged.parquet \
+     --expected-basins 5 --force
+   ```
+2. On h2o: re-audit — `python scripts/audit_stage1_nh_package.py --package-dir ... --expected-basins 5`
+3. Transfer to Moriah; run preflight — `python scripts/check_stage1_nh_preflight.py --package-dir ...`
+4. Submit Smoke 0 — `sbatch scripts/run_stage1_smoke0_moriah.sbatch`
+
+---
+
+**NH 1.13 compatibility patch applied 2026-07-02.**
+
+Manual Smoke 0 attempts on Moriah revealed that the pilot package builder generated
+NH 1.13 incompatible configs and layout. Source now corrected:
+- `dataset: generic` (was `GenericDataset`)
+- All `_date` fields: `DD/MM/YYYY` (was ISO `YYYY-MM-DD`)
+- `epochs` key (was `num_epochs`; rejected by NH 1.13)
+- `head: regression`, `output_activation: linear` (were absent)
+- `shuffle`, `log_n_basins` removed (rejected by NH 1.13)
+- `attributes/attributes.csv` canonical layout (was root-level `attributes.csv`)
+- Package-internal `slurm/` no longer generated; repo-level sbatch is the Slurm entry point
+
+Scripts changed: `build_stage1_nh_package.py`, `audit_stage1_nh_package.py`,
+`check_stage1_nh_preflight.py` (new), `run_stage1_smoke0_moriah.sbatch`.
+No generated outputs committed. Pilot package on Moriah must be regenerated and re-transferred.
+
+---
+
+Pre-conditions completed 2026-07-01 (still valid for env; package must be regenerated):
 - Moriah `flashnh-moriah` env installed (Slurm job `45365952` PASS)
-- Pilot NH package transferred to Moriah (5 NCs, 19 MB, all manifests present)
 - Corrected full-period curated forcing v001 built on h2o (PASS — see below)
-
-**Ready to submit:** `sbatch scripts/run_stage1_smoke0_moriah.sbatch` (after `git pull` on Moriah).
-Not yet submitted. 2K-G-C is not complete.
 
 ---
 
