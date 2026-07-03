@@ -13,10 +13,18 @@ WARNING: This gap-fill policy is for Smoke 0/1 technical testing only.
 Do NOT carry it unchanged into scientific baseline training.
 See docs/stage1_neuralhydrology_preflight.md §8.2 for final training policy options.
 
-Attribute source on h2o (after git pull):
-  <repo>/reports/flashnh_basin_screening_v001/all_basins_merged.parquet
+Attribute source (canonical; NOT tracked in git — generated artifact, see
+docs/stage1_attribute_provenance.md for path, checksum, schema, and regeneration
+notes):
+  h2o-resident (stable, canonical — use this):
+    /data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet
+  h2o tmp/ copy (historical/staged only — do NOT use for new work):
+    /data42/omrip/Flash-NH/tmp/all_basins_merged.parquet
+  local-repo fixture:  reports/flashnh_basin_screening_v001/all_basins_merged.parquet
   (accepts .parquet or .csv; must contain STAID or gauge_id column
    plus DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE)
+  Checksum-verified identical across all copies as of Milestone 2K-G-D-A
+  (2026-07-03); see docs/stage1_attribute_provenance.md for evidence.
 
 Usage:
   python scripts/build_stage1_nh_package.py \\
@@ -25,7 +33,7 @@ stage1_basin_hourly_forcings_v001_5basin_corrected_pilot_20260630T100505Z/ \\
     --target-dir  /data42/omrip/Flash-NH/tmp/stage1_target_package_v001/ \\
     --out-dir     /data42/omrip/Flash-NH/tmp/stage1_nh_pilot_v001/ \\
     --staids      01019000,01022500,01033000,01038000,01049500 \\
-    --attributes-csv <repo>/reports/flashnh_basin_screening_v001/all_basins_merged.parquet \\
+    --attributes-csv /data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet \\
     --expected-basins 5 \\
     --force
 """
@@ -143,7 +151,11 @@ def _parse_args() -> argparse.Namespace:
         "--attributes-csv", required=True,
         help="Static attribute file (.csv or .parquet). Must have a STAID or gauge_id "
              "column plus DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE. "
-             "Default source: <repo>/reports/flashnh_basin_screening_v001/all_basins_merged.parquet",
+             "Canonical source (h2o-resident, not tracked in git): "
+             "/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet "
+             "-- do NOT use the old tmp/all_basins_merged.parquet path (historical/staged "
+             "only, superseded 2026-07-03). "
+             "See docs/stage1_attribute_provenance.md for checksum and schema.",
     )
     p.add_argument(
         "--expected-basins", type=int, default=None,
@@ -596,6 +608,7 @@ def _write_provenance(
         "target_dir":   str(args.target_dir),
         "out_dir":      str(args.out_dir),
         "attributes_src": str(args.attributes_csv),
+        "attributes_sha256": _sha256(Path(args.attributes_csv)),
         "staids":       staids,
         "n_basins":     len(staids),
         "period_start": str(_PERIOD_START),

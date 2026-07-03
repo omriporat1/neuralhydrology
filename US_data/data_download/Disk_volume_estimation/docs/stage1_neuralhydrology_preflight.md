@@ -124,8 +124,11 @@ standard dynamic inputs; do not hide them.
 - 5/5 basins PASS; 0 errors, 5 expected warnings (qobs NaN counts, normal)
 - 45,720 rows/basin; MRMS gap=136, RTMA gap=2 (all exact); all forcing non-null after gap-fill
 - `rtma_2d_K` non-null == 45,720 (dewpoint fix confirmed); `rtma_weasd_kgm2` absent (confirmed)
-- Static attribute source: `/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (staged manually;
-  not committed to git — cleanup required before full 2,752-basin package generation)
+- Static attribute source (at time of 2K-G-B): `/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet`
+  (staged manually; not committed to git). **Resolved 2K-G-D-A (2026-07-03):** promoted to
+  `/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`,
+  checksum-verified — see `docs/stage1_attribute_provenance.md`. The `tmp/` path above is
+  historical only.
 
 Scope:
 

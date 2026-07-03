@@ -2,6 +2,152 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-03 Milestone 2K-G-D-A — static attribute artifact promoted out of `tmp`; h2o checksum verified
+
+**Context.** Milestone 2K-G-D (same day, entry below) correctly identified the static
+attribute file as an external, checksum-pinned generated artifact — not to be committed
+to git — but left the canonical h2o copy resident under
+`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (a scratch-space path per
+`docs/repo_policy.md`, not intended for long-lived canonical inputs) and left the h2o-copy
+checksum **unverified** (no h2o/Moriah shell access from that session).
+
+**Decision 1 — promote the canonical h2o copy to a stable project data path.**
+`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` →
+`/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`.
+The `tmp/` path is now **historical/staged only** — retained on h2o as the
+pre-promotion reference copy, not to be referenced by new work. The parquet itself
+is **still not committed to git** (no change to that part of the 2K-G-D decision).
+
+**Decision 2 — h2o checksum verification closed (user-run on h2o, reported this session).**
+```
+mkdir -p /data42/omrip/Flash-NH/data/static_attributes/gagesii_v001
+cp /data42/omrip/Flash-NH/tmp/all_basins_merged.parquet \
+   /data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet
+sha256sum /data42/omrip/Flash-NH/tmp/all_basins_merged.parquet
+sha256sum /data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet
+```
+Both paths returned `06a9eeda9e94261d0b1bb9f2c2f42cb6bf11b4c02745d7ed5867ef0e0c0ad0b1`
+(`ls -lh`: `2.9M` both), matching the local repo-fixture checksum recorded at 2K-G-D.
+This closes the "Evidence that must be pulled" item left open by 2K-G-D — the
+tmp-vs-repo-fixture identity is now independently confirmed, not just assumed. No
+further attribute-checksum verification is required before full 2,752-basin package
+generation.
+
+**Decision 3 — Moriah mirror path documented, not yet populated.**
+`/sci/labs/efratmorin/omripo/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`
+is recorded as the intended Moriah-side mirror for when a Moriah build needs the
+attribute file directly. Not yet copied or verified — non-blocking today because
+Moriah packages so far have been transferred pre-built from h2o.
+
+**Docs/code updated to the stable path (all four locations named `tmp/` before this
+entry):** `docs/stage1_attribute_provenance.md` (canonical-path table, checksum
+section, verification evidence, resolved-status note),
+`reports/flashnh_basin_screening_v001/README.md` (tracked pointer),
+`scripts/build_stage1_nh_package.py` (module docstring + `--attributes-csv` help
+text — both now say "do NOT use the old tmp/ path"; `attributes_sha256` provenance
+recording added at 2K-G-D is unchanged), `docs/FLASHNH_CURRENT_STATE.md` (current
+milestone block + historical Smoke-0/1-era caveat annotated resolved, not rewritten).
+Remaining historical mentions of the `tmp/` path elsewhere in
+`FLASHNH_CURRENT_STATE.md` (Milestone 2K-G-B narrative) are left as period-accurate
+history, with a resolved-status note added rather than being rewritten.
+
+**Explicitly not done this session (by design):** parquet not committed to git; full
+2,752-basin NH package not generated; no training run.
+
+**Files changed:** `docs/stage1_attribute_provenance.md`,
+`reports/flashnh_basin_screening_v001/README.md`,
+`scripts/build_stage1_nh_package.py`, `docs/FLASHNH_CURRENT_STATE.md`,
+`docs/decision_log.md` (this entry).
+
+## 2026-07-03 Milestone 2K-G-D — attribute provenance closed + scientific baseline design gate opened
+
+**Decision 1 — attribute source stays external/h2o-Moriah-resident, checksum-pinned;
+not committed to git.**
+
+Investigated both paths that had appeared inconsistently across docs since Milestone
+2K-G-B/C: `reports/flashnh_basin_screening_v001/all_basins_merged.parquet` (repo-relative)
+and `/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (h2o-staged). Findings:
+- Local file exists (2.90 MiB / 3,037,889 bytes), gitignored (`reports/**`), never
+  independently tracked in the current tree (was briefly tracked at commit `905f871`,
+  then untracked by `f51b34a` "Tighten generated artifact tracking policy").
+- 9,008 rows × 48 columns — the full GAGES-II reference-basin universe, not scoped to the
+  2,752/2,843 Flash-NH candidates (builder subsets by `STAID` at load time).
+- Required columns confirmed present: `DRAIN_SQKM`, `LAT_GAGE`, `LNG_GAGE`, `BFI_AVE`.
+  `STAID` present (int64); `gauge_id` absent — expected, builder normalizes via
+  `_norm_staid()` (zero-pad to 8 chars; round-trip confirmed lossless).
+- sha256 (local copy): `06a9eeda9e94261d0b1bb9f2c2f42cb6bf11b4c02745d7ed5867ef0e0c0ad0b1`.
+- Provenance: **generated**, not source, not manually curated — a deterministic,
+  unfiltered merge of local GAGES-II CSVs (`US_data/attributes/attributes_gageii_*.csv`,
+  also untracked) via `scripts/flashnh_basin_screening.py`. That script reads from a
+  hardcoded absolute Windows path, so the merge is **not currently reproducible on
+  h2o/Moriah** — the h2o copy depends on the 2026-06-30 manual staging.
+
+Per `docs/repo_policy.md` → "Generated artifact policy" ("Git does not track generated
+data products... regardless of size"), committing the parquet — even at ~3 MB — would
+contradict the policy the repo already established by deliberately untracking this exact
+class of file. **Resolution: option (b) from the 2026-06-30 entry below** — document as a
+canonical, checksum-pinned external artifact. Full record: `docs/stage1_attribute_provenance.md`.
+
+**Caveat — h2o-copy checksum not yet independently verified.** This session had no
+h2o/Moriah shell access. The verification command
+(`ssh flashnh-h2o "sha256sum /data42/omrip/Flash-NH/tmp/all_basins_merged.parquet"`)
+is documented in `docs/stage1_attribute_provenance.md` and must be run, with the result
+compared against the checksum above, before full 2,752-basin package generation.
+**Superseded 2K-G-D-A (2026-07-03, entry above):** verification completed (PASS) and
+the canonical copy promoted off `tmp/` to a stable path.
+
+**Decision 2 — small tracked provenance pointer added under the existing README exception.**
+`reports/flashnh_basin_screening_v001/README.md` added (small, curated, points to the
+full provenance doc) under the pre-existing `!reports/**/README.md` gitignore exception.
+While implementing this, found that exception was **non-functional**: `reports/**`
+excludes the parent directories themselves, so git never evaluated the nested negation
+patterns (`!reports/**/README.md`, `!reports/**/summary.md`, `!reports/**/manifest.json`)
+against files inside them — a standard gitignore gotcha ("cannot re-include a file if a
+parent directory is excluded"). Fixed by adding `!reports/**/` before the file-level
+negations in `.gitignore` (Disk_volume_estimation). Verified with `git check-ignore -v`:
+the three intended file classes (`README.md`, `summary.md`, `manifest.json`) are now
+correctly un-ignored at any depth under `reports/`, while `*.parquet`, `*.csv`, `*.png`,
+etc. remain ignored via their own separate patterns. This also repairs the `manifest.json`/
+`summary.md` exceptions for *other* report directories (unrelated to this milestone) —
+those files were not staged or committed here; only the new README was added.
+
+**Decision 3 — builder now records the attribute file's own checksum in provenance.**
+`scripts/build_stage1_nh_package.py` `_write_provenance()` now writes `attributes_sha256`
+(computed from the actual `--attributes-csv` file used) into `run_provenance.json`, so
+every future package build is self-verifying regardless of which of the two documented
+paths supplied the file. Docstring and `--attributes-csv` help text updated to point at
+`docs/stage1_attribute_provenance.md` instead of repeating an ambiguous default path.
+Syntax-checked (`python -m py_compile`); not re-run end-to-end (requires h2o data, out of
+scope for this session).
+
+**Decision 4 — scientific-baseline design gate opened; `seq_length` framing corrected.**
+New scaffold doc `docs/stage1_scientific_baseline_design.md` lists what must be decided
+before the first scientific-baseline training run: dynamic input set (§1–2), static
+attributes (§3), target cleaning/normalization (§4–5), forcing-gap policy for training vs.
+Smoke 0/1 (§6, reusing the two candidates already identified in
+`docs/stage1_neuralhydrology_preflight.md` §8.2), loss/metrics (§7), train/val/test
+protocol (§8), `seq_length` + conventional hyperparameters (§9), W&B policy (§10), Slurm
+partition/GRES parameterization (§11), and evidence bundle conventions (§12). Most items
+are explicitly **OPEN** — this is a decision scaffold, not a final spec.
+
+Prior entries (2026-07-02, below) framed "lookback-expansion tests (seq_length
+72/168/336)" as the direct next milestone after attribute cleanup. **That framing is
+superseded**: `seq_length` is one hyperparameter decided inside this design gate (§9),
+not the milestone driver. `FLASHNH_CURRENT_STATE.md` updated accordingly.
+
+**Explicitly not done this session (by design):**
+- Full 2,752-basin NH package was **not** generated.
+- No training was run.
+- No large generated file was committed; local `reports/flashnh_basin_screening_v001/`
+  contents (parquets, csvs, plots) remain untracked, as before.
+
+**Files changed:** `docs/stage1_attribute_provenance.md` (new),
+`docs/stage1_scientific_baseline_design.md` (new),
+`reports/flashnh_basin_screening_v001/README.md` (new, tracked),
+`.gitignore` (Disk_volume_estimation — negation-pattern fix),
+`scripts/build_stage1_nh_package.py` (docstring + checksum recording),
+`docs/FLASHNH_CURRENT_STATE.md`, `docs/decision_log.md` (this entry).
+
 ## 2026-07-02 Smoke 1 PASS — meteorology ingestion confirmed on Moriah
 
 **Decision:** Accept Smoke 1 as a technical meteorology-ingestion PASS. This is NOT a

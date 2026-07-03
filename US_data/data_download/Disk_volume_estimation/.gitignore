@@ -42,6 +42,9 @@ Flash-NH_data/
 **/*.gpkg
 
 # Allow small curated report summaries when explicitly committed
+# (directories must be un-ignored first — git will not descend into an
+# ignored directory to test file-level negation patterns below it)
+!reports/**/
 !reports/**/README.md
 !reports/**/summary.md
 !reports/**/manifest.json

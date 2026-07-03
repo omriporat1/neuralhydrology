@@ -1,10 +1,45 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-02 (Smoke 1 meteorology PASS on Moriah)
+Last updated: 2026-07-03 (Milestone 2K-G-D-A — static attribute artifact promoted out of `tmp`)
 
 ## Current milestone
 
-**Smoke 1 PASS (2026-07-02) — meteorology ingestion confirmed.**
+**2K-G-D-A COMPLETE (2026-07-03) — canonical attribute artifact promoted off `tmp`;
+h2o checksum verification PASS.**
+
+2K-G-D (same day) identified the static attribute file as an external,
+checksum-pinned artifact (per `docs/repo_policy.md` generated-artifact policy — a
+generated data product is not committed regardless of its small size) but left it
+resident under `/data42/omrip/Flash-NH/tmp/`, and left the h2o-copy checksum
+unverified pending h2o shell access. 2K-G-D-A closes both:
+- **Promoted** the canonical h2o-resident copy from
+  `/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (now historical/staged only)
+  to the stable project data path
+  `/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`.
+- **Verified** (user-run on h2o): sha256 of both the `tmp/` copy and the newly
+  promoted stable-path copy is
+  `06a9eeda9e94261d0b1bb9f2c2f42cb6bf11b4c02745d7ed5867ef0e0c0ad0b1` (`ls -lh`: 2.9M
+  both) — identical, matching the local repo-fixture checksum recorded at 2K-G-D.
+  Full evidence: `docs/stage1_attribute_provenance.md`.
+- The parquet itself is still **not committed to git** — only the checksum,
+  path, and provenance are documented. `attributes_sha256` continues to be
+  written into every package's `run_provenance.json`
+  (`scripts/build_stage1_nh_package.py`).
+- Remaining open item (non-blocking): the Moriah mirror path
+  (`/sci/labs/efratmorin/omripo/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`)
+  is documented but not yet populated or verified.
+
+A design-gate scaffold for the first scientific baseline is now at
+`docs/stage1_scientific_baseline_design.md`: purpose/non-goals, dynamic-input set,
+static-attribute subset, target cleaning/normalization, forcing-gap policy, loss/metrics,
+train/val/test protocol, W&B policy, Slurm partition/GRES parameterization, and evidence
+bundle conventions. Most items are explicitly marked **OPEN** — this is a decision
+scaffold, not a locked spec. **Correction to prior framing:** earlier entries below
+described "lookback-expansion tests (seq_length 72/168/336)" as the next milestone —
+`seq_length` is one hyperparameter decided inside the design gate (§9), not the
+milestone driver.
+
+**Smoke 1 PASS (2026-07-02) — meteorology ingestion confirmed (retained for reference).**
 
 **This is a technical meteorology-ingestion PASS, not a scientific baseline.**
 6 RTMA vars + MRMS QPE + 2 gap flags, `seq_length=24` (same as Smoke 0 — isolates input
@@ -23,15 +58,22 @@ Purpose: confirm RTMA meteorology loads, normalizes, and trains without error.
 - Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
 - Artefacts: `model_epoch001/002/003.pt` (~83 KB each), optimizer states, TensorBoard events
 
-**Next: lookback-expansion tests (seq_length 72/168/336) or move to full 2,752-basin package.**
+**Next: resolve the OPEN decisions in `docs/stage1_scientific_baseline_design.md`
+(§1–§11), then generate the full 2,752-basin NH package using the stable attribute
+path (attribute-checksum verification is now closed — no longer a gate).**
 
 **Remaining gates before full 2,752-basin NH package + scientific baseline:**
-- Attribute provenance cleanup: `all_basins_merged.parquet` staged at h2o `tmp/`, not committed.
-  Must be committed or formally locked before full 2,752-basin NH package generation.
-- Slurm templates (smoke0/1 sbatch) are hard-pinned to `catfish/L4`. Future improvement:
-  make GPU partition and GRES configurable so runs can target `salmon` or `goldfish` without
-  editing the script. Defer until reproducibility baseline (scientific baseline) is established.
-- Lookback-expansion smoke (seq_length 72 h) is a separate next milestone after attribute cleanup.
+- ~~Attribute provenance / checksum verification~~ — **CLOSED 2K-G-D-A (2026-07-03)**.
+  Canonical path promoted off `tmp`; h2o checksum verified PASS. See
+  `docs/stage1_attribute_provenance.md`.
+- Scientific-baseline design gate: OPEN decisions in `docs/stage1_scientific_baseline_design.md`
+  (dynamic/static input set, target normalization, forcing-gap policy for training,
+  loss/metrics, split protocol, `seq_length` and other hyperparameters, W&B policy).
+- Slurm templates (smoke0/1 sbatch) are hard-pinned to `catfish/L4`. Per the design gate
+  (§11), parameterize `PARTITION`/`GRES` *before* the first scientific baseline run so the
+  run's evidence bundle records which GPU it used.
+- Moriah mirror of the attribute file (documented path, not yet populated/verified) —
+  only needed if a Moriah-side build reads the attribute file directly.
 
 ---
 
@@ -150,10 +192,13 @@ No forcing NaN warnings. All forcing variables non-null after gap-fill.
 - `mrms_qpe_1h_mm_gap sum == 136` per basin; `rtma_gap sum == 2` per basin
 - Gap fill: MRMS 136 NaN → 0.0 mm/basin; RTMA 2 NaN → linear interp per variable/basin
 
-**Static attribute caveat (cleanup required before full-scale package):**
+**Static attribute caveat (cleanup required before full-scale package) — RESOLVED 2K-G-D-A
+(2026-07-03), see top of this document and `docs/stage1_attribute_provenance.md`:**
 `reports/flashnh_basin_screening_v001/all_basins_merged.parquet` is **not tracked in git**
 (verified with `git ls-files` on h2o). The h2o builder used a manually staged copy at
-`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet`.
+`/data42/omrip/Flash-NH/tmp/all_basins_merged.parquet` (this path is now historical/staged
+only — promoted to `/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`,
+checksum-verified, at 2K-G-D-A).
 The 5-basin pilot PASS is valid. Before full 2,752-basin NH package generation, this file
 must be made canonical: committed to the repo or documented as a stable h2o-resident input
 with explicit provenance. This is a cleanup gate, not a blocker for Moriah transfer.
@@ -173,7 +218,8 @@ with explicit provenance. This is a cleanup gate, not a blocker for Moriah trans
 **Next: 2K-G-C — Moriah transfer + environment preflight + Smoke 0.**
 Transfer pilot package (`scp`), confirm NH conda env on GPU node, run Smoke 0 (seq_length=24, 2 epochs).
 No NH training has run yet. Full 2,752-basin NH package generation waits for:
-(1) corrected full forcing rebuild PASS on h2o; (2) attribute-source cleanup.
+(1) corrected full forcing rebuild PASS on h2o; (2) attribute-source cleanup
+(**resolved 2K-G-D-A, 2026-07-03** — see top of document).
 
 ---
 
