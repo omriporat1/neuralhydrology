@@ -1,8 +1,56 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-03 (Milestone 2K-G-D-A — static attribute artifact promoted out of `tmp`)
+Last updated: 2026-07-06 (Milestone 2K-G-E revision — scientific baseline design
+aligned to user-approved decisions)
 
 ## Current milestone
+
+**2K-G-E REVISED (2026-07-06) — scientific baseline design aligned to
+user-approved decisions; two new gating mini-milestones defined.**
+
+The first 2K-G-E proposal (2026-07-03) was never committed; user review
+changed several key decisions before commit, so `docs/stage1_scientific_baseline_design.md`
+was revised in place rather than amended. 14 binding decisions are now
+recorded there ("Binding decisions" section). Highlights of what changed from
+the 2026-07-03 draft:
+- **Static attributes reopened:** the draft ~16-column sign-off candidate is
+  **withdrawn**. The 48-column GAGES-II screening merge remains a valid,
+  checksum-verified provenance artifact but is likely insufficient as the
+  final modeling matrix — richer source material exists locally
+  (`US_data/attributes`, ~28 files, ~350-variable description workbook) and
+  is not yet mirrored to h2o/Moriah. Gated on new **Milestone 2K-G-F**.
+- **Target normalization:** log-transform **rejected** (poorly aligned with
+  flash-flood/high-flow emphasis). Leading candidate is now area-normalized/
+  specific discharge, pending feasibility. Gated on new **Milestone 2K-G-G**.
+- **`seq_length`:** narrowed and made **binding** — Stage 1 candidates are
+  only 12/24/48/72 h; 168/336 h explicitly belong to Stage 2, not Stage 1
+  (withdraws the draft's 336 h literature-based proposal).
+- **Lead time:** new design axis added — primary 6 h, secondary 12 h, 1/3 h
+  diagnostic-only; explicitly separate from `seq_length`.
+- **Temporal split dates revised:** train 2020-10-14→2023-12-31, validation
+  2024, test 2025 (was train ≤2022-12-31 / val 2023 / test 2024–2025).
+- **Spatial split added:** California excluded entirely from Stages 1–3;
+  ~10% non-CA spatial holdout, test-only, evaluated on the 2025 test period.
+- **California transfer learning (Stage 4) added:** ~90/10 CA split,
+  CA-only normalization-refit exception for fine-tuning, compare
+  original-vs-fine-tuned on CA holdout.
+- **Leakage-prevention rules made explicit:** all Stage 1–3 scalers fit only
+  on development-training data/period; Stage 4 CA scalers fit only on the CA
+  fine-tuning subset.
+- **Loss vs. metrics separated:** training loss still open (depends on target
+  scaling); evaluation always in raw `m^3/s`, raw-space NSE primary.
+- **Hyperparameters reframed:** the conventional table is now an *initial
+  seed config* only — the official benchmark requires a W&B sweep, not yet
+  run.
+- **W&B policy expanded:** loss/validation curves, LR, epoch timing, run
+  duration, GPU type, resource telemetry, in addition to config/provenance.
+- **Slurm policy:** stays flexible/parameterized, not hard-pinned; resources
+  may be increased later based on telemetry.
+
+A "Before full 2,752-basin NH package generation" checklist was updated to
+include the two new mini-milestones. **No code was changed** — this remains
+documentation-only; no config written, no package generated, no training run,
+no Moriah/California data transfer.
 
 **2K-G-D-A COMPLETE (2026-07-03) — canonical attribute artifact promoted off `tmp`;
 h2o checksum verification PASS.**
@@ -58,22 +106,42 @@ Purpose: confirm RTMA meteorology loads, normalizes, and trains without error.
 - Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
 - Artefacts: `model_epoch001/002/003.pt` (~83 KB each), optimizer states, TensorBoard events
 
-**Next: resolve the OPEN decisions in `docs/stage1_scientific_baseline_design.md`
-(§1–§11), then generate the full 2,752-basin NH package using the stable attribute
-path (attribute-checksum verification is now closed — no longer a gate).**
+**Next: run Milestones 2K-G-F (static attribute matrix recovery + audit) and
+2K-G-G (target scaling + gap policy + lead-time feasibility report — requires
+actual NH 1.13 code inspection on Moriah), then close the remaining sign-off
+items in `docs/stage1_scientific_baseline_design.md`, select the non-CA
+spatial-holdout basin list, encode the resolved policy into
+`config/stage1_scientific_baseline_v001.yaml` + NH YAML, run the W&B
+hyperparameter sweep, then generate the full 2,752-basin NH package.**
 
 **Remaining gates before full 2,752-basin NH package + scientific baseline:**
 - ~~Attribute provenance / checksum verification~~ — **CLOSED 2K-G-D-A (2026-07-03)**.
-  Canonical path promoted off `tmp`; h2o checksum verified PASS. See
-  `docs/stage1_attribute_provenance.md`.
-- Scientific-baseline design gate: OPEN decisions in `docs/stage1_scientific_baseline_design.md`
-  (dynamic/static input set, target normalization, forcing-gap policy for training,
-  loss/metrics, split protocol, `seq_length` and other hyperparameters, W&B policy).
-- Slurm templates (smoke0/1 sbatch) are hard-pinned to `catfish/L4`. Per the design gate
-  (§11), parameterize `PARTITION`/`GRES` *before* the first scientific baseline run so the
-  run's evidence bundle records which GPU it used.
+  Canonical path promoted off `tmp`; h2o checksum verified PASS (48-column
+  screening merge only — see next item for the modeling-matrix gate).
+- **NEW — Milestone 2K-G-F (Static Attribute Matrix Recovery + Audit):** not
+  started. Recover richer static attributes from `US_data/attributes` (~28
+  files), mirror to h2o/Moriah if absent, audit, checksum, propose a Stage 1
+  static-attribute policy. See `docs/stage1_scientific_baseline_design.md` §3.
+- **NEW — Milestone 2K-G-G (Target Scaling + Gap Policy + Lead-Time
+  Feasibility Report):** not started. Requires reading actual NH 1.13 code
+  on Moriah (not docs/assumptions) to resolve target-normalization
+  feasibility (§5) and forcing-gap-policy feasibility (§6), and to quantify
+  sample/window loss across `seq_length`×lead-time combinations.
+- Scientific-baseline design gate: **REVISED into 14 binding decisions
+  2K-G-E (2026-07-06)** — see `docs/stage1_scientific_baseline_design.md` →
+  "Binding decisions." Still open pending 2K-G-F/2K-G-G: target
+  normalization, forcing-gap policy, static-attribute column list. Also
+  still open: non-CA spatial-holdout basin selection (~10%), California
+  basin identification for Stage 4, `seq_length`/lead-time final selection
+  (via W&B sweep, not yet run).
+- Slurm templates (smoke0/1 sbatch) are hard-pinned to `catfish/L4`. Policy
+  is to keep this parameterized/flexible (§11) — sbatch edit itself still
+  deferred to when the baseline config is assembled.
 - Moriah mirror of the attribute file (documented path, not yet populated/verified) —
   only needed if a Moriah-side build reads the attribute file directly.
+- Revised temporal split dates (§8) and California exclusion are **not yet**
+  encoded in `scripts/build_stage1_nh_package.py`'s split constants — that is
+  a code change, out of scope for documentation-only milestones.
 
 ---
 

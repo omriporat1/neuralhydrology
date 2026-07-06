@@ -1,6 +1,111 @@
+
+
 # Decision Log
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
+
+## 2026-07-06 Milestone 2K-G-E (revised) — scientific baseline aligned to user-approved decisions; 2K-G-F/2K-G-G gates defined
+
+**Context.** The first 2K-G-E proposal (2026-07-03, originally recorded in this
+slot) was **never committed** — user review changed several key decisions before
+commit, so this entry and `docs/stage1_scientific_baseline_design.md` were revised
+in place rather than layering a second entry on an uncommitted draft. This entry
+replaces the 2026-07-03 text previously here.
+
+**What changed from the 2026-07-03 draft, and why:**
+1. **Static attributes reopened, not signed off.** The draft's ~16-column
+   candidate list is withdrawn. The 48-column GAGES-II screening merge stays a
+   valid, checksum-verified provenance artifact, but the user expects a richer
+   matrix (topography, geology, land use/land cover, vegetation, snow fraction,
+   climate/static hydrologic attributes) from local source material at
+   `C:\PhD\Python\neuralhydrology\US_data\attributes` (~28 files, including
+   `attributes_gageii_Topo.csv`, `attributes_gageii_Bas_Morph.csv`,
+   `attributes_hydroATLAS.csv`, `attributes_nldas2_climate.csv`, and a
+   ~350-variable description workbook `Var description_gageii.xlsx`) not yet
+   confirmed mirrored to h2o/Moriah. Gated on new **Milestone 2K-G-F**.
+2. **Target normalization: log-transform rejected.** User explicitly rejected it
+   as poorly aligned with the project's flash-flood/high-flow emphasis. Leading
+   candidate is now area-normalized/specific discharge, pending feasibility.
+   Evaluation must always be reported in raw `m^3/s`. Gated on new
+   **Milestone 2K-G-G**, which must inspect NH 1.13's actual installed
+   normalization code on Moriah, not public docs.
+3. **`seq_length` narrowed and made binding for Stage 1: only 12/24/48/72 h.**
+   The draft's 336 h (Kratzert et al. 2021-grounded) proposal is withdrawn —
+   168/336 h are explicitly Stage 2 (long-term antecedent modeling) territory,
+   not Stage 1. This is recorded as a binding decision specifically so future
+   prompts/docs stop reintroducing 168/336 h for Stage 1.
+4. **Lead time added as a new, separate design axis** (the draft did not address
+   it): primary benchmark lead time 6 h, secondary 12 h, 1/3 h diagnostic-only.
+   Input sequence length and prediction lead time are explicitly independent
+   axes.
+5. **Temporal split dates revised:** train `2020-10-14`→`2023-12-31`, validation
+   `2024-01-01`→`2024-12-31`, test `2025-01-01`→`2025-12-31` (was train
+   ≤2022-12-31 / val 2023 / test 2024–2025) — closer to a 60/20/20 chronological
+   design given the available data range. Not yet encoded in
+   `scripts/build_stage1_nh_package.py`'s split constants (code change, deferred).
+6. **Spatial/geographic split added:** California excluded entirely from Stages
+   1–3; ~10% non-CA CONUS spatial holdout, broadly distributed, strictly
+   test-only (never in training/validation/tuning/normalization/early
+   stopping/model selection); official spatial-holdout evaluation uses the 2025
+   test period for comparability with the temporal test set.
+7. **California transfer-learning split (Stage 4) added:** CA held out through
+   Stages 1–3; Stage 4 fine-tunes on CA with an internal ~90/10 split
+   (fine-tune-train/CA holdout); CA-specific normalization may be refit using
+   only the CA fine-tuning training subset (not the CA holdout); transfer
+   benefit is quantified by comparing the non-CA-trained model and the
+   fine-tuned model, both evaluated on the CA holdout.
+8. **Leakage-prevention rules made explicit:** all Stage 1–3 scalers (static,
+   dynamic, target, any area-based target-scaling statistic) are fit only on
+   development-training basins/period — never validation, temporal test,
+   spatial holdout, or CA data; Stage 4 CA normalization updates use only the CA
+   fine-tuning training subset.
+9. **Loss and metrics separated**, where the draft treated them as one resolved
+   item. Training loss stays open (depends on target-scaling outcome, §5/2K-G-G).
+   Evaluation metrics are always computed in raw `m^3/s`; raw-space NSE is
+   primary; KGE+components, PBIAS, peak magnitude error, and peak timing error
+   are added; detailed event/high-flow metric design is deferred to its own
+   near-term discussion.
+10. **Hyperparameter table reframed** from "recommend now, adopt as-is" to an
+    *initial seed config only* — the official Stage 1 benchmark requires a
+    controlled W&B hyperparameter sweep (candidate dimensions: `seq_length`,
+    hidden size, dropout, learning rate, batch size, possibly layer count),
+    not yet run. Sweep/model-selection objective for now: validation raw-space
+    NSE, with high-flow/event metrics logged as secondary diagnostics.
+11. **W&B logging policy expanded** beyond config/provenance to include loss and
+    validation curves, learning rate, epoch timing, run duration, GPU
+    type/partition/GRES, and system/resource telemetry where available.
+12. **Slurm policy reaffirmed as flexible/parameterized** (not a new decision,
+    but restated as binding): no permanent hard-pin to one partition/GPU;
+    resources actually used are recorded in the evidence bundle; allocation may
+    increase later based on telemetry.
+13. **Basin-set decision (2,752-basin floor, exclude `02299472`/`04073468`)
+    reconfirmed unchanged** — this item from the original draft was approved
+    as-is.
+14. **Two new mini-milestones defined** (not executed in this patch):
+    - **2K-G-F — Static Attribute Matrix Recovery + Audit**: inventory the
+      local attribute source directory; check/document h2o/Moriah mirror
+      status; use `Var description_gageii.xlsx` to interpret fields; recover
+      richer CAMELSH/CARAVAN/HydroATLAS/static attributes; merge with useful
+      existing GAGES-II fields; drop/encode non-numeric fields; audit
+      missingness/ranges/units; checksum; propose a Stage 1 attribute policy
+      for sign-off.
+    - **2K-G-G — Target Scaling + Gap Policy + Lead-Time Feasibility Report**:
+      inspect NH 1.13's actual installed code on Moriah (not public docs or
+      assumptions) for target-normalization support, `nan_handling_method`
+      behavior, masked-loss support, and window/sample-exclusion feasibility;
+      quantify expected sample/window loss across `seq_length`∈{12,24,48,72}
+      × lead time∈{1,3,6,12h}; record an explicit RTMA-interpolation decision.
+
+**Explicitly not done this session (by design):** no code changed; no config
+written; full 2,752-basin NH package not generated; no training run; no
+Moriah or California data transfer; 2K-G-F and 2K-G-G not executed — only
+scoped.
+
+**Files changed:** `docs/stage1_scientific_baseline_design.md` (revised in
+place — binding-decisions section, revised §1–§12, new §8b/§8c/§8d, new "New
+mini-milestones" section, updated checklist and Status),
+`docs/FLASHNH_CURRENT_STATE.md`, `docs/decision_log.md` (this entry, replacing
+the 2026-07-03 text in the same slot).
 
 ## 2026-07-03 Milestone 2K-G-D-A — static attribute artifact promoted out of `tmp`; h2o checksum verified
 
