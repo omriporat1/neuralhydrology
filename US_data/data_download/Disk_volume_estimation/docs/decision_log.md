@@ -4,6 +4,94 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-06 Milestone 2K-G-F — static attribute matrix inventory + audit plan
+
+**Context.** 2K-G-E (revised, 2026-07-06, above) reopened static attributes
+and gated them on this milestone. The existing canonical artifact
+(`gagesii_v001/all_basins_merged.parquet`, 48 columns, checksum
+`06a9eeda9...`) is a valid, checksum-pinned provenance artifact but draws
+from only 3 of 27 available GAGES-II source tables and has no topography,
+geology, land cover/vegetation, or snow fraction — insufficient as the final
+Stage 1 modeling matrix. This pass inventories the richer local source and
+proposes (does not build) a merge/audit policy.
+
+**Inventory.** Local source directory
+`C:\PhD\Python\neuralhydrology\US_data\attributes`: 29 CSVs (27 GAGES-II +
+HydroATLAS + NLDAS-2 climate) + 1 variable-description workbook, all keyed on
+`STAID`, all 9,008 rows. Cross-checked against the real Stage 1 basin
+manifest (`config/stage1_initial_training_basin_manifest.csv`, 2,843 basins:
+2,216 `TRAIN_CORE` + 627 `TRAIN_SOFT_KEEP`):
+- 100% GAGES-II coverage after zero-padding `STAID` to 8 chars, including all
+  6 non-standard-length USGS IDs (five 15-char, one 9-char).
+- HydroATLAS covers 99.8% (2,838/2,843) after zero-padding; the 5-basin gap
+  is exactly the 15-char non-standard IDs (HydroATLAS's raw `STAID` export is
+  not zero-padded, unlike the GAGES-II CSVs). **Clarified as a mandatory
+  build/audit gate, not a loose caveat** (same-day follow-up review): the
+  builder/auditor must explicitly detect these 5 basins and either
+  resolve/match them, retain them under a documented missing/imputation
+  policy, or fail the build with a named-basin message — a silent partial
+  HydroATLAS merge is not allowed.
+- NLDAS-2 climate covers 100% after zero-padding.
+- **Confirmed the existing 48-column canonical parquet stores `STAID` as
+  `int64`** (leading zeros stripped) — already handled by the builder's
+  `_norm_staid()`, but any new merge/audit script must reimplement 8-char
+  zero-padding itself; do not assume any file preserves it.
+
+**Content audit (780 non-ID columns across all sources, restricted to the
+2,843 Stage 1 basins):** 758 numeric-like / 22 non-numeric. Non-numeric split
+into free-text/administrative (drop: `STANAME`, `COUNTYNAME_SITE`,
+`WR_REPORT_REMARKS`, `ADR_CITATION`, `SCREENING_COMMENTS`, `NAWQA_SUID`),
+sparse binary membership flags (encode 0/1, not drop: `HCDN_2009`, `HBN36`,
+`OLD_HCDN`, `NSIP_SENTINEL`, `ACTIVE09`), and genuine categorical class codes
+(`CLASS`, `AGGECOREGION`, `HUC02`, `STATE`, `HUC10_CHECK`,
+`GEOL_REEDBUSH_DOM/SITE`, `GEOL_HUNT_DOM_CODE/DESC`, `GEOL_HUNT_SITE_CODE`,
+`USDA_LRR_SITE`). Only 6 of 780 columns exceed 20% missing (all sparse
+membership flags); 20 near-constant columns; one duplicate column
+(`DRAIN_SQKM`, appears in both `BasinID.csv` and `Bound_QA.csv`). Snow
+fraction is available **only** via HydroATLAS (`snw_pc_*`), not any GAGES-II
+file. Per-year time-series columns (`Climate_Ppt_Annual`/`Climate_Tmp_Annual`,
+~120 cols; `FlowRec`'s `wy1900`…`wy2009`, 110 cols) are flagged as needing
+reduction to summary statistics, not inclusion as raw per-year columns.
+**Decided (same-day follow-up review):** `STATE`/`HUC02` are useful for split
+construction, diagnostics, and reporting (CA exclusion, spatial holdout) but
+are excluded outright from `v001-core` model-input features — not merely
+de-prioritized pending a decision. Lat/lon are held out of `v001-core` by
+default and deferred to a dedicated ablation testing whether raw coordinates
+help or hurt spatial generalization.
+
+**Filtering philosophy for `v001-core` (same-day follow-up review):**
+conservative by default — any variable suspected to be problematic,
+non-physical, purely administrative, weakly useful, leakage-prone,
+near-constant, high-missingness, or hard to interpret is excluded from the
+first modeling matrix rather than kept on the chance it helps. A smaller,
+defensible first matrix is preferred over a maximal one; richer/borderline
+variables can be added later only as a deliberate, documented ablation. This
+applies to the per-year time-series columns and near-constant columns noted
+above, and to the HydroATLAS gap-gate policy above.
+
+**h2o/Moriah mirror status.** Not checked from this session — no network
+path from the Claude Code environment to h2o/Moriah (confirmed:
+`ssh flashnh-h2o` fails to resolve). Explicit user-side check/transfer/verify
+commands written to `docs/stage1_static_attribute_matrix_plan.md` §6 instead
+of assumed.
+
+**Proposed canonical paths** (not yet created):
+`/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/` (h2o
+source mirror), `/sci/labs/efratmorin/omripo/Flash-NH/data/static_attributes/source_attributes_v001/`
+(Moriah source mirror), `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet`
+(derived modeling matrix, once built).
+
+**Explicitly not done this session:** no final static-attribute matrix built
+or written anywhere; no h2o/Moriah transfer performed; no code, config,
+package, Slurm script, or training changed. The per-column audit CSV produced
+during inspection is a local scratch artifact (session scratchpad), not
+committed or canonical.
+
+**Files changed:** new `docs/stage1_static_attribute_matrix_plan.md`
+(inventory, content audit, mirror-status/commands, proposed paths, merge/audit
+policy, audit plan for the eventual matrix); `docs/FLASHNH_CURRENT_STATE.md`;
+`docs/decision_log.md` (this entry).
+
 ## 2026-07-06 Milestone 2K-G-E (revised) — scientific baseline aligned to user-approved decisions; 2K-G-F/2K-G-G gates defined
 
 **Context.** The first 2K-G-E proposal (2026-07-03, originally recorded in this

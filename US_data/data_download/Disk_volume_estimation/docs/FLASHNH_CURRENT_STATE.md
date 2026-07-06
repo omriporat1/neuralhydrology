@@ -1,9 +1,60 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-06 (Milestone 2K-G-E revision — scientific baseline design
-aligned to user-approved decisions)
+Last updated: 2026-07-06 (Milestone 2K-G-F — static attribute matrix
+inventory + audit plan)
 
 ## Current milestone
+
+**2K-G-F IN PROGRESS (2026-07-06) — static attribute matrix recovery + audit
+plan.** Inventoried the full local source directory
+(`C:\PhD\Python\neuralhydrology\US_data\attributes`: 29 CSVs + 1 variable
+description workbook, all keyed on `STAID`, all 9,008 rows) and cross-checked
+it against the real Stage 1 basin manifest (`config/stage1_initial_training_basin_manifest.csv`,
+2,843 basins). Key findings, recorded in the new
+`docs/stage1_static_attribute_matrix_plan.md`:
+- **100% GAGES-II source coverage** of the Stage 1 basin set once `STAID` is
+  zero-padded to 8 characters, including all 6 non-standard-length USGS IDs
+  (five 15-char, one 9-char coordinate-based station numbers).
+- **HydroATLAS covers 99.8%** (2,838/2,843) after zero-padding — the 5-basin
+  gap is exactly the 15-char non-standard IDs (HydroATLAS's own `STAID` export
+  is not zero-padded, unlike the GAGES-II CSVs). **Clarified as a mandatory
+  build/audit gate** (same-day follow-up review): the builder/auditor must
+  detect these 5 basins and either resolve/match them, retain them under a
+  documented missing-value policy, or fail the build — no silent partial
+  HydroATLAS merge is allowed.
+- **Confirmed the existing canonical 48-column parquet stores `STAID` as
+  `int64`** (leading zeros stripped) — already handled by the builder's
+  `_norm_staid()`, but any new merge/audit script must reimplement 8-char
+  zero-padding independently; do not assume any source/intermediate file
+  preserves it.
+- **The existing 48-column merge draws from only 3 of the 27 GAGES-II source
+  files** — no topography, geology, land cover/vegetation, or snow fraction.
+  The richer sources (Topo, Geology, 5× land-cover buffers, Soils, Climate,
+  HydroATLAS, NLDAS-2) are cataloged and ready to merge; **snow fraction is
+  only available via HydroATLAS** (`snw_pc_*`), not any GAGES-II file.
+- Full audit of all 780 non-ID source columns restricted to the Stage 1
+  basins: 758 numeric-like / 22 non-numeric (classified into
+  drop/binary-flag/categorical groups); only 6 columns >20% missing; 20
+  near-constant columns; one duplicate column (`DRAIN_SQKM`).
+- Proposed canonical paths (h2o source mirror, Moriah source mirror, derived
+  matrix path — see plan doc §7) and a merge/audit policy (§8–9). h2o/Moriah
+  mirror status **not checked from this session** (no network path from this
+  environment) — explicit user-side check/transfer commands documented in
+  the plan doc §6 instead.
+- **Filtering philosophy decided (same-day follow-up review): conservative by
+  default.** Ambiguous/borderline variables (problematic, non-physical,
+  administrative, weakly useful, leakage-prone, near-constant, high-missingness,
+  hard to interpret) are excluded from `v001-core` by default, not kept on
+  the chance the model learns something — a defensible small first matrix is
+  preferred over a maximal one. Under this policy, `STATE`/`HUC02` are
+  excluded outright from `v001-core` model inputs (kept only for split
+  construction/diagnostics/reporting); lat/lon are held out of `v001-core`
+  by default and deferred to a dedicated ablation on spatial generalization.
+
+**No final static-attribute matrix was built.** No code, config, package,
+Slurm script, or training changed; no h2o/Moriah transfer performed. The
+per-column audit CSV produced during inspection is a local scratch artifact
+only, outside the repo.
 
 **2K-G-E REVISED (2026-07-06) — scientific baseline design aligned to
 user-approved decisions; two new gating mini-milestones defined.**
@@ -106,11 +157,14 @@ Purpose: confirm RTMA meteorology loads, normalizes, and trains without error.
 - Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
 - Artefacts: `model_epoch001/002/003.pt` (~83 KB each), optimizer states, TensorBoard events
 
-**Next: run Milestones 2K-G-F (static attribute matrix recovery + audit) and
-2K-G-G (target scaling + gap policy + lead-time feasibility report — requires
-actual NH 1.13 code inspection on Moriah), then close the remaining sign-off
-items in `docs/stage1_scientific_baseline_design.md`, select the non-CA
-spatial-holdout basin list, encode the resolved policy into
+**Next: mirror the local attribute source directory to h2o/Moriah (commands
+in `docs/stage1_static_attribute_matrix_plan.md` §6), get sign-off on the
+merge/audit policy in that plan doc §8, then build and audit the derived
+`stage1_static_attributes_v001` matrix per §9 (2K-G-F close-out). In
+parallel, run Milestone 2K-G-G (target scaling + gap policy + lead-time
+feasibility report — requires actual NH 1.13 code inspection on Moriah), then
+close the remaining sign-off items in `docs/stage1_scientific_baseline_design.md`,
+select the non-CA spatial-holdout basin list, encode the resolved policy into
 `config/stage1_scientific_baseline_v001.yaml` + NH YAML, run the W&B
 hyperparameter sweep, then generate the full 2,752-basin NH package.**
 
@@ -118,10 +172,12 @@ hyperparameter sweep, then generate the full 2,752-basin NH package.**
 - ~~Attribute provenance / checksum verification~~ — **CLOSED 2K-G-D-A (2026-07-03)**.
   Canonical path promoted off `tmp`; h2o checksum verified PASS (48-column
   screening merge only — see next item for the modeling-matrix gate).
-- **NEW — Milestone 2K-G-F (Static Attribute Matrix Recovery + Audit):** not
-  started. Recover richer static attributes from `US_data/attributes` (~28
-  files), mirror to h2o/Moriah if absent, audit, checksum, propose a Stage 1
-  static-attribute policy. See `docs/stage1_scientific_baseline_design.md` §3.
+- **Milestone 2K-G-F (Static Attribute Matrix Recovery + Audit): inventory +
+  plan done 2026-07-06** (`docs/stage1_static_attribute_matrix_plan.md`) —
+  source inventory, Stage-1-basin coverage cross-check, 780-column audit,
+  proposed canonical paths and merge/audit policy all complete. **Not done:**
+  h2o/Moriah mirror transfer, final matrix build, final matrix audit,
+  attribute-policy sign-off — all still open.
 - **NEW — Milestone 2K-G-G (Target Scaling + Gap Policy + Lead-Time
   Feasibility Report):** not started. Requires reading actual NH 1.13 code
   on Moriah (not docs/assumptions) to resolve target-normalization
