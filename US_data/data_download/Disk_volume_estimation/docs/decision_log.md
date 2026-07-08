@@ -4,6 +4,87 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-07 Milestone 2K-G-F-B — static attribute source mirror + derived matrix builder/auditor
+
+**Context.** Implements the 2K-G-F plan (`docs/stage1_static_attribute_matrix_plan.md`)
+in code. Per the user, the 29-file source mirror was already copied to h2o at
+`/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/` with
+a 29-line `sha256sum`-generated checksum file (~53 MB total). This session
+has no network path to h2o (`ssh flashnh-h2o` fails to resolve, reconfirmed),
+so the mirror itself could not be independently verified here.
+
+**Scripts added.** `scripts/build_stage1_static_attribute_matrix.py` and
+`scripts/audit_stage1_static_attribute_matrix.py` (neither writes into the
+repo's tracked tree; generated matrix/manifest/provenance/audit outputs stay
+under the h2o target path or repo `tmp/`, per `docs/repo_policy.md`).
+
+**Column-classification policy implemented in code**, refining 2K-G-F's §5/§8
+to exact column names:
+- Duplicate `DRAIN_SQKM` (from `Bound_QA.csv`) dropped; admin free-text
+  (`STANAME`, `COUNTYNAME_SITE`, `WR_REPORT_REMARKS`, `ADR_CITATION`,
+  `SCREENING_COMMENTS`, `NAWQA_SUID`) dropped; admin numeric-ID columns
+  (`FIPS_SITE`, `REACHCODE`, `BOUND_SOURCE`) dropped — **newly identified
+  this session**: these pass a naive `pd.to_numeric` coercion check but are
+  administrative IDs, not physical quantities.
+- Sparse binary flags (`HCDN_2009`, `HBN36`, `OLD_HCDN`, `NSIP_SENTINEL`,
+  `ACTIVE09`) encoded 0/1.
+- Categorical fields deferred out of `v001-core` (raw values retained
+  separately, not one-hot-encoded): the explicit list from 2K-G-F's plan,
+  plus **newly identified this session**: GAGES-II `Regions.csv`'s
+  `_DOM`/`_SITE` dominant/site class-code columns (only its `_PCT` columns
+  are genuine continuous fractions), and HydroATLAS's `*_cl_smj`/`*_id_smj`
+  numeric-coded class/admin-division columns (10 `_cl_smj` + `gad_id_smj`) —
+  both groups pass the naive numeric check but are categorical, confirmed by
+  direct inspection of the full HydroATLAS/Regions.csv schemas.
+- `STATE`/`HUC02` → `split_support` role (excluded from `model_input`,
+  retained in the matrix); `LAT_GAGE`/`LNG_GAGE` → `diagnostic_latlon` role
+  (same treatment) — matches the 2K-G-F decision.
+- Per-year series: `FlowRec.csv`'s `wy1900`…`wy2009` dropped outright (native
+  summary columns `FLOWYRS_*`/`FLOW_PCT_EST_VALUES` already exist in the same
+  file, confirmed this session — no new derivation needed);
+  `Climate_Ppt_Annual`/`Climate_Tmp_Annual`'s per-year columns have no native
+  summary and are reduced to computed mean/std across the 1950–2009 series.
+- Dynamic near-constant (`nunique<=1`) and high-missingness (>20%) filters
+  applied after the above, on the Stage 1 subset.
+- Any unclassified non-numeric column causes the build to fail loud — no
+  silent inclusion or drop of unreviewed fields if the source schema drifts.
+
+**HydroATLAS 5-basin gap — resolved.** Directly verified this session
+(exact/zero-padded/leading-zero-stripped match tests against the local
+HydroATLAS CSV) that the 5 non-standard 15-char STAIDs are genuinely absent
+under any representation — a true data gap. Policy: builder computes the
+observed gap at build time and requires it to equal exactly this known
+5-basin set; if it matches, those basins are retained with NaN
+HydroATLAS-sourced columns plus an explicit `hydroatlas_coverage_flag`
+column (0 = gap, 1 = present); if the observed gap ever differs, the build
+fails loud. This is the concrete mechanism implementing 2K-G-F's mandatory
+gate (option b primary, option c safety net) — no silent partial merge is
+possible.
+
+**Local dry-run validates the logic (not the canonical build).** Run against
+`C:\PhD\Python\neuralhydrology\US_data\attributes` into repo `tmp/`
+(gitignored): build exit 0, 2,843 rows × 531 columns (496 `model_input`, 15
+dynamically excluded as near-constant — all HydroATLAS land-cover/PNV/wetland
+class fractions uniformly zero for this basin set); HydroATLAS gap gate
+matched the expected 5-basin set exactly; audit exit 0, 0 errors, 0 warnings,
+20 OK checks including a checksum round-trip. One auditor threshold was
+recalibrated during this dry-run: HydroATLAS's `gdp_ud_usu` (upstream-summed
+GDP, USD) legitimately reaches ≈$1.74 trillion for the largest basins — the
+numeric-range sanity bound was raised from 1e12 to 1e13 to accommodate this
+real basin-integrated economic aggregate rather than flag it as an error.
+
+**Correction.** The source mirror has **26** distinct
+`attributes_gageii_*.csv` files, not 27 as stated in 2K-G-F and by the user
+when describing the h2o mirror — the total file count of 29 (26 + HydroATLAS
++ NLDAS-2 + workbook) is unaffected and matches the user's own h2o-side
+`find | wc -l` result.
+
+**Not done (by design).** The canonical h2o build/audit was not executed (no
+network path from this session) — user-run commands are documented in
+`docs/stage1_static_attribute_matrix_plan.md` §11.5. No NH package was
+regenerated; no training was run; no NH config or Slurm script was modified;
+no generated matrix/manifest/provenance/audit file was committed to git.
+
 ## 2026-07-06 Milestone 2K-G-F — static attribute matrix inventory + audit plan
 
 **Context.** 2K-G-E (revised, 2026-07-06, above) reopened static attributes

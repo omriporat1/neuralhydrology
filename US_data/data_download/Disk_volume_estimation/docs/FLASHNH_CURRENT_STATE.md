@@ -1,11 +1,42 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-06 (Milestone 2K-G-F — static attribute matrix
-inventory + audit plan)
+Last updated: 2026-07-07 (Milestone 2K-G-F-B — static attribute source
+mirror + derived matrix builder/auditor)
 
 ## Current milestone
 
-**2K-G-F IN PROGRESS (2026-07-06) — static attribute matrix recovery + audit
+**2K-G-F-B COMPLETE (code) / PENDING (canonical h2o run) (2026-07-07) —
+static attribute source mirror + derived matrix builder/auditor.** Implements
+the 2K-G-F plan (`docs/stage1_static_attribute_matrix_plan.md`) in code:
+- `scripts/build_stage1_static_attribute_matrix.py` — merges the 29-file
+  GAGES-II/HydroATLAS/NLDAS-2 source mirror into
+  `stage1_static_attributes_v001.parquet` for the 2,843-basin Stage 1
+  universe, applying the conservative column-classification policy (admin/
+  duplicate/binary-flag/categorical-deferred/split-support/diagnostic-lat-lon
+  handling, per-year-series reduction, dynamic near-constant/high-missingness
+  exclusion) and the mandatory HydroATLAS 5-basin-gap gate (fail loud unless
+  the observed gap exactly matches the known 5 non-standard-ID basins).
+- `scripts/audit_stage1_static_attribute_matrix.py` — independently verifies
+  the output (coverage, duplicates, missingness, ranges, constant/duplicate
+  columns, categorical/ID-name leakage, `STATE`/`HUC02`/lat-lon exclusion,
+  HydroATLAS gap handling, checksum).
+- **Local dry-run PASS** against `C:\PhD\Python\neuralhydrology\US_data\attributes`
+  into repo `tmp/` (gitignored, not committed): build exit 0 (2,843 rows ×
+  531 cols, 496 `model_input`), audit exit 0 (0 errors, 0 warnings, 20 OK
+  checks). This validates the build/audit *logic* only — see below.
+- **Canonical h2o build/audit NOT run** — no network path from this
+  environment to h2o (`ssh flashnh-h2o` fails to resolve, reconfirmed).
+  User-run commands for the h2o source-mirror verification and canonical
+  build/audit are in `docs/stage1_static_attribute_matrix_plan.md` §11.5.
+- Minor correction carried over from 2K-G-F: the source mirror has **26**
+  `attributes_gageii_*.csv` files, not 27 as previously stated (29 total
+  files is unaffected: 26 + HydroATLAS + NLDAS-2 + workbook).
+
+No NH package was regenerated from this matrix; no training was run; no NH
+config/Slurm scripts were modified — all explicitly out of scope for this
+milestone.
+
+**2K-G-F DONE (2026-07-06) — static attribute matrix recovery + audit
 plan.** Inventoried the full local source directory
 (`C:\PhD\Python\neuralhydrology\US_data\attributes`: 29 CSVs + 1 variable
 description workbook, all keyed on `STAID`, all 9,008 rows) and cross-checked
@@ -157,14 +188,14 @@ Purpose: confirm RTMA meteorology loads, normalizes, and trains without error.
 - Run dir: `/sci/labs/efratmorin/omripo/Flash-NH/runs/flashnh_stage1_smoke1_0207_164941`
 - Artefacts: `model_epoch001/002/003.pt` (~83 KB each), optimizer states, TensorBoard events
 
-**Next: mirror the local attribute source directory to h2o/Moriah (commands
-in `docs/stage1_static_attribute_matrix_plan.md` §6), get sign-off on the
-merge/audit policy in that plan doc §8, then build and audit the derived
-`stage1_static_attributes_v001` matrix per §9 (2K-G-F close-out). In
-parallel, run Milestone 2K-G-G (target scaling + gap policy + lead-time
-feasibility report — requires actual NH 1.13 code inspection on Moriah), then
-close the remaining sign-off items in `docs/stage1_scientific_baseline_design.md`,
-select the non-CA spatial-holdout basin list, encode the resolved policy into
+**Next: run the canonical h2o build/audit (source mirror already in place per
+the user; commands in `docs/stage1_static_attribute_matrix_plan.md` §11.5),
+confirm audit PASS, then close out attribute-policy sign-off (2K-G-F/2K-G-F-B
+close-out). In parallel, run Milestone 2K-G-G (target scaling + gap policy +
+lead-time feasibility report — requires actual NH 1.13 code inspection on
+Moriah), then close the remaining sign-off items in
+`docs/stage1_scientific_baseline_design.md`, select the non-CA
+spatial-holdout basin list, encode the resolved policy into
 `config/stage1_scientific_baseline_v001.yaml` + NH YAML, run the W&B
 hyperparameter sweep, then generate the full 2,752-basin NH package.**
 
@@ -172,12 +203,14 @@ hyperparameter sweep, then generate the full 2,752-basin NH package.**
 - ~~Attribute provenance / checksum verification~~ — **CLOSED 2K-G-D-A (2026-07-03)**.
   Canonical path promoted off `tmp`; h2o checksum verified PASS (48-column
   screening merge only — see next item for the modeling-matrix gate).
-- **Milestone 2K-G-F (Static Attribute Matrix Recovery + Audit): inventory +
-  plan done 2026-07-06** (`docs/stage1_static_attribute_matrix_plan.md`) —
-  source inventory, Stage-1-basin coverage cross-check, 780-column audit,
-  proposed canonical paths and merge/audit policy all complete. **Not done:**
-  h2o/Moriah mirror transfer, final matrix build, final matrix audit,
-  attribute-policy sign-off — all still open.
+- **Milestone 2K-G-F (Static Attribute Matrix Recovery + Audit): plan done
+  2026-07-06**; **2K-G-F-B (builder/auditor + local dry-run) done 2026-07-07**
+  (`docs/stage1_static_attribute_matrix_plan.md` §11) — source inventory,
+  coverage cross-check, column-classification policy, builder/auditor
+  scripts, and a local dry-run PASS are all complete. **Not done:** canonical
+  h2o build/audit (blocked on user-run h2o access, commands documented in
+  plan §11.5), Moriah mirror of the source attributes, attribute-policy
+  final sign-off.
 - **NEW — Milestone 2K-G-G (Target Scaling + Gap Policy + Lead-Time
   Feasibility Report):** not started. Requires reading actual NH 1.13 code
   on Moriah (not docs/assumptions) to resolve target-normalization

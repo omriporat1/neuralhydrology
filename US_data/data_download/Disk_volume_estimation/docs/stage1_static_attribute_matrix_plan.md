@@ -13,6 +13,16 @@ see §8 (conservative filtering philosophy stated explicitly), §4/§9 (HydroATL
 5-basin gap promoted from a caveat to a mandatory build/audit gate), and §5/§8
 (lat/lon explicitly deferred to ablation, not in `v001-core` by default).
 
+**Milestone 2K-G-F-B (Static Attribute Source Mirror + Derived Matrix
+Builder/Auditor), 2026-07-07: this plan has now been implemented.** See §11
+for the concrete result. One correction to this plan's inventory: **26
+distinct `attributes_gageii_*.csv` files**, not 27 as stated throughout §1–§9
+below — the "27" figure (also independently repeated by the user when
+describing the h2o-side mirror) was a minor miscount; the total file count of
+29 (26 GAGES-II + HydroATLAS + NLDAS-2 + workbook) is correct and unaffected.
+§1–§10 below are preserved as the original planning-phase record; §11
+documents what was actually built.
+
 ## 1. Why this milestone exists
 
 The current canonical static-attribute artifact —
@@ -400,3 +410,164 @@ the HydroATLAS 5-basin gap from a caveat to a mandatory build/audit gate in
 `STATE`/`HUC02` from `v001-core` outright and deferred lat/lon to a dedicated
 ablation rather than leaving their status ambiguous (§5/§8). No matrix was
 built, no code/config/package/training changed in this pass either.
+
+## 11. Milestone 2K-G-F-B — builder/auditor implementation + local dry-run result (2026-07-07)
+
+This section documents what was actually implemented and validated, closing
+the "not built" gap noted in §10.
+
+**h2o source mirror.** Per the user, the 29 source files were mirrored to
+`/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/` and a
+`source_attributes_v001_checksums.sha256` (29 lines) was generated there
+(`sha256sum * > source_attributes_v001_checksums.sha256`, directory ≈53 MB).
+This session has no network path to h2o (`ssh flashnh-h2o` fails to resolve,
+reconfirmed), so the mirror and its checksums could not be independently
+verified from here — see §11.5 for the exact user-run verification commands.
+
+**Scripts implemented** (both under `scripts/`, neither commits any data
+output — see repo policy in `docs/repo_policy.md`):
+
+- `scripts/build_stage1_static_attribute_matrix.py` — reads the 29-file
+  source mirror + `config/stage1_initial_training_basin_manifest.csv`,
+  applies the §5/§8 classification policy below in code, and writes
+  `stage1_static_attributes_v001.parquet` + `_column_manifest.json` +
+  `_provenance.json`.
+- `scripts/audit_stage1_static_attribute_matrix.py` — independently
+  re-checks the output matrix (row count/coverage, duplicate IDs,
+  missingness per variable/basin, numeric ranges, constant/near-constant
+  columns, duplicate-value columns, categorical/ID-name leakage into
+  `model_input`, `STATE`/`HUC02`/lat-lon exclusion, HydroATLAS gap handling,
+  final checksum) and writes `_audit_summary.md`. Exit 0 = PASS, 1 = FAIL.
+
+**Concrete column-classification rules implemented** (refines §5/§8/§9 to
+column-name level, discovered via direct inspection of the local source
+mirror this session):
+
+- Duplicate drop: `DRAIN_SQKM` dropped from `attributes_gageii_Bound_QA.csv`
+  (kept from `BasinID.csv`).
+- Admin free-text drop: `STANAME`, `COUNTYNAME_SITE`, `WR_REPORT_REMARKS`,
+  `ADR_CITATION`, `SCREENING_COMMENTS`, `NAWQA_SUID`.
+- Admin numeric-ID drop (numeric-looking but not physical): `FIPS_SITE`,
+  `REACHCODE`, `BOUND_SOURCE`.
+- Binary flags encoded 0/1 (non-blank = member): `HCDN_2009`, `HBN36`,
+  `OLD_HCDN`, `NSIP_SENTINEL`, `ACTIVE09`.
+- Categorical, deferred out of `v001-core` (raw values retained in a
+  `categorical_deferred` column group, not one-hot-encoded this round):
+  `CLASS`, `AGGECOREGION`, `HUC10_CHECK`, `GEOL_REEDBUSH_DOM/SITE`,
+  `GEOL_HUNT_DOM_CODE/DESC`, `GEOL_HUNT_SITE_CODE`, `USDA_LRR_SITE`, plus
+  GAGES-II `Regions.csv` dominant/site class codes (`ECO2_BAS_DOM`,
+  `ECO3_BAS_DOM`, `HLR_BAS_DOM_100M`, `NUTR_BAS_DOM`, `PNV_BAS_DOM`,
+  `ECO3_SITE`, `HLR100M_SITE`, `HUC8_SITE`, `NUTR_ECO_SITE` — newly
+  identified this session; only `Regions.csv`'s `_PCT`-suffixed columns are
+  genuine continuous fractions) and HydroATLAS's `*_cl_smj`/`*_id_smj`
+  numeric-coded class/admin-division columns (10 `_cl_smj` + `gad_id_smj` —
+  newly identified this session; these pass a naive `pd.to_numeric` check but
+  are categorical, not ordinal).
+- `STATE`, `HUC02`: `split_support` role — retained in the matrix, excluded
+  from `model_input`.
+- `LAT_GAGE`, `LNG_GAGE`: `diagnostic_latlon` role — retained in the matrix,
+  excluded from `model_input`, reserved for a future ablation.
+- Per-year series: `FlowRec.csv`'s `wy1900`…`wy2009` (110 cols) dropped
+  outright — the file already carries native summaries (`FLOWYRS_1900_2009`,
+  `FLOWYRS_1950_2009`, `FLOWYRS_1990_2009`, `FLOW_PCT_EST_VALUES`), which pass
+  through as ordinary `model_input` columns, so no new derivation was needed.
+  `Climate_Ppt_Annual`/`Climate_Tmp_Annual`'s `PPT*_AVG`/`TMP*_AVG` (60 cols
+  each) have no native summary and are reduced to
+  `climate_ppt_annual_mean_mm`/`_std_mm` and
+  `climate_tmp_annual_mean_c`/`_std_c` (row-wise mean/std across the 1950–2009
+  annual series per basin).
+- Dynamic filters applied after the above, on the Stage 1 subset only:
+  near-constant (`nunique(dropna=True) <= 1`) and high-missingness (>20%)
+  `model_input` columns are excluded.
+- Any non-numeric or unclassified column not covered by a rule above causes
+  the build to fail loud (`sys.exit(1)`) rather than being silently included
+  or dropped — this is a deliberate safety net against source-schema drift.
+
+**HydroATLAS 5-basin gap — resolved, option (b) applied.** The builder
+computes the observed HydroATLAS-missing basin set at build time and requires
+it to equal exactly the 5 previously-audited 15-char coordinate-based STAIDs
+(`393109104464500`, `394839104570300`, `401733105392404`, `402114105350101`,
+`402913084285400`). If it matches, those 5 basins are retained with NaN
+HydroATLAS-sourced columns and an explicit `hydroatlas_coverage_flag` column
+(1 = present, 0 = known gap) written into the matrix. If the observed gap
+ever differs from this expected set, the build fails loud instead of
+proceeding — no silent partial merge is possible. Confirmed on the local
+dry-run (§11.3): observed gap matched the expected set exactly.
+
+**§11.3 — Local dry-run (validation of build/audit logic only; not the
+canonical build).** Run against the local source mirror
+`C:\PhD\Python\neuralhydrology\US_data\attributes` (checksum file not present
+locally, so `--no-require-checksums` was used — the canonical h2o run must
+use the default checksum-required path) into `tmp/stage1_static_attribute_matrix_v001_dryrun/`
+(gitignored, not committed):
+
+```
+python scripts/build_stage1_static_attribute_matrix.py \
+  --source-dir "C:/PhD/Python/neuralhydrology/US_data/attributes" \
+  --manifest   config/stage1_initial_training_basin_manifest.csv \
+  --out-dir    tmp/stage1_static_attribute_matrix_v001_dryrun \
+  --no-require-checksums --force
+
+python scripts/audit_stage1_static_attribute_matrix.py \
+  --matrix-dir tmp/stage1_static_attribute_matrix_v001_dryrun \
+  --matrix-name stage1_static_attributes_v001 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv
+```
+
+Result: build exit 0; matrix 2,843 rows × 531 columns (496 `model_input`, plus
+`split_support`/`diagnostic_latlon`/`categorical_deferred`/flag columns);
+15 near-constant HydroATLAS land-cover/PNV/wetland columns dynamically
+excluded from `model_input` (all uniformly zero for this CONUS basin set);
+HydroATLAS gap gate matched the expected 5-basin set exactly. Audit exit 0
+(PASS), 0 errors, 0 warnings, 20 OK checks — including the checksum
+round-trip (matrix sha256 in `_provenance.json` matches the recomputed file
+hash) and the HydroATLAS-flagged-basin NaN check. One auditor threshold was
+recalibrated during this dry-run: the numeric-range sanity check initially
+flagged HydroATLAS's `gdp_ud_usu` (upstream-summed GDP, USD) at up to ≈$1.74
+trillion for the largest basins as "implausibly large" at a 1e12 bound — this
+is a legitimate basin-integrated economic aggregate, not a data error, so the
+bound was raised to 1e13.
+
+**§11.4 — What this dry-run does and does not establish.** It validates the
+builder/auditor logic (classification rules, HydroATLAS gate, checksum
+round-trip, exclusion filters) end-to-end against real data. It does **not**
+constitute the canonical build — the canonical
+`stage1_static_attributes_v001.parquet` must still be produced on h2o against
+the h2o source mirror (with checksum verification required, not bypassed),
+per §11.5. The dry-run output was left under repo `tmp/` (gitignored) and was
+not copied anywhere else; it should be treated as disposable.
+
+**§11.5 — User-run commands for the canonical h2o build (not executable from
+this session).**
+
+```bash
+# 1. Verify the h2o source mirror + checksums:
+ssh flashnh-h2o "ls -la /data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/"
+ssh flashnh-h2o "cd /data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001 && sha256sum -c source_attributes_v001_checksums.sha256"
+# Confirm exactly 29 files + the checksum file itself (30 entries total in the listing),
+# and no unexpected raw-data subdirectories present.
+
+# 2. Copy the two new scripts to h2o (or pull via git if the repo is cloned there):
+scp scripts/build_stage1_static_attribute_matrix.py scripts/audit_stage1_static_attribute_matrix.py \
+    flashnh-h2o:/data42/omrip/Flash-NH/scripts/
+
+# 3. Run the canonical build (checksum verification ON by default):
+ssh flashnh-h2o "cd /data42/omrip/Flash-NH && python3 scripts/build_stage1_static_attribute_matrix.py \
+  --source-dir /data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv \
+  --out-dir    /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001 \
+  --matrix-name stage1_static_attributes_v001"
+
+# 4. Run the auditor against the canonical output; must PASS (exit 0) before this
+#    matrix is treated as usable for any downstream package build:
+ssh flashnh-h2o "cd /data42/omrip/Flash-NH && python3 scripts/audit_stage1_static_attribute_matrix.py \
+  --matrix-dir /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001 \
+  --matrix-name stage1_static_attributes_v001 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv"
+```
+
+**Not done in this milestone (by design, per explicit scope):** the full NH
+package was not regenerated from this matrix; no training was run; no NH
+configs or Slurm scripts were modified; the canonical h2o build/audit has not
+been executed (no network path from this session) — the commands above are
+for the user to run.
