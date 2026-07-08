@@ -4,6 +4,48 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-08 Milestone 2K-G-F-B closure — canonical h2o build/audit PASS
+
+**Context.** Closes the "canonical build not yet produced" gap left open by
+the 2026-07-07 entry below. The user ran the §11.5 commands
+(`docs/stage1_static_attribute_matrix_plan.md`) directly on h2o — this
+session still has no network path to h2o, so all facts below are as reported
+by the user.
+
+**Source mirror verification.** `/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/`
+contains 30 files (29 source files + `source_attributes_v001_checksums.sha256`);
+`sha256sum -c source_attributes_v001_checksums.sha256` returned OK for all
+29 files.
+
+**Canonical build.** Run with `scripts/build_stage1_static_attribute_matrix.py`
+against the verified source mirror, `config/stage1_initial_training_basin_manifest.csv`,
+output dir `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001`,
+matrix name `stage1_static_attributes_v001`, default checksum-required path
+(not bypassed).
+
+**Canonical audit: PASS.** 0 errors, 0 warnings, 20 OK checks. Matrix shape
+2,843 rows × 531 columns, 496 `model_input` columns. All Stage 1 basins
+present, no extra basins, no duplicate `gauge_id`, no non-numeric or
+ID/code-like `model_input` columns, `STATE`/`HUC02` excluded from
+`model_input` and retained as `split_support`, `LAT_GAGE`/`LNG_GAGE` excluded
+from `model_input` and retained as `diagnostic`. HydroATLAS coverage flag
+matched the expected 5-basin gap exactly (`393109104464500`,
+`394839104570300`, `401733105392404`, `402114105350101`, `402913084285400`),
+and those basins' HydroATLAS `model_input` columns are NaN as designed.
+Matrix checksum matched the provenance record.
+
+**Canonical artifact.** `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet`,
+matrix sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`.
+Output file sizes: parquet 8.8 MB; `_column_manifest.json` 58 KB;
+`_provenance.json` 20 KB; `_audit_summary.md` 1.7 KB. These are h2o-resident
+generated data artifacts, not git-tracked source files, per
+`docs/repo_policy.md`.
+
+**Not done.** No NH package was regenerated from this matrix; no training was
+run; no NH config/Slurm scripts were modified; no Moriah mirror of the source
+attributes or derived matrix has been performed. This was a docs-only
+closure patch — no code, config, or generated-output files changed.
+
 ## 2026-07-07 Milestone 2K-G-F-B — static attribute source mirror + derived matrix builder/auditor
 
 **Context.** Implements the 2K-G-F plan (`docs/stage1_static_attribute_matrix_plan.md`)

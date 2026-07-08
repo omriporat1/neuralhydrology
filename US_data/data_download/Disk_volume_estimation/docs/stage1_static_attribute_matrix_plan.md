@@ -266,7 +266,7 @@ when the user is ready; do not assume it has happened.
 |---|---|---|
 | Source attribute CSVs + workbook (h2o) | `/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/` | Mirror of the local 29-CSV + 1-workbook source directory; external, not committed to git (same policy as `gagesii_v001`). |
 | Source attribute CSVs + workbook (Moriah) | `/sci/labs/efratmorin/omripo/Flash-NH/data/static_attributes/source_attributes_v001/` | Mirror of the h2o copy, transferred once h2o copy is checksum-verified. |
-| Derived Stage 1 modeling matrix | `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet` | Output of the merge policy in §8, once built (not built in this pass). Checksum-pinned the same way as `gagesii_v001`. |
+| Derived Stage 1 modeling matrix | `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet` | Output of the merge policy in §8. **Built and audit-PASSed on h2o 2026-07-08; see §11.6.** Checksum-pinned the same way as `gagesii_v001` (matrix sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`). |
 | Existing 48-col screening merge | `/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet` | Unchanged, retained as a valid provenance artifact per `docs/stage1_attribute_provenance.md`; may be superseded as the builder's `--attributes-csv` input once `stage1_static_attributes_v001` exists, but is not deleted or invalidated by this milestone. |
 
 Adjust naming only if it collides with an existing convention; none was
@@ -537,6 +537,11 @@ the h2o source mirror (with checksum verification required, not bypassed),
 per §11.5. The dry-run output was left under repo `tmp/` (gitignored) and was
 not copied anywhere else; it should be treated as disposable.
 
+**Update (2026-07-08): the canonical h2o build/audit described in §11.5 has
+now been run and PASSed.** See §11.6 for the result. This closes the gap
+described above — a canonical, checksum-verified matrix now exists at the
+path in §7.
+
 **§11.5 — User-run commands for the canonical h2o build (not executable from
 this session).**
 
@@ -566,8 +571,39 @@ ssh flashnh-h2o "cd /data42/omrip/Flash-NH && python3 scripts/audit_stage1_stati
   --manifest   config/stage1_initial_training_basin_manifest.csv"
 ```
 
+**§11.6 — Canonical h2o build/audit result (2026-07-08).** The user ran the
+§11.5 commands directly on h2o (no network path exists from this session to
+h2o). Results, as reported by the user:
+
+- **Source mirror verification:** `/data42/omrip/Flash-NH/data/static_attributes/source_attributes_v001/`
+  contains 30 files (29 source files + `source_attributes_v001_checksums.sha256`);
+  `sha256sum -c source_attributes_v001_checksums.sha256` returned OK for all
+  29 files.
+- **Canonical build:** run with `--source-dir source_attributes_v001`,
+  `--manifest config/stage1_initial_training_basin_manifest.csv`, `--out-dir
+  stage1_static_attributes_v001`, `--matrix-name stage1_static_attributes_v001`
+  (default checksum-required path, not bypassed).
+- **Canonical audit: PASS.** 0 errors, 0 warnings, 20 OK checks. Matrix shape
+  2,843 rows × 531 columns, 496 `model_input` columns. All Stage 1 basins
+  present, no extra basins, no duplicate `gauge_id`, no non-numeric or
+  ID/code-like `model_input` columns, `STATE`/`HUC02` excluded from
+  `model_input` and retained as `split_support`, `LAT_GAGE`/`LNG_GAGE`
+  excluded from `model_input` and retained as `diagnostic`. HydroATLAS
+  coverage flag matched the expected 5-basin gap exactly (`393109104464500`,
+  `394839104570300`, `401733105392404`, `402114105350101`, `402913084285400`),
+  and those basins' HydroATLAS `model_input` columns are NaN as designed.
+  Matrix checksum matched the provenance record.
+- **Canonical artifact:** `/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet`,
+  matrix sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`.
+- **Output file sizes:** `stage1_static_attributes_v001.parquet` 8.8 MB;
+  `stage1_static_attributes_v001_column_manifest.json` 58 KB;
+  `stage1_static_attributes_v001_provenance.json` 20 KB;
+  `stage1_static_attributes_v001_audit_summary.md` 1.7 KB.
+
+These are h2o-resident data artifacts (generated outputs), not git-tracked
+source files, consistent with `docs/repo_policy.md`.
+
 **Not done in this milestone (by design, per explicit scope):** the full NH
-package was not regenerated from this matrix; no training was run; no NH
-configs or Slurm scripts were modified; the canonical h2o build/audit has not
-been executed (no network path from this session) — the commands above are
-for the user to run.
+package was not regenerated from this canonical matrix; no training was run;
+no NH configs or Slurm scripts were modified; no Moriah mirror transfer of
+the matrix has been performed or documented here.
