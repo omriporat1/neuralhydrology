@@ -154,6 +154,22 @@ def _count_valid_with_mask(total_hours: int, seq_length: int, lead_time: int,
 # ---------------------------------------------------------------------------
 
 
+def _to_naive_utc(series: pd.Series) -> pd.Series:
+    """Parse a timestamp-like series to naive-UTC-equivalent `Timestamp`s.
+
+    Real Flash-NH gap-inventory timestamps are ISO-8601 with a `Z` suffix
+    (e.g. `2020-10-14T00:00:00Z`), which `pandas.to_datetime` parses as
+    tz-aware UTC. The hourly period index this script builds elsewhere
+    (`_build_hourly_index`) is tz-naive. Comparing tz-aware to tz-naive
+    values silently matches nothing (no error), which previously produced
+    an all-False gap mask against real gap-inventory CSVs while still
+    passing smoke tests against naive-timestamp synthetic fixtures. Parsing
+    with `utc=True` then dropping the tz makes both naive and `Z`-suffixed
+    input compare correctly against the naive hourly index.
+    """
+    return pd.to_datetime(series, utc=True).dt.tz_localize(None)
+
+
 def _normalize_product_name(raw: object) -> str:
     """Map arbitrary product labels to one of "mrms"/"rtma"/"unspecified".
 
@@ -173,8 +189,8 @@ def _expand_gap_runs_to_timestamps(df: pd.DataFrame) -> pd.DataFrame:
     """Expand gap_start_utc/gap_end_utc interval rows into one row per
     hourly timestamp, inclusive of both endpoints (each floored to the
     hour). Preserves `product` (and `basin`, if present)."""
-    starts = pd.to_datetime(df["gap_start_utc"]).dt.floor("h")
-    ends = pd.to_datetime(df["gap_end_utc"]).dt.floor("h")
+    starts = _to_naive_utc(df["gap_start_utc"]).dt.floor("h")
+    ends = _to_naive_utc(df["gap_end_utc"]).dt.floor("h")
     has_basin = "basin" in df.columns
     has_product = "product" in df.columns
 
@@ -208,7 +224,7 @@ def _load_gap_masks(
     if "timestamp" in df.columns:
         schema = "timestamp_rows"
         expanded = df.copy()
-        expanded["timestamp"] = pd.to_datetime(expanded["timestamp"])
+        expanded["timestamp"] = _to_naive_utc(expanded["timestamp"])
         if "product" not in expanded.columns:
             expanded["product"] = "unspecified"
     elif {"gap_start_utc", "gap_end_utc"}.issubset(df.columns):
@@ -263,7 +279,7 @@ def _load_target_missing_masks(csv_path: str, index: pd.DatetimeIndex) -> dict[s
     df = pd.read_csv(csv_path)
     if "timestamp" not in df.columns:
         raise ValueError(f"target availability CSV missing required 'timestamp' column: {csv_path}")
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = _to_naive_utc(df["timestamp"])
 
     if "qobs_nan" in df.columns:
         missing_col, missing_true = "qobs_nan", 1

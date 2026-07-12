@@ -1275,3 +1275,209 @@ scaffold that implied NH 1.13 code could only be inspected on Moriah.
 No script was changed and no new evidence was produced by this patch — the Moriah
 command block in the feasibility report is unchanged; `nh13_inspection_summary.json`
 already records NH version/path so local vs. Moriah runs can be compared.
+
+## 2026-07-12 Stage 1 — Milestone 2K-G-G Phase B: Moriah NH 1.13.0 inspection evidence
+
+**Fact.** `scripts/inspect_neuralhydrology_stage1_mechanics.py` was run on Moriah, on
+a compute node (`glacier-30`) rather than the login node, inside the `flashnh-moriah`
+conda environment. Confirmed via package metadata (the package itself has no
+`__version__` attribute — `pip show`/`importlib.metadata.version()` is authoritative):
+- NeuralHydrology version: `1.13.0`
+- Python: `3.11.15`
+- Module path: `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah/lib/python3.11/site-packages/neuralhydrology`
+- Evidence directory (pulled to local `tmp/`, gitignored, not committed):
+  `tmp/nh13_inspection_moriah_20260712T100047Z/`
+- Git commit recorded at run time: `28883a6b4c50942a9da3223b3a863a1955444d4c`
+  (matches the committed Phase A scaffold commit — confirms the run used the correct,
+  already-committed inspection script).
+
+This is the first explicit, recorded confirmation of the Moriah NH version; prior docs'
+"NH 1.13" label was inferred from interactive troubleshooting behavior during Smoke 0/1,
+not a recorded version string, since `scripts/setup_flashnh_moriah_env.sbatch` installs
+NeuralHydrology unversioned (`pip install neuralhydrology ...`).
+
+A separate local inspection (`tmp/nh13_inspection_local_20260712T085939Z/`, NH `1.11.0`,
+from Milestone 2K-G-G-L) also exists but is version-mismatched relative to Moriah's
+`1.13.0` and was treated as non-authoritative background only, per the
+"Inspection environment policy" in `docs/stage1_target_scaling_gap_leadtime_feasibility.md`.
+
+**Decision/outcome.** The Moriah 1.13.0 evidence (`nh13_inspection_summary.{md,json}`,
+`source_hits.txt`) was analyzed and written up as Phase B findings in
+`docs/stage1_target_scaling_gap_leadtime_feasibility.md` ("Findings — Phase B"). 7 of 9
+NH-mechanics questions (Q1-Q9) are answered or substantially answered: scaler
+fit/save location and train-only fitting (confirms NH's existing `is_train`/passed-
+`scaler` contract already satisfies the §8d leakage-prevention rule with no custom code);
+area-normalized/specific-discharge feasibility (not a `GenericDataset` config flag —
+`_normalize_discharge` is `lamah.py`-subclass-specific; recommend precomputing at
+package-build time instead); target-transform reversibility (NH's native unscale only
+undoes the z-score, via inline `tester.py` arithmetic — no `inverse_transform` API
+exists in the codebase; an extra Flash-NH-side area-multiply step would be needed to
+get back to raw m^3/s if area-normalization is used); dynamic-input NaN handling
+(`nan_handling_method` is real, with `masked_mean` and `attention` modes confirmed in
+`modelzoo/inputlayer.py`); and lead-time implementation (no native `lead_time`/`horizon`
+config exists; NH's native hindcast/forecast architecture requires forecast-known future
+inputs Flash-NH's historical-only `v001-core` does not have; recommend package-build-time
+target shifting instead). 2 items are marked `REQUIRES TARGETED SOURCE INSPECTION` with
+specific follow-up commands: the exact `tester.py` inverse-scaling arithmetic (lines
+~249-260 were not captured by the keyword search), and the target-NaN masking mechanism
+in `training/loss.py` (not hit by any of the 15 searched keywords). Q10/Q11
+(window/sample-loss numbers against a real gap inventory) remain `PENDING` — that Moriah
+run was not executed this round. No target-scaling, gap-policy, or lead-time
+implementation decision was made final; no package builder, scientific NH config, or
+Slurm template was modified; no training was run.
+
+## 2026-07-12 Stage 1 — Milestone 2K-G-G Phase B follow-up: real window-loss numbers,
+## leakage refinement, gap-policy framework; 3 items still blocked on Moriah access
+
+**Fact — Moriah access blocker.** This follow-up round attempted to close the 3
+remaining `REQUIRES TARGETED SOURCE INSPECTION` items from the prior Phase B entry
+(exact `tester.py` inverse-scaling arithmetic, `training/loss.py` target-NaN masking,
+default `nan_handling_method` behavior) using the exact `sed`/`grep` commands already
+recorded in `docs/stage1_target_scaling_gap_leadtime_feasibility.md`. All three remain
+unresolved: this working session has no SSH/network path to Moriah
+(`ssh -o ConnectTimeout=5 -o BatchMode=yes moriah "echo CONNECTIVITY_OK"` fails with
+"Could not resolve hostname moriah"). These are lightweight source-file inspections
+requiring no NeuralHydrology import or compute allocation — the next concrete step is
+unchanged: the user runs the 3 listed commands on Moriah directly and shares output, or
+a future session with Moriah SSH access runs them.
+
+**Fact — Q10/Q11 closed without a new Moriah run.**
+`scripts/analyze_stage1_window_feasibility.py` imports no NeuralHydrology, so it was run
+locally against the real gap-inventory evidence already pulled from an earlier milestone
+(`tmp/stage1_forcing_fullperiod_postrun_audit_20260624T060504Z/fullperiod_gap_inventory.csv`,
+2026-06-24 full-period forcing postrun audit). No new Moriah round-trip was needed.
+
+**Fact — real bug found and fixed in `scripts/analyze_stage1_window_feasibility.py`.**
+The real gap-inventory CSV's timestamps are ISO-8601 with a `Z` suffix (tz-aware after
+`pandas.to_datetime`), while the script's internal hourly period index is tz-naive;
+comparing tz-aware gap-hour timestamps against the tz-naive index via `.isin()` silently
+matched zero rows (no error). The first real-gap run
+(`tmp/stage1_window_feasibility_real_gaps_20260712T103728Z/`, superseded, stale, not
+cited as evidence) consequently reported 0% MRMS/RTMA gap-loss at every one of the 16
+`seq_length` x `lead_time` combinations — implausible, since the known 136 MRMS + 2 RTMA
+archive-gap hours are scattered across the full 2020-2025 period. Root-caused via a
+scratch debug script isolating the internal boolean gap masks (all-`False` despite
+correct gap-hour counts in the loader's own metadata). Neither prior Phase A synthetic
+smoke-test CSV had a `Z` suffix, so this bug was invisible to earlier regression tests.
+Fixed by adding a `_to_naive_utc()` helper
+(`pd.to_datetime(series, utc=True).dt.tz_localize(None)`) applied at all 3
+timestamp-parsing call sites. Verified via `python -m py_compile` (clean) and full
+regression re-runs of both pre-existing synthetic fixtures (byte-identical output to
+before the fix — no regression). The real-gap run was then redone with the fix applied
+(`tmp/stage1_window_feasibility_real_gaps_20260712T104021Z/`), console-confirmed correct
+gap detection (`mrms: 136, rtma: 2`, matching known archive-gap counts).
+
+**Decision/outcome — Q10/Q11 answered.** Corrected either-gap window-loss fraction
+ranges from ~1.3% at `seq_length=12` to ~5.6% at `seq_length=72` across the full
+12/24/48/72 h x 1/3/6/12 h lead-time design space; MRMS-gap loss dominates RTMA-gap loss
+by roughly two orders of magnitude at every combination (e.g. 5.44% vs. 0.16% at
+`seq_length=72, lead_time=12`), tracking the known 136-vs-2 archive-gap-hour asymmetry.
+No combination shows a surprisingly large loss fraction (all remain under 6%), but loss
+is clearly non-negligible and grows monotonically with `seq_length` — full table recorded
+in `docs/stage1_target_scaling_gap_leadtime_feasibility.md` under "Window/sample
+feasibility."
+
+**Decision/outcome — Q4 leakage finding refined (not reversed).** The original Q4
+answer ("NH enforces train-dataset-only scaling, satisfying §8d with no custom code") is
+now explicitly scoped: this is true for the mechanism NH's `is_train`/passed-`scaler`
+contract actually protects — **temporal** leakage (fitting a scaler using
+validation/test-period timesteps). It is **not** true that NH protects **spatial**
+leakage (California/spatial-holdout basins) — NH has no concept of basin role; if
+Flash-NH's training-basin list accidentally includes a spatial-holdout or California
+basin, NH computes the scaler over it without complaint. Spatial-leakage prevention
+remains entirely a Flash-NH basin-list-construction responsibility, upstream of and
+unverified by this evidence.
+
+**Decision/outcome — gap-policy decision framework added, not decided.** Compared
+Policy A (leave gap hours as true NaN + explicit `nan_handling_method`: uses existing NH
+machinery, no window dropped, but requires deliberate config and does not achieve clean
+per-sample exclusion) against Policy B (hard-exclude gap-intersecting windows via
+custom package-builder/sampler logic: scientifically cleaner for MRMS, but not native in
+NH per the Q8 evidence, and costs `seq_length`-dependent sample loss per the numbers
+above). Flagged that RTMA (2 gap hours) may warrant a separate, simpler policy from MRMS
+(136 gap hours) given the ~100x loss asymmetry. Neither the Policy A/B choice nor the
+RTMA-vs-MRMS-split question was decided in this round, per explicit instruction.
+
+**Not done.** No final target-scaling, gap-policy, or lead-time implementation decision
+was made. No package builder, scientific NH config, or Slurm template was modified. No
+training was run; no NH package was generated. Nothing under `tmp/` was committed,
+including both `window_feasibility_real_gaps_*` run directories produced this round (the
+first stale/superseded, the second corrected/authoritative).
+
+## 2026-07-12 Stage 1 — Milestone 2K-G-G Phase B follow-up part 2: Moriah SSH access
+## restored, all 3 remaining NH-mechanics items closed
+
+**Fact — Moriah SSH access restored.** The user fixed Moriah SSH connectivity from
+local Windows/VS Code. Confirmed via `ssh moriah "hostname"` -> `moriah-gw-01`. Note:
+default modern `scp`/SFTP-subsystem transfer is still unavailable on Moriah (legacy
+`scp -O` required for any future file pull); plain SSH command execution works normally
+and was sufficient for this round, since only inline `sed`/`grep` output over an SSH
+session was needed (no file transfer).
+
+**Commands run** (all against
+`/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah/lib/python3.11/site-packages/neuralhydrology`
+on the Moriah login node — lightweight source-file reads only, no compute allocation, as
+instructed):
+1. `ssh moriah "sed -n '240,270p' .../evaluation/tester.py"`
+2. `ssh moriah "grep -n 'isnan\|nanmean\|nan_to_num\|mask\|ground_truth\[.y.\]\|prediction\[.y_hat.\]' .../training/loss.py"`
+   plus `grep -n '^class' .../training/loss.py` and targeted `sed` reads of the matched
+   class bodies.
+3. `ssh moriah "sed -n '60,110p' .../modelzoo/inputlayer.py"`,
+   `ssh moriah "sed -n '210,305p' .../modelzoo/inputlayer.py"`,
+   `ssh moriah "grep -n 'nan_handling_method\|masked_mean\|attention' .../modelzoo/inputlayer.py"`,
+   and `ssh moriah "grep -n 'nan_handling_method' .../utils/config.py"` plus a targeted
+   `sed` read of the matched config property.
+
+Raw output saved to `tmp/nh13_targeted_inspection_moriah_20260712T120839Z/` (3 files:
+`tester_240_270.txt`, `loss_py_nan_grep.txt`, `inputlayer_nan_handling.txt`; gitignored,
+not committed).
+
+**Decision/outcome — Q2 (tester.py inverse-scaling arithmetic) confirmed.**
+`tester.py:247-259`: both predictions and observations are unscaled with
+`raw = scaled * feature_scale + feature_center`, the direct algebraic inverse of the
+forward z-score at `basedataset.py:758`. No separate formula for predictions vs.
+observations. No public `inverse_transform` API exists anywhere in the installed 1.13.0
+source (confirmed zero hits in the earlier Phase B pass, now confirmed by direct
+inspection of the only call site) — this is inline arithmetic private to `Tester`. The
+existing caveat that this reversal only undoes the z-score (not an area-normalization
+step, if Flash-NH adopts specific discharge) is unchanged and now rests on confirmed
+rather than inferred arithmetic.
+
+**Decision/outcome — Q5 (training/loss.py target-NaN masking) confirmed.**
+`training/loss.py` defines `BaseLoss` and 6 concrete subclasses — `MaskedMSELoss`,
+`MaskedRMSELoss`, `MaskedNSELoss`, `MaskedGMMLoss`, `MaskedCMALLoss`, `MaskedUMALLoss` —
+every one of which masks target NaNs per-element inside its own `_get_loss` via
+`~torch.isnan(ground_truth['y'])`-style boolean masking before the loss reduction
+(exact element-wise masking, not `torch.nanmean`). This confirms `BaseDataset
+._validate_samples`'s earlier-observed lack of a target-NaN sample-exclusion criterion is
+intentional NH design (include the sample, mask the NaN element at loss time), not an
+evidence gap. A target NaN cannot silently contaminate training through any NH-provided
+loss class.
+
+**Decision/outcome — Q6/Q7 (default `nan_handling_method` behavior) confirmed, and the
+default is dangerous.** `Config.nan_handling_method` (`utils/config.py:610-613`) returns
+`None` when the config key is absent. When `None`, both the `__init__` sizing branch and
+the `forward()` dispatch branch in `modelzoo/inputlayer.py` fall through every
+`if`/`elif` to a final unconditional `else` that performs **no NaN handling at all** —
+raw (possibly NaN) dynamic-input tensors are concatenated and passed directly into an
+unprotected `nn.Linear`-based embedding layer, with no masking, zeroing, or flagging.
+This confirms the unset default is not a safe silent fallback: a NaN dynamic input would
+propagate through the embedding and corrupt downstream activations/gradients. A third
+mode, `input_replacing` (not found in the first Phase B pass), was also confirmed,
+alongside the two already-known modes `masked_mean` and `attention` — 3 total real
+modes, all requiring explicit configuration. Because of this finding, the gap-policy
+decision framework's Policy A (leave gap hours as NaN + `nan_handling_method`) was
+revised in `docs/stage1_target_scaling_gap_leadtime_feasibility.md` to state explicit
+`nan_handling_method` configuration is mandatory, not merely recommended, for that policy
+to be safe.
+
+**Outcome — zero remaining `REQUIRES TARGETED SOURCE INSPECTION` items.** All Phase B
+NH-mechanics questions (Q1-Q9) and window-feasibility questions (Q10-Q11) for Milestone
+2K-G-G are now answered from authoritative Moriah NH 1.13.0 evidence.
+
+**Not done.** No final target-scaling, gap-policy, or lead-time implementation decision
+was made — §5/§6/§9b of `docs/stage1_scientific_baseline_design.md` remain open; this
+round closed evidence gaps only. No package builder, scientific NH config, or Slurm
+template was modified. No training was run; no NH package was generated. Nothing under
+`tmp/` was committed, including the new `nh13_targeted_inspection_moriah_20260712T120839Z/`
+evidence directory.
