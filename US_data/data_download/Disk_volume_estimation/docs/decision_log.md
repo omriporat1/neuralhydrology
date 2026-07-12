@@ -1231,3 +1231,47 @@ This is a pre-build implementation requirement, not a blocker for closing 2K-F-B
 5. Path safety guard in launcher: `OUT_DIR` must begin with `/data42/omrip/Flash-NH/`.
 
 **Authorization:** Full 2,752-basin build (Milestone 2K-F-C) requires explicit authorization.
+
+## 2026-07-08 Stage 1 — Milestone 2K-G-G Phase A: Feasibility Report Scaffold
+
+**Decision:** Add Phase A scaffolding only for Milestone 2K-G-G (Target Scaling + Gap
+Policy + Lead-Time Feasibility Report). No Moriah code inspection was performed in this
+session (no network path from this environment to Moriah); no target-scaling, gap-policy,
+or lead-time implementation decision was made or finalized.
+
+**Added:**
+- `scripts/inspect_neuralhydrology_stage1_mechanics.py` — read-only inspection of the
+  installed NeuralHydrology 1.13 package (Moriah). No training, no dataset package
+  generation, no Slurm submission, no GPU use. Falls back gracefully (exit 0, clear
+  message) when `neuralhydrology` is not importable, as confirmed by a local smoke run.
+- `scripts/analyze_stage1_window_feasibility.py` — geometry-only window/sample-loss
+  estimator for the `seq_length` (12/24/48/72 h) x lead-time (1/3/6/12 h) grid, with
+  optional MRMS/RTMA/either-gap exclusion and target-availability layering if CSVs are
+  supplied. Does not import or require NeuralHydrology. Local smoke run over the real
+  Stage 1 full period (2020-10-14 to 2025-12-31) confirms `total_hours=45720`, matching
+  the known full-period step count exactly.
+- `docs/stage1_target_scaling_gap_leadtime_feasibility.md` — Phase A report scaffold:
+  purpose, non-goals, inherited binding decisions, exact Moriah commands, expected
+  evidence files, and Phase B questions. Explicitly marked
+  **"status: Phase A scaffold created; Moriah evidence pending"** — no findings are
+  recorded as final.
+
+**Not done in this patch:** no NH 1.13 code inspected on Moriah; no target-scaling,
+gap-policy, or lead-time decision made; no package builder, scientific NH config, or
+Slurm template modified; no NH package generated; no training run.
+
+## 2026-07-12 Stage 1 — Milestone 2K-G-G Phase A: inspection-environment wording patch
+
+**Decision:** Wording-only clarification of
+`docs/stage1_target_scaling_gap_leadtime_feasibility.md` (and the "Current milestone"
+block of `docs/FLASHNH_CURRENT_STATE.md`): local inspection of a pinned
+NeuralHydrology 1.13 installation is allowed and encouraged for code review, source
+navigation, and preliminary interpretation. Final Phase B conclusions must still be
+verified against the `flashnh-moriah` environment, because that is the runtime used
+for Smoke 0/1 and future Stage 1 training; if local and Moriah installations differ,
+Moriah is authoritative. This replaces earlier wording in the feasibility-report
+scaffold that implied NH 1.13 code could only be inspected on Moriah.
+
+No script was changed and no new evidence was produced by this patch — the Moriah
+command block in the feasibility report is unchanged; `nh13_inspection_summary.json`
+already records NH version/path so local vs. Moriah runs can be compared.

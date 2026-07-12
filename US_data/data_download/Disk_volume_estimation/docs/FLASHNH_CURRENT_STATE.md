@@ -1,8 +1,21 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-08 (Milestone 2K-G-F-B — canonical h2o build/audit PASS)
+Last updated: 2026-07-08 (Milestone 2K-G-G Phase A scaffold added)
 
 ## Current milestone
+
+**2K-G-G Phase A scaffold added (2026-07-08) — Target Scaling + Gap Policy +
+Lead-Time Feasibility Report.** Scaffold only: `scripts/inspect_neuralhydrology_stage1_mechanics.py`
+(read-only NH 1.13 code inspection; local and/or Moriah, Moriah authoritative — see
+"Inspection environment policy" in `docs/stage1_target_scaling_gap_leadtime_feasibility.md`)
+and `scripts/analyze_stage1_window_feasibility.py`
+(geometry/gap-exclusion window-loss estimator, no NH required), plus
+`docs/stage1_target_scaling_gap_leadtime_feasibility.md`. Both scripts syntax-checked
+and smoke-tested locally only. **Moriah-authoritative evidence pending** — the user
+has not yet run the inspection helper (locally or on Moriah) or the window-feasibility
+script. No target-scaling, gap-policy, or lead-time implementation decision was made;
+no NH package generated; no training run; no package builder/config/Slurm template
+modified.
 
 **2K-G-F-B COMPLETE — canonical h2o PASS (2026-07-08) — static attribute
 source mirror + derived matrix builder/auditor.** Implements
