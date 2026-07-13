@@ -1,0 +1,194 @@
+# Flash-NH Stage 1 — Scientific Baseline Policy (machine-readable)
+# policy_name: stage1_scientific_baseline_v001
+#
+# Single machine-readable source of the binding Stage 1 scientific policy
+# signed off at Milestone 2K-G-H (docs/stage1_scientific_baseline_design.md)
+# with the 2K-G-I I-0 sign-offs and the history-only gap-mask correction
+# (docs/stage1_baseline_package_implementation_plan.md §7/§9/§12/§14/§15/§21).
+#
+# Portable scientific policy ONLY: no machine paths (h2o/Moriah/local
+# absolute paths), no credentials, no Slurm resources, no run-specific
+# output paths. Data locations are CLI arguments to the consuming scripts,
+# per repository convention.
+#
+# Consumers must load this file through
+# src/baseline/policy.py::load_stage1_baseline_policy (which pins every
+# binding value) and record this file's sha256 in their run provenance.
+#
+# List order is binding wherever a list appears below (leads, seq_lengths,
+# dynamic_inputs, ...): consumers may rely on the recorded order, and the
+# validator rejects reordering.
+
+policy_name: stage1_scientific_baseline_v001
+policy_version: 1
+
+signed_off:
+  milestone: "2K-G-H"
+  date: "2026-07-12"
+  commit: "e860316"
+
+# ---------------------------------------------------------------------------
+# Research period (full curated-product timeline; 45,720 hourly steps)
+# ---------------------------------------------------------------------------
+period:
+  start_utc: "2020-10-14T00:00:00Z"
+  end_utc: "2025-12-31T23:00:00Z"
+  expected_hours: 45720
+
+# ---------------------------------------------------------------------------
+# Temporal split (design doc §8; same basins across periods — see plan §6)
+# ---------------------------------------------------------------------------
+temporal_split:
+  training:
+    start: "2020-10-14"
+    end: "2023-12-31"
+  validation:
+    start: "2024-01-01"
+    end: "2024-12-31"
+  test:
+    start: "2025-01-01"
+    end: "2025-12-31"
+
+# ---------------------------------------------------------------------------
+# Basin universe (plan §5; eligible list is a FUTURE artifact — promoted at
+# I-A5 after h2o re-export + checksum verification; loaders must not require
+# it to exist yet)
+# ---------------------------------------------------------------------------
+basin_universe:
+  initial_manifest: config/stage1_initial_training_basin_manifest.csv
+  eligible_basins_list: config/stage1_baseline_splits_v001/eligible_basins_v001.txt
+  expected_eligible_count: 2752
+  excluded_staids: ["02299472", "04073468"]
+  policy_excluded_target_status: [TARGET_OPERATIONAL_REVIEW]
+  california:
+    membership_rule: "STATE == CA"
+    excluded_stages_1_3: true
+
+# ---------------------------------------------------------------------------
+# Spatial split (signed off 2026-07-13; candidate method subject to machine
+# audit + human QC — not a guarantee the first generated split is accepted)
+# ---------------------------------------------------------------------------
+spatial_split:
+  seed: 42
+  nonca_holdout_fraction: 0.10
+  holdout_tolerance: 0.02
+  geography_field: HUC02
+  area_field: DRAIN_SQKM
+  hydroclimate_field: ari_ix_uav
+  area_binning: terciles
+  hydroclimate_binning: terciles
+  min_composite_stratum_size: 10
+  method_status: candidate_subject_to_machine_and_human_qc
+  california_finetune_fraction: 0.90
+  california_stratification: area_and_aridity_not_huc02_dependent
+
+# ---------------------------------------------------------------------------
+# Target (design doc §5/§5a; mm/h computed at package-build time; all four
+# leads in the first package; NH inverse scaling returns mm/h only —
+# official metrics are Flash-NH-computed in raw m3/s)
+# ---------------------------------------------------------------------------
+target:
+  source_variable: qobs_m3s
+  training_units: mm_per_h_equivalent_runoff_depth
+  conversion_constant: 3.6           # q_mm_per_h = q_m3s * 3.6 / area_km2
+  area_field: DRAIN_SQKM
+  area_units: km2
+  leads_hours: [1, 3, 6, 12]
+  primary_lead: 6
+  secondary_lead: 12
+  diagnostic_leads: [1, 3]
+  variable_name_template: "qobs_mm_per_h_lead{lead:02d}"
+  package_dtype: float32
+  internal_dtype: float64
+  evaluation_units: "m3/s"
+
+# ---------------------------------------------------------------------------
+# Sequence lengths (design doc §9a — binding; 168/336 are Stage 2, forbidden
+# in Stage 1)
+# ---------------------------------------------------------------------------
+seq_lengths_hours: [12, 24, 48, 72]
+forbidden_seq_lengths_hours: [168, 336]
+
+# ---------------------------------------------------------------------------
+# Gap policy (design doc §6 + plan §12/§14 as corrected 2026-07-13:
+# HISTORY-ONLY forcing mask — no forcing-gap check at the target hour;
+# the broader 2K-G-G counting convention is a conservative upper bound, not
+# the implementation. NH integration mechanism is NOT encoded here — gated
+# on I-D2-pre Moriah verification.)
+# ---------------------------------------------------------------------------
+gap_policy:
+  forcing_history_policy: hard_exclude_if_history_intersects_gap
+  applies_to:
+    - training
+    - validation
+    - temporal_test
+    - spatial_holdout
+    - california_finetune
+    - california_holdout
+  expected_mrms_gap_hours: 136
+  expected_rtma_gap_hours: 2
+  include_rtma_in_history_mask: true
+  target_hour_forcing_gap_exclusion: false
+  qobs_nan_policy: target_masking_separate_from_forcing_mask
+  excluded_issue_time_report_text: "predictions unavailable due to required forcing history intersecting an archive gap"
+  nan_handling_method:
+    baseline_relies_on_it: false
+    unset_forbidden_when_nan_dynamic_inputs: true
+
+# ---------------------------------------------------------------------------
+# Dynamic inputs (design doc §1 — binding v001-core, order binding)
+# ---------------------------------------------------------------------------
+dynamic_inputs:
+  - mrms_qpe_1h_mm
+  - rtma_2t_K
+  - rtma_2d_K
+  - rtma_2sh_kgkg
+  - rtma_10u_ms
+  - rtma_10v_ms
+  - mrms_qpe_1h_mm_gap
+  - rtma_gap
+
+# ---------------------------------------------------------------------------
+# Static attributes (design doc §3; imputation signed off 2026-07-13,
+# plan §15/§21 item 2)
+# ---------------------------------------------------------------------------
+static_attributes:
+  matrix_name: stage1_static_attributes_v001
+  expected_rows: 2843
+  expected_columns: 531
+  expected_model_input_columns: 496
+  sha256: eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464
+  role_source: stage1_static_attributes_v001_column_manifest.json
+  allowed_role: model_input
+  forbidden_model_inputs: [STATE, HUC02, LAT_GAGE, LNG_GAGE]
+  imputation:
+    strategy: median
+    fit_basin_scope: development_training_only
+    apply_unchanged_to: [validation, temporal_test, spatial_holdout]
+    fail_if_all_nan_in_development_training: true
+    missingness_indicators_as_model_inputs: false
+  stage4_refit_scope: california_finetune_training_only
+
+# ---------------------------------------------------------------------------
+# NeuralHydrology compatibility expectations (Smoke 0/1-proven NH 1.13
+# compat set; custom-dataset name intentionally NOT encoded — gated on
+# I-D2-pre)
+# ---------------------------------------------------------------------------
+nh:
+  expected_version: "1.13.0"
+  dataset: generic
+  date_format: "DD/MM/YYYY"
+  head: regression
+  output_activation: linear
+  predict_last_n: 1
+
+# ---------------------------------------------------------------------------
+# Audit constants / requirements (plan §10/§11/§12)
+# ---------------------------------------------------------------------------
+audit:
+  roundtrip_float64_rtol: 1.0e-12
+  package_float32_rtol: 1.0e-5
+  independent_lead_alignment_audit_required: true
+  raw_space_evaluation_audit_required: true
+  forcing_gap_masks_history_only: true
+  consumers_must_record_policy_sha256: true
