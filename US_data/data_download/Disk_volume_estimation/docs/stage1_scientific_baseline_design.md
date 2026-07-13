@@ -6,6 +6,10 @@ Milestone 2K-G-E (Scientific Baseline Design Resolution): first proposed 2026-07
 splits, target scaling, lead time, static attributes, hyperparameter framing). This
 revision replaces the 2026-07-03 draft in place — that draft was never committed
 (see `docs/decision_log.md` for what changed and why).
+**Milestone 2K-G-H (Scientific Baseline Policy Sign-off), 2026-07-12:** converts
+the 2K-G-F/2K-G-G evidence into binding decisions, closing every item this
+document previously left `STILL OPEN` or `GATED` — see "Binding decisions —
+Milestone 2K-G-H sign-off" below and the revised "Status" section at the end.
 
 This document now distinguishes three kinds of items:
 - **Approved** — a binding decision, recorded below, not open for re-litigation
@@ -119,6 +123,109 @@ values already settled here.
 
 ---
 
+## Binding decisions — Milestone 2K-G-H sign-off (user-approved, 2026-07-12)
+
+**This sign-off converts the 2K-G-G Phase B evidence
+(`docs/stage1_target_scaling_gap_leadtime_feasibility.md`, evidence
+committed at `0d0e6aa`) into binding Stage 1 decisions.** It closes every
+item the 2026-07-06 revision left `STILL OPEN` or `GATED` on 2K-G-F/2K-G-G
+(§3, §5, §6), and adds detail the 2026-07-06 revision did not yet specify
+(target-inversion audit requirements, static-attribute pathway, spatial
+split stratification factors). **No code, config, Slurm script, or NH
+package changed in this patch — this is a docs-only policy sign-off.**
+Implementation is scoped as a new mini-milestone, 2K-G-I (see "New
+mini-milestones" below), not executed here.
+
+1. **Target scaling — APPROVED, supersedes §5's `STILL OPEN` status.**
+   Area-normalized discharge, internal unit **mm/h equivalent runoff
+   depth**, computed by the Flash-NH package builder at package-build time
+   (before NH ever sees the data) — Q1 evidence confirmed this is not a
+   `GenericDataset` config flag. Per-basin target column is a
+   transformed/shifted variable such as `qobs_mm_per_h_leadXX`, not raw
+   `qobs_m3s`. NH's native scaler inversion (Q2 evidence,
+   `tester.py:247-259`) returns only to mm/h; official evaluation requires
+   an **additional Flash-NH-side conversion** from mm/h back to raw `m^3/s`
+   using basin area. **Binding evaluation policy:** NH's own loss/
+   validation curves are training diagnostics in transformed (mm/h) space
+   unless separately proven equivalent to raw-space metrics; official
+   benchmark metrics (§7) are always computed by Flash-NH after full
+   inverse conversion to raw `m^3/s`. Detail in §5 (revised below).
+2. **Target inversion / audit requirements — NEW, APPROVED.** Three
+   required future implementation checklist/audit items, detailed in the
+   new §5a below: (a) deterministic unit tests for the `m^3/s -> mm/h ->
+   m^3/s` round-trip using basin area; (b) a package-audit requirement that
+   `qobs_mm_per_h_leadXX` at timestamp `t` equals original `qobs_m3s` at
+   `t+XXh` converted to mm/h, checked on random basin/time samples; (c) an
+   evaluation-audit requirement that raw-space metric scripts verify units,
+   basin area, target lead alignment, NaN masking, and the conversion back
+   to `m^3/s`.
+3. **Lead-time implementation — APPROVED, extends §9b.** Package-build-time
+   target shifting (Q9 evidence: NH has no native `lead_time` config;
+   the native hindcast/forecast architecture requires forecast-known future
+   inputs Flash-NH's purely-historical `v001-core` inputs don't have — see
+   §9b). **All four lead times — 1 h, 3 h, 6 h, 12 h — are included in the
+   first package/config/sweep design**, not just 6 h/12 h: 1 h and 3 h
+   remain diagnostics (not the primary benchmark) but are included now
+   because their incremental package/config cost is small and deferring
+   them would mean reproducing package-build work later. **Primary
+   benchmark/model-selection lead: 6 h. Secondary: 12 h.** `seq_length`
+   (§9a) and lead time remain separate design axes — do not conflate them.
+4. **Forcing-gap policy — APPROVED, supersedes §6's `HIGH PRIORITY, gated`
+   status.** Scientific baseline (Policy B from the feasibility doc's
+   decision framework) **hard-excludes training windows that intersect
+   MRMS archive-gap hours**, at package-build time. Accepted because the
+   corrected 2K-G-G real-gap window loss is modest (~1.3% at
+   `seq_length=12` to ~5.6% at `seq_length=72` — see the feasibility doc's
+   corrected results table) and hard exclusion is scientifically cleaner
+   than silent fill. RTMA (2 archive-gap hours total, ~2 orders of
+   magnitude smaller than MRMS's 136) is treated separately in wording: if
+   the exclusion-mask implementation naturally supports an "either MRMS or
+   RTMA gap" mask, excluding RTMA-gap-intersecting windows too is
+   acceptable — MRMS drives the scientific policy either way. **Silent
+   dynamic-input NaNs are not allowed.** NH's `nan_handling_method` (Q6/Q7
+   evidence: default `None` is unsafe, passes raw NaN into an unprotected
+   embedding) remains a **fallback/ablation path only, not the baseline**;
+   if used in any ablation it must be explicitly configured
+   (`masked_mean`, `attention`, or `input_replacing`) — unset/default is
+   forbidden for NaN-valued dynamic inputs in any run, baseline or
+   ablation. Smoke 0/1's technical fill policy (MRMS gaps → 0.0 mm, RTMA
+   gaps → linear interpolation) remains historical/technical only — not
+   the scientific baseline. Detail in §6 (revised below).
+5. **Static attributes — APPROVED, resolves §3's `REOPENED, gated` status.**
+   Canonical `stage1_static_attributes_v001` (2,843 basins × 531 columns,
+   496 `model_input`; Moriah/h2o canonical PASS 2026-07-08, sha256
+   `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`; see
+   `docs/stage1_static_attribute_matrix_plan.md` §11.6 and
+   `docs/FLASHNH_CURRENT_STATE.md`'s 2K-G-F-B entry) is accepted as the
+   Stage 1 v001-core static attribute matrix — the baseline static-attribute
+   matrix for the first scientific baseline. Numeric static attributes pass
+   through the model's standard static-attribute pathway/embedding layer
+   (assuming NH config support — the same mean/std scaler path confirmed
+   for dynamic inputs at `basedataset.py:725-736`, Q3 evidence). **No raw
+   categorical embeddings in this first baseline** — categorical/admin/
+   geographic leakage-prone fields remain excluded/deferred per the
+   2K-G-F/2K-G-F-B conservative column-classification policy. `STATE`/
+   `HUC02` remain split-support/diagnostics only, not model inputs.
+   `LAT_GAGE`/`LNG_GAGE` remain diagnostic only, deferred to a later
+   lat/lon ablation. Detail in §3 (revised below).
+6. **Spatial split and leakage — APPROVED, extends §8b/§8d.** Reproducible
+   seeded stratified non-CA spatial holdout (mechanism unchanged from
+   §8b's ~10% rule). California remains excluded entirely from Stages 1–3,
+   reserved for Stage 4 transfer learning (§8c, unchanged). Spatial leakage
+   prevention is a Flash-NH basin-list responsibility, not something NH
+   enforces (Q4 evidence — NH's `is_train`/scaler contract protects
+   temporal leakage automatically but has zero concept of basin role).
+   Future implementation must produce **explicit basin-list artifacts**
+   for: development training; validation; temporal test; non-CA spatial
+   holdout; California Stage 4 fine-tune/holdout split. Stratification
+   should consider at minimum HUC02/geography, basin area, and
+   hydroclimatic attributes such as aridity/climate, if available from
+   `stage1_static_attributes_v001`. Detail in §8b (revised below).
+7. **Next implementation milestone — DEFINED, not executed.** `2K-G-I —
+   Baseline Package Builder + Split Config Implementation`. Scope is a
+   checklist (see "New mini-milestones" below), not code — not authorized
+   or started in this patch.
+
 ## 1. Candidate dynamic inputs for the first baseline — `v001-core` (APPROVED)
 
 Confirmed working end-to-end in Smoke 1 (`docs/stage1_neuralhydrology_preflight.md`
@@ -166,37 +273,49 @@ separate, later experiment.
   reanalysis-driven baseline only; forecast-aware modeling is a later
   project phase per the project's stated purpose).
 
-## 3. Static attributes — REOPENED, gated on Milestone 2K-G-F
+## 3. Static attributes — APPROVED (2026-07-12, Milestone 2K-G-H)
 
-The 2026-07-03 draft proposed signing off a curated ~16-column subset of the
-48-column GAGES-II screening merge. **That proposal is withdrawn — do not
-sign off any column list from the current screening merge.**
+**Resolved.** Canonical `stage1_static_attributes_v001` is **accepted as the
+Stage 1 v001-core static attribute matrix** — the baseline static-attribute
+matrix for the first scientific baseline. This supersedes the 2026-07-06
+`REOPENED, gated on 2K-G-F` status: 2K-G-F (recovery/audit plan, done
+2026-07-06) and 2K-G-F-B (builder/auditor implementation, canonical h2o
+build PASS 2026-07-08) are both complete.
 
-`/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`
-(48 columns, checksum-pinned per `docs/stage1_attribute_provenance.md`)
-remains a **valid, checksum-verified provenance artifact**, but it is likely
-**not sufficient** as the final Stage 1 modeling static-attribute matrix. The
-user has richer local source material at
-`C:\PhD\Python\neuralhydrology\US_data\attributes` — reportedly ~28 attribute
-files, mostly GAGES-II / related sources, going well beyond the 48-column
-screening merge, including at minimum:
-- `attributes_gageii_Topo.csv`
-- `attributes_gageii_Bas_Morph.csv`
-- `attributes_hydroATLAS.csv`
-- `attributes_nldas2_climate.csv`
-- `Var description_gageii.xlsx` (variable-description reference, reportedly
-  ~350 described static variables)
+**Artifact.** 2,843 basins × 531 columns (496 classified `model_input`),
+built from the 29-file GAGES-II/HydroATLAS/NLDAS-2 local source mirror via
+`scripts/build_stage1_static_attribute_matrix.py`, independently verified by
+`scripts/audit_stage1_static_attribute_matrix.py` (0 errors, 0 warnings, 20
+OK checks on the canonical h2o run). Canonical path:
+`/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet`,
+sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`. Full
+detail in `docs/stage1_static_attribute_matrix_plan.md` §11.6 and the
+2K-G-F-B entry in `docs/FLASHNH_CURRENT_STATE.md`. This replaces the earlier
+48-column GAGES-II screening merge
+(`/data42/omrip/Flash-NH/data/static_attributes/gagesii_v001/all_basins_merged.parquet`)
+as the Stage 1 modeling matrix; that 48-column merge remains a valid,
+checksum-verified provenance artifact (`docs/stage1_attribute_provenance.md`)
+but is no longer the matrix Stage 1 training uses.
 
-The user expects the final Stage 1 static-attribute matrix to include
-topography, geology, land use/land cover, vegetation, snow fraction, and
-climate/static hydrologic attributes — none of which exist in the current
-48-column screening merge (confirmed in `docs/stage1_attribute_provenance.md`:
-that merge has no `ELEV`, `SLOPE`, `FOREST_PCT`, or climate-normal fields).
+**Modeling pathway (APPROVED).** Numeric static attributes pass through the
+model's standard static-attribute pathway/embedding layer, assuming NH
+config support — the same mean/std scaler mechanism already confirmed for
+dynamic inputs (`basedataset.py:725-736`, Q3 evidence in
+`docs/stage1_target_scaling_gap_leadtime_feasibility.md`) applies
+analogously to static attributes. **No raw categorical embeddings in this
+first baseline** — categorical/admin/geographic leakage-prone fields remain
+excluded/deferred, per the 2K-G-F/2K-G-F-B conservative column-classification
+policy (admin/duplicate/binary-flag/categorical-deferred/split-support/
+diagnostic-lat-lon handling). Specifically:
+- `STATE`/`HUC02` remain **split-support/diagnostics only** — usable for
+  spatial-split stratification (§8b) and post-hoc analysis, but **not model
+  inputs**.
+- `LAT_GAGE`/`LNG_GAGE` remain **diagnostic only**, deferred to a later
+  lat/lon ablation — not model inputs in this first baseline.
 
-**Resolution (2026-07-06):** static attributes are **gated on Milestone
-2K-G-F** (Static Attribute Matrix Recovery + Audit — see "New mini-milestones"
-below). No column list — curated or otherwise — is proposed in this document
-until that milestone produces an audited, checksummed candidate matrix.
+**Not reopened by this sign-off:** whether/when a later ablation introduces
+categorical embeddings, or a lat/lon ablation, remains a future discussion —
+this sign-off only locks the v001-core numeric-attribute baseline.
 
 ## 4. Target variable and target cleaning (APPROVED — basin set)
 
@@ -212,74 +331,144 @@ Milestone 2J-A/2J-B) — **reuse as-is, do not redefine here**:
 2,752-basin floor. This is the conservative basin set for Stage 1–3 (before
 the §8b spatial split and §8c CA exclusion are applied on top of it).
 
-## 5. Target normalization / transformation policy — STILL OPEN, gated on 2K-G-G
+## 5. Target normalization / transformation policy — APPROVED (2026-07-12, Milestone 2K-G-H)
 
-**Log-transform is rejected as the recommended default (2026-07-06).** The
-2026-07-03 draft proposed `log(qobs + eps)` as the leading candidate; the
+**Log-transform is rejected as the recommended default (2026-07-06, unchanged).**
+The 2026-07-03 draft proposed `log(qobs + eps)` as the leading candidate; the
 user explicitly rejected this as poorly aligned with the project's
 flash-flood / high-flow emphasis (log-compression de-emphasizes exactly the
 peak events Flash-NH cares most about).
 
-**Current candidates, still open:**
-- **(a) Area-normalized / specific discharge** (e.g. runoff-depth-equivalent,
-  discharge divided by `DRAIN_SQKM` or similar) — **leading candidate**,
-  pending confirmation that NH / the package builder can support this
-  transform cleanly and invert it back to raw `m^3/s` for evaluation.
-- **(b) Raw `qobs_m3s` with NH default z-score normalization per basin** —
-  simplest alternative, still under consideration.
-- **(c) Per-basin standardization** (basin-specific mean/std, not global) —
-  alternative still under consideration.
+**Resolved (2026-07-12): candidate (a), area-normalized/specific discharge,
+is APPROVED**, with the internal unit fixed to **mm/h equivalent runoff
+depth** (candidates (b) raw `qobs_m3s` + NH default z-score, and (c)
+per-basin standardization, are no longer under consideration for the
+baseline). This was gated on 2K-G-G; the gate is now closed — Q1/Q2 evidence
+in `docs/stage1_target_scaling_gap_leadtime_feasibility.md` confirmed the
+mechanism:
 
-Regardless of which is chosen, **evaluation/reporting metrics must always be
+- **Computation.** The Flash-NH package builder computes `qobs_mm_per_h` at
+  **package-build time**, before NH ever sees the data (Q1 evidence:
+  area-normalized discharge is not a `GenericDataset` config flag — NH 1.13
+  only has this as a `LamaH`-dataset-subclass-specific pattern
+  (`lamah.py:287`), not a `GenericDataset` hook). Precomputing at
+  package-build time means plain `GenericDataset` + NH's default z-score
+  scaler apply on top with zero custom dataset code.
+- **Package target variable naming.** The per-basin NH package target
+  variable is written as a **transformed/shifted target**, e.g.
+  `qobs_mm_per_h_leadXX` (where `XX` is the lead time in hours, §9b) — not
+  raw `qobs_m3s`. This ties the target-scaling decision to the lead-time
+  decision: the target column already encodes both the mm/h transform and
+  the lead-time shift.
+- **Inversion.** NH's native scaler inversion (Q2 evidence, exact confirmed
+  arithmetic `raw = scaled * feature_scale + feature_center` at
+  `tester.py:247-259`, applied identically to predictions and observations)
+  only undoes the z-score — it returns the target to **mm/h**, not raw
+  `m^3/s`. There is no public `inverse_transform` API in NH 1.13.0 (zero
+  hits for that string in the installed source). Converting mm/h back to raw
+  `m^3/s` requires an **additional Flash-NH-side step** (multiply by basin
+  area, using the same area value the builder used) applied after NH's
+  native unscale — this is not automatic and not provided by NH.
+- **Binding evaluation policy.** NH's own loss/validation curves (as logged
+  during training, e.g. via W&B per §10) are **training diagnostics in
+  transformed (mm/h) space**, not official benchmark numbers, unless
+  separately proven equivalent to raw-space metrics. **Official benchmark
+  metrics (§7) are always computed by Flash-NH after full inverse conversion
+  to raw `m^3/s`** — raw-space NSE remains the primary evaluation metric
+  (§7, unchanged).
+
+## 5a. Target inversion / audit requirements — NEW, APPROVED (2026-07-12)
+
+Three requirements for the future 2K-G-I implementation (checklist items,
+not run in this patch):
+
+1. **Deterministic unit tests.** A `m^3/s -> mm/h -> m^3/s` round-trip test
+   using basin area, covering at minimum: a small representative basin, a
+   large representative basin, and an edge case (near-zero flow). The
+   round-trip must be exact to floating-point tolerance — any deviation
+   indicates a unit or area-lookup bug.
+2. **Package audit requirement.** For random basin/time samples drawn from a
+   built NH package, `qobs_mm_per_h_leadXX` at timestamp `t` must equal
+   original `qobs_m3s` at timestamp `t+XXh` (the correct lead-shifted source
+   timestamp) converted to mm/h using that basin's area. This is a
+   builder-output audit (analogous to existing package auditors, e.g.
+   `scripts/audit_stage1_static_attribute_matrix.py`), not a unit test — it
+   verifies the actual package artifact, not just the conversion function in
+   isolation.
+3. **Evaluation audit requirement.** Raw-space metric scripts (§7) must
+   verify, before computing any reported metric: units (mm/h vs. `m^3/s`),
+   basin area (correct value used, correct join key), target lead alignment
+   (the model's prediction timestep is compared against the correct
+   lead-shifted observation, not the unshifted one), NaN masking (consistent
+   with NH's `_mask_valid`/`Masked*Loss` behavior, Q5 evidence), and the
+   conversion back to `m^3/s` (no silent double-conversion or missed
+   conversion).
+
+Regardless of the above, **evaluation/reporting metrics must always be
 computed in raw discharge units (`m^3/s`)** after inverse-transforming model
-output — see §7.
+output — see §7 (unchanged).
 
-**Gated on Milestone 2K-G-G:** before locking any target-scaling policy, NH
-1.13's actual target-normalization behavior (as installed on Moriah) must be
-inspected directly in code — not inferred from public docs or assumptions.
-This determines which of (a)/(b)/(c) is actually implementable without
-custom code, and whether inverse-transform-for-evaluation is handled natively
-or needs a custom step.
-
-## 6. Forcing gap policy — scientific baseline vs. Smoke 0/1 — HIGH PRIORITY, gated on 2K-G-G
+## 6. Forcing gap policy — scientific baseline vs. Smoke 0/1 — APPROVED (2026-07-12, Milestone 2K-G-H)
 
 Smoke 0/1 used a **technical-only** gap-fill policy (documented in
 `docs/stage1_neuralhydrology_preflight.md` §8.2, and flagged with an explicit
 `WARNING` in `scripts/build_stage1_nh_package.py`'s docstring): MRMS gaps
 (136 h/basin) filled with 0.0 mm, RTMA gaps (2 h/basin) linearly
-interpolated. This is explicitly **not** approved for scientific training,
-and **must not be silently carried forward** — this is now treated as a
-high-priority unresolved technical/scientific issue, not a routine cleanup
-item.
+interpolated. **This remains historical/technical only — not the scientific
+baseline.** This supersedes the 2026-07-06 `HIGH PRIORITY, gated on 2K-G-G`
+status; the gate is now closed.
 
-Two candidate approaches were already identified in §8.2 of the preflight
-doc:
-- **(a) Window/sample exclusion.** Keep the full 45,720-hour aligned `date`
-  coordinate in the NC (do not remove rows), but exclude any training
-  window whose input sequence or prediction horizon contains a gap hour,
-  at NH batch-sampling time.
-- **(b) `nan_handling_method`.** Use a tested NH-native NaN-handling method
-  (e.g. `masked_mean`) instead of pre-filling, so the model/loss sees the
-  gap structure directly rather than an imputed value.
+**Resolved: Policy B — hard-exclude MRMS-gap-intersecting training windows.**
+Of the two candidates identified in §8.2 of the preflight doc — (a) window/
+sample exclusion vs. (b) `nan_handling_method` — **(a) is APPROVED as the
+scientific baseline.** The Flash-NH package builder (or a custom sampler
+built on top of it, per 2K-G-G's Q8 evidence that no native NH mechanism
+does this) hard-excludes any training window whose input sequence or
+prediction horizon intersects an **MRMS** archive-gap hour, at package-build
+time (or equivalently, dataset-index-construction time).
 
-RTMA's 2 h/basin (0.004%) interpolation likely remains acceptable as-is, but
-this must be **explicitly recorded as a decision**, not assumed by omission.
+**Why accepted:** the corrected 2K-G-G real-gap window-loss numbers (see
+`docs/stage1_target_scaling_gap_leadtime_feasibility.md`, "Window/sample
+feasibility" §, corrected results table) are modest — either-gap loss
+ranges from ~1.3% at `seq_length=12` to ~5.6% at `seq_length=72` across the
+full `seq_length` × lead-time design space — and hard exclusion is
+scientifically cleaner than silent fill (no imputed/interpolated value ever
+enters a training window; easier to state and defend in a benchmark-paper
+methods section than to characterize NH's internal NaN-masking behavior to
+a reviewer).
 
-**Gated on Milestone 2K-G-G:** a required **gap-policy technical report**
-must examine, by reading the actual NeuralHydrology 1.13 code installed on
-Moriah (not public docs, not assumptions):
-- support for `nan_handling_method` and its exact behavior,
-- masked-loss support for dynamic-input NaNs,
-- whether window/sample exclusion based on `mrms_qpe_1h_mm_gap` is natively
-  supported by the `generic` dataset's batch sampler, or requires a custom
-  sampler/package mask,
-- quantified expected sample/window loss for each combination of
-  `seq_length` ∈ {12, 24, 48, 72} × lead time ∈ {1, 3, 6, 12} h — this
-  matters because window exclusion cost scales with both axes,
-- an explicit, recorded decision on the RTMA interpolation policy.
+**RTMA treated separately in wording, not necessarily in mechanism.** RTMA
+has only **2** archive-gap hours total (~2 orders of magnitude smaller than
+MRMS's 136) — its contribution to either-gap loss is negligible (e.g. 0.16%
+vs. 5.44% MRMS at `seq_length=72, lead_time=12`). **MRMS drives the
+scientific policy.** If the implementation naturally supports an "either
+MRMS or RTMA gap" exclusion mask (i.e. excluding RTMA-gap-intersecting
+windows costs no extra engineering beyond the MRMS mask), doing so is
+acceptable; RTMA's historical linear-interpolation-then-include approach is
+not required to be preserved, but is also not the reason for the policy —
+this decision is driven by MRMS regardless of how RTMA is ultimately
+handled inside the same exclusion mask.
 
-No forcing-gap policy is proposed as final in this document — this section
-is gated, not merely "needs sign-off."
+**`nan_handling_method` is a fallback/ablation path only — not the
+baseline.** NH's native dynamic-input NaN-handling mechanism
+(`nan_handling_method`, Q6/Q7 evidence) remains available for a future
+ablation comparing hard exclusion (Policy B, the baseline) against
+NaN-passthrough-with-masking (Policy A) — but is **not** used in the
+scientific baseline itself. **If used in any ablation, it must be
+explicitly configured** (`masked_mean`, `attention`, or `input_replacing`);
+**unset/default `None` is unsafe and forbidden** for NaN-valued dynamic
+inputs in any run — Q6 evidence confirmed the unset default silently passes
+raw NaN into an unprotected `nn.Linear` embedding with no masking, corrupting
+gradients rather than being safely ignored. This prohibition applies
+regardless of whether Policy A or Policy B is in effect for that run: any
+run that leaves NaN-valued dynamic inputs in the data (i.e. does not use
+Policy B's hard exclusion) must have `nan_handling_method` explicitly set.
+
+**RTMA's separate 2 h/basin interpolation policy is recorded, not assumed
+by omission**, per the original 2026-07-06 requirement: RTMA's negligible
+gap contribution means its treatment (interpolated, excluded via the
+combined mask, or left to `nan_handling_method` in an ablation) does not
+materially change the scientific outcome — see above.
 
 ## 7. Loss and metrics — training loss vs. evaluation metrics (separated)
 
@@ -359,6 +548,25 @@ The exact ~10% spatial-holdout basin list is **not selected in this
 document** — selecting it (with a documented, reproducible stratification
 method) is a follow-up step, not authorized here.
 
+**Stratification method and basin-list artifacts — APPROVED (2026-07-12,
+Milestone 2K-G-H), method specified, not yet executed.** The non-CA spatial
+holdout must use a **reproducible seeded stratified sample** (not simple
+random selection). Stratification should consider, at minimum: HUC02/
+geography, basin area, and hydroclimatic attributes such as aridity/climate,
+if available from the accepted static matrix
+(`stage1_static_attributes_v001`, §3). Future implementation (2K-G-I, see
+"New mini-milestones" below) must produce **explicit basin-list artifacts**
+(not an implicit filter buried in package-builder code) for each of:
+- development training basins,
+- validation basins (same as development training under §8's temporal
+  split — a distinct *basin* list only if §8b's spatial split ever
+  diverges validation from training basins, which it does not today),
+- temporal test basins,
+- non-CA spatial holdout basins,
+- California Stage 4 fine-tune/holdout split (§8c).
+
+These artifacts are what 2K-G-I must produce; none exist yet.
+
 ## 8c. California transfer-learning split (Stage 4) (NEW, APPROVED)
 
 1. California is held out completely from Stages 1–3 (§8b).
@@ -427,6 +635,27 @@ address lead time at all, and future revisions should not conflate the two.
 - 1 h and 3 h lead times may be used as diagnostic/sanity checks (e.g.
   confirming the model performs reasonably at near-nowcast horizons), but are
   **not** the primary benchmark.
+
+**Implementation mechanism and design-space scope — APPROVED (2026-07-12,
+Milestone 2K-G-H).** Q9 evidence (`docs/stage1_target_scaling_gap_leadtime_feasibility.md`)
+confirmed NH 1.13.0 has no native `lead_time` config (zero hits for that
+string in the installed source), and its native hindcast/forecast
+architecture (`forecast_seq_length`/`forecast_overlap`, `HandoffForecastLSTM`
+etc.) requires forecast-known future dynamic inputs that Flash-NH's purely-
+historical MRMS/RTMA `v001-core` inputs do not have. **Lead time is
+implemented via package-build-time target shifting** — the target series is
+shifted by `lead_time` hours relative to the aligned forcing window before
+NH ever sees it, then plain `seq_length`/`predict_last_n=1` semantics apply
+on top (this is the same mechanism §5 uses for the `qobs_mm_per_h_leadXX`
+target column naming — the mm/h transform and the lead-time shift are both
+package-build-time operations on the same column).
+
+**All four lead times — 1 h, 3 h, 6 h, 12 h — are included in the first
+package/config/sweep design**, not deferred one at a time. 1 h and 3 h
+remain diagnostics, not the primary benchmark (unchanged from above), but
+are built now because the incremental package/config cost of adding a lead
+time at package-build time is small relative to the cost of re-running
+package generation later to add them retroactively.
 
 ### 9c. Hyperparameters — initial seed config, not the final benchmark
 
@@ -543,11 +772,12 @@ Reuse the existing conventions rather than invent new ones:
 
 ## New mini-milestones (required gates before full package generation)
 
-Both milestones below are **design/technical-preflight milestones**. Neither
-is executed in this patch — this document only defines their scope and why
-they are required. Both explicitly require inspecting the **actual installed
-code** (NeuralHydrology 1.13 on Moriah; the local attribute-source directory)
-rather than relying on public documentation or assumptions.
+**2K-G-F and 2K-G-G (below) are both DONE** — 2K-G-F-B canonical build PASS
+2026-07-08 (§3), 2K-G-G Phase B evidence committed at `0d0e6aa` and converted
+into binding decisions by this 2K-G-H sign-off (§5/§5a/§6/§9b). Their scope
+descriptions are kept below for historical record. **2K-G-I (new) is the
+current next milestone** — it is defined here but **not executed in this
+patch**.
 
 ### 2K-G-F — Static Attribute Matrix Recovery + Audit
 
@@ -613,25 +843,77 @@ inspecting NH 1.13's actual installed behavior on Moriah. Scope:
 shell access from a session with that access); this section only documents
 the requirement and scope.
 
+**DONE (2026-07-12):** Phase B evidence gathered and committed at `0d0e6aa`;
+converted into binding decisions by the 2K-G-H sign-off above (§5, §5a, §6,
+§9b).
+
+### 2K-G-I — Baseline Package Builder + Split Config Implementation (NEW, defined 2026-07-12, not executed)
+
+**Defined as the next implementation-planning/code milestone by the 2K-G-H
+sign-off. Not executed in this patch — checklist only, no code written
+here.** Required because every decision in this document is now signed off
+(§3, §5, §5a, §6, §8b, §9a, §9b) but none is implemented — the package
+builder, NH configs, and Slurm templates referenced throughout this document
+still encode Smoke 0/1's technical-only choices (old temporal-split
+constants, technical gap-fill, raw `qobs_m3s` target, no lead-time shifting,
+48-column static-attribute merge, no spatial-holdout/CA basin lists).
+Future scope (checklist, not designed in detail here):
+
+- [ ] Target conversion to `qobs_mm_per_h` at package-build time (§5).
+- [ ] Lead-time target shifting for 1/3/6/12 h, producing
+      `qobs_mm_per_h_leadXX` columns (§5, §9b).
+- [ ] Raw `m^3/s` reconstruction/evaluation audit implementing §5a's three
+      requirements (unit round-trip test, package audit, evaluation audit).
+- [ ] Hard MRMS-gap training-window exclusion mechanism (§6) — custom
+      sampler or package-builder-time sample-mask filtering, since Q8
+      evidence found no native NH mechanism.
+- [ ] Explicit basin split artifact generation (§8b): development training,
+      validation, temporal test, non-CA spatial holdout, California Stage 4
+      fine-tune/holdout — using the seeded stratified method (HUC02/
+      geography, basin area, hydroclimatic attributes) specified in §8b.
+- [ ] Use of `stage1_static_attributes_v001` (§3) as the static-attribute
+      source, replacing the 48-column merge in the package builder.
+- [ ] Baseline NH YAML/config generation encoding the revised temporal split
+      (§8), the resolved target/gap/lead-time policy, and the accepted
+      static-attribute matrix.
+- [ ] Package audit updates reflecting all of the above (extending
+      `scripts/audit_stage1_static_attribute_matrix.py`-style independent
+      verification to the full NH package, not just the static-attribute
+      matrix).
+
+This is a checklist for future work, not a design in itself — sequencing,
+owner, and estimated effort for each item are not decided in this patch.
+
 ---
 
 ## Checklist: before full 2,752-basin NH package generation
 
 - [x] Attribute provenance (48-column screening merge) closed — canonical
-      path, checksum verified (Milestone 2K-G-D-A). **Note:** this closes
-      provenance for the *current* merge only — it does not close §3/2K-G-F.
-- [ ] **2K-G-F** — richer static-attribute matrix recovered, audited,
-      checksummed, and a column-list policy proposed for sign-off.
-- [ ] **2K-G-G** — target-scaling and forcing-gap-policy feasibility report
-      completed via actual NH 1.13 code inspection on Moriah.
-- [ ] Target normalization policy signed off (§5), informed by 2K-G-G.
-- [ ] Forcing gap policy signed off (§6), informed by 2K-G-G.
-- [ ] Non-CA spatial-holdout basin list selected (~10%, §8b) with a
-      documented, reproducible stratification method.
-- [ ] California basin list identified and excluded from Stages 1–3 (§8c).
+      path, checksum verified (Milestone 2K-G-D-A). **Note:** this closed
+      provenance for that merge only; §3 has since moved on to
+      `stage1_static_attributes_v001` (below).
+- [x] **2K-G-F / 2K-G-F-B** — richer static-attribute matrix recovered,
+      audited, checksummed (`stage1_static_attributes_v001`, canonical h2o
+      PASS 2026-07-08), and accepted as the Stage 1 baseline by this 2K-G-H
+      sign-off (§3).
+- [x] **2K-G-G** — target-scaling and forcing-gap-policy feasibility report
+      completed via actual NH 1.13 code inspection on Moriah (evidence
+      committed at `0d0e6aa`).
+- [x] Target normalization policy signed off (§5, §5a) — 2026-07-12,
+      Milestone 2K-G-H.
+- [x] Forcing gap policy signed off (§6) — 2026-07-12, Milestone 2K-G-H.
+- [ ] Non-CA spatial-holdout basin list **selected** (~10%, §8b) — the
+      stratification method is now specified (§8b: HUC02/geography, basin
+      area, hydroclimatic attributes) but the actual basin list is not yet
+      generated; scoped to 2K-G-I.
+- [ ] California basin list identified and excluded from Stages 1–3 (§8c) —
+      scoped to 2K-G-I.
 - [ ] `seq_length` and lead-time combination selected within the approved
       Stage 1 candidates (§9a/§9b), via the W&B sweep (§9c/§9d) once it can
-      be run.
+      be run. **Note:** all four lead times (1/3/6/12 h, §9b) are now
+      approved for inclusion in the first package/config/sweep design; final
+      selection among them (beyond primary=6h/secondary=12h) still awaits
+      the sweep.
 - [ ] W&B sweep executed for the official Stage 1 benchmark (§9c) — the
       seed config (§9c table) is not a substitute.
 - [ ] `config/stage1_scientific_baseline_v001.yaml` + NH YAML encode the
@@ -653,17 +935,26 @@ the requirement and scope.
 
 ## Status
 
-**DESIGN GATE — v001 REVISED (2K-G-E revision, 2026-07-06).** 14 binding
-decisions are now recorded (see "Binding decisions" above), replacing the
-2026-07-03 draft's proposals where the user's review changed them (target
-normalization, `seq_length` range, lead time, temporal split dates, spatial/CA
-splits, static attributes, hyperparameter framing, loss/metric separation,
-W&B scope, Slurm policy). Two new mini-milestones (2K-G-F, 2K-G-G) are
-required — both gate real scientific decisions (static attributes, target
-scaling, gap policy) behind actual code/data inspection rather than
-documentation assumptions.
+**DESIGN GATE — v002, POLICY SIGN-OFF COMPLETE (2K-G-H, 2026-07-12).**
+Every item this document previously left `STILL OPEN` or `GATED` on
+2K-G-F/2K-G-G is now `APPROVED`: static attributes (§3), target
+normalization + inversion/audit requirements (§5, §5a), forcing gap policy
+(§6), lead-time implementation + full 4-lead-time scope (§9b), and spatial
+split stratification method + basin-list-artifact requirement (§8b). This
+supersedes the 2026-07-06 status (14 binding decisions, two open gates);
+the 2K-G-H sign-off above adds decisions 1–7 on top of those 14 and closes
+both gates. The evidence this sign-off is based on
+(`docs/stage1_target_scaling_gap_leadtime_feasibility.md`) is committed at
+`0d0e6aa`.
+
+**No scientific/methodological item in this document remains open pending
+evidence.** What remains is **implementation**, scoped as the new
+`2K-G-I — Baseline Package Builder + Split Config Implementation` milestone
+(checklist above; not designed in detail, not executed here) — updating the
+package builder, NH configs, Slurm templates, and generating basin-list
+artifacts to actually encode everything this document now specifies.
 
 This document does **not** authorize full 2,752-basin package generation,
 training, or any Moriah/California data transfer. All remain separate,
-explicitly gated steps — now gated on 2K-G-F and 2K-G-G in addition to the
-existing sign-off items.
+explicit steps — gated on 2K-G-I's implementation, not on any further
+policy decision.

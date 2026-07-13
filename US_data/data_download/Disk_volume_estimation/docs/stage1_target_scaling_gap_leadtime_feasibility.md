@@ -12,9 +12,20 @@ the first follow-up round were closed in a second follow-up round,
 2026-07-12, once Moriah SSH access was restored; see "Evidence follow-up
 (2026-07-12, part 2)" below). Window-feasibility evidence against the real
 gap inventory (Q10-Q11) is also answered (2026-07-12, part 1 follow-up).
-No final target-scaling, gap-policy, or lead-time implementation decision
-has been made — those remain explicitly `PENDING`, gated on a Flash-NH
-policy decision, not on missing evidence.**
+This evidence-gathering patch was committed at `0d0e6aa`.
+
+**Superseded note (2026-07-12, Milestone 2K-G-H):** the target-scaling,
+gap-policy, and lead-time implementation decisions that this document
+originally left `PENDING` (gated on a Flash-NH policy decision, not on
+missing evidence) have since been **made and recorded as binding** in
+`docs/stage1_scientific_baseline_design.md` §5/§5a/§6/§9b, via the 2K-G-H
+sign-off. This document remains the evidence record (Phase B findings
+below are unchanged and still authoritative for *how NH 1.13.0 behaves*);
+it is `docs/stage1_scientific_baseline_design.md` that now holds the
+binding *policy* built on top of that evidence. The "Target-scaling
+decision" and "Gap-policy decision framework" sections below are updated
+with pointers to the binding sign-off, not rewritten as a duplicate policy
+record.
 
 `scripts/inspect_neuralhydrology_stage1_mechanics.py` was run on Moriah on
 a compute node (`glacier-30`, not the login node) against the
@@ -769,44 +780,49 @@ by the Q6/Q8 mechanism facts and the corrected Q10/Q11 loss numbers above:
     (`seq_length=72`), i.e. this policy's cost is `seq_length`-dependent
     engineering + `seq_length`-dependent data loss, not a fixed cost.
 
-**Reading the corrected numbers into this framework (still not a
-decision):** the corrected Q10/Q11 loss fractions are modest in absolute
-terms (under 6% even at the most expensive `seq_length=72,
-lead_time=12` combination) but are clearly non-trivial and
-`seq_length`-dependent rather than negligible-and-flat. This is exactly
-the regime the user asked to flag explicitly: loss is small enough that
-hard MRMS-window exclusion (Policy B) is not obviously infeasible on data-
-availability grounds at any of the four candidate `seq_length` values, but
-large enough — and `seq_length`-dependent enough — that it is not "free"
-either, and the engineering cost (custom sample filtering, since Q8 found
-no native mechanism) is real. Both policies remain viable candidates;
-this document does not select between them.
+**Reading the corrected numbers into this framework — DECIDED (2026-07-12,
+Milestone 2K-G-H), superseding "still not a decision" below.** The
+corrected Q10/Q11 loss fractions are modest in absolute terms (under 6%
+even at the most expensive `seq_length=72, lead_time=12` combination) but
+are clearly non-trivial and `seq_length`-dependent rather than
+negligible-and-flat. Reading these numbers into the framework, the user
+approved **Policy B (hard MRMS-gap window exclusion) as the scientific
+baseline** — see `docs/stage1_scientific_baseline_design.md` §6 for the
+binding decision and rationale. `nan_handling_method`/Policy A remains
+available as a fallback/ablation path only, not the baseline, and must be
+explicitly configured if ever used (unset default remains forbidden per
+Q6). This document's framework and evidence above are unchanged and remain
+the record of *why* — the decision itself now lives in §6 of the design
+doc, not here.
 
-**RTMA may warrant a separate policy from MRMS — flagged, not decided.**
-The MRMS/RTMA loss asymmetry is stark: MRMS-gap loss is roughly two orders
-of magnitude larger than RTMA-gap loss at every `seq_length`/`lead_time`
-(e.g. 5.44% vs. 0.16% at `seq_length=72, lead_time=12`), tracking the
-underlying 136 MRMS vs. 2 RTMA archive-gap-hour counts. This asymmetry
-means a combined "either-gap" exclusion policy is almost entirely driven
-by MRMS, and a policy that treats RTMA differently from MRMS (e.g. RTMA
-interpolation retained as today's Smoke-0/1 technical-only fill, but
-promoted to a scientific-path decision for RTMA specifically, while MRMS
-gets its own separate policy — either NaN+`nan_handling_method` or hard
-exclusion) is a structurally reasonable option given how small the RTMA
-contribution is. This document flags the option without deciding it.
+**RTMA treated separately in wording, decided alongside MRMS.** The
+MRMS/RTMA loss asymmetry described below is why RTMA gets separate wording
+in §6's binding decision (excluding RTMA-gap-intersecting windows too is
+acceptable if the mask naturally supports it, but MRMS drives the policy
+either way) rather than a fully independent decision process. Original
+evidence-only framing, preserved for context: the MRMS/RTMA loss asymmetry
+is stark — MRMS-gap loss is roughly two orders of magnitude larger than
+RTMA-gap loss at every `seq_length`/`lead_time` (e.g. 5.44% vs. 0.16% at
+`seq_length=72, lead_time=12`), tracking the underlying 136 MRMS vs. 2 RTMA
+archive-gap-hour counts. This asymmetry means a combined "either-gap"
+exclusion policy is almost entirely driven by MRMS.
 
 ### Target-scaling decision
 
-`PENDING` as a final decision — §5 remains open. Phase B evidence
-(Q1/Q2 above) shows area-normalized/specific discharge is not a
-`GenericDataset` config flag but is straightforward to implement at
-package-build time, with the caveat that raw-m^3/s reversal at evaluation
-time would need an extra Flash-NH-side step beyond NH's native scaler
-unscale. This narrows the choice among (a) area-normalized/specific
-discharge (package-build-time, extra reversal step), (b) raw `qobs_m3s`
-with NH default z-score (no extra reversal step, but no basin-area
-normalization benefit), or (c) per-basin standardization — but does not
-select among them.
+**DECIDED (2026-07-12, Milestone 2K-G-H) — no longer `PENDING`.** §5 of
+`docs/stage1_scientific_baseline_design.md` now records the binding
+decision: area-normalized discharge, internal unit **mm/h equivalent
+runoff depth**, computed by the package builder at package-build time, per-
+basin package target column named e.g. `qobs_mm_per_h_leadXX`. Phase B
+evidence (Q1/Q2 above, unchanged) is the basis for this decision: area-
+normalized/specific discharge is not a `GenericDataset` config flag but is
+straightforward to implement at package-build time, with the caveat that
+raw-`m^3/s` reversal at evaluation time needs an extra Flash-NH-side step
+beyond NH's native scaler unscale — this caveat is now §5's binding
+"additional Flash-NH-side conversion" requirement, and §5a records the
+resulting audit requirements (unit round-trip test, package audit,
+evaluation audit). Candidates (b) raw `qobs_m3s` + NH default z-score and
+(c) per-basin standardization are no longer under consideration.
 
 ## Local validation (Phase A, this patch)
 
@@ -891,14 +907,21 @@ evidence; none remain open in this document.
 ## Not done in this update (Phase B, 2026-07-12, parts 1+2)
 
 - No final target-scaling, gap-policy, or lead-time implementation decision
-  was made — Phase B supplies mechanism-level facts (what NH 1.13.0 can and
-  cannot do natively); §5/§6/§9b decisions in
-  `docs/stage1_scientific_baseline_design.md` remain open. The gap-policy
-  decision framework compares Policy A vs. Policy B and reads the real
-  loss numbers into that comparison, but does not select between them, and
-  does not decide the RTMA-vs-MRMS split question either.
-- No package builder, scientific NH config, or Slurm template was modified.
+  was made **in this document** — Phase B supplies mechanism-level facts
+  (what NH 1.13.0 can and cannot do natively). **Superseded note
+  (2026-07-12, Milestone 2K-G-H):** those decisions have since been made
+  and recorded as binding in `docs/stage1_scientific_baseline_design.md`
+  §5/§5a/§6/§9b, in a separate docs-only policy-sign-off patch built on top
+  of this document's evidence (this document itself was not re-opened for
+  evidence changes by that sign-off — see the "Superseded note" in
+  "Status" above).
+- No package builder, scientific NH config, or Slurm template was modified
+  — still true; the 2K-G-H sign-off was also docs-only. Implementation is
+  scoped as a new milestone, `2K-G-I — Baseline Package Builder + Split
+  Config Implementation` (see `docs/stage1_scientific_baseline_design.md`,
+  "New mini-milestones"), not yet started.
 - No training was run; no NH package was generated; nothing under `tmp/`
   was committed (including the two `window_feasibility_real_gaps_*` run
   directories and the `nh13_targeted_inspection_moriah_*` evidence
-  directory produced across both parts of this follow-up).
+  directory produced across both parts of this follow-up). Still true as
+  of the 2K-G-H sign-off.
