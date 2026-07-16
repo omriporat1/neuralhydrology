@@ -68,11 +68,17 @@ def test_returned_object_is_plain_dict(committed_policy):
     assert type(committed_policy) is dict
 
 
-def test_future_eligible_list_is_not_required_to_exist(committed_policy):
+def test_canonical_eligible_list_exists_and_matches_policy_count(committed_policy):
+    # I-A5 canonical promotion is complete: the policy-resolved eligible-
+    # basins list now intentionally exists, and its line count agrees with
+    # the signed policy's expected_eligible_count. Full checksum/content
+    # verification against the split manifest is the committed I-A3
+    # auditor's job (scripts/audit_stage1_baseline_splits.py) and is not
+    # duplicated here.
     eligible = REPO_ROOT / committed_policy["basin_universe"]["eligible_basins_list"]
-    # The split artifacts are a future (I-A5) deliverable; loading must not
-    # depend on their existence.
-    assert not eligible.exists()
+    assert eligible.exists()
+    lines = [line for line in eligible.read_text().splitlines() if line.strip()]
+    assert len(lines) == committed_policy["basin_universe"]["expected_eligible_count"]
 
 
 def test_validate_does_not_mutate_input(policy):
