@@ -55,6 +55,11 @@ def test_committed_policy_loads_with_expected_core_values(committed_policy):
     assert committed_policy["target"]["leads_hours"] == [1, 3, 6, 12]
     assert committed_policy["seq_lengths_hours"] == [12, 24, 48, 72]
     assert committed_policy["spatial_split"]["seed"] == 42
+    assert committed_policy["spatial_split"]["missing_hydroclimate_policy"]["never_in_holdout"] is True
+    assert committed_policy["spatial_split"]["fallback_policy"]["ladder"] == "single_level_huc02_sparse_pool"
+    assert committed_policy["spatial_split"]["exact_holdout_count_binding"] is False
+    assert committed_policy["basin_universe"]["expected_nonca_count"] == 2557
+    assert committed_policy["basin_universe"]["expected_ca_count"] == 195
     assert len(committed_policy["dynamic_inputs"]) == 8
     assert committed_policy["gap_policy"]["target_hour_forcing_gap_exclusion"] is False
 
@@ -134,6 +139,8 @@ _INVARIANT_MUTATIONS = [
     ("wrong-temporal-date", "temporal_split.training.end", "2022-12-31", None),
     ("unquoted-date-type", "temporal_split.test.start", 20250101, None),
     ("wrong-eligible-count", "basin_universe.expected_eligible_count", 2754, None),
+    ("wrong-nonca-count", "basin_universe.expected_nonca_count", 2556, None),
+    ("wrong-ca-count", "basin_universe.expected_ca_count", 196, None),
     ("numeric-excluded-staids", "basin_universe.excluded_staids",
      [2299472, 4073468], "strings"),
     ("wrong-excluded-set", "basin_universe.excluded_staids",
@@ -150,6 +157,30 @@ _INVARIANT_MUTATIONS = [
     ("wrong-min-stratum", "spatial_split.min_composite_stratum_size", 5, None),
     ("ca-finetune-out-of-range", "spatial_split.california_finetune_fraction",
      1.5, "california_finetune_fraction"),
+    ("wrong-missing-hydro-rule", "spatial_split.missing_hydroclimate_policy.rule",
+     "impute_with_median", "rule"),
+    ("wrong-missing-hydro-reason",
+     "spatial_split.missing_hydroclimate_policy.assignment_reason",
+     "aridity_missing", None),
+    ("missing-hydro-never-holdout-false",
+     "spatial_split.missing_hydroclimate_policy.never_in_holdout", False,
+     "never_in_holdout"),
+    ("wrong-missing-hydro-count",
+     "spatial_split.missing_hydroclimate_policy.known_missing_count_v001", 6, None),
+    ("wrong-fallback-ladder", "spatial_split.fallback_policy.ladder",
+     "multi_level_huc02_area_pool", "ladder"),
+    ("intermediate-huc02-area-layer-reintroduced",
+     "spatial_split.fallback_policy.no_intermediate_huc02_area_layer", False, None),
+    ("whole-huc02-downgrade-reintroduced",
+     "spatial_split.fallback_policy.no_whole_huc02_downgrade_for_sibling_sparsity",
+     False, None),
+    ("wrong-ca-fallback-ladder", "spatial_split.california_fallback_policy.ladder",
+     "huc02_dependent_pool", "ladder"),
+    ("exact-holdout-count-pinned",
+     "spatial_split.exact_holdout_count_binding", True,
+     "exact_holdout_count_binding"),
+    ("largest-remainder-reintroduced",
+     "spatial_split.largest_remainder_optimization_used", True, None),
     ("wrong-target-source", "target.source_variable", "qobs_cfs", None),
     ("wrong-conversion-constant", "target.conversion_constant", 3.7,
      "conversion_constant"),

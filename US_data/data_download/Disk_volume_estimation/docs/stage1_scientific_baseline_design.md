@@ -567,6 +567,22 @@ if available from the accepted static matrix
 
 These artifacts are what 2K-G-I must produce; none exist yet.
 
+**Generator method — signed off 2026-07-13 (2K-G-I I-A2), binding via
+`config/stage1_scientific_baseline_v001.yaml::spatial_split`:** seeded random
+sampling of ~10% within each HUC02 × area-tercile × aridity-tercile stratum
+(≥ 10 basins); strata below that floor are pooled once with their HUC02
+siblings into a single sparse pool (sampled if the pool itself reaches 10,
+otherwise sent to `development_train` in full) — one fallback level, no
+intermediate HUC02 × area layer, no downgrade of a sufficient stratum for a
+sibling's sparsity. Basins missing `ari_ix_uav` (5 in v001) are assigned
+directly to `development_train`, never stratified, never eligible for
+holdout (`assignment_reason = missing_hydroatlas_stratifier`). The 8–12%
+overall band is binding; the exact resulting count is not (no
+largest-remainder pass). Implementation: `src/baseline/splits.py` +
+`scripts/generate_stage1_baseline_splits.py`. This defines the **candidate**
+method only — still subject to the I-A3 machine audit and I-A4 human QC
+before promotion.
+
 ## 8c. California transfer-learning split (Stage 4) (NEW, APPROVED)
 
 1. California is held out completely from Stages 1–3 (§8b).

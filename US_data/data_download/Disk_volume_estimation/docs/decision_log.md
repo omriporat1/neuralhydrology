@@ -1584,4 +1584,54 @@ evidence into policy, it does not re-derive it. No package builder, NH config, o
 template was modified — implementation is scoped to the new, not-yet-started 2K-G-I
 milestone. No training was run; no NH package was generated; nothing under `tmp/` was
 touched or committed by this patch.
+
+## 2026-07-13 Stage 1 — Milestone 2K-G-I I-A2: spatial split generator, method finalized
+
+**Context.** Implements the split-generator sub-milestone scoped in the 2026-07-12 entry
+above (§8b basin-list artifacts). Two points needed a concrete decision before code could
+be written: how to handle the 5 non-CA basins with no `ari_ix_uav` value, and how to
+simplify the multi-level sparse-stratum fallback ladder drafted in
+`docs/stage1_baseline_package_implementation_plan.md` §7 into something a small,
+testable function set could implement without an intermediate HUC02 × area layer or a
+global largest-remainder top-up pass.
+
+**Decisions (signed off by the user, same day):**
+1. **Missing-hydroclimate-stratifier basins — Option B.** All 5 basins missing
+   `ari_ix_uav` stay in the 2,752-basin universe and are assigned directly to their
+   population's training role (`development_train` for non-CA; the same rule applies to
+   California generically, though no CA basin is missing aridity in v001) —
+   `assignment_reason = missing_hydroatlas_stratifier`. They are excluded from
+   stratification/sampling entirely, never enter a holdout role, and there is no
+   `aridity_missing` stratum and no imputation.
+2. **Sparse-stratum fallback simplified to one level.** Non-CA: stratum = HUC02 × area
+   tercile × aridity tercile; strata with ≥ 10 basins are sampled directly; strata below
+   that pool once into a single HUC02-level sparse pool (sampled if the pool reaches 10,
+   otherwise sent to `development_train` in full). A sufficient stratum is never
+   downgraded because a sibling stratum in the same HUC02 is sparse. California: the same
+   shape, statewide (no HUC02 grouping key, HUC02 diagnostic only), one sparse pool.
+3. **No exact global holdout count.** The 8–12% overall band
+   (`nonca_holdout_fraction ± holdout_tolerance`) remains binding; the exact resulting
+   basin count (e.g. 255 vs 256 non-CA, 19 vs 20 CA) is explicitly not material and is not
+   pinned as a policy constant — no largest-remainder optimization is used.
+4. Seed 42, tercile binning, and minimum composite stratum size 10 are unchanged from the
+   2026-07-12 sign-off.
+
+**Encoding.** `config/stage1_scientific_baseline_v001.yaml::spatial_split` gained
+`missing_hydroclimate_policy`, `fallback_policy`, `california_fallback_policy`,
+`exact_holdout_count_binding: false`, and `largest_remainder_optimization_used: false`;
+`src/baseline/policy.py`'s validator pins the new fields; `tests/test_policy.py` gained
+matching mutation tests. `docs/stage1_baseline_package_implementation_plan.md` §7 and
+`docs/stage1_scientific_baseline_design.md` §8b were updated to describe the simplified
+ladder and Option B instead of the earlier multi-level/largest-remainder draft text.
+
+**Implementation.** `src/baseline/splits.py` (small, testable functions — no class
+hierarchy) + `scripts/generate_stage1_baseline_splits.py` (candidate-generation CLI,
+fail-fast on checksum/count/join/field/role violations) + `tests/test_splits.py`
+(synthetic-fixture unit and integration tests). A candidate split was generated under
+`tmp/` for machine/human review; nothing was promoted into
+`config/stage1_baseline_splits_v001/` — promotion is gated on the I-A3 independent
+auditor and I-A4 human QC, not yet started.
+
+**Not done.** No independent auditor, no maps/QC figures, no promotion, no commit of this
+patch's own changes (left for user review). `reports/` was not touched.
 evidence directory.

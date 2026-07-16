@@ -298,11 +298,13 @@ config/stage1_baseline_splits_v001/
   california_holdout.txt          # ~10% of CA
   split_assignment.csv            # one row per eligible basin: STAID, split_role,
                                   #   STATE, HUC02, area_class, hydro_class,
-                                  #   stratum_id, fallback_applied
+                                  #   stratum_id, assignment_reason
   split_manifest.json             # seed, algorithm id+version, bin edges,
                                   #   source checksums (matrix sha256, eligible-list
                                   #   sha256, policy sha256), counts per split,
-                                  #   holdout fractions, fallback log, git commit,
+                                  #   holdout fractions, fallback log,
+                                  #   HUC02-by-role counts, missing-stratifier basin
+                                  #   IDs/reason, per-artifact sha256 checksums,
                                   #   explicit note that the three temporal lists
                                   #   are identical by design
 ```
@@ -379,20 +381,35 @@ defines the **candidate** split method only — the first generated split
 remains subject to the machine audit (I-A3) and human QC review (I-A4) and is
 not guaranteed acceptance.
 
-**Sparse-stratum fallback (deterministic, all recorded):**
-- stratum with < 10 basins → merge up to HUC02 × area class;
-- still < 10 → HUC02-only allocation;
-- HUC02 with < 10 non-CA basins → retain entirely in development (no holdout
-  from that HUC02), recorded;
-- rounding: per-stratum holdout count = `round(0.10 × n)`, with a final
-  global top-up/trim pass (largest-remainder, seeded order) to land within
-  tolerance;
-- every fallback and every top-up decision appended to the manifest's
-  `fallback_log`.
+**Sparse-stratum fallback — simplified to ONE level (superseding the earlier
+multi-level draft above; signed off 2026-07-13, I-A2):**
+- stratum (HUC02 × area tercile × aridity tercile) with ≥ 10 basins → direct
+  random ~10% holdout from that stratum;
+- stratum with < 10 basins → pool **all** such sparse-stratum basins within
+  the same HUC02 into **one** HUC02-level sparse pool (no intermediate
+  HUC02 × area layer);
+- that pool with ≥ 10 basins → random ~10% holdout from the pool; still
+  < 10 → the entire pool goes to `development_train`;
+- a non-sparse stratum is **never** downgraded merely because a sibling
+  stratum in the same HUC02 is sparse;
+- rounding: per-stratum/per-pool holdout count = `round(0.10 × n)`; there is
+  **no** global top-up/trim pass and no largest-remainder optimization — the
+  exact resulting global count is not a policy constant, only the 8–12%
+  overall band is binding;
+- every fallback decision appended to the manifest's `fallback_log`.
 
-The same machinery (without HUC02 stratification if CA HUC02 diversity is too
-small — CA is mostly HUC 18) generates the CA 90/10 fine-tune/holdout split;
-for CA, stratify on area × aridity only, HUC-region recorded as diagnostic.
+**Missing-hydroclimate-stratifier basins (Option B, signed off 2026-07-13):**
+basins missing `ari_ix_uav` are never stratified or sampled at all — each is
+assigned directly to its population's training role (`development_train` for
+non-CA, `california_finetune_train` for CA) with
+`assignment_reason = missing_hydroatlas_stratifier`, and can never appear in
+a holdout role. v001 has 5 such basins, all non-CA. There is no
+`aridity_missing` stratum and no imputation.
+
+The same machinery, without HUC02 in the grouping key (CA is mostly HUC 18),
+generates the CA 90/10 fine-tune/holdout split with a single statewide sparse
+pool in place of the per-HUC02 pool; HUC-region is recorded as diagnostic
+only.
 
 ---
 

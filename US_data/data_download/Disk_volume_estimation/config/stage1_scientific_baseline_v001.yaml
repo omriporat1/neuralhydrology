@@ -58,6 +58,8 @@ basin_universe:
   initial_manifest: config/stage1_initial_training_basin_manifest.csv
   eligible_basins_list: config/stage1_baseline_splits_v001/eligible_basins_v001.txt
   expected_eligible_count: 2752
+  expected_nonca_count: 2557
+  expected_ca_count: 195
   excluded_staids: ["02299472", "04073468"]
   policy_excluded_target_status: [TARGET_OPERATIONAL_REVIEW]
   california:
@@ -81,6 +83,42 @@ spatial_split:
   method_status: candidate_subject_to_machine_and_human_qc
   california_finetune_fraction: 0.90
   california_stratification: area_and_aridity_not_huc02_dependent
+  # Basins missing the hydroclimate stratifier (ari_ix_uav) are never
+  # stratified/sampled: they go straight to the training role of their
+  # population (development_train for non-CA, california_finetune_train for
+  # CA) and can never land in a holdout role. v001 has 5 such basins, all
+  # non-CA (Option B, signed off 2026-07-13; see decision_log.md).
+  missing_hydroclimate_policy:
+    rule: assign_to_training_role_directly
+    applies_to_field: ari_ix_uav
+    assignment_reason: missing_hydroatlas_stratifier
+    excluded_from_stratification: true
+    never_in_holdout: true
+    known_missing_count_v001: 5
+  # Simplified, single-level sparse-stratum fallback (supersedes any older
+  # multi-level pooling text in docs/): a composite stratum with fewer than
+  # min_composite_stratum_size basins is pooled ONCE with its siblings, and a
+  # pool that is still too small goes to training in full. There is no
+  # intermediate HUC02 x area layer and a sufficient stratum is never
+  # downgraded merely because another stratum in the same HUC02 is sparse.
+  fallback_policy:
+    ladder: single_level_huc02_sparse_pool
+    step_1: "stratum = HUC02 x area_tercile x aridity_tercile; n >= min_composite_stratum_size -> direct random ~nonca_holdout_fraction holdout"
+    step_2: "strata with n < min_composite_stratum_size pool ALL such basins within the same HUC02 into ONE HUC02-level sparse pool; pool n >= min_composite_stratum_size -> random ~nonca_holdout_fraction holdout from the pool; else the entire pool -> development_train"
+    no_intermediate_huc02_area_layer: true
+    no_whole_huc02_downgrade_for_sibling_sparsity: true
+  # California's ladder is the same shape as fallback_policy but statewide
+  # (no HUC02 grouping key) and pools into a single fallback -> california_finetune_train.
+  california_fallback_policy:
+    ladder: single_level_statewide_sparse_pool
+    step_1: "stratum = area_tercile x aridity_tercile (HUC02 is diagnostic only, not a grouping key); n >= min_composite_stratum_size -> direct random holdout at (1 - california_finetune_fraction)"
+    step_2: "strata with n < min_composite_stratum_size pool ALL such basins statewide into ONE sparse pool; pool n >= min_composite_stratum_size -> random holdout from the pool; else the entire pool -> california_finetune_train"
+  # The 8-12% band (nonca_holdout_fraction +/- holdout_tolerance) is binding;
+  # the exact resulting basin count is not -- per-stratum rounding means the
+  # generator is not expected to hit an exact global count, and no specific
+  # count (e.g. 255 vs 256 non-CA, 19 vs 20 CA) is pinned as policy.
+  exact_holdout_count_binding: false
+  largest_remainder_optimization_used: false
 
 # ---------------------------------------------------------------------------
 # Target (design doc §5/§5a; mm/h computed at package-build time; all four

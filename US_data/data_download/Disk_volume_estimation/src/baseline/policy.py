@@ -234,6 +234,14 @@ def validate_stage1_baseline_policy(data) -> dict:
     _expect(data, "basin_universe.eligible_basins_list",
             "config/stage1_baseline_splits_v001/eligible_basins_v001.txt")
     _expect(data, "basin_universe.expected_eligible_count", 2752)
+    _expect(data, "basin_universe.expected_nonca_count", 2557)
+    _expect(data, "basin_universe.expected_ca_count", 195)
+    eligible_count = _get(data, "basin_universe.expected_eligible_count")
+    nonca_count = _get(data, "basin_universe.expected_nonca_count")
+    ca_count = _get(data, "basin_universe.expected_ca_count")
+    if nonca_count + ca_count != eligible_count:
+        _fail("basin_universe",
+              "expected_nonca_count + expected_ca_count must equal expected_eligible_count")
     excluded = _get(data, "basin_universe.excluded_staids")
     if not isinstance(excluded, list) or not all(isinstance(s, str) for s in excluded):
         _fail("basin_universe.excluded_staids",
@@ -268,6 +276,22 @@ def validate_stage1_baseline_policy(data) -> dict:
     _expect(data, "spatial_split.california_finetune_fraction", 0.90)
     _expect(data, "spatial_split.california_stratification",
             "area_and_aridity_not_huc02_dependent")
+    _expect(data, "spatial_split.missing_hydroclimate_policy.rule",
+            "assign_to_training_role_directly")
+    _expect(data, "spatial_split.missing_hydroclimate_policy.applies_to_field", "ari_ix_uav")
+    _expect(data, "spatial_split.missing_hydroclimate_policy.assignment_reason",
+            "missing_hydroatlas_stratifier")
+    _expect(data, "spatial_split.missing_hydroclimate_policy.excluded_from_stratification", True)
+    _expect(data, "spatial_split.missing_hydroclimate_policy.never_in_holdout", True)
+    _expect(data, "spatial_split.missing_hydroclimate_policy.known_missing_count_v001", 5)
+    _expect(data, "spatial_split.fallback_policy.ladder", "single_level_huc02_sparse_pool")
+    _expect(data, "spatial_split.fallback_policy.no_intermediate_huc02_area_layer", True)
+    _expect(data, "spatial_split.fallback_policy.no_whole_huc02_downgrade_for_sibling_sparsity",
+            True)
+    _expect(data, "spatial_split.california_fallback_policy.ladder",
+            "single_level_statewide_sparse_pool")
+    _expect(data, "spatial_split.exact_holdout_count_binding", False)
+    _expect(data, "spatial_split.largest_remainder_optimization_used", False)
 
     # ---- target ----
     _expect(data, "target.source_variable", "qobs_m3s")
