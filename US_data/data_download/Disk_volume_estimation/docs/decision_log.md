@@ -1634,4 +1634,35 @@ auditor and I-A4 human QC, not yet started.
 
 **Not done.** No independent auditor, no maps/QC figures, no promotion, no commit of this
 patch's own changes (left for user review). `reports/` was not touched.
+
+## 2026-07-16 Stage 1 — Milestone 2K-G-I I-A3/I-A4: split auditor + visual QC, both PASS
+
+**I-A3 (independent auditor).** `src/baseline/split_audit.py` +
+`scripts/audit_stage1_baseline_splits.py` + `tests/test_split_audit.py` (32 tests)
+reimplement population reconstruction, tercile fitting, stratum/pool routing,
+counts/fractions/HUC02 summaries, and manifest/checksum reconciliation independently of
+`build_split_assignment` — it reuses only `normalize_staid`. Run against the real I-A2
+candidate (`tmp/stage1_baseline_splits_v001_candidate`) and its repeat directory:
+**PASS, 0 errors, 0 warnings, 146 OK checks**, byte-identical repeat confirmed. Committed
+separately (I-A3 commit).
+
+**I-A4 (human visual QC).** `scripts/generate_stage1_baseline_split_qc.py` renders four
+plots from the same candidate (non-CA CONUS overview, California overview,
+non-CA drainage-area ECDF, non-CA aridity ECDF) plus a `visual_qc_summary.md`. Human
+review verdict: **PASS.** The non-California spatial holdout is broadly distributed
+across the major CONUS basin clusters; the California holdout has reasonable
+north/central/south representation for a 19-basin sample; development and holdout
+drainage-area ECDFs broadly overlap; development and holdout aridity ECDFs are nearly
+coincident; the five missing-aridity basins were omitted only from the aridity plot, not
+imputed, and all remain in development training. No visible difference was judged severe
+enough to invalidate the split. Generated plots remain under
+`tmp/stage1_baseline_splits_v001_qc/` (gitignored, not committed).
+
+**Decision.** With I-A3 and I-A4 both PASS, the split candidate is accepted for
+canonical promotion. I-A5 (byte-copy promotion to `config/stage1_baseline_splits_v001/`)
+is the next and final split sub-milestone; no further auditor hardening, visual QC,
+statistical tests, or balance optimization is planned for this split design.
+
+**Not done.** No split regeneration, no seed/policy change, no promotion yet, no NH
+package build, no training, no h2o/Moriah commands, no push. `reports/` was not touched.
 evidence directory.

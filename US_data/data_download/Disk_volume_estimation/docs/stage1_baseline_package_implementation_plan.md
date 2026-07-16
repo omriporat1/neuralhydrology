@@ -1105,6 +1105,19 @@ missing regions, or severe area/aridity imbalance — not a general QC
 framework. The candidate remains unpromoted; I-A5 remains pending human
 sign-off on I-A4.
 
+**I-A4 status (2026-07-16): human visual QC PASS.** Reviewed
+`scripts/generate_stage1_baseline_split_qc.py`'s four plots against the
+same real candidate: non-CA spatial holdout is broadly distributed across
+the major CONUS basin clusters; the 19-basin California holdout has
+reasonable north/central/south representation; non-CA development vs.
+holdout drainage-area ECDFs broadly overlap; development vs. holdout
+aridity ECDFs are nearly coincident (five missing-aridity basins omitted
+from that plot only, not imputed, all remain in development training).
+No visible clustering, missing region, or severe imbalance was found.
+Generated plots stay under `tmp/stage1_baseline_splits_v001_qc/`
+(gitignored, uncommitted). With I-A3 and I-A4 both PASS, **I-A5 canonical
+promotion is the next and final split sub-milestone.**
+
 ---
 
 ## 21. Risks, hidden failure modes, and open questions
