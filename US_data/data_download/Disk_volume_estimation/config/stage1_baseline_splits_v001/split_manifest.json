@@ -1,0 +1,237 @@
+{
+  "created_by": "scripts/generate_stage1_baseline_splits.py",
+  "status": "candidate_subject_to_machine_and_human_qc",
+  "policy_path": "config\\stage1_scientific_baseline_v001.yaml",
+  "policy_sha256": "b93858c65779fb9a42f3a3fc146d088147fee0a09583c4181a1bec69b0c00c0a",
+  "attributes_parquet_path": "tmp\\stage1_baseline_split_inputs_v001\\stage1_baseline_split_inputs_v001_20260713T123758Z\\stage1_static_attributes_v001.parquet",
+  "attributes_parquet_sha256": "eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464",
+  "eligible_basins_path": "tmp\\stage1_baseline_split_inputs_v001\\stage1_baseline_split_inputs_v001_20260713T123758Z\\eligible_basins_v001.txt",
+  "eligible_basins_sha256": "d6e5860a3888da09718412a7381810c54ca286c6683d926644ee1dc02c18ea45",
+  "eligible_basins_count": 2752,
+  "temporal_lists_identical_by_design": true,
+  "algorithm_id": "stage1_seeded_random_stratified_split_v1",
+  "algorithm_version": 1,
+  "seed": 42,
+  "min_stratum_size": 10,
+  "nonca_holdout_fraction_target": 0.1,
+  "ca_holdout_fraction_target": 0.09999999999999998,
+  "tercile_edges": {
+    "nonca_area": [
+      121.0176,
+      381.5595
+    ],
+    "nonca_aridity": [
+      55.37817058666666,
+      84.17723516999999
+    ],
+    "ca_area": [
+      87.01860666666667,
+      295.0562999999999
+    ],
+    "ca_aridity": [
+      28.88291792333333,
+      50.505948039999986
+    ]
+  },
+  "fallback_log": [
+    {
+      "staid": "01125500",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01160350",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01162500",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01184490",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01192883",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01196561",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "01",
+      "pool_size": 6
+    },
+    {
+      "staid": "01350180",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "02",
+      "pool_size": 1
+    },
+    {
+      "staid": "02298110",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "03",
+      "pool_size": 1
+    },
+    {
+      "staid": "03116077",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "05",
+      "pool_size": 5
+    },
+    {
+      "staid": "03149500",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "05",
+      "pool_size": 5
+    },
+    {
+      "staid": "03277300",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "05",
+      "pool_size": 5
+    },
+    {
+      "staid": "03282500",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "05",
+      "pool_size": 5
+    },
+    {
+      "staid": "03289300",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "05",
+      "pool_size": 5
+    },
+    {
+      "staid": "05124480",
+      "reason": "sparse_pool_below_min_stratum_size",
+      "pool_key": "09",
+      "pool_size": 1
+    }
+  ],
+  "missing_stratifier_basins": {
+    "reason": "missing_hydroatlas_stratifier",
+    "staids": [
+      "393109104464500",
+      "394839104570300",
+      "401733105392404",
+      "402114105350101",
+      "402913084285400"
+    ],
+    "count": 5
+  },
+  "huc02_role_counts": {
+    "01": {
+      "development_train": 151,
+      "spatial_holdout_nonca": 16
+    },
+    "02": {
+      "development_train": 440,
+      "spatial_holdout_nonca": 48
+    },
+    "03": {
+      "development_train": 370,
+      "spatial_holdout_nonca": 43
+    },
+    "04": {
+      "development_train": 115,
+      "spatial_holdout_nonca": 14
+    },
+    "05": {
+      "development_train": 225,
+      "spatial_holdout_nonca": 24
+    },
+    "06": {
+      "development_train": 61,
+      "spatial_holdout_nonca": 6
+    },
+    "07": {
+      "development_train": 145,
+      "spatial_holdout_nonca": 15
+    },
+    "08": {
+      "development_train": 32,
+      "spatial_holdout_nonca": 4
+    },
+    "09": {
+      "development_train": 1
+    },
+    "10L": {
+      "development_train": 89,
+      "spatial_holdout_nonca": 10
+    },
+    "10U": {
+      "development_train": 31,
+      "spatial_holdout_nonca": 3
+    },
+    "11": {
+      "development_train": 116,
+      "spatial_holdout_nonca": 12
+    },
+    "12": {
+      "development_train": 119,
+      "spatial_holdout_nonca": 13
+    },
+    "13": {
+      "development_train": 19,
+      "spatial_holdout_nonca": 2
+    },
+    "14": {
+      "development_train": 54,
+      "spatial_holdout_nonca": 6
+    },
+    "15": {
+      "california_finetune_train": 1,
+      "development_train": 45,
+      "spatial_holdout_nonca": 4
+    },
+    "16": {
+      "california_finetune_train": 21,
+      "california_holdout": 2,
+      "development_train": 57,
+      "spatial_holdout_nonca": 5
+    },
+    "17": {
+      "development_train": 237,
+      "spatial_holdout_nonca": 25
+    },
+    "18": {
+      "california_finetune_train": 154,
+      "california_holdout": 17
+    }
+  },
+  "counts": {
+    "development_train": 2307,
+    "validation": 2307,
+    "temporal_test": 2307,
+    "spatial_holdout_nonca": 250,
+    "california_all": 195,
+    "california_finetune_train": 176,
+    "california_holdout": 19
+  },
+  "resulting_fractions": {
+    "nonca_holdout_of_nonca": 0.09777082518576456,
+    "ca_holdout_of_ca": 0.09743589743589744
+  },
+  "artifact_sha256": {
+    "california_all.txt": "3693bb67be3afc2755f261da9530fc11a1b8971a756b901e2c5a929ec3bba948",
+    "california_finetune_train.txt": "7ca5ae9cb4b88022f158186b534b67546a6f3b24938e33298de0ff4591b0db25",
+    "california_holdout.txt": "13daa29b70d9d52c0daeff66b812f6fe680e71cc1f7fb5f80e7de7187a96e08b",
+    "development_train.txt": "b71051bc0c8f49627a6a0919e7cfe524e64740f29cd01f8b850b54915487e23e",
+    "eligible_basins_v001.txt": "2b335df50c22e4f4892ae5e7636290ed2a7535006ef95760b03f23ab7acc95f4",
+    "spatial_holdout_nonca.txt": "f6d6756b3462b75409cc0b2052c72cf1a1850289bbe7e664838c86810e235c3c",
+    "split_assignment.csv": "60917a189f2c59bf89f131910d5a3e0c7c1a3adddcbaaad64227a32ffa8858f5",
+    "temporal_test.txt": "b71051bc0c8f49627a6a0919e7cfe524e64740f29cd01f8b850b54915487e23e",
+    "validation.txt": "b71051bc0c8f49627a6a0919e7cfe524e64740f29cd01f8b850b54915487e23e"
+  }
+}

@@ -918,12 +918,14 @@ owner, and estimated effort for each item are not decided in this patch.
 - [x] Target normalization policy signed off (§5, §5a) — 2026-07-12,
       Milestone 2K-G-H.
 - [x] Forcing gap policy signed off (§6) — 2026-07-12, Milestone 2K-G-H.
-- [ ] Non-CA spatial-holdout basin list **selected** (~10%, §8b) — the
-      stratification method is now specified (§8b: HUC02/geography, basin
-      area, hydroclimatic attributes) but the actual basin list is not yet
-      generated; scoped to 2K-G-I.
-- [ ] California basin list identified and excluded from Stages 1–3 (§8c) —
-      scoped to 2K-G-I.
+- [x] Non-CA spatial-holdout basin list **selected** (~10%, §8b) — generated,
+      independently audited (PASS, 0 errors), human visually reviewed
+      (PASS), and canonically promoted to
+      `config/stage1_baseline_splits_v001/` (2026-07-16, Milestone 2K-G-I
+      I-A1–I-A5). Split design is now frozen.
+- [x] California basin list identified and excluded from Stages 1–3 (§8c) —
+      `california_finetune_train`/`california_holdout` lists included in the
+      same 2026-07-16 promotion above.
 - [ ] `seq_length` and lead-time combination selected within the approved
       Stage 1 candidates (§9a/§9b), via the W&B sweep (§9c/§9d) once it can
       be run. **Note:** all four lead times (1/3/6/12 h, §9b) are now

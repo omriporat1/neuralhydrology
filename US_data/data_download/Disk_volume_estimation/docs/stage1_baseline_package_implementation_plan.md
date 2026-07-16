@@ -1118,6 +1118,24 @@ Generated plots stay under `tmp/stage1_baseline_splits_v001_qc/`
 (gitignored, uncommitted). With I-A3 and I-A4 both PASS, **I-A5 canonical
 promotion is the next and final split sub-milestone.**
 
+**I-A5 status (2026-07-16): promotion COMPLETE.** The accepted I-A2
+candidate was byte-copied (no regeneration, no reordering, no manual
+edits) from `tmp/stage1_baseline_splits_v001_candidate/` to the canonical
+path **`config/stage1_baseline_splits_v001/`**. Source basis: I-A3
+independent audit PASS (0 errors, 0 warnings) and I-A4 human visual QC
+PASS. All 10 expected artifacts are present and SHA-256-identical between
+candidate and canonical copy. The committed I-A3 auditor was re-run
+against the canonical directory (repeat evidence unchanged) and returned
+**PASS, 0 errors**, with unchanged role counts
+(`development_train`/`validation`/`temporal_test` 2307 each,
+`spatial_holdout_nonca` 250, `california_all` 195,
+`california_finetune_train` 176, `california_holdout` 19) and unchanged
+holdout fractions (non-CA 0.09777, CA 0.09744). The five nonstandard
+15-digit missing-aridity STAIDs were verified present unchanged. **The
+Stage 1 baseline split design is now frozen** for the first Stage 1
+baseline; do not reopen it absent a concrete scientific or correctness
+problem. Next work is the baseline NH package-builder implementation.
+
 ---
 
 ## 21. Risks, hidden failure modes, and open questions

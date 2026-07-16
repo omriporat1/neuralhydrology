@@ -1665,4 +1665,30 @@ statistical tests, or balance optimization is planned for this split design.
 
 **Not done.** No split regeneration, no seed/policy change, no promotion yet, no NH
 package build, no training, no h2o/Moriah commands, no push. `reports/` was not touched.
+
+## 2026-07-16 Stage 1 — Milestone 2K-G-I I-A5: canonical split promotion, COMPLETE
+
+**Action.** Byte-copied (via `shutil.copy2`, no regeneration/reordering/manual edits)
+the accepted I-A2 candidate's 10 artifacts from `tmp/stage1_baseline_splits_v001_candidate/`
+to the canonical path **`config/stage1_baseline_splits_v001/`**. Source basis: I-A3
+independent audit PASS (0 errors) and I-A4 human visual QC PASS (see prior entry).
+
+**Verification.** Pre-promotion: candidate re-audited PASS (0 errors) and reconfirmed
+byte-identical to its repeat directory. Post-promotion: exact 10-file inventory matched;
+every candidate/canonical file pair SHA-256-identical; the committed I-A3 auditor
+(`scripts/audit_stage1_baseline_splits.py`) re-run with `--candidate-dir
+config/stage1_baseline_splits_v001` and the unchanged repeat directory as repeat
+evidence returned **PASS, 0 errors**, with unchanged role counts
+(`development_train`/`validation`/`temporal_test` 2307, `spatial_holdout_nonca` 250,
+`california_all` 195, `california_finetune_train` 176, `california_holdout` 19) and
+unchanged holdout fractions (non-CA 0.09777, CA 0.09744); the five nonstandard
+15-digit missing-aridity STAIDs were confirmed present unchanged in the canonical copy.
+
+**Decision.** The Stage 1 baseline split design is now frozen for the first Stage 1
+baseline. Do not reopen it absent a concrete scientific or correctness problem. Next
+work is the baseline NH package-builder implementation.
+
+**Not done.** No split regeneration, no seed/policy change, no NH package build, no
+training, no h2o/Moriah commands, no push. `reports/` was not touched; only
+`config/stage1_baseline_splits_v001/` and this documentation were changed.
 evidence directory.

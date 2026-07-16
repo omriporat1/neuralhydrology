@@ -1,8 +1,22 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-12 (Milestone 2K-G-H Scientific Baseline Policy Sign-off COMPLETE — all Stage 1 scientific/methodological decisions now binding)
+Last updated: 2026-07-16 (Milestone 2K-G-I I-A1-I-A5 COMPLETE — Stage 1 baseline split design frozen)
 
 ## Current milestone
+
+**2K-G-I I-A1-I-A5 (spatial/temporal split generation through canonical
+promotion) COMPLETE (2026-07-16).** Seeded stratified split candidate
+(I-A2) passed an independent auditor (I-A3: PASS, 0 errors,
+`scripts/audit_stage1_baseline_splits.py`) and human visual QC (I-A4:
+PASS, no clustering/imbalance found; see `docs/decision_log.md` for
+accepted findings) and was byte-copy-promoted (I-A5) to the canonical
+path **`config/stage1_baseline_splits_v001/`** (10 artifacts;
+`development_train`/`validation`/`temporal_test` 2307 each,
+`spatial_holdout_nonca` 250, `california_finetune_train` 176,
+`california_holdout` 19). **The split design is now frozen; do not
+reopen it absent a concrete scientific or correctness problem.** Next
+work: baseline NH package-builder implementation (remaining 2K-G-I
+checklist items below).
 
 **2K-G-H Scientific Baseline Policy Sign-off COMPLETE (2026-07-12) —
 docs-only.** Converts the 2K-G-G Phase B evidence (committed at `0d0e6aa`)
