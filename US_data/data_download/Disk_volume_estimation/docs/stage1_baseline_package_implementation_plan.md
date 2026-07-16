@@ -1087,6 +1087,24 @@ acceptance criteria.
 Full 2,752-basin package generation and the W&B sweep remain **separately
 authorized** after I-F2 — not part of this milestone's commits.
 
+**I-A3 status (2026-07-16):** implemented (`src/baseline/split_audit.py`,
+`scripts/audit_stage1_baseline_splits.py`, `tests/test_split_audit.py`, 32
+tests, all passing) as an *independent* auditor — it does not call
+`build_split_assignment` and reimplements population reconstruction,
+tercile fitting, stratum/pool routing, counts/fractions/HUC02 summaries,
+and manifest/checksum reconciliation from scratch. Run against the real
+I-A2 candidate (`tmp/stage1_baseline_splits_v001_candidate`) and its repeat
+directory: **PASS, 0 errors, 0 warnings, 146 OK checks**, byte-identical
+repeat comparison confirmed. This is a machine audit result only — it is
+not a human QC review (I-A4) and does not constitute split promotion
+(I-A5). I-A3 is now considered closed; no further auditor hardening is
+planned unless a future check fails. I-A4 is scoped down to a minimal
+visual sanity check (one CONUS map, one California map, two distribution
+plots) to answer a single question — obvious geographic clustering,
+missing regions, or severe area/aridity imbalance — not a general QC
+framework. The candidate remains unpromoted; I-A5 remains pending human
+sign-off on I-A4.
+
 ---
 
 ## 21. Risks, hidden failure modes, and open questions
