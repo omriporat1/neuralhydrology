@@ -327,14 +327,22 @@ topography; see `docs/decision_log.md`. It is not an alias of
 `stage1_static_attributes_v001` and must not be used here).
 
 `--gap-manifest` is recorded for **provenance only** (never used to
-differentiate basins — see "Forcing-gap handling" above) and is a
-package-instance-specific `gap_timestamps.json` (written under an NH package's
-own `data_dir/masks/`, per `src/baseline/nh_dataset.py`'s convention) — there is
-no single global canonical path for it. Resolve
-`<CANONICAL_GAP_TIMESTAMPS_JSON>` below to the `gap_timestamps.json` produced by
-whichever NH package build (e.g. the Milestone 2K-G-B / 2K-G-C 50-basin package)
-is being used as the current forcing-gap reference at run time; if none exists
-yet, omit `--gap-manifest` entirely rather than inventing a path.
+differentiate basins — see "Forcing-gap handling" above) and expects a
+package-instance-specific `gap_timestamps.json`, read from an NH package's own
+`data_dir/masks/gap_timestamps.json` by `src/baseline/nh_dataset.py`'s
+`_load_gap_timestamps()`. As of this writing (2026-07-19), **no such file
+exists anywhere**: it is a documented consumer expectation only — no script in
+this repo, including the frozen `scripts/build_stage1_nh_package.py`, ever
+writes `masks/gap_timestamps.json`, and the existing Milestone 2K-G-B / 2K-G-C
+50-basin package does not have one either. The command below therefore
+**omits `--gap-manifest` entirely** for this selection-only run. There is no
+checksum-verified equivalent to substitute — the Milestone 2K-E
+forcing-extraction audit's gap findings use a different schema (not a flat
+JSON list of ISO timestamps), and converting them would be a package-build
+concern, not a selection-step one. This is safe because `--gap-manifest` never
+affects which basins are selected; add the flag in a later run once a real
+`gap_timestamps.json` is produced by an actual NH package build for the
+selected 32 basins.
 
 ```bash
 source /opt/conda/etc/profile.d/conda.sh
@@ -346,7 +354,6 @@ python scripts/generate_stage1_compact_package_selection.py \
     --attributes-parquet /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet \
     --column-manifest /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001_column_manifest.json \
     --qobs-status /data42/omrip/Flash-NH/tmp/stage1_full_2843/audit/target_status.csv \
-    --gap-manifest <CANONICAL_GAP_TIMESTAMPS_JSON> \
     --policy config/stage1_compact_package_selection_v001.yaml \
     --out-dir /data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001 \
     --force
