@@ -1,0 +1,177 @@
+# Flash-NH Stage 1 -- Compact Scientific Package basin selection configuration
+# selection_name: stage1_compact_package_selection_v001
+#
+# Machine-readable design input for scripts/generate_stage1_compact_package_selection.py.
+# This file does NOT select basins itself -- it records the seed, target count,
+# bin thresholds, and reserved-category policy so the selector reads policy
+# from config rather than hard-coding decisions. See
+# docs/stage1_compact_package_selection.md for the full method description.
+#
+# Portable policy ONLY: no machine paths (h2o/Moriah/local absolute paths),
+# no credentials, no Slurm resources, no run-specific output paths.
+
+selection_name: stage1_compact_package_selection_v001
+policy_version: "2"
+created: "2026-07-19"
+revised: "2026-07-19"
+revision_note: >
+  policy_version 2: corrected select_within_cell() to use a seeded
+  permutation of HUC02 visitation order (was: fixed ascending-sorted order,
+  which systematically favored low-numbered HUC02 codes whenever a cell's
+  quota was smaller than its number of distinct HUC02 groups -- the common
+  case); added the geography.macro_regions diagnostic block and the hard
+  east/west CONUS breadth check; made reserved-category selection
+  overlap-aware/parsimonious. See docs/stage1_compact_package_selection.md.
+purpose: >
+  Deterministic selection of a small (~20-50, default 32) diagnostic basin
+  subset drawn strictly from the canonical non-California development-basin
+  pool, for the first Compact Scientific Package. Does not build NH packages,
+  does not train models.
+
+algorithm_id: stage1_compact_diversity_quota_selection_v1
+algorithm_version: 2
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Target count
+# ---------------------------------------------------------------------------
+target_count: 32
+min_target_count: 20
+max_target_count: 50
+
+# ---------------------------------------------------------------------------
+# Selection universe (required input): the canonical spatial-split assignment
+# CSV (e.g. config/stage1_baseline_splits_v001/split_assignment.csv), filtered
+# to this split_role. Any other role present in the same file is out of scope
+# and must never be selected.
+# ---------------------------------------------------------------------------
+selection_universe:
+  required_split_role: development_train
+  forbidden_state: "CA"
+  forbidden_split_roles:
+    - spatial_holdout_nonca
+    - california_finetune_train
+    - california_holdout
+  required_columns:
+    - STAID
+    - split_role
+    - STATE
+    - HUC02
+    - area_class
+    - hydro_class
+
+# ---------------------------------------------------------------------------
+# Primary stratification: reused directly from the canonical split's own
+# area_class x hydro_class tercile fields (low/middle/high) -- no new tercile
+# edges are computed by this selector. Basins whose hydro_class is not one of
+# low/middle/high (the canonical "missing aridity stratifier" edge case) are
+# excluded from this grid and handled as a reserved edge case below.
+# ---------------------------------------------------------------------------
+stratification:
+  cell_dims: [area_class, hydro_class]
+  valid_class_values: [low, middle, high]
+  min_quota_per_nonempty_cell: 1
+
+# ---------------------------------------------------------------------------
+# Geographic breadth: HUC02 is used only as a soft, documented tie-break
+# (round-robin, in a seeded *permuted* visitation order -- not ascending HUC02
+# sort order, which would systematically favor low-numbered HUC02 codes --
+# across HUC02 groups within each stratification cell) -- never a hard
+# per-HUC02 quota. distinct_huc02_soft_minimum is a warning-only threshold
+# recorded in the summary, not a failure condition.
+#
+# macro_regions: explicit, versioned HUC02 -> macro-region mapping (never
+# inferred from HUC02 numeric ordering). Every HUC02 code that can appear in
+# the development_train pool must be listed under exactly one macro region
+# (build_macro_region_map fails loudly on an unlisted or duplicated code).
+# HUC18 (California) never appears in this pool -- CA is excluded by STATE,
+# not by HUC code -- but is still listed here for completeness/portability in
+# case a future non-CA HUC18 basin (if any exist) needs classifying via the
+# canonical split artifact rather than being silently dropped by this map.
+#
+# east_macro_regions / west_macro_regions: used only for the
+# require_east_west_spread acceptance check below -- a basin's "side" is
+# never inferred from its macro-region name.
+#
+# distinct_macro_region_soft_minimum: warning-only, like distinct_huc02_soft_minimum.
+# require_east_west_spread: HARD failure (not a warning) if true and either
+# side has zero representation in the final selection -- a compact package
+# with no ordinary western or no ordinary eastern basin defeats its purpose
+# as a nationally representative diagnostic set. This check does NOT force
+# equal counts across macro regions; area x hydro balance remains primary.
+# ---------------------------------------------------------------------------
+geography:
+  distinct_huc02_soft_minimum: 6
+  macro_region_map_version: 1
+  macro_regions:
+    northeast_mid_atlantic: ["01", "02"]
+    southeast: ["03"]
+    great_lakes_ohio_tennessee: ["04", "05", "06"]
+    mississippi: ["07", "08"]
+    plains_missouri_south_central: ["09", "10U", "10L", "11", "12", "13"]
+    colorado_great_basin: ["14", "15", "16"]
+    pacific_northwest_california: ["17", "18"]
+    alaska_hawaii_other: ["19", "20", "21"]
+  east_macro_regions:
+    - northeast_mid_atlantic
+    - southeast
+    - great_lakes_ohio_tennessee
+    - mississippi
+  west_macro_regions:
+    - plains_missouri_south_central
+    - colorado_great_basin
+    - pacific_northwest_california
+  distinct_macro_region_soft_minimum: 3
+  require_east_west_spread: true
+
+# ---------------------------------------------------------------------------
+# qobs completeness (optional input: a target-status/coverage table, e.g.
+# audit/target_status.csv with a STAID column and a coverage_fraction column
+# -- coverage_fraction and qobs_coverage are both accepted as the coverage
+# column name). Used only as a secondary CSV annotation + bin, not a
+# stratification cell dimension. If the input is absent, the bin is recorded
+# as "not_evaluated" and no basin is force-included on this basis.
+# ---------------------------------------------------------------------------
+qobs_completeness:
+  coverage_column_candidates: [coverage_fraction, qobs_coverage]
+  staid_column_candidates: [STAID, gauge_id]
+  bin_edges:
+    low_max: 0.90    # coverage <= low_max -> low
+    mid_max: 0.99     # low_max < coverage <= mid_max -> mid; else high
+
+# ---------------------------------------------------------------------------
+# Static-attribute missingness / imputation burden (optional input: the
+# checksum-pinned static-attribute parquet + its column-role manifest JSON).
+# Missingness is counted only over columns with role == model_input_role.
+# If the input is absent, the bin is recorded as "not_evaluated".
+# ---------------------------------------------------------------------------
+static_missingness:
+  model_input_role: model_input
+  bin_edges:
+    none_max: 0    # missing_count <= none_max -> none
+    some_max: 5     # none_max < missing_count <= some_max -> some; else high
+
+# ---------------------------------------------------------------------------
+# Reserved (forced-include) edge-case categories. Evaluated in this order;
+# each pool contributes up to its cap of not-yet-reserved candidates, sorted
+# ascending by normalized STAID for determinism. A basin may be tagged with
+# more than one reason if it matches more than one predicate. If a category
+# has zero eligible candidates the run proceeds without it and that is
+# recorded (not an error) in selection_summary.md/json.
+# ---------------------------------------------------------------------------
+reserved_categories:
+  unusual_identifier:
+    # normalized STAID length != standard_length (see src/baseline/staid.py)
+    standard_length: 8
+    forced_include_cap: 1
+  hydro_stratifier_gap:
+    # hydro_class not in stratification.valid_class_values (canonical
+    # "missing aridity stratifier" basins from src/baseline/splits.py)
+    forced_include_cap: 1
+  static_missing_value_case:
+    # static_missing_model_input_count > 0 (only evaluated when the
+    # attributes input is supplied)
+    forced_include_cap: 1
+
+output:
+  default_subdir_name: stage1_compact_package_selection_v001
