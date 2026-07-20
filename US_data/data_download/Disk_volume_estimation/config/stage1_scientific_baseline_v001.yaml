@@ -6,6 +6,12 @@
 # with the 2K-G-I I-0 sign-offs and the history-only gap-mask correction
 # (docs/stage1_baseline_package_implementation_plan.md §7/§9/§12/§14/§15/§21).
 #
+# policy_version 2 (2026-07-20): static_attributes.* reconciled to the
+# accepted stage1_static_attributes_v002 matrix (see docs/decision_log.md,
+# 2026-07-20 entries). No scientific decision was reopened; only the
+# matrix identity/shape/checksum fields changed to match the artifact
+# already accepted in commit 2f78e45.
+#
 # Portable scientific policy ONLY: no machine paths (h2o/Moriah/local
 # absolute paths), no credentials, no Slurm resources, no run-specific
 # output paths. Data locations are CLI arguments to the consuming scripts,
@@ -20,7 +26,7 @@
 # validator rejects reordering.
 
 policy_name: stage1_scientific_baseline_v001
-policy_version: 1
+policy_version: 2
 
 signed_off:
   milestone: "2K-G-H"
@@ -191,12 +197,12 @@ dynamic_inputs:
 # plan §15/§21 item 2)
 # ---------------------------------------------------------------------------
 static_attributes:
-  matrix_name: stage1_static_attributes_v001
+  matrix_name: stage1_static_attributes_v002
   expected_rows: 2843
-  expected_columns: 531
-  expected_model_input_columns: 496
-  sha256: eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464
-  role_source: stage1_static_attributes_v001_column_manifest.json
+  expected_columns: 523
+  expected_model_input_columns: 473
+  sha256: 4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297
+  role_source: stage1_static_attributes_v002_column_manifest.json
   allowed_role: model_input
   forbidden_model_inputs: [STATE, HUC02, LAT_GAGE, LNG_GAGE]
   imputation:

@@ -21,11 +21,11 @@ Usage (h2o):
   conda activate /data42/omrip/Flash-NH/envs/flashnh-stage1
 
   python scripts/prepare_stage1_compact_static_attributes.py \\
-    --attributes-parquet /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001.parquet \\
-    --column-manifest    /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v001/stage1_static_attributes_v001_column_manifest.json \\
+    --attributes-parquet /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002.parquet \\
+    --column-manifest    /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002_column_manifest.json \\
     --split-assignment   config/stage1_baseline_splits_v001/split_assignment.csv \\
     --target-basins       /data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence/compact_basin_ids.txt \\
-    --out-dir             /data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v001/ \\
+    --out-dir             /data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v002/ \\
     --force
 """
 from __future__ import annotations

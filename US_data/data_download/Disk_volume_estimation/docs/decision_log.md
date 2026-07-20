@@ -2101,3 +2101,55 @@ configs, split artifacts, package builders, or Slurm files were touched; no
 h2o/Moriah connection was made in the course of writing this entry; Compact
 Scientific Package construction has not started. **Next milestone: Compact
 Scientific Package builder planning and implementation.**
+
+---
+
+## 2026-07-20 — Stage 1 — Executable policy reconciled to static matrix v002
+
+**Problem.** The 2026-07-20 acceptance of `stage1_static_attributes_v002`
+(entry above) updated narrative documentation, but the *executable*
+scientific-baseline policy — `config/stage1_scientific_baseline_v001.yaml`
+and its loader/validator `src/baseline/policy.py` — still hard-pinned the
+superseded v001 identity/shape/checksum
+(`stage1_static_attributes_v001`, 531 total columns, 496 `model_input`,
+sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`).
+Any future policy-consuming builder would have failed loudly against the
+now-canonical v002 artifact.
+
+**Fix.** Reconciled the `static_attributes` block in
+`config/stage1_scientific_baseline_v001.yaml` and the matching pinned
+constants/`_expect(...)` calls in `src/baseline/policy.py` to the accepted
+v002 values: `matrix_name: stage1_static_attributes_v002`, `expected_columns:
+523`, `expected_model_input_columns: 473`,
+`sha256: 4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`,
+`role_source: stage1_static_attributes_v002_column_manifest.json`. This is a
+binding-value change, so `policy_version` was bumped `1 -> 2` (both in the
+YAML and the loader's `_expect(data, "policy_version", 2)` check), per the
+existing per-file policy-version convention already used in
+`config/stage1_compact_package_selection_v001.yaml`. `tests/test_policy.py`
+was updated to assert the v002 values and `policy_version == 2`, and to
+mutation-test rejection of the old v001 matrix name, wrong column/model-input
+counts, and the old policy version. The policy filename
+(`stage1_scientific_baseline_v001.yaml`) is unchanged — it is the Stage 1
+scientific-baseline policy artifact's name, not tied to the static matrix's
+internal version. `scripts/prepare_stage1_compact_static_attributes.py`'s
+usage-example docstring was updated from v001 to v002 paths (trivial,
+operator-facing text only; the script's logic already takes all paths as CLI
+arguments and was already re-run against v002 per the entry above).
+
+**Unaffected / not reopened.** No scientific decision was reopened by this
+patch — only the static-matrix identity/shape/checksum fields that already
+changed with the v002 acceptance were propagated into the executable policy.
+`src/baseline/split_audit.py`'s `V001_STATIC_MATRIX_SHA256` constant is
+intentionally untouched: it independently verifies the matrix checksum that
+actually built the already-frozen `config/stage1_baseline_splits_v001/`
+artifacts (which were built from v001 and were not rerun), so it must keep
+pointing at v001. `docs/stage1_baseline_package_implementation_plan.md` and
+the mid-document 2K-G-H-era summary in `docs/FLASHNH_CURRENT_STATE.md` still
+contain stale v001/531/496 prose; both are deferred to a later
+documentation-reconciliation patch, not rewritten here.
+
+**Not done.** No package builder, auditor, config-generator, mask, or
+NeuralHydrology work was implemented. No h2o or Moriah connection was made.
+No package was built and no training occurred. This is a policy/loader/test
+reconciliation only.

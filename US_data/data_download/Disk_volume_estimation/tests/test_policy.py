@@ -50,7 +50,7 @@ def _reject(data, match=None):
 
 def test_committed_policy_loads_with_expected_core_values(committed_policy):
     assert committed_policy["policy_name"] == "stage1_scientific_baseline_v001"
-    assert committed_policy["policy_version"] == 1
+    assert committed_policy["policy_version"] == 2
     assert committed_policy["period"]["expected_hours"] == 45720
     assert committed_policy["target"]["leads_hours"] == [1, 3, 6, 12]
     assert committed_policy["seq_lengths_hours"] == [12, 24, 48, 72]
@@ -138,7 +138,7 @@ def test_missing_required_nested_key_rejected(policy):
 _INVARIANT_MUTATIONS = [
     # (id, dotted path, bad value, match substring or None)
     ("wrong-policy-name", "policy_name", "stage1_baseline_v002", "policy_name"),
-    ("wrong-policy-version", "policy_version", 2, "policy_version"),
+    ("wrong-policy-version", "policy_version", 1, "policy_version"),
     ("bool-as-policy-version", "policy_version", True, "policy_version"),
     ("wrong-expected-hours", "period.expected_hours", 45721, "expected_hours"),
     ("string-expected-hours", "period.expected_hours", "45720", "expected_hours"),
@@ -225,11 +225,13 @@ _INVARIANT_MUTATIONS = [
     ("missing-dynamic-input", "dynamic_inputs",
      ["mrms_qpe_1h_mm", "rtma_2t_K", "rtma_2d_K", "rtma_2sh_kgkg",
       "rtma_10u_ms", "rtma_10v_ms", "mrms_qpe_1h_mm_gap"], None),
+    ("wrong-matrix-name", "static_attributes.matrix_name",
+     "stage1_static_attributes_v001", None),
     ("wrong-matrix-sha", "static_attributes.sha256", "0" * 64, "sha256"),
     ("wrong-matrix-rows", "static_attributes.expected_rows", 2842, None),
-    ("wrong-matrix-cols", "static_attributes.expected_columns", 530, None),
+    ("wrong-matrix-cols", "static_attributes.expected_columns", 522, None),
     ("wrong-model-input-count",
-     "static_attributes.expected_model_input_columns", 495, None),
+     "static_attributes.expected_model_input_columns", 472, None),
     ("forbidden-static-list-shrunk", "static_attributes.forbidden_model_inputs",
      ["STATE", "HUC02", "LAT_GAGE"], "forbidden_model_inputs"),
     ("wrong-imputation-strategy", "static_attributes.imputation.strategy",

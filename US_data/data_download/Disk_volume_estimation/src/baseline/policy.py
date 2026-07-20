@@ -152,7 +152,7 @@ _GAP_SCOPES = [
     "california_holdout",
 ]
 _FORBIDDEN_STATIC_INPUTS = ["STATE", "HUC02", "LAT_GAGE", "LNG_GAGE"]
-_MATRIX_SHA256 = "eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464"
+_MATRIX_SHA256 = "4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297"
 _REPORT_TEXT = (
     "predictions unavailable due to required forcing history intersecting "
     "an archive gap"
@@ -196,7 +196,7 @@ def validate_stage1_baseline_policy(data) -> dict:
 
     # ---- identity / provenance ----
     _expect(data, "policy_name", "stage1_scientific_baseline_v001")
-    _expect(data, "policy_version", 1)
+    _expect(data, "policy_version", 2)
     _expect(data, "signed_off.milestone", "2K-G-H")
     _expect(data, "signed_off.date", "2026-07-12")
     _expect(data, "signed_off.commit", "e860316")
@@ -350,13 +350,13 @@ def validate_stage1_baseline_policy(data) -> dict:
               f"forbidden model-input names must not appear here: {sorted(overlap)}")
 
     # ---- static attributes ----
-    _expect(data, "static_attributes.matrix_name", "stage1_static_attributes_v001")
+    _expect(data, "static_attributes.matrix_name", "stage1_static_attributes_v002")
     _expect(data, "static_attributes.expected_rows", 2843)
-    _expect(data, "static_attributes.expected_columns", 531)
-    _expect(data, "static_attributes.expected_model_input_columns", 496)
+    _expect(data, "static_attributes.expected_columns", 523)
+    _expect(data, "static_attributes.expected_model_input_columns", 473)
     _expect(data, "static_attributes.sha256", _MATRIX_SHA256)
     _expect(data, "static_attributes.role_source",
-            "stage1_static_attributes_v001_column_manifest.json")
+            "stage1_static_attributes_v002_column_manifest.json")
     _expect(data, "static_attributes.allowed_role", "model_input")
     _expect(data, "static_attributes.forbidden_model_inputs", _FORBIDDEN_STATIC_INPUTS)
     _expect(data, "static_attributes.imputation.strategy", "median")
