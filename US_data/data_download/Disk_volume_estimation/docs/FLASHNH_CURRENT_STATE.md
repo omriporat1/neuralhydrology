@@ -1,8 +1,57 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-16 (Milestone 2K-G-I I-A1-I-A5 COMPLETE — Stage 1 baseline split design frozen)
+Last updated: 2026-07-20 (Compact Scientific Package selection ACCEPTED; scientific/static-prep primitives increment)
 
 ## Current milestone
+
+**Compact Scientific Package selection — ACCEPTED (2026-07-20).** The fully
+enriched h2o run of `scripts/generate_stage1_compact_package_selection.py`
+(selector commits `71467b5`, `65af017`) is accepted as the project's Compact
+Scientific Package basin list. Enriched run inputs: canonical
+`split_assignment.csv` (`development_train`, 2,307 basins), canonical
+`stage1_static_attributes_v001` matrix + column-role manifest, canonical
+`stage1_static_attributes_v001` full-period qobs/target-status table. All
+acceptance checks PASS: count=32; development-pool membership PASS;
+California exclusion PASS; spatial-holdout leakage PASS; qobs enrichment and
+static missingness evaluated for all 32 selected basins; input/artifact
+checksums PASS. Accepted characteristics: 13 distinct HUC02s, 7 macro-regions,
+east/west split 19/13; area classes high/low/middle = 12/10/10; hydro classes
+high/low/middle/missing = 10/11/10/1; qobs completeness high/mid/low =
+15/16/1; static missingness none/high = 31/1. Two designated diagnostic
+basins: `393109104464500` (compound edge case — `unusual_identifier` +
+`hydro_stratifier_gap` + `static_missing_value_case`, 169 missing
+`model_input` static attributes) and `05568800` (lowest qobs completeness in
+the selection, coverage fraction ≈0.8746). Canonical evidence path on h2o:
+`/data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence`
+(generated artifact; its `selection_manifest.json` correctly still reports
+`"status": "candidate"` per the tool's own generated-artifact convention —
+per policy, generated evidence is never hand-edited; **project-level
+acceptance is recorded here and in `docs/decision_log.md` instead**). Full
+32-basin ID list is not duplicated in this document — see
+`compact_basin_ids.txt` in the evidence bundle above, or the local
+split-based candidate run described in
+`docs/stage1_compact_package_selection.md`. Building the 32-basin NH package
+is a separate, not-yet-started step.
+
+**Scientific target-transformation + static-preparation primitives increment
+(2026-07-20).** Reviewed existing code before writing anything new (reuse-first):
+`src/baseline/units.py` (m³/s↔mm/h conversion) and `src/baseline/lead_targets.py`
+(1/3/6/12 h lead-target shifting) already fully satisfy the discharge-transform
+and lead-semantics requirements, with existing test coverage in
+`tests/test_units.py`/`tests/test_lead_targets.py` — no new code needed there.
+`src/baseline/validity_mask.py` already implements the history/boundary
+validity split needed for forcing-gap awareness. Two genuine gaps were found
+and filled: (1) `src/baseline/static_preparation.py` — development-train-only
+median imputation for `model_input` static-attribute columns, per the
+already-signed-off policy (`config/stage1_scientific_baseline_v001.yaml::static_attributes.imputation`,
+`docs/stage1_baseline_package_implementation_plan.md` §15); (2)
+`src/baseline/gap_mask_io.py` — a loader/writer converting the Milestone 2K-E
+forcing-audit's missing-hour-product inventory into the flat
+`masks/gap_timestamps.json` format `src/baseline/nh_dataset.py` already
+expects but that no script previously produced. Neither changes any signed
+scientific decision. **Not done in this increment:** no NH package built, no
+`FlashNHDataset`/NH-registration/launcher changes, no training, no Moriah use,
+no full 2,752-basin package. See `docs/decision_log.md` for full detail.
 
 **2K-G-I I-A1-I-A5 (spatial/temporal split generation through canonical
 promotion) COMPLETE (2026-07-16).** Seeded stratified split candidate

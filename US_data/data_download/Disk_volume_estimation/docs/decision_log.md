@@ -1692,3 +1692,142 @@ work is the baseline NH package-builder implementation.
 training, no h2o/Moriah commands, no push. `reports/` was not touched; only
 `config/stage1_baseline_splits_v001/` and this documentation were changed.
 evidence directory.
+
+## 2026-07-20 Compact Scientific Package selection — ACCEPTED
+
+**Context.** The fully enriched h2o run of
+`scripts/generate_stage1_compact_package_selection.py` (selector commits
+`71467b5`, `65af017`; see `docs/stage1_compact_package_selection.md`'s "Exact
+h2o command" for the invocation) was executed by the user against the
+canonical enrichment inputs: `config/stage1_baseline_splits_v001/split_assignment.csv`
+(`development_train`, 2,307 basins), the canonical `stage1_static_attributes_v001`
+matrix + column-role manifest, and the canonical full-period qobs/target-status
+table. This closes the "two selection runs, not one" gap that document left
+open (only the local split-based candidate, with enrichment columns
+`not_evaluated`, had been run as of 2026-07-19).
+
+**Acceptance checks (all PASS, as reported by the user from the h2o run).**
+Count = 32. Development-pool membership PASS (all 32 confirmed
+`development_train`). California exclusion PASS (`STATE != "CA"` for all 32).
+Spatial-holdout leakage PASS (no overlap with `spatial_holdout_nonca`,
+`validation`, `temporal_test`, or California roles). qobs enrichment and
+static missingness evaluated (not `not_evaluated`) for all 32 selected
+basins. Input and output artifact checksums PASS.
+
+**Accepted characteristics.** 13 distinct HUC02s; 7 distinct macro-regions
+(of the 8 defined in `config/stage1_compact_package_selection_v001.yaml`);
+east/west macro-region-side split 19/13 (the hard `require_east_west_spread`
+check therefore PASS by a wide margin). Area classes (canonical terciles)
+high/low/middle = 12/10/10. Hydro classes (canonical aridity terciles)
+high/low/middle/missing = 10/11/10/1. qobs completeness bins high/mid/low =
+15/16/1. Static missingness bins none/high = 31/1 (only one basin has any
+missing `model_input` static attribute).
+
+**Designated diagnostic basins.**
+- `393109104464500` — the selection's one compound edge case: satisfies all
+  three reserved categories simultaneously (`unusual_identifier`, 15-char
+  STAID; `hydro_stratifier_gap`, missing the aridity stratifier;
+  `static_missing_value_case`), with 169 missing `model_input` static
+  attributes. This is the one `static_missing_bin = high` basin above, and
+  is the designated real-data stress case for the new static-imputation
+  primitives (`src/baseline/static_preparation.py`, see the entry below).
+- `05568800` — lowest qobs completeness in the selection, coverage fraction
+  ≈0.8746 (the selection's one `qobs_completeness_bin = low` basin).
+
+**Artifact status — two-tier, by design.** The generated evidence bundle
+(canonical h2o path:
+`/data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence`,
+containing `compact_basin_selection.csv`, `compact_basin_ids.txt`,
+`selection_summary.md/.json`, `selection_manifest.json`, `run_command.txt`)
+correctly still reports `selection_manifest.json`'s `"status"` field as
+`"candidate"` — this is the tool's own generated-artifact status, and per
+project policy generated evidence is never hand-edited to change it.
+**Project-level acceptance is recorded here and in
+`docs/FLASHNH_CURRENT_STATE.md` instead** — those two documents are now the
+authoritative record that this specific 32-basin selection (identified by
+its artifact checksums) is the accepted Compact Scientific Package, distinct
+from the generated artifact's own `candidate` self-description. The full
+32-basin ID list is intentionally not pasted into this or any other
+document — see `compact_basin_ids.txt` in the evidence bundle above.
+
+**Not done.** No NH package built for the 32 basins, no `FlashNHDataset`
+changes, no training, no commit/push of this acceptance beyond
+documentation. `tmp/` evidence remains untracked.
+
+## 2026-07-20 Scientific target-transformation + static-preparation primitives (Milestone 2K-G-I primitives increment)
+
+**Context.** With the Compact Scientific Package accepted (previous entry),
+the next step toward a package builder is a set of independently testable
+scientific primitives: discharge-unit transforms, lead-target construction,
+development-only static-attribute imputation, and a forcing-gap-timestamp
+loading interface. This patch implements only those primitives — explicitly
+**not** the package builder itself, not `FlashNHDataset`, not training, not
+the full 2,752-basin package, and does not use Moriah.
+
+**Reuse-first inspection (done before writing any code).** Read
+`docs/stage1_scientific_baseline_design.md` in full,
+`docs/stage1_baseline_package_implementation_plan.md`'s static-attribute
+NaN-policy section (§15/§16 area), `config/stage1_scientific_baseline_v001.yaml`,
+`src/baseline/nh_dataset.py`, `src/baseline/splits.py`,
+`src/baseline/compact_selection.py`, and the existing test suites, before
+deciding what (if anything) was missing.
+
+- **`src/baseline/units.py` and `src/baseline/lead_targets.py` already fully
+  satisfy the discharge-transform and lead-shift requirements** — exact
+  `q_m3s <-> mm/h` conversion with strict area validation, NaN preservation,
+  and `build_lead_target`/`build_lead_targets` for leads 1/3/6/12 h with
+  convert-then-shift semantics, hourly-index validation, and terminal-boundary
+  NaN — all already tested in `tests/test_units.py`/`tests/test_lead_targets.py`,
+  including the negative-discharge arithmetic-conversion case
+  (`test_negative_discharge_converts_arithmetically`, consistent with
+  `docs/stage1_target_policy.md`'s cleaning-happens-upstream policy). **No new
+  code was added for this part** — this entry exists to record that the
+  reuse check was done, not to introduce a change.
+- **`src/baseline/validity_mask.py` already implements the binding
+  history/boundary validity split** (§6/§9a-9b) and needed no changes.
+
+**New: `src/baseline/static_preparation.py`.** Implements development-train-only
+median imputation for `model_input` static-attribute columns, per the
+already-signed-off policy (`config/stage1_scientific_baseline_v001.yaml::static_attributes.imputation`,
+signed off 2026-07-13 per `docs/stage1_baseline_package_implementation_plan.md`
+§15): `strategy: median`, `fit_basin_scope: development_training_only`,
+frozen fitted values applied unchanged to validation/temporal-test/spatial-holdout/
+compact-selection basins, hard failure if any `model_input` column is all-NaN
+over the development-training population, no missingness-indicator columns
+added as model inputs. Reuses `splits.load_matrix_for_splits`,
+`splits.join_eligible_with_matrix`, and `staid.normalize_staid` rather than
+reimplementing matrix loading or basin-ID validation. Writes a machine-readable
+imputation manifest (input/manifest checksums, fit population + count,
+per-column method/fitted-value, before/after missing counts, columns with no
+valid fit values, algorithm/version id) and preserves an imputed-value audit
+mask. Tests cover the compound edge-case basin `393109104464500` (169 missing
+`model_input` columns) via a synthetic fixture shaped to match its real
+missingness profile.
+
+**New: `src/baseline/gap_mask_io.py`.** `src/baseline/nh_dataset.py` already
+expects `<data_dir>/masks/gap_timestamps.json` (a flat JSON list of ISO
+timestamps), but — confirmed via `docs/stage1_compact_package_selection.md`'s
+own note and a repo-wide grep — no script has ever produced that file; only
+test fixtures (`tests/_nh_synthetic.py`) write a synthetic one. The real gap
+inventory already exists as an uncommitted h2o audit artifact from Milestone
+2K-E (`fullperiod_missing_hour_products.csv`, columns
+`chunk_label,product,valid_time_utc,reason`; product values
+`mrms_qpe_1h_pass1`/`rtma_conus_aws_2p5km`, per
+`scripts/generate_fullperiod_audit_tables.py`). This module converts that
+inventory into the canonical `gap_timestamps.json` format, validating against
+an explicit hourly timeline by reusing
+`validity_mask.bad_hour_mask_from_timestamps` — it does **not** decide the
+gap policy (already signed off, §6: MRMS drives the policy; RTMA may be
+folded into the same exclusion mask) and does not compute gap hours from raw
+archive data itself, only reformats/validates an already-produced inventory.
+`gap_mask_io.py` is the tested conversion primitive (17/17 tests passing);
+the future compact-package builder is expected to call it directly to
+produce `<data_dir>/masks/gap_timestamps.json` for each built NH package.
+There is intentionally no standalone gap-conversion CLI in this increment —
+conversion is a small step inside package construction, not a separate
+operator-facing tool, so it is deferred to the builder itself rather than
+adding orchestration ahead of a concrete caller.
+
+**Not done.** No NH package built, no `FlashNHDataset`/`nh_register.py`/
+`run_stage1_nh.py` changes, no training, no Moriah use, no full 2,752-basin
+package, nothing committed or pushed pending review.

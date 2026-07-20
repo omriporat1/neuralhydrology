@@ -1,12 +1,30 @@
 # Flash-NH Stage 1 — Compact Scientific Package Basin Selection
 
 Date: 2026-07-19 (corrected same day — see "Correction history" below)
-Status: **Selector implemented and locally validated against the real canonical
-`split_assignment.csv` (2,307-basin `development_train` pool). This produces the
-*split-based candidate* only (enrichment inputs — static attributes, qobs status —
-are absent locally, so those columns are `not_evaluated`). The final accepted
+Status (as of 2026-07-19; **historical/pre-acceptance — see the 2026-07-20
+Update immediately below for current status**): **Selector implemented and
+locally validated against the real canonical `split_assignment.csv`
+(2,307-basin `development_train` pool). This produces the *split-based
+candidate* only (enrichment inputs — static attributes, qobs status — are
+absent locally, so those columns are `not_evaluated`). The final accepted
 Compact Scientific Package requires the fully enriched run on h2o — see
-"Two selection runs, not one" below. That h2o run has not yet happened.**
+"Two selection runs, not one" below.**
+
+**Update, 2026-07-20 — the fully enriched h2o run has now happened and its
+32-basin output is ACCEPTED as the project's Compact Scientific Package.**
+This distinction is important and deliberate: the *generated artifact*
+(`selection_manifest.json` at the canonical h2o evidence path
+`/data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence`)
+correctly still reports `"status": "candidate"` — that field describes the
+tool's own generated-artifact state and is never hand-edited. *Project-level*
+acceptance of that specific selection (identified by its artifact checksums)
+is recorded separately, in `docs/FLASHNH_CURRENT_STATE.md` and
+`docs/decision_log.md` (2026-07-20 entry), not in this document or the
+generated files. See those two documents for the accepted run's full
+characteristics (HUC/macro-region/east-west balance, qobs/static-missingness
+bins, the two designated diagnostic basins). This document's own content
+below is unchanged and continues to describe the selector's design and the
+local split-based candidate run.
 
 ### Correction history
 
@@ -274,12 +292,17 @@ not confuse the two:**
    determinism) end-to-end, but it is **explicitly not the final accepted
    Compact Scientific Package** — `manifest.json`'s `"status"` field is always
    `"candidate"`.
-2. **Fully enriched h2o canonical selection** (not yet run). Adds the
-   checksum-pinned static-attribute matrix (for `drain_sqkm`/`aridity_value`/
-   static-missingness bins and the `static_missing_value_case` reserved category)
-   and the qobs/target-status table (for `qobs_completeness_bin`/`target_status`).
-   This is the run whose output should actually be reviewed/accepted as the
-   Compact Scientific Package basin list — see "Exact h2o command" below.
+2. **Fully enriched h2o canonical selection** (historical/pre-acceptance
+   framing below — **this run has since happened and its output is the
+   ACCEPTED Compact Scientific Package**; see the "Update, 2026-07-20"
+   note at the top of this document and `docs/FLASHNH_CURRENT_STATE.md` /
+   `docs/decision_log.md` for the current, authoritative status and basin
+   list). Adds the checksum-pinned static-attribute matrix (for
+   `drain_sqkm`/`aridity_value`/static-missingness bins and the
+   `static_missing_value_case` reserved category) and the qobs/target-status
+   table (for `qobs_completeness_bin`/`target_status`). This was the run
+   whose output was reviewed and accepted as the Compact Scientific Package
+   basin list — see "Exact h2o command" below for the invocation used.
 
 ## Local validation (synthetic fixtures)
 
@@ -330,19 +353,27 @@ topography; see `docs/decision_log.md`. It is not an alias of
 differentiate basins — see "Forcing-gap handling" above) and expects a
 package-instance-specific `gap_timestamps.json`, read from an NH package's own
 `data_dir/masks/gap_timestamps.json` by `src/baseline/nh_dataset.py`'s
-`_load_gap_timestamps()`. As of this writing (2026-07-19), **no such file
-exists anywhere**: it is a documented consumer expectation only — no script in
-this repo, including the frozen `scripts/build_stage1_nh_package.py`, ever
-writes `masks/gap_timestamps.json`, and the existing Milestone 2K-G-B / 2K-G-C
-50-basin package does not have one either. The command below therefore
-**omits `--gap-manifest` entirely** for this selection-only run. There is no
-checksum-verified equivalent to substitute — the Milestone 2K-E
-forcing-extraction audit's gap findings use a different schema (not a flat
-JSON list of ISO timestamps), and converting them would be a package-build
-concern, not a selection-step one. This is safe because `--gap-manifest` never
-affects which basins are selected; add the flag in a later run once a real
-`gap_timestamps.json` is produced by an actual NH package build for the
-selected 32 basins.
+`_load_gap_timestamps()`. As of the fully enriched selection run
+(2026-07-19/20), **no such file existed anywhere**: it was a documented
+consumer expectation only — no script in this repo, including the frozen
+`scripts/build_stage1_nh_package.py`, ever wrote `masks/gap_timestamps.json`,
+and the existing Milestone 2K-G-B / 2K-G-C 50-basin package did not have one
+either. The command below therefore **omitted `--gap-manifest` entirely** for
+that selection-only run. There was no checksum-verified equivalent to
+substitute — the Milestone 2K-E forcing-extraction audit's gap findings use a
+different schema (not a flat JSON list of ISO timestamps), and converting them
+was a package-build concern, not a selection-step one. This was safe because
+`--gap-manifest` never affects which basins are selected.
+As of the 2026-07-20 primitives increment, the tested conversion primitive
+now exists: `src/baseline/gap_mask_io.py` (17/17 tests passing) converts a
+Milestone 2K-E `fullperiod_missing_hour_products.csv` gap inventory into the
+canonical `masks/gap_timestamps.json` format. It is not yet invoked by any
+package-build script — the future compact-package builder is expected to call
+it directly to produce `<data_dir>/masks/gap_timestamps.json` for each built
+NH package; there is intentionally no standalone gap-conversion CLI in this
+increment. Re-running the selector with `--gap-manifest` remains unnecessary
+for selection (it never affects which basins are selected) and is deferred to
+whenever a real per-package `gap_timestamps.json` exists.
 
 ```bash
 source /opt/conda/etc/profile.d/conda.sh
