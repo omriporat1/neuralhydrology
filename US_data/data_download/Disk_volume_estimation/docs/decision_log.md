@@ -1831,3 +1831,176 @@ adding orchestration ahead of a concrete caller.
 **Not done.** No NH package built, no `FlashNHDataset`/`nh_register.py`/
 `run_stage1_nh.py` changes, no training, no Moriah use, no full 2,752-basin
 package, nothing committed or pushed pending review.
+
+## 2026-07-20 Stage 1 — Milestone: static-attribute semantic correction (sentinel decoding + role reclassification), IMPLEMENTED, PENDING H2O REBUILD
+
+**Context.** Before the Compact Scientific Package builder begins consuming
+`stage1_static_attributes_v001` (canonical, `docs/decision_log.md` 2K-G-H
+entry; 2,843 × 531, 496 `model_input`, sha256
+`eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`), a
+read-only semantic audit was run over all 496 `model_input` columns (script
+preserved at
+`C:\Users\omrip\AppData\Local\Temp\claude\...\scratchpad\audit_496.py`,
+against the byte-identical local checksum-pinned parquet copy under
+`tmp/stage1_baseline_split_inputs_v001/...`, not against a fresh h2o pull).
+The audit checked sentinel-literal frequency (`-9999`/`-999`/`-99`/`999`/
+`9999`), name-pattern screens (id/geo/leakage/percent/count-like), exact
+duplicate-value columns, and `|corr|>=0.999` pairs, cross-referenced against
+the GAGES-II variable-description workbook. Findings were bounded to a
+specific list of columns; no defect implicated the split assignment, the
+32-basin Compact Scientific Package selection, the target/lead-time/
+validity-mask code, or the ~485 remaining `model_input` columns.
+
+**Binding decisions (not to be reopened absent a new concrete problem):**
+1. Eight infrastructure-distance sentinel columns (`RAW_DIS_NEAREST_DAM`,
+   `RAW_AVG_DIS_ALLDAMS`, `RAW_DIS_NEAREST_MAJ_DAM`,
+   `RAW_AVG_DIS_ALL_MAJ_DAMS`, `RAW_DIS_NEAREST_CANAL`,
+   `RAW_AVG_DIS_ALLCANALS`, `RAW_DIS_NEAREST_MAJ_NPDES`,
+   `RAW_AVG_DIS_ALL_MAJ_NPDES`): decode exact `-999`/`-999.0` to NaN before
+   missingness calc; no blanket sentinel replacement elsewhere; let the
+   existing `>20%` missingness rule exclude all eight; retain provenance; no
+   new presence/distance derived features this increment.
+2. Direct coordinates (`LAT_GAGE`, `LNG_GAGE`, `LAT_CENT`, `LONG_CENT`):
+   retain as diagnostic metadata only (`diagnostic_latlon`), excluded from
+   `model_input`; no other geography exclusions added.
+3. Gauge-record/network metadata (`FLOWYRS_1900_2009`, `FLOWYRS_1950_2009`,
+   `FLOWYRS_1990_2009`, `FLOW_PCT_EST_VALUES`, `BASIN_BOUNDARY_CONFIDENCE`,
+   `ACTIVE09`, `HBN36`, `HCDN_2009`, `OLD_HCDN`, `NSIP_SENTINEL`,
+   `PCT_DIFF_NWIS`, `NWIS_DRAIN_SQKM`): moved to a new
+   `diagnostic_record_network_qa` role, not `model_input`.
+   `NWIS_DRAIN_SQKM`/`PCT_DIFF_NWIS` exact `-9999` sentinels still decoded
+   for provenance/validation despite the role change. Retained, not deleted.
+4. `PERHOR`: decode exact `-9999` to NaN, retain as `model_input`, allow
+   later development-only imputation, replacement count recorded.
+5. `STRAHLER_MAX`: decode exact `-99` to NaN, retain as `model_input`, allow
+   later imputation, replacement count recorded, no derived
+   artificial-channel flag this increment.
+6. `lka_pc_use`: excluded from first-baseline `model_input`, retained under
+   a new `deferred_ambiguous` role, may be reconsidered once HydroATLAS
+   catalog semantics are resolved.
+7. Retained unchanged, no exclusion: `dor_pc_pva`, `dis_m3_pyr`,
+   `run_mm_syr` — a possible future ablation is noted, not acted on.
+8. Expected corrected count ≈473 `model_input` columns — explicitly
+   provisional, not an acceptance criterion; the h2o rebuild is authoritative.
+
+**Action.** `scripts/build_stage1_static_attribute_matrix.py`: added
+`_SENTINEL_VALUES_BY_COLUMN` (per-column exact-match sentinel map covering
+the 12 columns above) and `_decode_column_sentinels()`, invoked once per
+mapped column immediately before role classification and the missingness
+calculation in `_load_and_classify()`; non-numeric values in a mapped column
+fail the build loud; per-column replacement counts (including legitimate
+zero) are written to `provenance.json` under a new `sentinel_decoding` block
+together with the sentinel map and algorithm id
+(`stage1_static_sentinel_decode_v1`). Two new roles added to
+`_classify_columns()`: `diagnostic_record_network_qa` (12 columns, checked
+before the pre-existing binary-flag branch since 5 of the 12 overlap it) and
+`deferred_ambiguous` (`lka_pc_use`); `diagnostic_latlon` extended from 2 to 4
+columns. The 90%-reliably-numeric gate in the `candidate_model_input`
+dispatch branch is bypassed specifically for sentinel-mapped columns (their
+numeric-ness is already fail-loud-validated by the decode step, and their
+post-decode missingness is expected, not schema drift) — this was required
+for the 8 `RAW_*` columns to reach the intended `>20%` high-missingness
+exclusion filter in `build()` rather than being rejected earlier by the
+coarse gate. Critically, **the 8 `RAW_*` columns are excluded by the
+pre-existing missingness mechanism, not by name** — verified directly in
+provenance output. `scripts/audit_stage1_static_attribute_matrix.py`:
+independently mirrors the same sentinel map and role sets (not imported)
+and adds hard-fail checks for coordinates/record-network-QA/`lka_pc_use`/
+`RAW_*` leaking into `model_input`, any literal mapped sentinel surviving in
+`model_input`, and manifest/matrix column-role consistency, plus positive
+checks that `PERHOR`/`STRAHLER_MAX`/`dor_pc_pva`/`dis_m3_pyr`/`run_mm_syr`
+remain `model_input`. `src/baseline/static_preparation.py` required **no
+changes** — its role-based column selection is plain string equality against
+the manifest, so new role names work automatically; confirmed by inspection,
+not modified, per the hard constraint against touching that file this
+increment. `tests/test_static_attribute_matrix.py` (new, 19 tests): sentinel
+decoding, role classification, an end-to-end synthetic-fixture build proving
+the exclusion mechanism, and auditor PASS/hard-fail regressions.
+
+**Verification.** `py_compile` clean on both changed scripts. Full local
+suite: `python -m pytest tests/ -q --ignore=tests/test_nh_dataset.py
+--ignore=tests/test_nh_register.py` → 448 passed (includes the 19 new
+tests). A local, checksum-unverified dry-run against the same 29-file source
+mirror used for the original v001 canonical build
+(`C:\PhD\Python\neuralhydrology\US_data\attributes`, output to
+`tmp/stage1_static_attribute_matrix_v002_dryrun/`, gitignored, not
+committed) produced: 2,843 rows × 523 columns, **473 `model_input`**
+columns; all 8 `RAW_*` columns present in `high_missing_excluded_model_input`
+(not in any hand-authored exclusion list); 15,018 total sentinel values
+replaced across the 12 mapped columns; independent-auditor result PASS, 0
+errors, 0 warnings, 32 OK checks, including all new hard-fail and positive
+checks; matrix sha256
+`6ff9084008a2e7af8aab0ba46716650c06bb1fa7c92de815c620c0c850c734dd`
+(local-mirror dry-run only — **not** a canonical checksum, since this source
+mirror has not been re-verified against the h2o mirror this session).
+
+**Decision.** The corrected classification (sentinel decoding + two new
+roles + extended `diagnostic_latlon`) is accepted as the design for the
+Stage 1 v002 static-attribute matrix. `stage1_static_attributes_v001` and
+its checksum remain the historical record of the 2026-07-08 canonical build
+and are not overwritten or deleted, but are **superseded for modeling
+purposes** — the Compact Scientific Package builder and any future training
+must consume the corrected matrix once it is canonically rebuilt. The
+existing compact-selector output (32 basins, `71467b5`/`65af017`) and the
+canonical split assignment (`config/stage1_baseline_splits_v001/`) are
+**unaffected and remain valid** — selection/splitting operate on basin sets,
+independent of which static-attribute columns are classified `model_input`.
+The compact static-imputation artifact
+(`stage1_compact_static_imputation_v001`, built from v001) is likewise
+superseded pending the corrected canonical rebuild.
+
+**Corrected canonical rebuild — exact h2o commands (not yet run).**
+
+```bash
+# 1. Rebuild the corrected canonical matrix under a new version path
+python scripts/build_stage1_static_attribute_matrix.py \
+  --source-dir /data42/omrip/Flash-NH/data/static_attributes/gageii_hydroatlas_source_v001 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv \
+  --out-dir    /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002 \
+  --matrix-name stage1_static_attributes_v002 \
+  --force
+
+# 2. Run the independent auditor against the new build
+python scripts/audit_stage1_static_attribute_matrix.py \
+  --matrix-dir /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002 \
+  --matrix-name stage1_static_attributes_v002 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv
+
+# 3. Create a compact evidence bundle (matrix + manifest + provenance + audit
+#    summary) for local inspection, mirroring the v001 evidence convention
+mkdir -p /data42/omrip/Flash-NH/tmp/stage1_static_attributes_v002_evidence
+cp /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002.parquet \
+   /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002_column_manifest.json \
+   /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002_provenance.json \
+   /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/audit_summary.md \
+   /data42/omrip/Flash-NH/tmp/stage1_static_attributes_v002_evidence/
+sha256sum /data42/omrip/Flash-NH/tmp/stage1_static_attributes_v002_evidence/stage1_static_attributes_v002.parquet
+
+# 4. Pull the evidence bundle locally for inspection (run from local machine)
+scp -r h2o:/data42/omrip/Flash-NH/tmp/stage1_static_attributes_v002_evidence \
+  tmp/stage1_static_attributes_v002_evidence
+
+# 5. Only after the v002 canonical matrix is reviewed and accepted: rerun the
+#    compact static-imputation step against it (same 32 compact basins,
+#    same split assignment, new source matrix, new out-dir — do not
+#    overwrite the v001 imputation artifact)
+python scripts/prepare_stage1_compact_static_attributes.py \
+  --attributes-parquet /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002.parquet \
+  --column-manifest    /data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002_column_manifest.json \
+  --split-assignment   config/stage1_baseline_splits_v001/split_assignment.csv \
+  --target-basins       /data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence/compact_basin_ids.txt \
+  --out-dir             /data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v002/ \
+  --force
+
+# 6. Pull the replacement compact-imputation evidence locally
+scp -r h2o:/data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v002 \
+  tmp/stage1_compact_static_imputation_v002
+```
+
+**Not done.** No h2o or Moriah connection made this increment; no canonical
+artifact generated (only a local `tmp/`-scoped dry-run against an
+unverified source mirror); compact selector not rerun; canonical split
+artifacts not modified; `src/baseline/compact_selection.py`,
+`src/baseline/static_preparation.py`, target-conversion/lead-target/
+validity-mask code not modified; no NH package built; no training run;
+nothing committed or pushed pending review.

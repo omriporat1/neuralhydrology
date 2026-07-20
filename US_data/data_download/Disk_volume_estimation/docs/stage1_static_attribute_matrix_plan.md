@@ -607,3 +607,130 @@ source files, consistent with `docs/repo_policy.md`.
 package was not regenerated from this canonical matrix; no training was run;
 no NH configs or Slurm scripts were modified; no Moriah mirror transfer of
 the matrix has been performed or documented here.
+
+## 12. Static-attribute semantic correction — sentinel decoding + role
+reclassification (2026-07-20, superseding v001 for modeling)
+
+**Context.** A comprehensive read-only semantic audit of all 496 canonical
+`model_input` columns of `stage1_static_attributes_v001` (§11.6,
+sha256 `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`,
+preserved above as historical record — **not overwritten, not deleted**)
+found a bounded set of semantic defects: 8 GAGES-II infrastructure-distance
+columns carrying an undecoded `-999` "no feature within search radius"
+sentinel that was being treated as a valid distance; direct gauge/basin
+coordinates and gauge-record/network/QA metadata classified as `model_input`
+despite not describing basin physical/hydro-environmental attributes; two
+columns (`PERHOR`, `STRAHLER_MAX`) with a documented missing-value sentinel
+not yet decoded; and one HydroATLAS field (`lka_pc_use`) with unresolved
+catalog semantics. The audit confirmed these defects were bounded and did not
+implicate the remaining ~485 columns, the HydroATLAS 5-basin gap policy, or
+any target/split/training code. Full binding-decision detail:
+`docs/decision_log.md` (2026-07-20 entry) and
+`docs/stage1_scientific_baseline_design.md` §3.
+
+**Implementation.** `scripts/build_stage1_static_attribute_matrix.py` gained:
+
+- `_SENTINEL_VALUES_BY_COLUMN`: an explicit per-column sentinel map (`-999.0`
+  for the 8 `RAW_*` infrastructure-distance columns, `-9999.0` for
+  `NWIS_DRAIN_SQKM`/`PCT_DIFF_NWIS`/`PERHOR`, `-99.0` for `STRAHLER_MAX`).
+  `_decode_column_sentinels()` converts exact matches to `NaN` **before**
+  role classification and the missingness calculation, for the listed column
+  only — no blanket negative-value replacement, no other column touched even
+  if it happens to contain the same literal number. Non-numeric values in a
+  mapped column fail the build loud (`sys.exit(1)`). Per-column replacement
+  counts (including legitimate zero) are recorded in `_provenance.json` under
+  `sentinel_decoding`, keyed by `<source_file>:<column>`, alongside the
+  sentinel map used and an algorithm id (`stage1_static_sentinel_decode_v1`).
+- Two new column roles: `diagnostic_record_network_qa` (gauge-record history
+  / gauge-network membership / boundary-processing QA metadata — 12 columns:
+  `FLOWYRS_1900_2009`, `FLOWYRS_1950_2009`, `FLOWYRS_1990_2009`,
+  `FLOW_PCT_EST_VALUES`, `BASIN_BOUNDARY_CONFIDENCE`, `ACTIVE09`, `HBN36`,
+  `HCDN_2009`, `OLD_HCDN`, `NSIP_SENTINEL`, `PCT_DIFF_NWIS`,
+  `NWIS_DRAIN_SQKM`) and `deferred_ambiguous` (`lka_pc_use` only, pending
+  resolution of exact HydroATLAS catalog semantics). `diagnostic_latlon` was
+  extended from `{LAT_GAGE, LNG_GAGE}` to also include `LAT_CENT`,
+  `LONG_CENT` (basin-centroid coordinates, same direct-location rationale).
+  `NWIS_DRAIN_SQKM`/`PCT_DIFF_NWIS` still get their `-9999` sentinel decoded
+  for provenance/validation even though they now land in the diagnostic role,
+  not `model_input`.
+- **Mechanism, not hand-classification, excludes the 8 `RAW_*` columns.**
+  They are still classified `candidate_model_input` by `_classify_columns()`;
+  after sentinel decoding their missingness legitimately exceeds the existing
+  `>20%` threshold (24–93% missing across the 8 columns in practice — most
+  basins have no dam/canal/NPDES outfall within the GAGES-II search radius),
+  so the pre-existing dynamic near-constant/high-missingness filter in
+  `build()` excludes them exactly as it would any other high-missingness
+  column. This was verified explicitly (see local dry-run below): the 8
+  columns appear in `provenance.json`'s `high_missing_excluded_model_input`
+  list, not in any new hand-authored exclusion set. One consequence: the
+  pre-existing "reliably numeric" gate in `_load_and_classify()` (fails the
+  build if `notna().mean() < 0.90` for an unclassified numeric column) is
+  bypassed specifically for sentinel-mapped columns, since their numeric-ness
+  is already fail-loud-validated by `_decode_column_sentinels()` and their
+  post-decode missingness is expected and legitimate, not a schema-drift
+  signal.
+- `PERHOR` and `STRAHLER_MAX` remain `model_input` after decoding (both stay
+  under the 20% missingness threshold); `dor_pc_pva`, `dis_m3_pyr`,
+  `run_mm_syr` are unchanged (still `model_input`, no sentinel, no role
+  change) per the binding decision that these are valid baseline predictors
+  distinct from the excluded fields.
+
+`scripts/audit_stage1_static_attribute_matrix.py` independently mirrors the
+same sentinel map and role sets (not imported from the builder, by design)
+and gained hard-fail checks: direct coordinates (`LAT_GAGE`/`LNG_GAGE`/
+`LAT_CENT`/`LONG_CENT`) as `model_input`; any of the 12
+`diagnostic_record_network_qa` fields as `model_input`; `lka_pc_use` as
+`model_input`; any of the 8 `RAW_*` infrastructure-distance columns surviving
+as `model_input`; any literal mapped sentinel value remaining in a
+`model_input` column; and column-manifest/matrix-column inconsistency. Plus
+positive checks that `PERHOR`/`STRAHLER_MAX` remain `model_input` with zero
+remaining sentinel values, and that `dor_pc_pva`/`dis_m3_pyr`/`run_mm_syr`
+remain `model_input`.
+
+**Local dry-run (validation only, not the canonical build).** Run against
+the local, checksum-unverified source fixture
+`C:\PhD\Python\neuralhydrology\US_data\attributes` into
+`tmp/stage1_static_attribute_matrix_v002_dryrun/` (gitignored, not
+committed):
+
+```
+python scripts/build_stage1_static_attribute_matrix.py \
+  --source-dir "C:/PhD/Python/neuralhydrology/US_data/attributes" \
+  --manifest   config/stage1_initial_training_basin_manifest.csv \
+  --out-dir    tmp/stage1_static_attribute_matrix_v002_dryrun \
+  --matrix-name stage1_static_attributes_v002 \
+  --no-require-checksums --force
+
+python scripts/audit_stage1_static_attribute_matrix.py \
+  --matrix-dir tmp/stage1_static_attribute_matrix_v002_dryrun \
+  --matrix-name stage1_static_attributes_v002 \
+  --manifest   config/stage1_initial_training_basin_manifest.csv
+```
+
+Result: build exit 0; matrix 2,843 rows × 523 columns, **473 `model_input`**
+(provisional — this local source mirror is not checksum-verified against the
+h2o mirror, so this count is not the acceptance criterion for the canonical
+rebuild). All 8 `RAW_*` columns excluded via
+`high_missing_excluded_model_input` (15,018 total sentinel values replaced
+across the 12 mapped columns). Audit exit 0 (PASS), 0 errors, 0 warnings, 32
+OK checks, including all new hard-fail checks passing and the two new
+positive checks (`PERHOR`/`STRAHLER_MAX` retained, no residual sentinels).
+
+**Tests.** `tests/test_static_attribute_matrix.py` (new, 19 tests): sentinel
+decoding (per-mapped-column, non-sentinel/unrelated-column non-interference,
+zero-count visibility, non-numeric fail-loud, blank-value passthrough), role
+classification (coordinates, record/network/QA, deferred, retained fields),
+an end-to-end synthetic-fixture build proving the `RAW_*` exclusion mechanism,
+and auditor regressions (PASS on a corrected fixture; hard-fail on a
+surviving sentinel, a leaked coordinate, a leaked record/network/QA field,
+a leaked `lka_pc_use`, a leaked `RAW_*` column).
+
+**Not done in this increment (by design, per explicit scope):** the
+corrected canonical rebuild has not been run on h2o; no NH package was built;
+no training ran; Moriah was not used; the compact static-imputation artifact
+was not rerun (it is superseded pending the corrected canonical matrix, see
+`docs/decision_log.md`); nothing was committed. See
+`docs/decision_log.md` (2026-07-20 entry) for the exact h2o commands to
+produce and evidence-bundle the corrected canonical matrix under a new
+`stage1_static_attributes_v002` path (the historical v001 checksum above is
+retained as provenance, not overwritten).

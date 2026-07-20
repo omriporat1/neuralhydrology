@@ -317,6 +317,42 @@ diagnostic-lat-lon handling). Specifically:
 categorical embeddings, or a lat/lon ablation, remains a future discussion —
 this sign-off only locks the v001-core numeric-attribute baseline.
 
+**SUPERSEDED FOR MODELING (2026-07-20).** A read-only semantic audit of all
+496 `model_input` columns of `stage1_static_attributes_v001` found bounded
+semantic defects: 8 GAGES-II infrastructure-distance columns
+(`RAW_DIS_NEAREST_DAM`, `RAW_AVG_DIS_ALLDAMS`, `RAW_DIS_NEAREST_MAJ_DAM`,
+`RAW_AVG_DIS_ALL_MAJ_DAMS`, `RAW_DIS_NEAREST_CANAL`, `RAW_AVG_DIS_ALLCANALS`,
+`RAW_DIS_NEAREST_MAJ_NPDES`, `RAW_AVG_DIS_ALL_MAJ_NPDES`) carrying an
+undecoded `-999` "no feature within search radius" sentinel; 12 gauge-record/
+network/QA metadata columns (`FLOWYRS_1900_2009`, `FLOWYRS_1950_2009`,
+`FLOWYRS_1990_2009`, `FLOW_PCT_EST_VALUES`, `BASIN_BOUNDARY_CONFIDENCE`,
+`ACTIVE09`, `HBN36`, `HCDN_2009`, `OLD_HCDN`, `NSIP_SENTINEL`,
+`PCT_DIFF_NWIS`, `NWIS_DRAIN_SQKM`) classified `model_input` despite
+describing gauge/network provenance rather than basin physical attributes;
+`LAT_CENT`/`LONG_CENT` (basin-centroid coordinates) classified `model_input`
+alongside the already-diagnostic `LAT_GAGE`/`LNG_GAGE`; undecoded missing-
+value sentinels on `PERHOR` (`-9999`) and `STRAHLER_MAX` (`-99`); and one
+HydroATLAS field (`lka_pc_use`) with unresolved catalog semantics. Binding
+decisions and full rationale: `docs/decision_log.md` (2026-07-20 entry).
+Implementation: `docs/stage1_static_attribute_matrix_plan.md` §12.
+
+The v001 artifact and checksum above remain the historical record of the
+2026-07-08 canonical build and are **not overwritten or deleted**. The
+corrected matrix is pending a canonical h2o rebuild under a new version path
+(`stage1_static_attributes_v002`, exact commands in
+`docs/decision_log.md`); a local, checksum-unverified dry-run against the
+same source mirror confirmed the corrected pipeline lands at **473
+`model_input` columns** (provisional — the h2o rebuild is the authority on
+the final count) with all 8 `RAW_*` columns excluded via the existing
+`>20%` high-missingness mechanism (not by name), `PERHOR`/`STRAHLER_MAX`
+retained as `model_input` with sentinels decoded, and `dor_pc_pva`/
+`dis_m3_pyr`/`run_mm_syr` unchanged. The compact static-imputation artifact
+built from v001 (`stage1_compact_static_imputation_v001`) is likewise
+superseded pending the corrected rebuild — the accepted 32-basin Compact
+Scientific Package selection and split assignment are unaffected and remain
+valid (selection is basin-set logic, independent of static-attribute
+column content).
+
 ## 4. Target variable and target cleaning (APPROVED — basin set)
 
 Target: `qobs_m3s` (streamflow, m³/s). Cleaning policy already decided and

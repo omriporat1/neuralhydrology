@@ -1,8 +1,38 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-20 (Compact Scientific Package selection ACCEPTED; scientific/static-prep primitives increment)
+Last updated: 2026-07-20 (static-attribute semantic correction — sentinel decoding + role reclassification, pending h2o rebuild)
 
 ## Current milestone
+
+**Static-attribute semantic correction — sentinel decoding + role
+reclassification (2026-07-20, pending h2o rebuild).** A read-only semantic
+audit of all 496 `model_input` columns of canonical `stage1_static_attributes_v001`
+found bounded defects: 8 GAGES-II infrastructure-distance `RAW_*` columns
+carrying an undecoded `-999` sentinel; 12 gauge-record/network/QA metadata
+columns and `LAT_CENT`/`LONG_CENT` misclassified as `model_input` rather than
+diagnostic; undecoded sentinels on `PERHOR` (`-9999`) and `STRAHLER_MAX`
+(`-99`); one deferred-ambiguous HydroATLAS field (`lka_pc_use`).
+`scripts/build_stage1_static_attribute_matrix.py` and
+`scripts/audit_stage1_static_attribute_matrix.py` were both updated: a new
+per-column sentinel-decode step (`_SENTINEL_VALUES_BY_COLUMN`, applied before
+role classification/missingness calc, replacement counts recorded in
+provenance) and two new roles (`diagnostic_record_network_qa`,
+`deferred_ambiguous`; `diagnostic_latlon` extended to 4 columns). The 8
+`RAW_*` columns are excluded via the pre-existing `>20%` high-missingness
+mechanism after decoding — **not** hand-classified by name — proving the
+general policy operates correctly. 19 new focused tests added
+(`tests/test_static_attribute_matrix.py`); full local suite 448 passed. A
+local, checksum-unverified dry-run against the same source mirror used for
+the original canonical build confirms the corrected pipeline (2,843 rows ×
+523 columns, **473 `model_input`**, provisional) and an independent-auditor
+PASS (0 errors, 0 warnings, 32 OK checks). **Not done in this increment:**
+no h2o/Moriah connection, no canonical rebuild executed, no compact-selector
+rerun, no NH package built, no training, nothing committed. The accepted
+32-basin Compact Scientific Package selection and canonical split assignment
+are unaffected and remain valid. Full detail:
+`docs/stage1_static_attribute_matrix_plan.md` §12,
+`docs/stage1_scientific_baseline_design.md` §3, `docs/decision_log.md`
+(2026-07-20 entry). Corrected canonical rebuild (h2o) is the next blocker.
 
 **Compact Scientific Package selection — ACCEPTED (2026-07-20).** The fully
 enriched h2o run of `scripts/generate_stage1_compact_package_selection.py`

@@ -31,7 +31,57 @@ CREATED_UTC = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # Must match scripts/build_stage1_static_attribute_matrix.py policy exactly.
 _GEO_SPLIT_SUPPORT = {"STATE", "HUC02"}
-_DIAGNOSTIC_LATLON = {"LAT_GAGE", "LNG_GAGE"}
+# Direct gauge / basin-centroid coordinates -- diagnostic only, never model_input
+# (2026-07-20 static-attribute semantic correction; see docs/decision_log.md).
+_DIAGNOSTIC_LATLON = {"LAT_GAGE", "LNG_GAGE", "LAT_CENT", "LONG_CENT"}
+
+# Gauge-record history / gauge-network membership / boundary-processing QA
+# metadata -- diagnostic only, never model_input (same correction).
+_DIAGNOSTIC_RECORD_NETWORK_QA = {
+    "FLOWYRS_1900_2009", "FLOWYRS_1950_2009", "FLOWYRS_1990_2009",
+    "FLOW_PCT_EST_VALUES", "BASIN_BOUNDARY_CONFIDENCE",
+    "ACTIVE09", "HBN36", "HCDN_2009", "OLD_HCDN", "NSIP_SENTINEL",
+    "PCT_DIFF_NWIS", "NWIS_DRAIN_SQKM",
+}
+
+# Deferred/ambiguous fields -- never model_input in the first Stage 1 baseline
+# (same correction).
+_DEFERRED_AMBIGUOUS = {"lka_pc_use"}
+
+# The 8 infrastructure-distance sentinel columns: must be excluded from
+# model_input via the ordinary high-missingness mechanism (>20%) after
+# sentinel decoding, never by hand-classification. If any survive as
+# model_input, the sentinel-decode/exclusion pipeline is broken.
+_RAW_INFRA_DISTANCE_COLUMNS = {
+    "RAW_DIS_NEAREST_DAM", "RAW_AVG_DIS_ALLDAMS",
+    "RAW_DIS_NEAREST_MAJ_DAM", "RAW_AVG_DIS_ALL_MAJ_DAMS",
+    "RAW_DIS_NEAREST_CANAL", "RAW_AVG_DIS_ALLCANALS",
+    "RAW_DIS_NEAREST_MAJ_NPDES", "RAW_AVG_DIS_ALL_MAJ_NPDES",
+}
+
+# Fields explicitly retained as model_input despite the semantic correction
+# (2026-07-20; see docs/decision_log.md) -- positive-checked below.
+_RETAINED_MODEL_INPUT_FIELDS = {"PERHOR", "STRAHLER_MAX", "dor_pc_pva", "dis_m3_pyr", "run_mm_syr"}
+
+# Explicit per-column sentinel-value maps, mirrored independently from
+# scripts/build_stage1_static_attribute_matrix.py::_SENTINEL_VALUES_BY_COLUMN.
+# Only these exact (column, value) pairs are checked -- not a blanket
+# negative-value rejection.
+_SENTINEL_VALUES_BY_COLUMN: dict[str, set[float]] = {
+    "RAW_DIS_NEAREST_DAM": {-999.0},
+    "RAW_AVG_DIS_ALLDAMS": {-999.0},
+    "RAW_DIS_NEAREST_MAJ_DAM": {-999.0},
+    "RAW_AVG_DIS_ALL_MAJ_DAMS": {-999.0},
+    "RAW_DIS_NEAREST_CANAL": {-999.0},
+    "RAW_AVG_DIS_ALLCANALS": {-999.0},
+    "RAW_DIS_NEAREST_MAJ_NPDES": {-999.0},
+    "RAW_AVG_DIS_ALL_MAJ_NPDES": {-999.0},
+    "NWIS_DRAIN_SQKM": {-9999.0},
+    "PCT_DIFF_NWIS": {-9999.0},
+    "PERHOR": {-9999.0},
+    "STRAHLER_MAX": {-99.0},
+}
+
 _EXPECTED_HYDROATLAS_GAP_STAIDS = frozenset({
     "393109104464500", "394839104570300", "401733105392404",
     "402114105350101", "402913084285400",
@@ -144,8 +194,11 @@ def main() -> None:
     else:
         warn("Column manifest missing -- role-based checks will use heuristics only")
 
+    _non_model_input_fallback = (
+        _GEO_SPLIT_SUPPORT | _DIAGNOSTIC_LATLON | _DIAGNOSTIC_RECORD_NETWORK_QA | _DEFERRED_AMBIGUOUS
+    )
     model_input_cols = [c for c, r in col_roles.items() if r == "model_input"] or \
-        [c for c in df.columns if c not in _GEO_SPLIT_SUPPORT | _DIAGNOSTIC_LATLON
+        [c for c in df.columns if c not in _non_model_input_fallback
          and c not in ("hydroatlas_coverage_flag", "final_training_status")]
 
     # ---- 3. missingness per variable ----
@@ -223,11 +276,59 @@ def main() -> None:
     leaked_split_support = sorted(_GEO_SPLIT_SUPPORT & set(model_input_cols))
     leaked_latlon = sorted(_DIAGNOSTIC_LATLON & set(model_input_cols))
     chk("STATE/HUC02 excluded from model_input", not leaked_split_support, str(leaked_split_support))
-    chk("LAT_GAGE/LNG_GAGE excluded from model_input", not leaked_latlon, str(leaked_latlon))
+    chk("Direct coordinate fields excluded from model_input", not leaked_latlon, str(leaked_latlon))
     chk("STATE/HUC02 present in matrix (as split_support)", _GEO_SPLIT_SUPPORT.issubset(df.columns) or
         any(c in df.columns for c in _GEO_SPLIT_SUPPORT))
-    chk("LAT_GAGE/LNG_GAGE present in matrix (as diagnostic)", _DIAGNOSTIC_LATLON.issubset(df.columns) or
+    chk("Direct coordinate fields present in matrix (as diagnostic)", _DIAGNOSTIC_LATLON.issubset(df.columns) or
         any(c in df.columns for c in _DIAGNOSTIC_LATLON))
+
+    # ---- 8b. record/network/QA + deferred-ambiguous fields excluded from model_input
+    # (2026-07-20 static-attribute semantic correction; see docs/decision_log.md) ----
+    leaked_record_qa = sorted(_DIAGNOSTIC_RECORD_NETWORK_QA & set(model_input_cols))
+    chk("Gauge-record/network/QA fields excluded from model_input", not leaked_record_qa,
+        str(leaked_record_qa))
+    leaked_deferred = sorted(_DEFERRED_AMBIGUOUS & set(model_input_cols))
+    chk("lka_pc_use excluded from model_input", not leaked_deferred, str(leaked_deferred))
+
+    # ---- 8c. the 8 infrastructure-distance columns must NOT survive as model_input
+    # (they must be excluded through the ordinary high-missingness mechanism after
+    # sentinel decoding, never by hand-classification -- this proves the policy is
+    # operating correctly) ----
+    leaked_raw_infra = sorted(_RAW_INFRA_DISTANCE_COLUMNS & set(model_input_cols))
+    chk("Infrastructure-distance RAW_* columns excluded from model_input", not leaked_raw_infra,
+        str(leaked_raw_infra))
+
+    # ---- 8d. no literal mapped sentinel value remains in any model_input column ----
+    sentinel_leaks = []
+    for c, sentinels in _SENTINEL_VALUES_BY_COLUMN.items():
+        if c not in model_input_cols or c not in df.columns:
+            continue
+        n_hit = int(df[c].isin(sentinels).sum())
+        if n_hit:
+            sentinel_leaks.append(f"{c}: {n_hit} value(s) still equal to sentinel(s) {sorted(sentinels)}")
+    chk("No literal sentinel values remain in model_input columns", not sentinel_leaks, str(sentinel_leaks))
+
+    # ---- 8e. positive checks: fields explicitly retained as model_input ----
+    for c in sorted(_RETAINED_MODEL_INPUT_FIELDS):
+        if c not in col_roles:
+            warn(f"retained field '{c}' not present in column manifest -- cannot verify role")
+            continue
+        chk(f"'{c}' remains model_input", col_roles.get(c) == "model_input",
+            f"role={col_roles.get(c)!r}")
+    for c in ("PERHOR", "STRAHLER_MAX"):
+        if c not in df.columns or c not in _SENTINEL_VALUES_BY_COLUMN:
+            continue
+        n_hit = int(df[c].isin(_SENTINEL_VALUES_BY_COLUMN[c]).sum())
+        chk(f"'{c}' has no remaining sentinel value(s)", n_hit == 0, f"{n_hit} found")
+
+    # ---- 8f. column-manifest / matrix column consistency ----
+    if manifest_json_path.exists():
+        manifest_cols = set(col_roles.keys())
+        matrix_cols = set(df.columns) | {"gauge_id"}  # gauge_id is the index, not a data column
+        manifest_only = sorted(manifest_cols - matrix_cols)
+        matrix_only = sorted(set(df.columns) - manifest_cols)
+        chk("Column manifest matches matrix columns exactly", not manifest_only and not matrix_only,
+            f"manifest_only={manifest_only[:10]}, matrix_only={matrix_only[:10]}")
 
     # ---- 9. HydroATLAS 5-basin gap handling ----
     if "hydroatlas_coverage_flag" not in df.columns:

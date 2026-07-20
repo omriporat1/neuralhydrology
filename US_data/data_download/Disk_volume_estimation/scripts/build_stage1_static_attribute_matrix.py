@@ -23,8 +23,20 @@ Column roles (see column_manifest.json "role" field):
   model_input          - conservative v001-core numeric feature (float)
   split_support         - STATE/HUC02, retained for split construction/diagnostics,
                            EXCLUDED from model_input by design (not a model feature)
-  diagnostic_latlon      - LAT_GAGE/LNG_GAGE, held out of model_input by default;
-                           reserved for a dedicated future ablation
+  diagnostic_latlon      - LAT_GAGE/LNG_GAGE/LAT_CENT/LONG_CENT (direct gauge and
+                           basin-centroid coordinates), held out of model_input by
+                           default; reserved for a dedicated future ablation
+  diagnostic_record_network_qa - gauge-record history / gauge-network membership /
+                           boundary-processing QA metadata (FLOWYRS_*,
+                           FLOW_PCT_EST_VALUES, BASIN_BOUNDARY_CONFIDENCE, ACTIVE09,
+                           HBN36, HCDN_2009, OLD_HCDN, NSIP_SENTINEL, PCT_DIFF_NWIS,
+                           NWIS_DRAIN_SQKM); describes the observational record and
+                           its provenance, not the basin itself -- excluded from
+                           model_input (2026-07-20 static-attribute semantic
+                           correction; see docs/decision_log.md)
+  deferred_ambiguous      - fields whose semantics are not yet fully resolved
+                           against the exact source catalog (currently lka_pc_use);
+                           excluded from model_input pending resolution
   categorical_deferred    - genuine multi-class categorical codes (including
                            numeric-coded classes such as HydroATLAS "*_cl_smj"
                            and GAGES-II "*_DOM"/"*_SITE" region codes); kept as
@@ -33,6 +45,17 @@ Column roles (see column_manifest.json "role" field):
   flag                  - derived per-basin QA/coverage flags added by this
                            builder (e.g. hydroatlas_coverage_flag)
   id                    - gauge_id index (not a data column)
+
+Sentinel decoding (2026-07-20 static-attribute semantic correction, see
+docs/decision_log.md): a narrowly scoped, explicit per-column map
+(_SENTINEL_VALUES_BY_COLUMN) converts exact documented missing-value
+sentinels (e.g. -999, -9999, -99) to NaN before role classification and
+missingness calculation. This is NOT a blanket negative-value replacement --
+only the listed columns are touched, and unrelated columns containing the
+same literal number are left unchanged. This is what allows the 8
+infrastructure-distance RAW_* columns to be excluded from model_input
+through the existing high-missingness mechanism (not by hand-classification
+by name) once their -999 sentinels are correctly counted as missing.
 
 Filtering philosophy (conservative by default; see decision_log.md
 2026-07-06 follow-up and stage1_static_attribute_matrix_plan.md secs 8-9):
@@ -127,7 +150,10 @@ _ADMIN_DROP_TEXT: set[str] = {
 _ADMIN_DROP_NUMERIC_ID: set[str] = {"FIPS_SITE", "REACHCODE", "BOUND_SOURCE"}
 
 # Sparse binary membership flags: "present" (non-blank) means member,
-# "missing" means non-member. Encoded 0/1, NOT dropped as high-missingness.
+# "missing" means non-member. Retained as diagnostic_record_network_qa (see
+# below), NOT model_input -- gauge-network membership is not a basin/
+# hydro-environmental attribute. This set now only controls *encoding style*
+# (0/1 presence) within that diagnostic role, not the role itself.
 _BINARY_FLAGS: set[str] = {"HCDN_2009", "HBN36", "OLD_HCDN", "NSIP_SENTINEL", "ACTIVE09"}
 
 # Genuine categorical fields (including numeric-coded classes) deferred out of
@@ -150,8 +176,52 @@ _CATEGORICAL_DEFER_SUFFIXES: tuple[str, ...] = ("_cl_smj", "_id_smj")
 _GEO_SPLIT_SUPPORT: set[str] = {"STATE", "HUC02"}
 
 # Coordinates held out of model_input by default; reserved for a dedicated
-# future ablation on spatial generalization.
-_DIAGNOSTIC_LATLON: set[str] = {"LAT_GAGE", "LNG_GAGE"}
+# future ablation on spatial generalization. Gauge and basin-centroid
+# coordinates are both direct-location fields (2026-07-20 static-attribute
+# semantic correction; see docs/decision_log.md).
+_DIAGNOSTIC_LATLON: set[str] = {"LAT_GAGE", "LNG_GAGE", "LAT_CENT", "LONG_CENT"}
+
+# Gauge-record history / gauge-network membership / boundary-processing QA
+# metadata: these describe the *observational record and its provenance*,
+# not the basin's physical/hydro-environmental setting, so they are held out
+# of model_input as diagnostic metadata (2026-07-20 static-attribute semantic
+# correction; see docs/decision_log.md). NWIS_DRAIN_SQKM and PCT_DIFF_NWIS
+# still have their -9999 sentinels decoded (see _SENTINEL_VALUES_BY_COLUMN)
+# for provenance/validation purposes even though they land here, not in
+# model_input.
+_DIAGNOSTIC_RECORD_NETWORK_QA: set[str] = {
+    "FLOWYRS_1900_2009", "FLOWYRS_1950_2009", "FLOWYRS_1990_2009",
+    "FLOW_PCT_EST_VALUES", "BASIN_BOUNDARY_CONFIDENCE",
+    "ACTIVE09", "HBN36", "HCDN_2009", "OLD_HCDN", "NSIP_SENTINEL",
+    "PCT_DIFF_NWIS", "NWIS_DRAIN_SQKM",
+}
+
+# Deferred/ambiguous fields: semantics not yet fully resolved against the
+# exact HydroATLAS catalog; excluded from the first Stage 1 baseline
+# model_input set pending that resolution (2026-07-20 static-attribute
+# semantic correction; see docs/decision_log.md).
+_DEFERRED_AMBIGUOUS: set[str] = {"lka_pc_use"}
+
+# Explicit per-column sentinel-value maps: exact numeric values decoded to
+# NaN before missingness calculation and role classification. Narrowly
+# scoped -- only the listed column is affected, no blanket negative-value
+# replacement (2026-07-20 static-attribute semantic correction; see
+# docs/decision_log.md and the 496-column semantic audit it codifies).
+_SENTINEL_VALUES_BY_COLUMN: dict[str, frozenset[float]] = {
+    "RAW_DIS_NEAREST_DAM": frozenset({-999.0}),
+    "RAW_AVG_DIS_ALLDAMS": frozenset({-999.0}),
+    "RAW_DIS_NEAREST_MAJ_DAM": frozenset({-999.0}),
+    "RAW_AVG_DIS_ALL_MAJ_DAMS": frozenset({-999.0}),
+    "RAW_DIS_NEAREST_CANAL": frozenset({-999.0}),
+    "RAW_AVG_DIS_ALLCANALS": frozenset({-999.0}),
+    "RAW_DIS_NEAREST_MAJ_NPDES": frozenset({-999.0}),
+    "RAW_AVG_DIS_ALL_MAJ_NPDES": frozenset({-999.0}),
+    "NWIS_DRAIN_SQKM": frozenset({-9999.0}),
+    "PCT_DIFF_NWIS": frozenset({-9999.0}),
+    "PERHOR": frozenset({-9999.0}),
+    "STRAHLER_MAX": frozenset({-99.0}),
+}
+_SENTINEL_DECODE_ALGORITHM_ID = "stage1_static_sentinel_decode_v1"
 
 # Per-year raw series: drop outright because equivalent official summary
 # columns already exist natively in the same file (FLOWYRS_*, FLOW_PCT_EST_VALUES).
@@ -213,6 +283,33 @@ def _find_staid_col(df: pd.DataFrame) -> str:
             return candidate
     log.error("No STAID column found. Columns: %s", list(df.columns[:10]))
     sys.exit(1)
+
+
+def _decode_column_sentinels(series: pd.Series, colname: str, counts: dict[str, int]) -> pd.Series:
+    """Replace exact sentinel value(s) for ``colname`` with NaN; pass through unchanged
+    otherwise. Only columns present in ``_SENTINEL_VALUES_BY_COLUMN`` are touched. Fails
+    loud if the column contains a non-blank value that doesn't coerce to numeric (a
+    sentinel-mapped column is expected to be numeric-with-sentinels, not mixed-schema).
+    Records the replacement count in ``counts`` (0 included, not omitted)."""
+    sentinels = _SENTINEL_VALUES_BY_COLUMN.get(colname)
+    if not sentinels:
+        return series
+    numeric = pd.to_numeric(series, errors="coerce")
+    nonnumeric_mask = numeric.isna() & series.notna() & (series.astype(str).str.strip() != "")
+    if nonnumeric_mask.any():
+        offending = sorted(series[nonnumeric_mask].astype(str).unique())[:10]
+        log.error(
+            "Column '%s' is mapped for sentinel decoding (values %s) but contains "
+            "non-numeric value(s), refusing to silently proceed. Offending raw values "
+            "(up to 10): %s",
+            colname, sorted(sentinels), offending,
+        )
+        sys.exit(1)
+    sentinel_mask = numeric.isin(sentinels)
+    counts[colname] = int(sentinel_mask.sum())
+    decoded = series.copy()
+    decoded[sentinel_mask] = np.nan
+    return decoded
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +455,8 @@ class _FileResult:
         self.model_input = pd.DataFrame()
         self.split_support = pd.DataFrame()
         self.diagnostic = pd.DataFrame()
+        self.diagnostic_record_network_qa = pd.DataFrame()
+        self.deferred_ambiguous = pd.DataFrame()
         self.categorical_deferred = pd.DataFrame()
         self.dropped: dict[str, list[str]] = {
             "duplicate": [], "admin_text": [], "admin_numeric_id": [],
@@ -366,6 +465,7 @@ class _FileResult:
         self.binary_encoded: list[str] = []
         self.per_year_reduced: list[str] = []
         self.coverage_missing: list[str] = []
+        self.sentinel_replacement_counts: dict[str, int] = {}
 
 
 def _classify_columns(name: str, cols: list[str]) -> dict[str, str]:
@@ -382,8 +482,15 @@ def _classify_columns(name: str, cols: list[str]) -> dict[str, str]:
             roles[c] = "admin_text"
         elif c in _ADMIN_DROP_NUMERIC_ID:
             roles[c] = "admin_numeric_id"
+        elif c in _DIAGNOSTIC_RECORD_NETWORK_QA:
+            # Checked before _BINARY_FLAGS: the 5 sparse-membership flags
+            # (HCDN_2009/HBN36/OLD_HCDN/NSIP_SENTINEL/ACTIVE09) are a subset
+            # of this diagnostic set and must land here, not in model_input.
+            roles[c] = "diagnostic_record_network_qa"
         elif c in _BINARY_FLAGS:
             roles[c] = "binary_flag"
+        elif c in _DEFERRED_AMBIGUOUS:
+            roles[c] = "deferred_ambiguous"
         elif c in _CATEGORICAL_DEFER_EXPLICIT or c.endswith(_CATEGORICAL_DEFER_SUFFIXES):
             roles[c] = "categorical_deferred"
         elif c in _GEO_SPLIT_SUPPORT:
@@ -446,6 +553,17 @@ def _load_and_classify(path: Path, stage1_ids: list[str]) -> _FileResult:
             sys.exit(1)
         sub = raw.loc[stage1_ids]
 
+    # Sentinel decoding happens before role classification and before the
+    # missingness calculation, so decoded NaNs correctly inflate missingness
+    # for the affected columns (2026-07-20 static-attribute semantic
+    # correction). Only columns explicitly listed in
+    # _SENTINEL_VALUES_BY_COLUMN are touched; every other column, including
+    # unrelated ones containing the same literal sentinel number, is
+    # untouched.
+    for c in sub.columns:
+        if c in _SENTINEL_VALUES_BY_COLUMN:
+            sub[c] = _decode_column_sentinels(sub[c], c, result.sentinel_replacement_counts)
+
     non_id_cols = [c for c in sub.columns]
     roles = _classify_columns(name, non_id_cols)
     reduce_spec = _PER_YEAR_REDUCE.get(name)
@@ -460,10 +578,19 @@ def _load_and_classify(path: Path, stage1_ids: list[str]) -> _FileResult:
             result.dropped["admin_numeric_id"].append(c)
         elif role == "per_year_raw_dropped":
             result.dropped["per_year_raw_dropped"].append(c)
+        elif role == "diagnostic_record_network_qa":
+            if c in _BINARY_FLAGS:
+                enc = sub[c].notna() & (sub[c].astype(str).str.strip() != "")
+                result.diagnostic_record_network_qa[c] = enc.astype("int8")
+                result.binary_encoded.append(c)
+            else:
+                result.diagnostic_record_network_qa[c] = pd.to_numeric(sub[c], errors="coerce")
         elif role == "binary_flag":
             enc = sub[c].notna() & (sub[c].astype(str).str.strip() != "")
             result.model_input[c] = enc.astype("int8")
             result.binary_encoded.append(c)
+        elif role == "deferred_ambiguous":
+            result.deferred_ambiguous[c] = pd.to_numeric(sub[c], errors="coerce")
         elif role == "categorical_deferred":
             result.categorical_deferred[c] = sub[c]
         elif role == "split_support":
@@ -474,7 +601,14 @@ def _load_and_classify(path: Path, stage1_ids: list[str]) -> _FileResult:
             continue  # handled in bulk below
         elif role == "candidate_model_input":
             coerced = pd.to_numeric(sub[c], errors="coerce")
-            if coerced.notna().mean() < 0.90:
+            # The 90% "reliably numeric" gate is a schema-drift safety net for
+            # columns with no explicit classification. Sentinel-mapped columns
+            # already went through an explicit, fail-loud numeric validation
+            # in _decode_column_sentinels() -- their post-decode missingness
+            # can legitimately exceed 10% (that's the point: it lets the
+            # dynamic >20% high-missingness filter in build() decide their
+            # fate, rather than this coarse gate hard-failing the whole build).
+            if c not in _SENTINEL_VALUES_BY_COLUMN and coerced.notna().mean() < 0.90:
                 log.error(
                     "%s: column '%s' is not reliably numeric (only %.1f%% coerces) and is not "
                     "classified as admin/categorical/flag -- refusing to silently include or drop. "
@@ -530,6 +664,8 @@ def build(args: argparse.Namespace) -> None:
     model_input = pd.DataFrame(index=stage1_ids)
     split_support = pd.DataFrame(index=stage1_ids)
     diagnostic = pd.DataFrame(index=stage1_ids)
+    diagnostic_record_network_qa = pd.DataFrame(index=stage1_ids)
+    deferred_ambiguous = pd.DataFrame(index=stage1_ids)
     categorical_deferred = pd.DataFrame(index=stage1_ids)
     hydroatlas_flag = pd.Series(1, index=stage1_ids, dtype="int8", name="hydroatlas_coverage_flag")
 
@@ -538,10 +674,13 @@ def build(args: argparse.Namespace) -> None:
     binary_encoded_all: list[str] = []
     per_year_reduced_all: list[str] = []
     column_source: dict[str, str] = {}
+    sentinel_replacement_counts_all: dict[str, int] = {}
 
     model_input_parts = [model_input]
     split_support_parts = [split_support]
     diagnostic_parts = [diagnostic]
+    diagnostic_record_network_qa_parts = [diagnostic_record_network_qa]
+    deferred_ambiguous_parts = [deferred_ambiguous]
     categorical_deferred_parts = [categorical_deferred]
     seen_model_input_cols: set[str] = set()
 
@@ -558,6 +697,10 @@ def build(args: argparse.Namespace) -> None:
             split_support_parts.append(r.split_support)
         if not r.diagnostic.empty:
             diagnostic_parts.append(r.diagnostic)
+        if not r.diagnostic_record_network_qa.empty:
+            diagnostic_record_network_qa_parts.append(r.diagnostic_record_network_qa)
+        if not r.deferred_ambiguous.empty:
+            deferred_ambiguous_parts.append(r.deferred_ambiguous)
         if not r.categorical_deferred.empty:
             categorical_deferred_parts.append(r.categorical_deferred)
         for col in r.model_input.columns:
@@ -566,18 +709,26 @@ def build(args: argparse.Namespace) -> None:
             column_source[col] = r.name
         for col in r.diagnostic.columns:
             column_source[col] = r.name
+        for col in r.diagnostic_record_network_qa.columns:
+            column_source[col] = r.name
+        for col in r.deferred_ambiguous.columns:
+            column_source[col] = r.name
         for col in r.categorical_deferred.columns:
             column_source[col] = r.name
         for k in dropped_all:
             dropped_all[k].extend(f"{r.name}:{c}" for c in r.dropped[k])
         binary_encoded_all.extend(f"{r.name}:{c}" for c in r.binary_encoded)
         per_year_reduced_all.extend(f"{r.name}:{c}" for c in r.per_year_reduced)
+        for col, n in r.sentinel_replacement_counts.items():
+            sentinel_replacement_counts_all[f"{r.name}:{col}"] = n
         if r.coverage_missing:
             hydroatlas_flag.loc[r.coverage_missing] = 0
 
     model_input = pd.concat(model_input_parts, axis=1)
     split_support = pd.concat(split_support_parts, axis=1)
     diagnostic = pd.concat(diagnostic_parts, axis=1)
+    diagnostic_record_network_qa = pd.concat(diagnostic_record_network_qa_parts, axis=1)
+    deferred_ambiguous = pd.concat(deferred_ambiguous_parts, axis=1)
     categorical_deferred = pd.concat(categorical_deferred_parts, axis=1)
 
     # ---- dynamic near-constant / high-missingness exclusion (model_input only) ----
@@ -602,7 +753,8 @@ def build(args: argparse.Namespace) -> None:
 
     # ---- assemble final matrix ----
     matrix = pd.concat(
-        [model_input, split_support, diagnostic, categorical_deferred, hydroatlas_flag],
+        [model_input, split_support, diagnostic, diagnostic_record_network_qa,
+         deferred_ambiguous, categorical_deferred, hydroatlas_flag],
         axis=1,
     )
     matrix.index.name = "gauge_id"
@@ -611,6 +763,8 @@ def build(args: argparse.Namespace) -> None:
     role_map: dict[str, str] = {c: "model_input" for c in model_input.columns}
     role_map.update({c: "split_support" for c in split_support.columns})
     role_map.update({c: "diagnostic_latlon" for c in diagnostic.columns})
+    role_map.update({c: "diagnostic_record_network_qa" for c in diagnostic_record_network_qa.columns})
+    role_map.update({c: "deferred_ambiguous" for c in deferred_ambiguous.columns})
     role_map.update({c: "categorical_deferred" for c in categorical_deferred.columns})
     role_map["hydroatlas_coverage_flag"] = "flag"
     role_map["final_training_status"] = "flag"
@@ -660,6 +814,8 @@ def build(args: argparse.Namespace) -> None:
         "n_model_input_columns": len(model_input.columns),
         "n_split_support_columns": len(split_support.columns),
         "n_diagnostic_latlon_columns": len(diagnostic.columns),
+        "n_diagnostic_record_network_qa_columns": len(diagnostic_record_network_qa.columns),
+        "n_deferred_ambiguous_columns": len(deferred_ambiguous.columns),
         "n_categorical_deferred_columns": len(categorical_deferred.columns),
         "hydroatlas_gap": {
             "expected_missing_staids": sorted(_EXPECTED_HYDROATLAS_GAP_STAIDS),
@@ -675,6 +831,14 @@ def build(args: argparse.Namespace) -> None:
         "high_missing_excluded_model_input": high_missing_excluded,
         "near_constant_max_nunique": _NEAR_CONSTANT_MAX_NUNIQUE,
         "high_missing_threshold": _HIGH_MISSING_THRESHOLD,
+        "sentinel_decoding": {
+            "algorithm_id": _SENTINEL_DECODE_ALGORITHM_ID,
+            "sentinel_values_by_column": {
+                c: sorted(v) for c, v in _SENTINEL_VALUES_BY_COLUMN.items()
+            },
+            "replacement_counts_by_source_qualified_column": sentinel_replacement_counts_all,
+            "total_values_replaced": sum(sentinel_replacement_counts_all.values()),
+        },
     }
     with open(provenance_path, "w", encoding="utf-8") as f:
         json.dump(provenance, f, indent=2)
