@@ -61,9 +61,13 @@ Authority hierarchy (not re-decided here):
    is fallback/ablation only; unset/default `None` is forbidden in any run that
    permits NaN dynamic inputs (Q6: unset passes raw NaN into an unprotected
    `nn.Linear`). Smoke 0/1 fill (MRMS→0 mm, RTMA→interp) is historical only.
-6. **Static attributes.** Canonical `stage1_static_attributes_v001`
-   (2,843 × 531, 496 `model_input`, h2o canonical audit PASS, sha256
-   `eb17aaa07c786a25291ceaf69e770bd54bda4bc22fbd1216a81734fa6882f464`), through
+6. **Static attributes.** [**Updated 2026-07-20** — the v001 matrix named in
+   this item at I-0 planning time (2026-07-13) has since been superseded;
+   see `docs/decision_log.md` 2026-07-20 entries and
+   `docs/FLASHNH_CURRENT_STATE.md` for the full acceptance record. This item
+   now states the current binding matrix.] Canonical
+   `stage1_static_attributes_v002` (2,843 × 523, 473 `model_input`, sha256
+   `4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`), through
    NH's standard numeric static-attribute pathway. No raw categorical
    embeddings. `STATE`/`HUC02` split-support/diagnostics only;
    `LAT_GAGE`/`LNG_GAGE` diagnostics only — none of the four are model inputs.
@@ -133,7 +137,7 @@ Key structural facts:
 | Temporal split | `_TRAIN_END="2022-12-31"`, `_VAL_*=2023`, `_TEST_*=2024–2025` hard-coded (`build_stage1_nh_package.py:70-74`) | Train→2023-12-31, val 2024, test 2025 | New policy YAML + new builder; never edit constants in the frozen smoke builder |
 | Target | Raw `qobs_m3s` written and configured as target (builder line 344, configs line 427) | `qobs_mm_per_h_leadXX` (4 leads), mm/h | New conversion + lead-shift modules |
 | Gap handling | MRMS NaN→0.0, RTMA→interp (`_apply_gap_fill`, lines 299–325); auditor asserts zero forcing NaN | Preserve NaN; hard-exclude gap-intersecting training windows | New builder writes NaN-preserving NCs; validity-mask + NH index integration |
-| Static attributes | 48-col merge; `_REQUIRED_ATTR_COLS = [DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE]` (line 93); LAT/LNG configured as NH static inputs | `stage1_static_attributes_v001`, 496 `model_input` cols via role manifest; lat/lon excluded from inputs | Role-driven column selection from `_column_manifest.json` |
+| Static attributes | 48-col merge; `_REQUIRED_ATTR_COLS = [DRAIN_SQKM, LAT_GAGE, LNG_GAGE, BFI_AVE]` (line 93); LAT/LNG configured as NH static inputs | `stage1_static_attributes_v002` (**updated 2026-07-20**; supersedes the v001/496 figure this row originally named), 473 `model_input` cols via role manifest; lat/lon excluded from inputs | Role-driven column selection from `_column_manifest.json` |
 | Basin lists | All basins in all splits (`_write_basin_lists`) | 7 real split artifacts, CA excluded, spatial holdout disjoint | New split generator/auditor/QC/promotion |
 | Configs | Two smoke YAMLs, Moriah paths hard-coded, `qobs_m3s` target | 16 lead×seq configs from template+generator, policy-driven | New config generator |
 | Slurm | Dead `_write_slurm` in builder (wrong invocation, `--partition=gpu`); repo sbatch hard-pinned `catfish`/L4 | Parameterized `PARTITION`/`GRES` (design doc §11) | New parameterized baseline sbatch (later sub-milestone); never call `_write_slurm` |
@@ -209,6 +213,19 @@ it at I-B; no test infrastructure exists today — creating `tests/` +
 ---
 
 ## 5. Basin-universe reconciliation
+
+**Historical/frozen note (added 2026-07-20):** this section documents the
+basin-universe reconciliation and split-generation process as it was actually
+planned and executed, which correctly used the `stage1_static_attributes_v001`
+matrix for `STATE`/`HUC02`/area/hydroclimate split-support fields. The split
+artifacts this process produced (`config/stage1_baseline_splits_v001/`) are
+now frozen and accepted, and are not being regenerated against
+`stage1_static_attributes_v002` — see `docs/decision_log.md` 2026-07-20
+entries. The `v001` matrix name and 531/496 figures below describe that real,
+completed historical process and are preserved as-is. They are unrelated to
+the *current* binding model-input static matrix (`stage1_static_attributes_v002`,
+473 `model_input` columns), which is used for compact-package attribute
+preparation (§15) and is stated as current in §1 item 6 and §3.
 
 ### Sources
 
@@ -447,7 +464,10 @@ CONUS scale):
 - optional: CONUS map colored by area class or aridity class.
 
 Distribution comparisons (development vs spatial holdout; and CA fine-tune vs
-CA holdout; and CA vs non-CA) — concise scientific set, not all 496 columns:
+CA holdout; and CA vs non-CA) — concise scientific set, not all 496 columns
+(historical figure from the `v001` matrix used for this now-complete,
+frozen split-QC pass; see the §5 historical note — unrelated to the current
+`stage1_static_attributes_v002` model-input count):
 `DRAIN_SQKM` (log-scale), aridity (`ari_ix_uav`), mean annual precipitation,
 elevation (`ELEV_MEAN_M_BASIN` or HydroATLAS `ele_mt_sav`), snow fraction
 (`snw_pc_syr`), `BFI_AVE` (or a flashiness proxy if available), target-data
@@ -480,6 +500,18 @@ Preserve after approval: `summary.md` + `manifest.json` (tracked under
 machine-readable source, modeled on `config/stage1_target_policy.yaml`
 (existing precedent: policy in config, consumed by builders, never executes
 transformations). Schema outline:
+
+**Status note (added 2026-07-20):** the outline below is the **illustrative
+I-0-era schema sketch** as originally drafted (2026-07-13), preserved
+unedited as planning history. It was subsequently implemented as
+`config/stage1_scientific_baseline_v001.yaml` (sub-milestone I-A1, and
+revised in place to `policy_version: 2` on 2026-07-20 to reconcile
+`static_attributes.*` with the accepted `stage1_static_attributes_v002`
+matrix — see `docs/decision_log.md`). The actual policy file is the binding
+artifact; where it differs from the sketch below (notably
+`static_attributes.matrix_name`/`sha256`/column counts, now v002/523/473),
+the actual file governs. Do not treat this code block as current schema
+documentation.
 
 ```yaml
 policy_name: stage1_scientific_baseline_v001
@@ -740,6 +772,44 @@ global forcing-validity only); qobs NaNs remain per-basin and are handled by
 NH loss masking — the package auditor reports both quantities separately so
 they are never conflated.
 
+**Runtime-vs-audit-artifact clarification (added 2026-07-20, based on direct
+code inspection of `src/baseline/nh_dataset.py`,
+`src/baseline/gap_mask_io.py`, and `src/baseline/validity_mask.py`, none of
+which were modified by this note).** The 16-artifact `.npz`
+(`history_valid_seq{L}.npz` / `valid_issue_times_seq{L}_lead{XX}.npz` /
+`masks_manifest.json`) design above is a **still-proposed audit/evidence
+artifact set** — it has not been built. The **currently implemented runtime
+mechanism** is materially simpler and already exists:
+`src/baseline/nh_dataset.py::FlashNHDataset` (a `GenericDataset` subclass,
+per the §13 Option 2 design) reads a single flat timestamp list from
+`masks/gap_timestamps.json` (written by `src/baseline/gap_mask_io.py` from a
+gap inventory, MRMS-only by default per Policy B), builds the research
+timeline from the dataset instance's own loaded dates, and computes
+`history_valid` **live, per instance** via
+`validity_mask.compute_history_valid` — there are no precomputed
+per-`(seq_length, lead)` boolean-array files consumed at runtime. Its
+target-boundary check is also period-aware
+(`issue_ts + lead_delta > period_end`), which is deliberately different from
+`validity_mask.compute_boundary_valid` (not period-aware). Do not read this
+section as meaning only `gap_timestamps.json` is needed end-to-end: the
+question of whether independently-computed, precomputed sequence/lead
+validity masks or valid-timestamp arrays and their counts are still required
+— for audit cross-checks and off-by-one verification separate from the
+runtime filter — is **not yet decided**. That decision belongs to the
+package builder/auditor implementation increment (not yet started; out of
+scope for this docs-only patch), which will determine whether such
+artifacts live inside the transferable package, only in the compact
+package's evidence/audit bundle, or both. Whichever form is chosen, its
+representation must record: the timeline definition, `seq_length`, lead,
+issue-time indexing convention, source gap-inventory/policy checksums, and
+valid/invalid counts per combination — so it can be reconciled against the
+runtime filter's own counts. The approved rule
+`sample_valid = history_valid_seq & target_boundary_valid_lead & split_valid`
+is unchanged by this note; a forcing gap at the future target timestamp is
+still not by itself a basis for exclusion (§12 above); basin-specific qobs
+NaNs remain a separate, target/loss-masking concern, never folded into the
+forcing-validity mask.
+
 ---
 
 ## 13. Applying the validity mask to NeuralHydrology
@@ -878,7 +948,9 @@ scripts/build_stage1_baseline_nh_package.py   # thin CLI; all logic in src/basel
              (13 dynamic vars + 4 lead targets + qobs_m3s diagnostic) →
            attributes/attributes.csv (model_input columns ONLY) →
            basins/ (copied from canonical split artifacts, checksummed) →
-           masks/ (16 validity artifacts + masks_manifest.json) →
+           masks/ (still-proposed audit artifacts — see §12's 2026-07-20
+             runtime-vs-audit-artifact note; the runtime filter itself only
+             requires masks/gap_timestamps.json) →
            configs/ (via the config generator, §17) →
            manifests/ + run_provenance.json (policy/matrix/split/mask checksums)
 scripts/audit_stage1_baseline_nh_package.py   # independent; reads original target
@@ -892,13 +964,22 @@ Frozen for historical reproducibility: all Smoke 0/1 scripts (§4 table).
 
 ### Static attribute integration
 
+**Updated 2026-07-20** — this subsection is forward-looking builder spec
+(not yet implemented); it now names the current binding matrix. It
+originally named `stage1_static_attributes_v001`/496 columns at I-0 planning
+time (2026-07-13); see `docs/decision_log.md` 2026-07-20 entries for the
+supersession record.
+
 - Column selection: **strictly** `role == "model_input"` from
-  `stage1_static_attributes_v001_column_manifest.json` — never dtype
+  `stage1_static_attributes_v002_column_manifest.json` — never dtype
   inference. `attributes/attributes.csv` contains **only** `gauge_id` + those
-  496 columns, so `STATE`/`HUC02`/`LAT_GAGE`/`LNG_GAGE`/categorical/
+  473 columns, so `STATE`/`HUC02`/`LAT_GAGE`/`LNG_GAGE`/categorical/
   admin/coverage-flag columns cannot leak into NH inputs even via config
   error. The NH configs' `static_attributes` list is generated from the same
-  manifest and cross-checked by the auditor.
+  manifest and cross-checked by the auditor. For the accepted 32-basin
+  Compact Scientific Package specifically, `attributes/attributes.csv` is
+  exactly the accepted 32×473 prepared static matrix (development-train-fit
+  median imputation already applied and accepted — see §16).
 - **Canonical basin area: `DRAIN_SQKM`** (GAGES-II BasinID, km²; the
   Bound_QA duplicate was already dropped at matrix build). The builder must
   fail loud if any HydroATLAS area-like column would be accidentally used;
@@ -909,11 +990,20 @@ Frozen for historical reproducibility: all Smoke 0/1 scripts (§4 table).
 - Area audit: units (km², sanity vs known basin sizes), positivity,
   completeness for all 2,752, exact source column, matrix sha256, and a
   conversion-consistency spot check (recompute one lead target from area).
-- **Static-attribute NaN policy — SIGNED OFF (2026-07-13).** The problem is
+- **Static-attribute NaN policy — SIGNED OFF (2026-07-13); numbers below are
+  the original v001-era sign-off figures, preserved as historical record of
+  the decision. The policy itself (median imputation fit on development-train
+  only, applied unchanged elsewhere) carries over unchanged to v002 and has
+  already been executed and accepted for the 32-basin Compact Scientific
+  Package (168 imputed values, all on basin `393109104464500`, zero
+  remaining NaNs — see `docs/FLASHNH_CURRENT_STATE.md`); a full 2,752-basin
+  v002 missingness audit analogous to the ~195-column figure below has not
+  yet been documented in this plan.** The problem is
   broader than the 5 HydroATLAS-gap basins (all of which are in the 2,752
-  eligible set, making ~195 HydroATLAS `model_input` columns NaN for them):
+  eligible set, making ~195 HydroATLAS `model_input` columns NaN for them,
+  under v001):
   matrix policy allows up to 20% missingness per column, so the builder must
-  **audit missingness across all 496 `model_input` columns over the
+  **audit missingness across all 473 `model_input` columns (v002) over the
   development-training basin set**, not just the known HydroATLAS gap.
   Decided policy:
   - impute static `model_input` NaNs with **medians fitted only on
@@ -937,29 +1027,46 @@ Frozen for historical reproducibility: all Smoke 0/1 scripts (§4 table).
 
 ## 16. Early h2o compact package and early Moriah smoke (revised sequencing)
 
+**Updated 2026-07-20** — the compact basin subset described in this section
+was a **~12–15-basin illustrative proposal** at I-0 planning time
+(2026-07-13); the basin set is **no longer undecided**. A deterministic
+32-basin Compact Scientific Package selection has since been accepted (see
+`docs/stage1_compact_package_selection.md` and the acceptance record in
+`docs/FLASHNH_CURRENT_STATE.md`): all 32 basins drawn from
+`development_train` (no California or spatial-holdout basins), spanning 13
+distinct HUC02s and 7 macro-regions (east/west split 19/13), including the
+diagnostic basins `393109104464500` (HydroATLAS-gap / compound edge case;
+under v002 imputation this basin carries all 168 imputed static values in
+the accepted compact matrix) and `05568800` (lowest qobs completeness,
+≈0.8746). This selection and its evidence bundle
+(`/data42/omrip/Flash-NH/tmp/stage1_compact_package_selection_v001_evidence`
+on h2o) are frozen and **must not be regenerated or redesigned** here; the
+paragraphs below describe the package this basin set is built into, not a
+still-open selection question.
+
 Moriah integration is pulled **forward**: it runs as soon as one
 scientifically correct configuration exists, before the 16-combo expansion.
 
+**Package architecture (provisional, frozen for this rollout):** one
+physical package covering all 32 accepted basins. Every basin NetCDF
+contains the eight accepted `v001-core` dynamic inputs, the diagnostic/
+provenance `qobs_m3s` series, and all four shifted-target mm/h series
+(`qobs_mm_per_h_lead01/03/06/12`) — never only the compact-configuration
+lead. `attributes/attributes.csv` is exactly the accepted 32×473 prepared
+static matrix (development-train-fit median imputation already applied; 168
+imputed values, all on basin `393109104464500`; zero remaining NaNs). Each
+lead-specific NH config selects exactly one of the four transformed targets
+via `target_variables`; raw `qobs_m3s` is never configured as an NH training
+target in any config, consistent with §1 item 1 and §11.
+
 Compact configuration: **lead = 6 h, seq_length = 24 h** (primary benchmark
 lead; the seq value continuous with Smoke 0/1 evidence — no better candidate
-emerged from inspection).
-
-Compact basin subset (~12–15 basins, chosen deliberately, not the first five
-alphabetical — though the 5 legacy pilot basins are worth keeping for
-continuity with Smoke 0/1 diagnostics):
-- the 5 legacy pilot basins (01019000, 01022500, 01033000, 01038000,
-  01049500 — includes high-qobs-NaN cases 01033000/01022500);
-- 1 very small and 1 very large basin by `DRAIN_SQKM`;
-- 2 basins from arid/western HUC02s (hydroclimate contrast);
-- ≥1 HydroATLAS-gap basin (e.g. `393109104464500`) — exercises the
-  static-NaN policy and 15-char ID handling end to end;
-- the 9-char basin `103366092` if distinct from the above;
-- 2 spatial-holdout basins — **package-audit only** (present in the package,
-  absent from every training config; auditor asserts the training basin list
-  excludes them);
-- CA exclusion check: assert no `california_all.txt` member appears anywhere
-  in the compact package's training/validation lists (CA basins need not be
-  in the package at all).
+emerged from inspection). This is the **first** integration config, not the
+final config set: after this smoke passes, the complete 16 lead×seq
+combinations (§17) are generated against the same 32-basin package. Do not
+describe the final design as only these four leads' worth of configs, or as
+only this one config — the rollout is (1) this one lead06/seq24 config
+first, then (2) the full 16-config expansion once (1) passes.
 
 Sequence: build compact package on h2o → h2o audit (I-C3 auditor) → `scp -O`
 to Moriah → CPU preflight (NH loads package; dataset counts match mask
@@ -970,7 +1077,9 @@ inverse scaling are in mm/h; a tiny Flash-NH script converts a sample back to
 m³/s and matches the original magnitudes. Only after this smoke passes is the
 16-combo config expansion (I-E2) and any full 2,752-basin build authorized.
 
-No training is run in the current planning pass.
+No implementation, package build, remote run, or training has occurred as of
+this docs-only patch (2026-07-20); the package/builder/auditor code itself is
+still not implemented.
 
 ---
 
@@ -1212,11 +1321,13 @@ after I-F1; key only via user-private env).
 2. **Static-attribute NaN policy — SIGNED OFF (§15).** Medians fitted only on
    development-training basins; applied unchanged to all other Stage 1–3
    splits; missing/imputed counts audited per column and per split across all
-   496 `model_input` columns; fitted values + checksum recorded; build fails
-   if any `model_input` column is all-NaN over development training; no
-   missingness-indicator inputs in v001 unless separately approved; Stage 4
-   may later fit its own medians on the CA fine-tune-training subset only.
-   Unblocks I-C2.
+   473 `model_input` columns (**updated 2026-07-20** to the current
+   `stage1_static_attributes_v002` count — the original 2026-07-13 sign-off
+   named 496/v001; the decision itself is unchanged, see §15); fitted values
+   + checksum recorded; build fails if any `model_input` column is all-NaN
+   over development training; no missingness-indicator inputs in v001 unless
+   separately approved; Stage 4 may later fit its own medians on the CA
+   fine-tune-training subset only. Unblocks I-C2.
 3. **California membership — SIGNED OFF.** `STATE == "CA"` from the canonical
    split-support field. `LAT_GAGE`/`LNG_GAGE` are diagnostic cross-checks
    only: anomalies are flagged for human review in the split QC, never

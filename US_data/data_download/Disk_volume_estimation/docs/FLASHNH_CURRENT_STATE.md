@@ -155,14 +155,19 @@ design doc's "Binding decisions — Milestone 2K-G-H sign-off" section):
    policy. `nan_handling_method` (Policy A) remains a fallback/ablation path
    only, not the baseline; unset/default `None` remains forbidden in any
    run per Q6 evidence.
-5. **Static attributes (§3):** canonical `stage1_static_attributes_v001`
-   (2,843 × 531 cols, 496 `model_input`, h2o canonical PASS 2026-07-08)
+5. **Static attributes (§3) — HISTORICAL, SUPERSEDED (see 2026-07-20 state at
+   top of this document).** At the time of this 2K-G-H sign-off
+   (2026-07-12), canonical `stage1_static_attributes_v001`
+   (2,843 × 531 cols, 496 `model_input`, h2o canonical PASS 2026-07-08) was
    accepted as the Stage 1 baseline static matrix, replacing the earlier
    48-column merge. Numeric attributes pass through NH's standard
    static-attribute pathway; no categorical embeddings in this first
    baseline. `STATE`/`HUC02` remain split-support/diagnostics only;
    `LAT_GAGE`/`LNG_GAGE` remain diagnostic only, deferred to a later
-   ablation.
+   ablation. **This v001 matrix was superseded on 2026-07-20 by the accepted
+   `stage1_static_attributes_v002` (2,843 × 523 cols, 473 `model_input`) —
+   see the acceptance record at the top of this document and
+   `docs/decision_log.md` for the current binding static-attribute state.**
 6. **Spatial split and leakage (§8b):** reproducible seeded stratified
    non-CA spatial holdout (mechanism unchanged), stratifying on at least
    HUC02/geography, basin area, and hydroclimatic/aridity attributes from

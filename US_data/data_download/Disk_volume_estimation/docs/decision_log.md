@@ -2153,3 +2153,89 @@ documentation-reconciliation patch, not rewritten here.
 NeuralHydrology work was implemented. No h2o or Moriah connection was made.
 No package was built and no training occurred. This is a policy/loader/test
 reconciliation only.
+
+---
+
+## 2026-07-20 — Stage 1 — Compact Scientific Package implementation-contract docs reconciled to v002/32-basin state
+
+**Problem.** The entry above reconciled the *executable* scientific-baseline
+policy to `stage1_static_attributes_v002`, but explicitly deferred two
+*documentation* artifacts: `docs/stage1_baseline_package_implementation_plan.md`
+(the active Compact Scientific Package implementation plan) still prescribed
+active/forward-looking work against the superseded `stage1_static_attributes_v001`
+(531 total / 496 `model_input` columns) and a still-undecided "~12–15-basin"
+illustrative compact subset; and the mid-document 2K-G-H-era summary in
+`docs/FLASHNH_CURRENT_STATE.md` still presented the same v001/531/496 figures
+without a superseded marker, alongside the correct v002 acceptance record at
+the top of the same file.
+
+**Fix (docs-only; no code/config/test/generated-artifact change).** Updated
+active and forward-looking sections of
+`docs/stage1_baseline_package_implementation_plan.md`: §1 binding-requirements
+item 6 and the §3 gap-table static-attributes row now name
+`stage1_static_attributes_v002` (523 total / 473 `model_input`, sha256
+`4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`); §15
+"Static attribute integration" now names the v002 column-manifest filename
+and 473-column count, and records that `attributes/attributes.csv` for the
+accepted Compact Scientific Package is exactly the accepted 32×473 prepared
+matrix; §21 sign-off item 2 records the updated 473-column audit scope while
+preserving the original 2026-07-13 sign-off's decision text; §16 was rewritten
+to replace the "~12–15 basin, chosen deliberately" illustrative proposal with
+the actual accepted deterministic 32-basin Compact Scientific Package
+selection (all `development_train`, no California/spatial-holdout basins;
+see `docs/stage1_compact_package_selection.md` and the acceptance record in
+`docs/FLASHNH_CURRENT_STATE.md`), and now states the frozen provisional
+package architecture explicitly: one physical 32-basin package; every basin
+NetCDF carries the eight accepted `v001-core` dynamic inputs plus the
+diagnostic/provenance `qobs_m3s` series plus all four shifted mm/h lead
+targets (`qobs_mm_per_h_lead01/03/06/12`); `attributes/attributes.csv` equals
+the accepted 32×473 prepared static matrix; each lead-specific NH config
+selects exactly one transformed target; raw `qobs_m3s` is never configured as
+an NH training target. Rollout is documented as (1) one lead06/seq24
+integration config first, then (2) the full 16 lead×seq config expansion
+after that config's Moriah smoke passes — the plan no longer implies only
+four configs exist or will ever exist. §12 gained a runtime-vs-audit-artifact
+clarification, grounded in direct 2026-07-20 inspection of
+`src/baseline/nh_dataset.py`, `src/baseline/gap_mask_io.py`, and
+`src/baseline/validity_mask.py` (none modified): the currently *implemented*
+runtime filter (`FlashNHDataset`) consumes a single flat
+`masks/gap_timestamps.json` and computes `history_valid` live per instance,
+materially simpler than the still-proposed 16-artifact `.npz` +
+`masks_manifest.json` audit-artifact design in the same section; whether
+precomputed sequence/lead validity masks or valid-timestamp arrays are still
+needed as independent audit/off-by-one-verification evidence — and whether
+such artifacts would live inside the transferable package, only in the
+compact package's evidence/audit bundle, or both — remains an open decision
+for the not-yet-started package builder/auditor increment. The approved rule
+`sample_valid = history_valid_seq & target_boundary_valid_lead & split_valid`
+is restated unchanged; a forcing gap at the future target timestamp is still
+not by itself a basis for exclusion; basin-specific qobs NaNs remain a
+separate target/loss-masking concern. §5 (basin-universe reconciliation) and
+§9 (the illustrative I-0-era YAML policy-schema outline) each received a
+short framing note marking their v001/531/496 content as valid, preserved
+historical/illustrative record — distinct from, and not rewritten to match,
+the current v002 state — since they describe the real, completed,
+frozen split-generation process and the schema sketch that predates the
+actual implemented `config/stage1_scientific_baseline_v001.yaml`
+(`policy_version: 2`), respectively.
+
+Also added a superseded/historical marker to the mid-document "Static
+attributes (§3)" bullet in the 2026-07-12 2K-G-H sign-off summary of
+`docs/FLASHNH_CURRENT_STATE.md`, pointing to the correct top-of-document
+2026-07-20 v002 acceptance record without duplicating it and without altering
+the historical decision text itself.
+
+**Unaffected / not reopened.** No scientific decision was reopened. The
+frozen split artifacts (`config/stage1_baseline_splits_v001/`) and the
+accepted 32-basin Compact Scientific Package selection were **not**
+regenerated or redesigned. No source code, YAML/config file, test, mask
+artifact, or generated package was created or modified. No h2o or Moriah
+connection was made. No training was run. Historical v001 provenance
+(the real 2K-G-F-B build event, the real split-generation process that
+genuinely used v001 fields, the real 2026-07-13 sign-off text) was preserved
+as-is, not rewritten to falsely appear to have used v002.
+
+**Not done.** Package-builder code, auditor code, the config generator, mask
+artifacts (runtime or audit-form), NeuralHydrology integration code, and
+Slurm files remain not implemented — this patch only reconciled planning
+documentation with the already-accepted v002/32-basin state.
