@@ -317,9 +317,9 @@ diagnostic-lat-lon handling). Specifically:
 categorical embeddings, or a lat/lon ablation, remains a future discussion —
 this sign-off only locks the v001-core numeric-attribute baseline.
 
-**SUPERSEDED FOR MODELING (2026-07-20).** A read-only semantic audit of all
-496 `model_input` columns of `stage1_static_attributes_v001` found bounded
-semantic defects: 8 GAGES-II infrastructure-distance columns
+**SUPERSEDED FOR MODELING BY v002 (2026-07-20).** A read-only semantic audit
+of all 496 `model_input` columns of `stage1_static_attributes_v001` found
+bounded semantic defects: 8 GAGES-II infrastructure-distance columns
 (`RAW_DIS_NEAREST_DAM`, `RAW_AVG_DIS_ALLDAMS`, `RAW_DIS_NEAREST_MAJ_DAM`,
 `RAW_AVG_DIS_ALL_MAJ_DAMS`, `RAW_DIS_NEAREST_CANAL`, `RAW_AVG_DIS_ALLCANALS`,
 `RAW_DIS_NEAREST_MAJ_NPDES`, `RAW_AVG_DIS_ALL_MAJ_NPDES`) carrying an
@@ -333,25 +333,51 @@ describing gauge/network provenance rather than basin physical attributes;
 alongside the already-diagnostic `LAT_GAGE`/`LNG_GAGE`; undecoded missing-
 value sentinels on `PERHOR` (`-9999`) and `STRAHLER_MAX` (`-99`); and one
 HydroATLAS field (`lka_pc_use`) with unresolved catalog semantics. Binding
-decisions and full rationale: `docs/decision_log.md` (2026-07-20 entry).
+decisions and full rationale: `docs/decision_log.md` (2026-07-20 entries).
 Implementation: `docs/stage1_static_attribute_matrix_plan.md` §12.
 
 The v001 artifact and checksum above remain the historical record of the
-2026-07-08 canonical build and are **not overwritten or deleted**. The
-corrected matrix is pending a canonical h2o rebuild under a new version path
-(`stage1_static_attributes_v002`, exact commands in
-`docs/decision_log.md`); a local, checksum-unverified dry-run against the
-same source mirror confirmed the corrected pipeline lands at **473
-`model_input` columns** (provisional — the h2o rebuild is the authority on
-the final count) with all 8 `RAW_*` columns excluded via the existing
-`>20%` high-missingness mechanism (not by name), `PERHOR`/`STRAHLER_MAX`
-retained as `model_input` with sentinels decoded, and `dor_pc_pva`/
-`dis_m3_pyr`/`run_mm_syr` unchanged. The compact static-imputation artifact
-built from v001 (`stage1_compact_static_imputation_v001`) is likewise
-superseded pending the corrected rebuild — the accepted 32-basin Compact
-Scientific Package selection and split assignment are unaffected and remain
-valid (selection is basin-set logic, independent of static-attribute
-column content).
+2026-07-08 canonical build and are **not overwritten or deleted**, but are
+superseded for modeling purposes.
+
+**Corrected canonical matrix v002 — ACCEPTED (2026-07-20).**
+`stage1_static_attributes_v002` is accepted as the canonical Stage 1
+v001-core static-attribute matrix, replacing v001 above. Source-checksum
+verification 29/29 PASS. Canonical path:
+`/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002.parquet`,
+sha256 `4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`
+(companion column-manifest/provenance/audit-summary checksums in
+`docs/decision_log.md`). Matrix: 2,843 rows × 523 total columns — **473
+`model_input`** (authoritative), 2 split-support, 4 diagnostic lat/lon, 12
+diagnostic record/network/QA, 1 deferred-ambiguous, 29 categorical-deferred,
+2 flag. Sentinel algorithm `stage1_static_sentinel_decode_v1`, 15,018 total
+values decoded. All 8 `RAW_*` infrastructure-distance columns excluded via
+the existing `>20%` high-missingness mechanism (not by name); `PERHOR`/
+`STRAHLER_MAX` retained `model_input` with sentinels decoded; `dor_pc_pva`/
+`dis_m3_pyr`/`run_mm_syr` retained unchanged; direct-coordinate,
+record/network/QA, and `lka_pc_use` exclusions verified; HydroATLAS 5-basin
+gap unchanged and explicitly handled. Independent audit
+(`scripts/audit_stage1_static_attribute_matrix.py`): PASS, 0 errors, 0
+warnings, 32 OK checks. The full `model_input` column list is not
+reproduced here — see the canonical column manifest.
+
+**Compact static-imputation v002 — ACCEPTED (2026-07-20).** Rebuilt against
+the accepted v002 matrix (algorithm `stage1_static_median_imputation_v1`,
+primitive unchanged from v001). Canonical generated output:
+`/data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v002`. Input
+matrix checksum matches v002 exactly. Output 32 basins × 473 `model_input`
+columns; development-training-only fit (2,307-basin population); all fit
+columns had valid medians; 168 total values imputed, all on basin
+`393109104464500` (the designated compound-edge-case diagnostic basin, per
+`docs/FLASHNH_CURRENT_STATE.md`); zero remaining NaNs. Output checksums
+recorded in `docs/decision_log.md`. `stage1_compact_static_imputation_v001`
+remains preserved as historical provenance, superseded for modeling.
+
+**Not reopened / unaffected by this acceptance:** the selector and canonical
+split artifacts were not rerun; the accepted 32-basin Compact Scientific
+Package selection remains valid as-is (selection is basin-set logic,
+independent of static-attribute column content); no NH package has yet been
+built; no training has run.
 
 ## 4. Target variable and target cleaning (APPROVED — basin set)
 

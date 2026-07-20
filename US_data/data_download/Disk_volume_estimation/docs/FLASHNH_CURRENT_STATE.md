@@ -1,38 +1,62 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-20 (static-attribute semantic correction — sentinel decoding + role reclassification, pending h2o rebuild)
+Last updated: 2026-07-20 (static-attribute matrix v002 ACCEPTED — corrected canonical baseline; compact static-imputation v002 ACCEPTED)
 
 ## Current milestone
 
-**Static-attribute semantic correction — sentinel decoding + role
-reclassification (2026-07-20, pending h2o rebuild).** A read-only semantic
-audit of all 496 `model_input` columns of canonical `stage1_static_attributes_v001`
-found bounded defects: 8 GAGES-II infrastructure-distance `RAW_*` columns
-carrying an undecoded `-999` sentinel; 12 gauge-record/network/QA metadata
-columns and `LAT_CENT`/`LONG_CENT` misclassified as `model_input` rather than
-diagnostic; undecoded sentinels on `PERHOR` (`-9999`) and `STRAHLER_MAX`
-(`-99`); one deferred-ambiguous HydroATLAS field (`lka_pc_use`).
-`scripts/build_stage1_static_attribute_matrix.py` and
-`scripts/audit_stage1_static_attribute_matrix.py` were both updated: a new
-per-column sentinel-decode step (`_SENTINEL_VALUES_BY_COLUMN`, applied before
-role classification/missingness calc, replacement counts recorded in
-provenance) and two new roles (`diagnostic_record_network_qa`,
-`deferred_ambiguous`; `diagnostic_latlon` extended to 4 columns). The 8
-`RAW_*` columns are excluded via the pre-existing `>20%` high-missingness
-mechanism after decoding — **not** hand-classified by name — proving the
-general policy operates correctly. 19 new focused tests added
-(`tests/test_static_attribute_matrix.py`); full local suite 448 passed. A
-local, checksum-unverified dry-run against the same source mirror used for
-the original canonical build confirms the corrected pipeline (2,843 rows ×
-523 columns, **473 `model_input`**, provisional) and an independent-auditor
-PASS (0 errors, 0 warnings, 32 OK checks). **Not done in this increment:**
-no h2o/Moriah connection, no canonical rebuild executed, no compact-selector
-rerun, no NH package built, no training, nothing committed. The accepted
-32-basin Compact Scientific Package selection and canonical split assignment
-are unaffected and remain valid. Full detail:
-`docs/stage1_static_attribute_matrix_plan.md` §12,
+**Static-attribute matrix v002 — ACCEPTED as canonical Stage 1 baseline
+(2026-07-20).** `stage1_static_attributes_v002` (source-checksum-verified
+29/29 PASS build via `scripts/build_stage1_static_attribute_matrix.py`,
+independently audited PASS by
+`scripts/audit_stage1_static_attribute_matrix.py`) is accepted as the
+canonical Stage 1 v001-core static-attribute matrix, superseding
+`stage1_static_attributes_v001` for modeling. Canonical path:
+`/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/`
+(`stage1_static_attributes_v002.parquet`,
+`stage1_static_attributes_v002_column_manifest.json`,
+`stage1_static_attributes_v002_provenance.json`,
+`stage1_static_attributes_v002_audit_summary.md`). Matrix: 2,843 rows × 523
+total columns — **473 `model_input`** (authoritative, no longer provisional),
+2 split-support, 4 diagnostic lat/lon, 12 diagnostic record/network/QA, 1
+deferred-ambiguous (`lka_pc_use`), 29 categorical-deferred, 2 flag. Sentinel
+decoding (`stage1_static_sentinel_decode_v1`) replaced 15,018 values across
+the 12 mapped columns; the 8 infrastructure-distance `RAW_*` columns are
+excluded via the pre-existing `>20%` high-missingness mechanism, not by
+name; `PERHOR`/`STRAHLER_MAX` retained `model_input` with sentinels decoded;
+`dor_pc_pva`/`dis_m3_pyr`/`run_mm_syr` retained unchanged; direct-coordinate,
+record/network/QA, and `lka_pc_use` exclusions all verified; the HydroATLAS
+5-basin gap is unchanged and explicitly handled. Independent audit: PASS, 0
+errors, 0 warnings, 32 OK checks. Canonical matrix sha256
+`4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`;
+companion checksums (column manifest, provenance, audit summary) recorded in
+`docs/decision_log.md` (2026-07-20 acceptance entry). The full 473-column
+`model_input` list is not duplicated in prose — see the canonical column
+manifest.
+
+**Compact static-imputation v002 — ACCEPTED (2026-07-20).** Rebuilt against
+the accepted v002 matrix via `scripts/prepare_stage1_compact_static_attributes.py`
+(algorithm `stage1_static_median_imputation_v1`, unchanged primitive).
+Canonical generated output path:
+`/data42/omrip/Flash-NH/tmp/stage1_compact_static_imputation_v002`. Input
+matrix checksum matches canonical v002 exactly. Output: 32 basins × 473
+`model_input` columns; fit scope development-training-only (2,307-basin fit
+population); applied to the 32 accepted compact basins; all fit columns had
+valid medians; 168 total values imputed, all on a single basin
+(`393109104464500`, the same designated compound-edge-case diagnostic basin
+noted below); zero remaining NaNs. Output checksums (`imputed_static_attributes.parquet`,
+`imputed_value_mask.parquet`) recorded in `docs/decision_log.md`.
+
+**Both v001 artifacts (`stage1_static_attributes_v001` matrix and
+`stage1_compact_static_imputation_v001`) remain preserved as historical
+provenance — not deleted, not invalid — but are superseded for modeling.**
+The selector and canonical split artifacts were **not** rerun; the accepted
+32-basin Compact Scientific Package selection (below) remains valid as-is;
+the static-imputation primitive (`src/baseline/static_preparation.py`) is
+unchanged. No NH package has yet been built; no training has run. Full
+detail: `docs/stage1_static_attribute_matrix_plan.md` §12,
 `docs/stage1_scientific_baseline_design.md` §3, `docs/decision_log.md`
-(2026-07-20 entry). Corrected canonical rebuild (h2o) is the next blocker.
+(2026-07-20 acceptance entry). **Next milestone: Compact Scientific Package
+builder planning and implementation (not yet started).**
 
 **Compact Scientific Package selection — ACCEPTED (2026-07-20).** The fully
 enriched h2o run of `scripts/generate_stage1_compact_package_selection.py`
