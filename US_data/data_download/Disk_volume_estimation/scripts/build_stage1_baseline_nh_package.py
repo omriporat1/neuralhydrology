@@ -12,6 +12,7 @@ behavior; it only assumes local filesystem paths supplied via arguments.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -41,6 +42,17 @@ def _parse_args(argv=None) -> argparse.Namespace:
         "--static-attributes-parquet", required=True, help="Prepared compact static matrix (indexed by gauge_id)."
     )
     parser.add_argument("--static-column-manifest", required=True, help="Column-role manifest JSON.")
+    parser.add_argument(
+        "--static-preparation-manifest",
+        default=None,
+        help=(
+            "Optional imputation_manifest.json for the prepared compact static artifact "
+            "(as written by static_preparation.write_imputation_artifacts). When supplied, "
+            "its declared artifact_sha256['imputed_static_attributes.parquet'] checksum is "
+            "cross-checked against the actual --static-attributes-parquet file (computed by "
+            "this CLI, never trusted from the manifest)."
+        ),
+    )
     parser.add_argument(
         "--area-csv", required=True, help="CSV with columns gauge_id,DRAIN_SQKM (basin drainage areas)."
     )
@@ -74,7 +86,33 @@ def main(argv=None) -> int:
     gap_df = load_missing_hour_products(args.gap_inventory_csv)
     gap_timestamps = select_gap_timestamps(gap_df, products=gap_product_scope)
 
-    loader = default_local_basin_source_loader(args.forcing_root, args.qobs_root, area_by_basin)
+    loader = default_local_basin_source_loader(
+        args.forcing_root, args.qobs_root, area_by_basin, dynamic_inputs=policy["dynamic_inputs"]
+    )
+
+    # Canonical population-matrix identity, as declared by the validated
+    # policy -- independent of the prepared/compact artifact actually
+    # supplied via --static-attributes-parquet below (see
+    # package_builder._validate_prepared_static_artifact).
+    canonical_static_source_provenance = {
+        "matrix_name": policy["static_attributes"]["matrix_name"],
+        "sha256": policy["static_attributes"]["sha256"],
+    }
+
+    # Prepared artifact identity: always computed by this CLI from the
+    # actual file bytes, never trusted from a caller-supplied value.
+    prepared_static_attributes_provenance = {
+        "static_attributes_parquet": str(Path(args.static_attributes_parquet)),
+        "sha256": sha256_of(Path(args.static_attributes_parquet)),
+    }
+
+    static_preparation_manifest = None
+    if args.static_preparation_manifest is not None:
+        manifest_path = Path(args.static_preparation_manifest)
+        if not manifest_path.is_file():
+            raise SystemExit(f"--static-preparation-manifest not found: {manifest_path}")
+        static_preparation_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        prepared_static_attributes_provenance["static_preparation_manifest"] = str(manifest_path)
 
     result = build_compact_scientific_package(
         basin_ids=basin_ids,
@@ -92,11 +130,9 @@ def main(argv=None) -> int:
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         policy_provenance={"policy_yaml": str(Path(args.policy_yaml))},
-        static_attributes_provenance={
-            "static_attributes_parquet": str(Path(args.static_attributes_parquet)),
-            "matrix_name": policy["static_attributes"]["matrix_name"],
-            "sha256": sha256_of(Path(args.static_attributes_parquet)),
-        },
+        static_attributes_provenance=canonical_static_source_provenance,
+        prepared_static_attributes_provenance=prepared_static_attributes_provenance,
+        static_preparation_manifest=static_preparation_manifest,
         basin_selection_provenance={"basin_ids_file": str(Path(args.basin_ids_file))},
         gap_inventory_provenance={"gap_inventory_csv": str(Path(args.gap_inventory_csv))},
     )

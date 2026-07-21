@@ -360,6 +360,62 @@ def _validate_production_static_contract(
 
 
 # ---------------------------------------------------------------------------
+# Prepared (compact/imputed) static artifact identity -- independent of the
+# canonical population-matrix identity checked above. The artifact actually
+# supplied to this builder (e.g. a 32-row compact imputed matrix) is a
+# legitimately different file from the canonical matrix it was derived from;
+# their SHA-256 values are never required to agree. When an imputation
+# preparation manifest (as written by
+# ``static_preparation.write_imputation_artifacts``) is supplied, its
+# declared ``artifact_sha256["imputed_static_attributes.parquet"]`` must
+# agree with the actual file's checksum.
+# ---------------------------------------------------------------------------
+
+_PREPARED_STATIC_IDENTITY_FIELDS = ("sha256",)
+_PREPARED_STATIC_MANIFEST_ARTIFACT_KEY = "imputed_static_attributes.parquet"
+
+
+def _validate_prepared_static_artifact(
+    prepared_static_attributes_provenance: Mapping | None,
+    static_preparation_manifest: Mapping | None,
+) -> None:
+    if prepared_static_attributes_provenance is None:
+        raise PackageBuilderError(
+            "a validated production policy was supplied but "
+            "prepared_static_attributes_provenance is missing; it must record the actually "
+            "supplied (prepared/compact) static-attributes file's own identity field(s) "
+            f"{_PREPARED_STATIC_IDENTITY_FIELDS}, independent of the canonical population "
+            "matrix identity"
+        )
+    missing_fields = [
+        f for f in _PREPARED_STATIC_IDENTITY_FIELDS if f not in prepared_static_attributes_provenance
+    ]
+    if missing_fields:
+        raise PackageBuilderError(
+            f"prepared_static_attributes_provenance is missing required identity field(s) "
+            f"{missing_fields} for a production policy build"
+        )
+
+    if static_preparation_manifest is None:
+        return
+
+    artifact_sha256 = static_preparation_manifest.get("artifact_sha256")
+    if not isinstance(artifact_sha256, Mapping) or _PREPARED_STATIC_MANIFEST_ARTIFACT_KEY not in artifact_sha256:
+        raise PackageBuilderError(
+            "static_preparation_manifest is missing the expected "
+            f"artifact_sha256[{_PREPARED_STATIC_MANIFEST_ARTIFACT_KEY!r}] field"
+        )
+    manifest_sha256 = artifact_sha256[_PREPARED_STATIC_MANIFEST_ARTIFACT_KEY]
+    actual_sha256 = prepared_static_attributes_provenance["sha256"]
+    if manifest_sha256 != actual_sha256:
+        raise PackageBuilderError(
+            "prepared static artifact checksum mismatch: the actual "
+            f"{_PREPARED_STATIC_MANIFEST_ARTIFACT_KEY} file's SHA-256 ({actual_sha256!r}) does "
+            f"not match the preparation manifest's declared checksum ({manifest_sha256!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Gap-timestamp validation (reuses validity_mask.py rather than inventing a
 # second schema)
 # ---------------------------------------------------------------------------
@@ -524,6 +580,7 @@ def _build_manifest(
     gap_inventory_provenance: dict | None,
     gap_product_scope: tuple | None,
     write_qc_csv: bool,
+    prepared_static_attributes_provenance: dict | None = None,
 ) -> dict:
     lead_variable_names = [
         variable_name_for_lead(h, DEFAULT_VARIABLE_NAME_TEMPLATE) for h in DEFAULT_LEADS_HOURS
@@ -559,7 +616,10 @@ def _build_manifest(
         "static_model_input_columns": list(static_model_input_columns),
         "static_model_input_columns_sha256": static_columns_sha256,
         "policy_identity": policy_identity,
-        "static_attributes_source": dict(static_attributes_provenance) if static_attributes_provenance else None,
+        "canonical_static_source": dict(static_attributes_provenance) if static_attributes_provenance else None,
+        "prepared_static_artifact": (
+            dict(prepared_static_attributes_provenance) if prepared_static_attributes_provenance else None
+        ),
         "basin_selection_source": dict(basin_selection_provenance) if basin_selection_provenance else None,
         "gap_inventory_source": dict(gap_inventory_provenance) if gap_inventory_provenance else None,
         "gap_product_scope": list(gap_product_scope) if gap_product_scope is not None else None,
@@ -725,6 +785,8 @@ def build_compact_scientific_package(
     dry_run: bool = False,
     policy_provenance: dict | None = None,
     static_attributes_provenance: dict | None = None,
+    prepared_static_attributes_provenance: dict | None = None,
+    static_preparation_manifest: Mapping | None = None,
     basin_selection_provenance: dict | None = None,
     gap_inventory_provenance: dict | None = None,
 ) -> PackageBuildResult:
@@ -760,6 +822,24 @@ def build_compact_scientific_package(
         returned by ``static_preparation.load_column_manifest``); required
         whenever ``policy`` is supplied so ``static_model_input_columns``
         can be cross-checked against it exactly.
+    static_attributes_provenance: canonical population-matrix identity
+        (``matrix_name`` / ``sha256``) checked against
+        ``policy.static_attributes``; required whenever ``policy`` is
+        supplied. This is deliberately independent of
+        ``prepared_static_attributes_provenance`` below -- the canonical
+        matrix and the actually-supplied prepared/compact ``static_attributes``
+        are legitimately different files and their checksums are never
+        required to agree.
+    prepared_static_attributes_provenance: identity (at minimum ``sha256``)
+        of the actually-supplied ``static_attributes`` artifact itself
+        (e.g. a compact imputed matrix derived from the canonical
+        population matrix); required whenever ``policy`` is supplied.
+    static_preparation_manifest: optional parsed imputation preparation
+        manifest (as written by
+        ``static_preparation.write_imputation_artifacts``, i.e. the
+        on-disk ``imputation_manifest.json``); when supplied, its declared
+        ``artifact_sha256["imputed_static_attributes.parquet"]`` must equal
+        ``prepared_static_attributes_provenance["sha256"]``.
     gap_product_scope: optional explicit gap-inventory product scope used to
         select ``gap_timestamps`` upstream; when ``policy`` is also given it
         must equal :func:`resolve_gap_product_scope`'s result for that
@@ -799,6 +879,7 @@ def build_compact_scientific_package(
         _validate_production_static_contract(
             policy, static_model_input_columns, static_column_manifest, static_attributes_provenance
         )
+        _validate_prepared_static_artifact(prepared_static_attributes_provenance, static_preparation_manifest)
     elif gap_product_scope is not None:
         resolved_gap_product_scope = tuple(gap_product_scope)
 
@@ -860,6 +941,7 @@ def build_compact_scientific_package(
             policy=policy,
             policy_provenance=policy_provenance,
             static_attributes_provenance=static_attributes_provenance,
+            prepared_static_attributes_provenance=prepared_static_attributes_provenance,
             basin_selection_provenance=basin_selection_provenance,
             gap_inventory_provenance=gap_inventory_provenance,
             gap_product_scope=resolved_gap_product_scope,
@@ -1015,26 +1097,52 @@ def read_area_csv(path, basin_ids: Sequence[str] | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _validate_dynamic_inputs(dynamic_inputs: Sequence[str]) -> tuple:
+    if not isinstance(dynamic_inputs, (list, tuple)):
+        raise PackageBuilderError(f"dynamic_inputs must be a list/tuple, got {type(dynamic_inputs)!r}")
+    if len(dynamic_inputs) == 0:
+        raise PackageBuilderError("dynamic_inputs must not be empty")
+    if len(dynamic_inputs) != len(set(dynamic_inputs)):
+        dupes = sorted({v for v in dynamic_inputs if dynamic_inputs.count(v) > 1})
+        raise PackageBuilderError(f"dynamic_inputs contains duplicate name(s): {dupes}")
+    return tuple(dynamic_inputs)
+
+
 def default_local_basin_source_loader(
-    forcing_root, qobs_root, area_by_basin: Mapping[str, float]
+    forcing_root, qobs_root, area_by_basin: Mapping[str, float], dynamic_inputs: Sequence[str]
 ) -> Callable[[str], BasinSourceTables]:
     """One thin, concrete ``load_basin_source`` for the established local
     layout: ``<forcing_root>/time_series/<basin_id>.parquet`` (dynamic
     inputs) and ``<qobs_root>/time_series/<basin_id>.nc`` (a ``qobs_m3s``
     variable on a ``time``/``date`` coordinate), matching the frozen
     historical ``scripts/build_stage1_nh_package.py`` source convention.
-    Strips a tz-aware index to tz-naive UTC only; never fills, interpolates,
-    or reindexes -- any structural defect surfaces through Gate 1's own
-    strict validation.
+
+    ``dynamic_inputs`` is the exact ordered, unique set of forcing columns
+    this loader selects from each basin's parquet file -- source products
+    are free to carry additional fields beyond the approved model-input
+    contract (e.g. extra RTMA variables), and this loader's job is to select
+    exactly the approved columns, in order, so that Gate 1's own strict
+    forcing-column validation continues to see only the exact contract it
+    already enforces. Never fills, interpolates, reindexes, or converts
+    values -- any structural defect surfaces through Gate 1's own strict
+    validation.
     """
     forcing_root = Path(forcing_root)
     qobs_root = Path(qobs_root)
+    validated_dynamic_inputs = _validate_dynamic_inputs(dynamic_inputs)
 
     def _load(basin_id: str) -> BasinSourceTables:
         forcing_path = forcing_root / "time_series" / f"{basin_id}.parquet"
         if not forcing_path.is_file():
             raise PackageBuilderError(f"forcing file not found for basin {basin_id!r}: {forcing_path}")
         forcing = pd.read_parquet(forcing_path)
+        missing_inputs = [c for c in validated_dynamic_inputs if c not in forcing.columns]
+        if missing_inputs:
+            raise PackageBuilderError(
+                f"forcing file for basin {basin_id!r} is missing required dynamic input "
+                f"column(s) {missing_inputs}: {forcing_path}"
+            )
+        forcing = forcing[list(validated_dynamic_inputs)]
         if forcing.index.tz is not None:
             forcing.index = forcing.index.tz_convert("UTC").tz_localize(None)
 

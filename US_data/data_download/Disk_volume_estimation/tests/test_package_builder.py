@@ -28,7 +28,7 @@ from src.baseline.package_builder import (
     resolve_gap_product_scope,
 )
 from src.baseline.package_netcdf import EXPECTED_VARIABLES, validate_basin_netcdf_file
-from src.baseline.package_assembly import assemble_basin_package_table
+from src.baseline.package_assembly import DYNAMIC_INPUTS, assemble_basin_package_table
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,7 +87,8 @@ def _loader(n=10, start="2023-01-01", area=3.6, fail_for=None, basin_offsets=Non
 def _build(tmp_path, *, basin_ids=BASIN_IDS, n=10, evidence=True, write_qc_csv=False, overwrite=False,
            dry_run=False, gap_timestamps=None, static_attributes=None, loader=None, expected_index=None,
            forbidden_static_columns=None, static_model_input_columns=None, policy=None,
-           static_column_manifest=None, gap_product_scope=None, static_attributes_provenance=None):
+           static_column_manifest=None, gap_product_scope=None, static_attributes_provenance=None,
+           prepared_static_attributes_provenance=None, static_preparation_manifest=None):
     idx = expected_index if expected_index is not None else _hourly_index(n)
     kwargs = dict(
         basin_ids=basin_ids,
@@ -107,6 +108,8 @@ def _build(tmp_path, *, basin_ids=BASIN_IDS, n=10, evidence=True, write_qc_csv=F
         static_column_manifest=static_column_manifest,
         gap_product_scope=gap_product_scope,
         static_attributes_provenance=static_attributes_provenance,
+        prepared_static_attributes_provenance=prepared_static_attributes_provenance,
+        static_preparation_manifest=static_preparation_manifest,
     )
     if forbidden_static_columns is not None:
         kwargs["forbidden_static_columns"] = forbidden_static_columns
@@ -146,6 +149,21 @@ def _static_column_manifest(columns=STATIC_COLUMNS, role="model_input"):
 
 def _static_provenance(matrix_name=PRODUCTION_MATRIX_NAME, sha256=PRODUCTION_SHA256):
     return {"matrix_name": matrix_name, "sha256": sha256}
+
+
+# Deliberately distinct from PRODUCTION_SHA256: the prepared/compact static
+# artifact is a legitimately different file from the canonical population
+# matrix it was derived from, so their checksums must never be required to
+# agree (Blocker 1).
+PREPARED_SHA256 = "c" * 64
+
+
+def _prepared_provenance(sha256=PREPARED_SHA256):
+    return {"sha256": sha256}
+
+
+def _preparation_manifest(prepared_sha256=PREPARED_SHA256):
+    return {"artifact_sha256": {"imputed_static_attributes.parquet": prepared_sha256}}
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +709,93 @@ def test_synthetic_schema_seam_unaffected_by_production_contract(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Prepared (compact/imputed) static artifact identity -- independent of the
+# canonical population-matrix identity checked above (Blocker 1).
+# ---------------------------------------------------------------------------
+
+
+def test_prepared_static_artifact_accepted_with_distinct_checksum_from_canonical():
+    # Canonical identity and prepared-artifact identity are both valid even
+    # though their SHA-256 values differ -- they are legitimately different
+    # files, and the prepared checksum must never be required to equal the
+    # canonical one.
+    policy = _production_policy()
+    package_builder_module._validate_production_static_contract(
+        policy, STATIC_COLUMNS, _static_column_manifest(), _static_provenance()
+    )
+    package_builder_module._validate_prepared_static_artifact(_prepared_provenance(), _preparation_manifest())
+    assert PREPARED_SHA256 != PRODUCTION_SHA256
+
+
+def test_prepared_static_artifact_manifest_checksum_mismatch_rejected():
+    with pytest.raises(PackageBuilderError, match="checksum mismatch"):
+        package_builder_module._validate_prepared_static_artifact(
+            _prepared_provenance(sha256=PREPARED_SHA256),
+            _preparation_manifest(prepared_sha256="d" * 64),
+        )
+
+
+def test_prepared_static_artifact_missing_provenance_rejected():
+    with pytest.raises(PackageBuilderError, match="prepared_static_attributes_provenance"):
+        package_builder_module._validate_prepared_static_artifact(None, None)
+
+
+def test_build_requires_prepared_static_provenance_when_policy_supplied(tmp_path):
+    # Fails before any basin is loaded (pure validation-phase requirement) --
+    # exercises the real build_compact_scientific_package wiring, not just
+    # the standalone validator.
+    policy = _production_policy()
+    with pytest.raises(PackageBuilderError, match="prepared_static_attributes_provenance"):
+        _build(
+            tmp_path,
+            policy=policy,
+            static_column_manifest=_static_column_manifest(),
+            static_attributes_provenance=_static_provenance(),
+        )
+
+
+def test_build_rejects_prepared_static_checksum_manifest_mismatch(tmp_path):
+    policy = _production_policy()
+    with pytest.raises(PackageBuilderError, match="checksum mismatch"):
+        _build(
+            tmp_path,
+            policy=policy,
+            static_column_manifest=_static_column_manifest(),
+            static_attributes_provenance=_static_provenance(),
+            prepared_static_attributes_provenance=_prepared_provenance(),
+            static_preparation_manifest=_preparation_manifest(prepared_sha256="d" * 64),
+        )
+
+
+def test_manifest_records_canonical_and_prepared_static_identities_separately():
+    # Exercises _build_manifest directly (rather than the full public build,
+    # matching the existing gap-product-scope manifest test's pattern):
+    # canonical_static_source and prepared_static_artifact must be recorded
+    # as two distinct, unambiguous manifest fields.
+    policy = _production_policy(include_rtma=True)
+    scope = resolve_gap_product_scope(policy)
+    manifest = package_builder_module._build_manifest(
+        basin_ids=BASIN_IDS,
+        expected_index=_hourly_index(10),
+        static_model_input_columns=STATIC_COLUMNS,
+        per_basin_files=[],
+        checksums={"masks/gap_timestamps.json": {"sha256": "x" * 64, "size_bytes": 0}},
+        n_gap_timestamps=0,
+        policy=policy,
+        policy_provenance=None,
+        static_attributes_provenance=_static_provenance(),
+        prepared_static_attributes_provenance=_prepared_provenance(),
+        basin_selection_provenance=None,
+        gap_inventory_provenance=None,
+        gap_product_scope=scope,
+        write_qc_csv=False,
+    )
+    assert manifest["canonical_static_source"] == _static_provenance()
+    assert manifest["prepared_static_artifact"] == _prepared_provenance()
+    assert manifest["canonical_static_source"]["sha256"] != manifest["prepared_static_artifact"]["sha256"]
+
+
+# ---------------------------------------------------------------------------
 # 46-49. transactional package + QC-evidence promotion
 # ---------------------------------------------------------------------------
 
@@ -899,3 +1004,198 @@ def test_qc_csv_readback_catches_finite_value_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(package_builder_module.pd, "read_csv", corrupting_read_csv)
     with pytest.raises(PackageBuilderError, match="round-trip self-check"):
         _build(tmp_path, write_qc_csv=True)
+
+
+# ---------------------------------------------------------------------------
+# 61-64. default_local_basin_source_loader dynamic-input column selection
+# (Blocker 2)
+# ---------------------------------------------------------------------------
+
+from src.baseline.package_builder import default_local_basin_source_loader  # noqa: E402
+
+_EXTRA_FORCING_COLUMNS = {
+    "rtma_sp_Pa": 101325.0,
+    "rtma_tcc_pct": 50.0,
+    "rtma_vis_m": 16000.0,
+    "rtma_gust_ms": 5.0,
+    "rtma_ceil_m": 3000.0,
+}
+
+
+def _write_loader_fixture_files(root_dir, basin_id, idx, *, with_extra_columns=True, drop_column=None):
+    forcing_root = root_dir / "forcing"
+    qobs_root = root_dir / "qobs"
+    (forcing_root / "time_series").mkdir(parents=True, exist_ok=True)
+    (qobs_root / "time_series").mkdir(parents=True, exist_ok=True)
+
+    forcing = _valid_forcing(idx)
+    if with_extra_columns:
+        for name, value in _EXTRA_FORCING_COLUMNS.items():
+            forcing[name] = value
+    if drop_column is not None:
+        forcing = forcing.drop(columns=[drop_column])
+    forcing.to_parquet(forcing_root / "time_series" / f"{basin_id}.parquet")
+
+    qobs_values = np.arange(len(idx), dtype=np.float64) + 1.0
+    ds = xr.Dataset({"qobs_m3s": ("time", qobs_values)}, coords={"time": idx})
+    ds.to_netcdf(qobs_root / "time_series" / f"{basin_id}.nc")
+
+    return forcing_root, qobs_root
+
+
+def test_default_loader_selects_exact_dynamic_inputs_in_order(tmp_path):
+    basin_id = BASIN_IDS[0]
+    idx = _hourly_index(5)
+    forcing_root, qobs_root = _write_loader_fixture_files(tmp_path, basin_id, idx, with_extra_columns=True)
+
+    loader = default_local_basin_source_loader(
+        forcing_root, qobs_root, {basin_id: 3.6}, dynamic_inputs=DYNAMIC_INPUTS
+    )
+    source = loader(basin_id)
+
+    assert list(source.forcing.columns) == list(DYNAMIC_INPUTS)
+
+
+def test_default_loader_excludes_extra_source_columns(tmp_path):
+    basin_id = BASIN_IDS[0]
+    idx = _hourly_index(5)
+    forcing_root, qobs_root = _write_loader_fixture_files(tmp_path, basin_id, idx, with_extra_columns=True)
+
+    loader = default_local_basin_source_loader(
+        forcing_root, qobs_root, {basin_id: 3.6}, dynamic_inputs=DYNAMIC_INPUTS
+    )
+    source = loader(basin_id)
+
+    for extra_column in _EXTRA_FORCING_COLUMNS:
+        assert extra_column not in source.forcing.columns
+
+
+def test_default_loader_missing_required_dynamic_input_fails_clearly(tmp_path):
+    basin_id = BASIN_IDS[0]
+    idx = _hourly_index(5)
+    forcing_root, qobs_root = _write_loader_fixture_files(
+        tmp_path, basin_id, idx, with_extra_columns=False, drop_column="rtma_2t_K"
+    )
+
+    loader = default_local_basin_source_loader(
+        forcing_root, qobs_root, {basin_id: 3.6}, dynamic_inputs=DYNAMIC_INPUTS
+    )
+    with pytest.raises(PackageBuilderError, match="missing required dynamic input"):
+        loader(basin_id)
+
+
+def test_default_loader_duplicate_dynamic_inputs_rejected(tmp_path):
+    dynamic_inputs = list(DYNAMIC_INPUTS) + [DYNAMIC_INPUTS[0]]
+    with pytest.raises(PackageBuilderError, match="duplicate"):
+        default_local_basin_source_loader(
+            tmp_path / "forcing", tmp_path / "qobs", {}, dynamic_inputs=dynamic_inputs
+        )
+
+
+# ---------------------------------------------------------------------------
+# 65. CLI wiring: --static-preparation-manifest + policy-driven dynamic
+# inputs are actually threaded through to the builder/loader (Blockers 1+2)
+# ---------------------------------------------------------------------------
+
+import importlib.util
+import types
+
+
+def _load_cli_module():
+    script_path = REPO_ROOT / "scripts" / "build_stage1_baseline_nh_package.py"
+    spec = importlib.util.spec_from_file_location("_test_stage1_baseline_nh_package_cli", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cli_wires_static_preparation_manifest_and_policy_dynamic_inputs(tmp_path, monkeypatch):
+    from src.baseline.splits import sha256_of as real_sha256_of
+
+    module = _load_cli_module()
+
+    static_attributes_parquet = tmp_path / "prepared_static.parquet"
+    static_attributes_parquet.write_bytes(b"synthetic prepared static bytes")
+    actual_prepared_sha256 = real_sha256_of(static_attributes_parquet)
+    bogus_manifest_sha256 = "not_the_real_checksum"
+
+    preparation_manifest_path = tmp_path / "imputation_manifest.json"
+    preparation_manifest_path.write_text(
+        json.dumps({"artifact_sha256": {"imputed_static_attributes.parquet": bogus_manifest_sha256}}),
+        encoding="utf-8",
+    )
+
+    fixed_policy = {
+        "static_attributes": {"matrix_name": "stage1_static_attributes_v002", "sha256": "z" * 64},
+        "dynamic_inputs": ["input_a", "input_b", "input_c"],
+    }
+
+    monkeypatch.setattr(module, "load_stage1_baseline_policy", lambda path: fixed_policy)
+    monkeypatch.setattr(module, "validate_stage1_baseline_policy", lambda data: data)
+    monkeypatch.setattr(module, "derive_expected_index_from_policy", lambda policy: _hourly_index(3))
+    monkeypatch.setattr(module, "read_basin_ids_file", lambda path: list(BASIN_IDS))
+    monkeypatch.setattr(
+        module,
+        "load_static_matrix",
+        lambda parquet, manifest: (_static_attributes(), STATIC_COLUMNS, _static_column_manifest()),
+    )
+    monkeypatch.setattr(module, "read_area_csv", lambda path, basin_ids: {b: 3.6 for b in basin_ids})
+    monkeypatch.setattr(module, "resolve_gap_product_scope", lambda policy: (MRMS_PRODUCT,))
+    monkeypatch.setattr(module, "load_missing_hour_products", lambda path: object())
+    monkeypatch.setattr(module, "select_gap_timestamps", lambda df, products: [])
+
+    captured_loader_kwargs = {}
+
+    def fake_loader(forcing_root, qobs_root, area_by_basin, dynamic_inputs):
+        captured_loader_kwargs["dynamic_inputs"] = dynamic_inputs
+        return lambda basin_id: None
+
+    monkeypatch.setattr(module, "default_local_basin_source_loader", fake_loader)
+
+    captured_build_kwargs = {}
+
+    def fake_build(**kwargs):
+        captured_build_kwargs.update(kwargs)
+        return types.SimpleNamespace(
+            dry_run=False, basin_ids=tuple(BASIN_IDS), package_root=tmp_path / "package", evidence_root=None
+        )
+
+    monkeypatch.setattr(module, "build_compact_scientific_package", fake_build)
+
+    argv = [
+        "--policy-yaml", "unused_policy.yaml",
+        "--basin-ids-file", "unused_basins.txt",
+        "--static-attributes-parquet", str(static_attributes_parquet),
+        "--static-column-manifest", "unused_manifest.json",
+        "--static-preparation-manifest", str(preparation_manifest_path),
+        "--area-csv", "unused_area.csv",
+        "--forcing-root", "unused_forcing_root",
+        "--qobs-root", "unused_qobs_root",
+        "--gap-inventory-csv", "unused_gap.csv",
+        "--output-package-root", str(tmp_path / "package"),
+    ]
+    rc = module.main(argv)
+    assert rc == 0
+
+    # policy["dynamic_inputs"] is threaded through to the loader, unmodified.
+    assert captured_loader_kwargs["dynamic_inputs"] == ["input_a", "input_b", "input_c"]
+
+    # The CLI always computes the prepared artifact's checksum itself from
+    # the actual file bytes -- never trusting the (here deliberately wrong)
+    # manifest-declared value.
+    assert captured_build_kwargs["prepared_static_attributes_provenance"]["sha256"] == actual_prepared_sha256
+    assert captured_build_kwargs["prepared_static_attributes_provenance"]["sha256"] != bogus_manifest_sha256
+
+    # The preparation manifest is read and passed through unmodified for the
+    # builder's own cross-check.
+    assert (
+        captured_build_kwargs["static_preparation_manifest"]["artifact_sha256"]["imputed_static_attributes.parquet"]
+        == bogus_manifest_sha256
+    )
+
+    # Canonical identity provenance is populated from the policy itself, not
+    # from hashing the (unavailable) canonical population-matrix file.
+    assert captured_build_kwargs["static_attributes_provenance"] == {
+        "matrix_name": "stage1_static_attributes_v002",
+        "sha256": "z" * 64,
+    }
