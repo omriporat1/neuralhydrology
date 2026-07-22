@@ -4,6 +4,119 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-22 Gate 4 auditor correction round (local pass, pre-h2o)
+
+**Context.** A review of the 2026-07-21 Gate 4 auditor implementation
+accepted its core architecture and scientific independence, but required a
+focused correction round before the real h2o audit run. No redesign, no
+broadened scope — only listed corrections, in `src/baseline/package_audit.py`,
+`scripts/audit_stage1_compact_scientific_package.py`,
+`tests/test_package_audit.py`, and the docs below.
+
+**Corrections made.** (1) `--mode full` now hard-requires
+`--imputation-manifest`/`--imputed-value-mask`/`--qc-evidence-root`; a
+canonical full audit can no longer PASS with any of these skipped (a
+`dev_allow_missing_evidence` bypass exists for isolated dev/test use only,
+never set by the CLI). (2)-(3) Every forcing/qobs source file and every
+authoritative package artifact/metadata file is now checksum-bound from disk
+bytes, independently recomputed — never copied from any manifest under
+audit. (4) Package layout is now enumerated exactly: any missing or
+unexpected file (including extra top-level entries) fails the audit. (5)
+`+inf`/`-inf` are now rejected in forcing/qobs source arrays as well as
+package arrays; matched infinities can no longer silently pass a numeric
+comparison. (6) NetCDF dimension names/sizes, per-variable dimension tuples,
+the dataset-level schema name/version, and gap-flag/raw-target/lead-target
+role and metadata attributes are now independently checked against the real
+Gate 2 serialization contract (inspected read-only, never imported). (7)
+Imputation-evidence checks now verify exact mask basin/column order, strict
+boolean values, no missing cells, that every imputed cell has a manifest
+fitted value (a missing fitted value is now distinguished from a
+numerically-wrong one), and per-column/per-basin/total count agreement
+where the manifest records them — no hard-coded basin or count. (8) QC
+evidence membership is now exact (no extra CSVs, manifest count/membership
+agreement) and every manifest entry's checksum/size/row-count/non-authoritative
+declaration is cross-checked against the file on disk. (10) A full audit now
+hard-fails (raises) if the auditor's own git commit cannot be resolved or its
+working tree is not clean — distinct from, and never required to equal, the
+package build commit.
+
+**Test suite.** `tests/test_package_audit.py` grew from 16 to 37 tests (all
+corrections have dedicated regression coverage); `pytest -q
+tests/test_package_audit.py` and `pytest -q tests/test_package_builder.py`
+both pass (one intermittent Windows directory-lock `PermissionError` recurred
+and was confirmed, again, to pass cleanly in isolation — the same
+pre-existing environmental flake noted in the prior entry, not a logic
+defect).
+
+**Discovered during this round, resolved by a follow-up focused correction
+(same day): QC CSV vs. NetCDF float precision mismatch.** The QC CSV is
+written from the builder's pre-quantization float64 table, while the
+on-disk NetCDF stores the same values quantized to `float32`
+(`package_netcdf.py`). Comparing the two under the CSV-text round-trip
+tolerance (`rtol=1e-9`/`atol=1e-12`, designed for a float64-to-float64
+self-check) would have shown relative differences of order float32 machine
+epsilon (~1.2e-7) on nearly every value, unrelated to data correctness. This
+was fixed, not worked around: `qc_csv_matches_netcdf` now casts each QC
+CSV's finite values through the variable's actual on-disk storage dtype
+(read independently from the NetCDF, not hard-coded) and requires **exact**
+agreement with the stored value (`rtol=atol=0.0`), with NaN masks compared
+exactly and gap-flag/integer variables kept on exact binary comparison as
+before — see `compare_qc_csv_against_netcdf_storage` in
+`src/baseline/package_audit.py` and the "Comparison tolerances" section of
+`docs/stage1_compact_package_independent_audit.md`, which now documents all
+three distinct comparison classes (CSV float64 round trip, authoritative
+source-to-NetCDF at `package_float32_rtol`, and this exact QC-CSV-to-NetCDF
+projection) separately. `tests/test_package_audit.py` grew from 37 to 41
+tests to cover this (quantization-tolerant pass, one-ULP-precise failure,
+NaN-mismatch failure, gap-flag exactness); the pre-existing deliberately
+corrupted QC CSV test still fails as expected. This was a narrow, local-only
+follow-up: no h2o/Moriah access, no real audit run, nothing committed, no
+other behavior changed.
+
+**Scope of this round: local implementation only.** No h2o or Moriah
+access occurred; the real package and real source artifacts were not
+touched or audited; the built package was not modified; nothing was
+committed.
+
+## 2026-07-21 Compact Scientific Package built on h2o; independent audit implementation (local pass)
+
+**Context.** The 32-basin Compact Scientific Package was built and promoted
+on h2o at `/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001`
+(build commit `89c4dd162f7043419b4b227de5c2bc1b3b230da6`; non-authoritative
+QC evidence at `..._v001_evidence`; run logs at `..._v001_run_logs`).
+Builder-level self-validation and an independent ChatGPT inspection of the
+compact review bundle are complete. This entry records that state and the
+follow-on work started to independently certify it.
+
+**Package built is not the same as package certified.** Because a builder's
+own checks cannot certify the builder's own output, a separate, genuinely
+independent auditor was specified and implemented this session:
+`src/baseline/package_audit.py`, `scripts/audit_stage1_compact_scientific_package.py`,
+`tests/test_package_audit.py` (16 synthetic tests, all passing), and
+`docs/stage1_compact_package_independent_audit.md`. The auditor re-derives,
+from raw sources and general-purpose libraries only, package layout and
+checksums, basin membership/order, NetCDF dimensions/dtypes/units/timeline,
+all 8 dynamic inputs and raw `qobs_m3s` against source, the m³/s→mm/h
+conversion and the 1/3/6/12 h lead-target shift (both re-expressed
+independently, not imported from `src.baseline.units`/`lead_targets`), NaN
+propagation, static-attribute membership/order/values/imputation placement,
+independent reconstruction of the 138 MRMS+RTMA gap timestamps from the
+missing-hour inventory, gap-flag validity, and QC-CSV-to-NetCDF agreement
+(CSV treated as non-authoritative throughout).
+
+**Scope of this session: local implementation only.** No h2o or Moriah
+access occurred; the real package and real source artifacts were not
+touched or audited; no NH config was generated; no scientific policy or
+package-builder behavior changed; nothing was committed. The implementation
+was validated only against synthetic fixtures built with the real builder
+and then deliberately corrupted.
+
+**Status: package built, builder-level-validated, and externally
+eyeballed — but not yet independently certified.** NeuralHydrology
+configuration generation remains blocked until the new auditor is run on
+h2o against the real package and reports PASS, and the resulting evidence
+bundle is transferred and reviewed.
+
 ## 2026-07-08 Milestone 2K-G-F-B closure — canonical h2o build/audit PASS
 
 **Context.** Closes the "canonical build not yet produced" gap left open by

@@ -1,8 +1,43 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-20 (static-attribute matrix v002 ACCEPTED — corrected canonical baseline; compact static-imputation v002 ACCEPTED)
+Last updated: 2026-07-21 (Compact Scientific Package built on h2o, builder-level validation complete; independent audit implementation in progress — package not yet independently certified)
 
 ## Current milestone
+
+**Compact Scientific Package — built on h2o, builder-level validation
+complete; independent audit implementation in progress (2026-07-21).** The
+32-basin Compact Scientific Package (built via
+`scripts/build_stage1_baseline_nh_package.py`, commit
+`89c4dd162f7043419b4b227de5c2bc1b3b230da6`) has been built and promoted on
+h2o at `/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001`
+(non-authoritative QC evidence at `..._v001_evidence`, run logs at
+`..._v001_run_logs`). Builder-level self-validation and an independent
+ChatGPT inspection of its compact review bundle are complete. Package facts:
+32 per-basin NetCDF files; 45,720 hourly rows/basin; period 2020-10-14
+00:00 through 2025-12-31 23:00; 8 approved dynamic inputs; diagnostic raw
+`qobs_m3s`; 4 lead targets (1/3/6/12 h); 473 static model-input columns; 138
+global gap timestamps (136 MRMS + 2 RTMA); one 15-character basin ID
+`393109104464500`.
+
+**A genuinely independent auditor is now implemented** (local-only pass, not
+yet run against the real package): `src/baseline/package_audit.py`,
+`scripts/audit_stage1_compact_scientific_package.py`,
+`tests/test_package_audit.py` (37 synthetic tests, all passing), and
+`docs/stage1_compact_package_independent_audit.md`. The auditor re-derives
+every scientific/structural claim from raw sources — it does not import
+`package_builder`/`package_assembly`/`package_netcdf`/`units`/
+`lead_targets`/`gap_mask_io`, so a shared bug cannot pass both the build and
+the audit. It has not yet been run on h2o against the real package and real
+source artifacts.
+
+**The package is built, but not yet independently certified.**
+NeuralHydrology configuration generation remains blocked until a real h2o
+audit run reports PASS. Next step: run the auditor's preflight and full
+modes on h2o (see the doc above for exact command templates), transfer the
+generated evidence bundle, and record the certification result here and in
+`docs/decision_log.md`.
+
+---
 
 **Static-attribute matrix v002 — ACCEPTED as canonical Stage 1 baseline
 (2026-07-20).** `stage1_static_attributes_v002` (source-checksum-verified
@@ -87,6 +122,12 @@ split-based candidate run described in
 `docs/stage1_compact_package_selection.md`. Building the 32-basin NH package
 is a separate, not-yet-started step.
 
+> **Superseded (2026-07-21):** the 32-basin NH package has since been built
+> and promoted on h2o (build commit `89c4dd162f7043419b4b227de5c2bc1b3b230da6`);
+> see the current-state block at the top of this document and
+> `docs/stage1_compact_package_independent_audit.md`. It is not yet
+> independently certified.
+
 **Scientific target-transformation + static-preparation primitives increment
 (2026-07-20).** Reviewed existing code before writing anything new (reuse-first):
 `src/baseline/units.py` (m³/s↔mm/h conversion) and `src/baseline/lead_targets.py`
@@ -106,6 +147,11 @@ expects but that no script previously produced. Neither changes any signed
 scientific decision. **Not done in this increment:** no NH package built, no
 `FlashNHDataset`/NH-registration/launcher changes, no training, no Moriah use,
 no full 2,752-basin package. See `docs/decision_log.md` for full detail.
+
+> **Superseded (2026-07-21):** the 32-basin NH package has since been built
+> (see the current-state block at the top of this document); the
+> `FlashNHDataset`/NH-registration/launcher/training/Moriah/full-population
+> items in this sentence remain not done.
 
 **2K-G-I I-A1-I-A5 (spatial/temporal split generation through canonical
 promotion) COMPLETE (2026-07-16).** Seeded stratified split candidate
