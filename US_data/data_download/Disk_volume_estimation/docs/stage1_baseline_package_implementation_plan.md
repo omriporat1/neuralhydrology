@@ -1245,6 +1245,31 @@ Stage 1 baseline split design is now frozen** for the first Stage 1
 baseline; do not reopen it absent a concrete scientific or correctness
 problem. Next work is the baseline NH package-builder implementation.
 
+**NH config-generation + structural-preflight status (2026-07-22, local
+implementation increment, precedes I-E2/I-F1):** following Gate 4
+certification of the 32-basin Compact Scientific Package,
+`src/baseline/nh_config_generation.py` +
+`scripts/generate_stage1_nh_config.py` render **one** config only — lead06,
+seq_length 24, single target `qobs_mm_per_h_lead06`, the 8 approved dynamic
+inputs in binding order, all 473 static `model_input` attributes, and the
+frozen temporal split (train 2020-10-14→2023-12-31 / validation 2024 / test
+2025) over the same 32 certified compact basins in every period. This is
+deliberately narrower than §17's full 16-config generator and §20's I-E2
+row (which remain future work, not started); it exists to prove the
+config-generation + preflight mechanics on the smallest real case before
+expanding. A companion two-layer structural preflight
+(`src/baseline/nh_structural_preflight.py` +
+`scripts/check_stage1_nh_config_preflight.py`) validates the generated
+bundle file-only (Layer 1) and, against synthetic fixtures only, exercises
+real `FlashNHDataset` construction for train/validation/test (Layer 2) —
+this is preflight validation, not I-F1's Moriah smoke, and was never run
+against the real h2o package or on Moriah. 38 tests added and passing (see
+`docs/decision_log.md`'s 2026-07-22 entry for full detail, including a
+discovered-and-fixed NH 1.13 upstream mutable-default-argument scaler bug
+found while writing these tests). No h2o/Moriah access, no training, no
+Slurm, no W&B. I-D2 (`src/baseline/nh_dataset.py`/`FlashNHDataset`) remains
+the prerequisite this increment builds on, not something it redoes.
+
 ---
 
 ## 21. Risks, hidden failure modes, and open questions

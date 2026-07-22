@@ -93,7 +93,13 @@ def _build_and_run(tmp_path, seq_length):
     cfg = Config(cfg_path)
     prepare_run_dirs(cfg, tmp_path, f"seq{seq_length}")
 
-    train_ds = get_dataset(cfg=cfg, is_train=True, period="train")
+    # scaler={} is explicit, not the default: NH 1.13's BaseDataset.__init__
+    # gives ``scaler`` a mutable {} default that Python shares across every
+    # call site omitting it, so two train-period constructions in the same
+    # process (e.g. two tests in one pytest run) would otherwise silently
+    # reuse/corrupt each other's normalization -- see the matching comment in
+    # src/baseline/nh_structural_preflight.py::check_flashnh_dataset_construction.
+    train_ds = get_dataset(cfg=cfg, is_train=True, period="train", scaler={})
     val_ds = get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
     test_ds = get_dataset(cfg=cfg, is_train=False, period="test", scaler=train_ds.scaler)
     return {"train": train_ds, "validation": val_ds, "test": test_ds}
@@ -237,7 +243,7 @@ def test_gap_timestamp_timezone_variants_produce_identical_retained_hours(tmp_pa
         cfg = Config(cfg_path)
         prepare_run_dirs(cfg, base_dir, f"tzvariant_{label}")
 
-        train_ds = get_dataset(cfg=cfg, is_train=True, period="train")
+        train_ds = get_dataset(cfg=cfg, is_train=True, period="train", scaler={})  # see scaler={} note above
         val_ds = get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
         results[label] = _actual_hours(val_ds, "SYN02")
 
@@ -263,7 +269,7 @@ def test_gap_timestamps_outside_research_timeline_are_ignored_and_counted(tmp_pa
     cfg = Config(cfg_path)
     prepare_run_dirs(cfg, tmp_path, "outside_range")
 
-    train_ds = get_dataset(cfg=cfg, is_train=True, period="train")
+    train_ds = get_dataset(cfg=cfg, is_train=True, period="train", scaler={})  # see scaler={} note above
     val_ds = get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
 
     stats = val_ds.flashnh_filter_stats
@@ -286,7 +292,7 @@ def test_in_range_unaligned_gap_timestamp_raises(tmp_path):
 
     # Train succeeds: 2000-01-03 07:30 lies outside train's own instance timeline
     # (silently ignored, not raised).
-    train_ds = get_dataset(cfg=cfg, is_train=True, period="train")
+    train_ds = get_dataset(cfg=cfg, is_train=True, period="train", scaler={})  # see scaler={} note above
 
     # Validation's own timeline includes 2000-01-03 07:30's wall-clock hour range,
     # so the misaligned timestamp must raise rather than be silently dropped.

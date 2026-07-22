@@ -1,8 +1,62 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-22 (Compact Scientific Package built on h2o and independently certified — Gate 4 PASS)
+Last updated: 2026-07-22 (NH config-generation + structural-preflight local implementation increment)
 
 ## Current milestone
+
+**NH config-generation + structural-preflight local implementation increment
+(2026-07-22, local-only, no h2o/Moriah access, no training).** Following
+Gate 4 certification (below), this increment implements the first local
+foundation for compact-package NH integration-validation, strictly scoped
+to the first configuration only (lead 6 h, sequence length 24 h, target
+`qobs_mm_per_h_lead06`, 8 approved dynamic inputs in binding order, 473
+static `model_input` attributes, temporal split train 2020-10-14→2023-12-31
+/ validation 2024 / test 2025, same 32 certified compact basins in all three
+periods). Scope: `src/baseline/nh_config_generation.py` (config rendering +
+basin/date/static-list contracts), `src/baseline/nh_structural_preflight.py`
+(two-layer preflight: Layer 1 file-only structural checks against a
+generated config bundle; Layer 2 real `FlashNHDataset` construction —
+train/validation/test — against synthetic fixtures only, never the real
+package), `scripts/generate_stage1_nh_config.py`,
+`scripts/check_stage1_nh_config_preflight.py`. Test coverage: 38 tests
+passing (25 in `tests/test_nh_config_generation.py`, 13 in
+`tests/test_nh_structural_preflight.py`), plus the pre-existing
+`tests/test_nh_dataset.py` suite unaffected. No h2o/Moriah access, no data
+transfer, no NH training, no Slurm job, no W&B, and only this single
+configuration was rendered — not the full 16-config matrix. The certified
+Compact Scientific Package itself was not modified or rebuilt.
+
+**Notable discovery: NeuralHydrology 1.13 upstream mutable-default-argument
+scaler bug.** `neuralhydrology.datasetzoo.basedataset.BaseDataset.__init__`
+declares `scaler: Dict[...] = {}` as a mutable default argument, shared by
+Python across every call site in a process that omits `scaler=`. A second
+train-period `get_dataset(..., is_train=True, ...)` call in the same
+process (no explicit `scaler=`) inherits the first call's already-populated
+dict, so its own `not scaler` check is False, `_setup_normalization` is
+skipped, and NH silently reuses a stale, unrelated scaler — whose
+intersecting xarray arithmetic (`xr - center`) can silently drop dynamic
+input/target columns absent from that stale scaler. This only manifests
+when a single Python process constructs more than one train-period NH
+dataset without passing `scaler={}` explicitly (e.g. a shared pytest
+session, or interactive/dev usage) — a real training job (one Slurm
+process, one train-dataset construction) is unaffected. Fix applied:
+`scaler={}` is now passed explicitly at every train-period `get_dataset`
+call site in `nh_structural_preflight.py` and `tests/test_nh_dataset.py`.
+This is an NH-mechanics/dev-tooling finding, not a Stage 1 scientific
+decision.
+
+**Known documentation debt (not yet resolved):** the committed policy
+config declares `nh.dataset: generic`, while the task-mandated / generated
+config's `build_nh_config_mapping` hardcodes `dataset: flashnh`. Both are
+intentional for their respective purposes (the policy YAML documents the
+underlying NH dataset family; the generated config selects the registered
+`FlashNHDataset` class) but the discrepancy is not yet called out in-line
+in either file and should be reconciled or explicitly annotated in a future
+increment.
+
+---
+
+## Compact Scientific Package — Gate 4 certification (2026-07-22)
 
 **Compact Scientific Package — built and independently certified
 (2026-07-22).** The 32-basin Compact Scientific Package (built via

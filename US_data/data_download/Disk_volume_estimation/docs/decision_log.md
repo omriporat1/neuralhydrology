@@ -4,6 +4,104 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-22 NH config-generation + structural-preflight local implementation increment
+
+**Scope.** Following Gate 4 certification (below), this is the first local
+implementation increment for compact-package NH integration-validation.
+Strictly local: no h2o/Moriah access, no data transfer, no NH training run,
+no Slurm job, no W&B, no full 16-config matrix, no modification to the
+certified Compact Scientific Package. Renders and validates exactly one
+configuration: lead 6 h, sequence length 24 h, single target
+`qobs_mm_per_h_lead06`; 8 approved dynamic inputs in the binding order
+`mrms_qpe_1h_mm, rtma_2t_K, rtma_2d_K, rtma_2sh_kgkg, rtma_10u_ms,
+rtma_10v_ms, mrms_qpe_1h_mm_gap, rtma_gap`; 473 static `model_input`
+attributes in canonical order; the same 32 certified compact basins used
+identically across train (2020-10-14→2023-12-31), validation (2024), and
+test (2025) periods.
+
+**New/changed code.** `src/baseline/nh_config_generation.py` (config
+rendering; two-sided static-attribute contract; basin-list/date/dynamic-
+input/target contracts; basin-list leakage safeguards across the three
+periods) and `src/baseline/nh_structural_preflight.py` (two-layer
+preflight: Layer 1 is file-only structural checks against a generated
+config bundle and the package it was rendered against — ~18 named checks
+including forbidden-key rejection, `nan_handling_method` absence, exact
+seq/date/target/dynamic-input/static-count matches, basin-membership
+identity across periods, output-location safety; Layer 2 is real
+`FlashNHDataset` construction, train/validation/test, against synthetic
+fixtures only — never the real package, which lives only on h2o and is
+never transferred locally), plus thin CLIs
+`scripts/generate_stage1_nh_config.py` and
+`scripts/check_stage1_nh_config_preflight.py`. A read-only, synthetic-
+fixture-tested dynamic-NaN inventory helper
+(`inspect_dynamic_nan_inventory`) was added to `nh_structural_preflight.py`
+for future real-package auditing; it has not been run against the real
+package. A stale docstring in `src/baseline/nh_dataset.py` was corrected
+during this increment.
+
+**Test coverage.** 38 new tests passing: 25 in
+`tests/test_nh_config_generation.py` (config-generation contracts) and 13
+in `tests/test_nh_structural_preflight.py` (7 Layer-1 structural tests plus
+the 6 required Layer-2 real-`FlashNHDataset` tests). The pre-existing
+`tests/test_nh_dataset.py` suite continues to pass unaffected (with a
+defensive fix applied there too, see below). One pre-existing, unrelated,
+non-deterministic Windows `os.rename`-based flakiness in
+`tests/test_package_builder.py` was observed and is out of scope — it
+predates this increment and was not introduced by it.
+
+**Notable discovery: NeuralHydrology 1.13 upstream mutable-default-argument
+scaler bug (dev-tooling finding, not a scientific decision).**
+`neuralhydrology.datasetzoo.basedataset.BaseDataset.__init__` declares
+`scaler: Dict[...] = {}` as a mutable default argument. Python creates this
+dict once, at function-definition time, and shares it across every call in
+a process that omits `scaler=`. Consequence: if a single process
+constructs more than one train-period dataset via
+`get_dataset(cfg=cfg, is_train=True, period="train")` without passing
+`scaler=` explicitly (e.g. two tests in one pytest session, or interactive
+reuse), the second construction's `not scaler` check evaluates False
+(because the shared dict was already populated by the first construction),
+so `_setup_normalization` is skipped and the stale, unrelated scaler from
+the first construction is silently reused. Because the subsequent
+normalization step (`xr - center`) is an intersecting xarray operation, any
+dynamic-input or target column present in the new dataset but absent from
+the stale scaler is silently dropped rather than raising — this was first
+observed as a spurious `"[...] not in index"` `KeyError` that only occurred
+when `test_nh_dataset.py` ran before `test_nh_structural_preflight.py` in
+the same pytest invocation. A real training job (one Slurm process
+constructing exactly one train-period dataset) is unaffected. **Binding
+local dev-tooling practice going forward:** every train-period
+`get_dataset(..., is_train=True, ...)` call in this repository's code and
+tests must pass `scaler={}` explicitly, never rely on the default. Applied
+in `nh_structural_preflight.py::check_flashnh_dataset_construction` and
+defensively at all 4 train-period call sites in `tests/test_nh_dataset.py`.
+This does not affect, and is unrelated to, any of the 11 accepted mechanics
+findings from the prior NH scaler/lookup-table evidence gate — it is a
+distinct, purely process-lifetime artifact of NH's own `__init__` signature.
+
+**Known documentation debt (not yet resolved).** The committed policy
+config (`config/stage1_scientific_baseline_v001.yaml`) declares
+`nh.dataset: generic`, documenting the underlying NH dataset family, while
+`nh_config_generation.py::build_nh_config_mapping` hardcodes
+`dataset: flashnh` into every generated config, selecting the registered
+`FlashNHDataset` class actually used at construction time. Both values are
+individually correct for their own purpose, but the discrepancy is not
+currently annotated in either file. Reconciling or explicitly documenting
+this is deferred to a future increment.
+
+**Unaffected / not reopened.** No scientific decision was reopened; the 11
+accepted mechanics findings from the prior evidence gate stand unchanged.
+The certified Compact Scientific Package was not modified, rebuilt, or
+transferred. No h2o or Moriah connection was made. No training was run. No
+Slurm file was written. Only the single lead06/seq24 configuration was
+rendered — the full 16-config matrix was not generated.
+
+**Not done.** Real-package NaN inventory execution (the helper exists and
+is synthetic-fixture-tested only), Moriah transfer, Smoke-run execution
+against this configuration, and generation of the remaining 15 configs all
+remain not done.
+
+---
+
 ## 2026-07-22 Gate 4 — Compact Scientific Package independently certified (real h2o audit PASS)
 
 **Result.** The Gate 4 independent auditor (`src/baseline/package_audit.py`,

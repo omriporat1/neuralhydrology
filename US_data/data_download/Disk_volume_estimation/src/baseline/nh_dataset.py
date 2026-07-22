@@ -64,13 +64,24 @@ environment variables or process-global state):
     - archive-gap hours: ``<cfg.data_dir>/masks/gap_timestamps.json``, a flat
       JSON list of ISO timestamp strings (UTC, commonly with a trailing
       ``Z``). This is a deliberate design choice over NaN-detection in the
-      loaded dynamic-input arrays: the real Stage 1 package builder
-      (``scripts/build_stage1_nh_package.py``) already gap-fills forcing
-      NaNs for its Smoke 0/1 technical policy (retaining gap information
-      only in separate ``*_gap`` flag columns), so forcing arrays loaded by
-      NH will not reliably contain NaNs at gap hours. An explicit external
-      timestamp artifact keeps this dataset's forcing-validity check correct
-      regardless of that packaging choice.
+      loaded dynamic-input arrays: the certified Stage 1 Compact Scientific
+      Package (``stage1_compact_scientific_package_v001``, Gate 4 PASS)
+      preserves forcing NaNs at gap hours unchanged -- it does not gap-fill
+      them -- so ``*_gap`` flag columns and a matching gap-timestamp
+      inventory are the authoritative source of truth, and dynamic-input
+      NaNs are expected to coincide with them. Earlier MRMS zero-fill /
+      RTMA-interpolation gap handling existed only for the retired Smoke
+      0/1 technical-validation packages and is not part of this baseline's
+      missing-data policy. FlashNHDataset's role here is to hard-exclude any
+      sample whose backward warm-up history window intersects a documented
+      gap timestamp -- NH's own native sample validation does not perform
+      this check during evaluation (``is_train=False``), so this post-filter
+      is the sole mechanism protecting validation/test batches. Model-layer
+      ``nan_handling_method`` (NeuralHydrology's ``InputLayer`` NaN backstop)
+      is not used as the baseline missing-data mechanism and is left unset;
+      see ``docs/stage1_baseline_package_implementation_plan.md`` for the
+      accepted-findings record of why hard exclusion, not
+      ``nan_handling_method``, is the binding policy.
 
 Gap-timestamp strictness: a gap timestamp that falls entirely before or
 after this instance's research timeline is assumed to come from a shared
