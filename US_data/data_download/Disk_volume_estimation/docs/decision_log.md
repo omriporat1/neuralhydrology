@@ -4,6 +4,48 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-22 Gate 4 — Compact Scientific Package independently certified (real h2o audit PASS)
+
+**Result.** The Gate 4 independent auditor (`src/baseline/package_audit.py`,
+commit `4b524b3851b16baa080d4237622fa7da30e05cea`) was executed for real on
+h2o, in full mode, against the authoritative Compact Scientific Package at
+`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001` (build
+commit `89c4dd162f7043419b4b227de5c2bc1b3b230da6`). Execution timestamp
+`2026-07-22T08:58:52Z`. **Status: PASS — 0 errors, 0 warnings, 3,114 OK
+checks, full-audit exit code 0.** Audit output written to
+`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001_gate4_audit`.
+The build commit and the auditor commit are intentionally distinct
+identities — the auditor never imports or shares code with the builder it
+checks.
+
+**What the real run independently verified.** Exact package layout and
+authoritative file membership; exact 32-basin membership and order; all 32
+NetCDF timelines, schemas, dimensions, dtypes, units, and metadata; all 8
+dynamic variables against their original forcing parquets; raw `qobs_m3s`
+against the original qobs NetCDFs; independent m³/s→mm/h conversion;
+independent 1/3/6/12-hour lead-target reconstruction; exact NaN alignment
+and target-tail NaNs; static attributes against the prepared 32×473 matrix;
+all 168 imputed values against the imputation mask and manifest; exact
+reconstruction of 138 gap timestamps; binary and finite gap flags; exact
+32-file QC evidence membership and QC-to-NetCDF stored-value agreement
+(see the 2026-07-22 correction round below); checksums for all 38
+authoritative package artifacts, all 32 forcing source files, and all 32
+qobs source files; and policy/basin-selection/static/imputation/area/
+gap-inventory/package-manifest/build-commit/auditor-commit identities.
+
+**Evidence handling.** The transferred audit evidence bundle was
+independently reviewed (by ChatGPT) and found internally consistent. The
+generated evidence files (audit JSON/CSV/log outputs) remain untracked and
+are not committed to this repository.
+
+**Package status: BUILT AND INDEPENDENTLY CERTIFIED.** NeuralHydrology
+configuration generation is now unblocked.
+
+**Scope of this closure.** Documentation-only. No training, no Moriah
+transfer, and no NeuralHydrology configuration were performed as part of
+this closure; no audit code, package-building code, scientific policy, or
+generated artifact was changed.
+
 ## 2026-07-22 Gate 4 auditor correction round (local pass, pre-h2o)
 
 **Context.** A review of the 2026-07-21 Gate 4 auditor implementation
@@ -116,6 +158,11 @@ eyeballed — but not yet independently certified.** NeuralHydrology
 configuration generation remains blocked until the new auditor is run on
 h2o against the real package and reports PASS, and the resulting evidence
 bundle is transferred and reviewed.
+
+> **Superseded (2026-07-22):** the auditor has since been run for real on
+> h2o and reports PASS — see the 2026-07-22 "Compact Scientific Package
+> independently certified" entry above. NeuralHydrology configuration
+> generation is now unblocked.
 
 ## 2026-07-08 Milestone 2K-G-F-B closure — canonical h2o build/audit PASS
 

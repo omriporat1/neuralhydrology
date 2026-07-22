@@ -2,17 +2,28 @@
 
 ## Status
 
-The 32-basin Compact Scientific Package has been built and promoted on h2o
-(`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001`), and its
-builder-level self-checks and an independent ChatGPT inspection of its
-compact review bundle are complete. **The package is built, but not yet
-independently certified.** This document describes the independent auditor
-implemented to close that gap (`src/baseline/package_audit.py`,
-`scripts/audit_stage1_compact_scientific_package.py`). As of this writing the
-auditor has been implemented and exercised only against synthetic fixtures
-(`tests/test_package_audit.py`); it has not yet been run against the real
-package or its real source artifacts on h2o. **NeuralHydrology configuration
-generation remains blocked until the real audit run completes with PASS.**
+**GATE 4 CLOSED — the package is built and independently certified.** The
+32-basin Compact Scientific Package
+(`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001`, build
+commit `89c4dd162f7043419b4b227de5c2bc1b3b230da6`) has been independently
+audited for real on h2o, in full mode, by the auditor described in this
+document (`src/baseline/package_audit.py`,
+`scripts/audit_stage1_compact_scientific_package.py`, auditor commit
+`4b524b3851b16baa080d4237622fa7da30e05cea`). Execution timestamp
+`2026-07-22T08:58:52Z`. **Result: PASS — 0 errors, 0 warnings, 3,114 OK
+checks, full-audit exit code 0.** Audit output written to
+`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001_gate4_audit`;
+the transferred evidence bundle was independently reviewed (by ChatGPT) and
+found internally consistent, and remains untracked in this repository.
+Builder-level self-checks and an earlier independent ChatGPT inspection of
+the compact review bundle were also complete beforehand. The build commit
+and the auditor commit are intentionally distinct identities — the auditor
+never imports or shares code with the builder it checks. **NeuralHydrology
+configuration generation is now unblocked.**
+
+This document continues to describe the auditor's design, independence
+boundary, and comparison rules as reusable reference documentation for any
+future re-run (e.g. against a rebuilt or expanded package).
 
 ## Purpose
 
@@ -218,21 +229,27 @@ python scripts/audit_stage1_compact_scientific_package.py \
   --output-dir /data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001_gate4_audit
 ```
 
-These are documentation templates for the next phase only — they are not run
-as part of this correction round. The auditor's own working tree must be
-clean and its commit resolvable at execution time (see check 14 above), so
-any outstanding auditor-code changes must be committed before the full audit
-is actually run on h2o.
+These command templates were used for the real 2026-07-22 full audit run
+(auditor commit `4b524b3851b16baa080d4237622fa7da30e05cea`, result PASS) and
+remain here as reusable reference documentation for any future re-run (e.g.
+against a rebuilt or expanded package). The auditor's own working tree must
+be clean and its commit resolvable at execution time (see check 14 above),
+so any outstanding auditor-code changes must be committed before the full
+audit is run on h2o.
 
 ## Evidence-transfer requirements
 
 After a real h2o run, the entire generated `--output-dir` (all 6 items above)
 must be transferred off h2o as Gate 4 evidence before the package can be
 considered independently certified. Nothing under `--output-dir` is
-committed to git.
+committed to git. This was done for the 2026-07-22 run; the transferred
+evidence bundle remains untracked, as required.
 
 ## Scope note
 
-NeuralHydrology configuration generation remains blocked until this auditor
-has been run against the real package and real source artifacts on h2o and
-reports `PASS`.
+**Gate 4 is CLOSED.** The auditor has been run against the real package and
+real source artifacts on h2o and reported `PASS` (2026-07-22,
+`2026-07-22T08:58:52Z`). NeuralHydrology configuration generation is no
+longer blocked on this gate. A future re-run of the command templates above
+remains the correct procedure should the package ever be rebuilt or
+expanded.

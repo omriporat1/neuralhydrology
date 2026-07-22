@@ -1,12 +1,11 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-21 (Compact Scientific Package built on h2o, builder-level validation complete; independent audit implementation in progress — package not yet independently certified)
+Last updated: 2026-07-22 (Compact Scientific Package built on h2o and independently certified — Gate 4 PASS)
 
 ## Current milestone
 
-**Compact Scientific Package — built on h2o, builder-level validation
-complete; independent audit implementation in progress (2026-07-21).** The
-32-basin Compact Scientific Package (built via
+**Compact Scientific Package — built and independently certified
+(2026-07-22).** The 32-basin Compact Scientific Package (built via
 `scripts/build_stage1_baseline_nh_package.py`, commit
 `89c4dd162f7043419b4b227de5c2bc1b3b230da6`) has been built and promoted on
 h2o at `/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001`
@@ -19,23 +18,30 @@ ChatGPT inspection of its compact review bundle are complete. Package facts:
 global gap timestamps (136 MRMS + 2 RTMA); one 15-character basin ID
 `393109104464500`.
 
-**A genuinely independent auditor is now implemented** (local-only pass, not
-yet run against the real package): `src/baseline/package_audit.py`,
+**Gate 4 independent audit: PASS.** The genuinely independent auditor
+(`src/baseline/package_audit.py`,
 `scripts/audit_stage1_compact_scientific_package.py`,
-`tests/test_package_audit.py` (37 synthetic tests, all passing), and
-`docs/stage1_compact_package_independent_audit.md`. The auditor re-derives
-every scientific/structural claim from raw sources — it does not import
+`tests/test_package_audit.py`, `docs/stage1_compact_package_independent_audit.md`
+— committed `4b524b3851b16baa080d4237622fa7da30e05cea`) was run for real on
+h2o against the real package and real source artifacts, in full mode, at
+`2026-07-22T08:58:52Z`. Result: **status PASS, 0 errors, 0 warnings, 3,114 OK
+checks, exit code 0.** Audit output:
+`/data42/omrip/Flash-NH/tmp/stage1_compact_scientific_package_v001_gate4_audit`.
+The auditor re-derives every scientific/structural claim from raw
+sources — it does not import
 `package_builder`/`package_assembly`/`package_netcdf`/`units`/
 `lead_targets`/`gap_mask_io`, so a shared bug cannot pass both the build and
-the audit. It has not yet been run on h2o against the real package and real
-source artifacts.
+the audit. The build commit (`89c4dd162...`) and the auditor commit
+(`4b524b385...`) are intentionally distinct identities. The transferred
+audit evidence bundle was independently reviewed by ChatGPT and found
+internally consistent; the generated evidence files remain untracked and
+are not committed to this repository.
 
-**The package is built, but not yet independently certified.**
-NeuralHydrology configuration generation remains blocked until a real h2o
-audit run reports PASS. Next step: run the auditor's preflight and full
-modes on h2o (see the doc above for exact command templates), transfer the
-generated evidence bundle, and record the certification result here and in
-`docs/decision_log.md`.
+**The package is built and independently certified.** NeuralHydrology
+configuration generation is now unblocked. See
+`docs/decision_log.md`'s 2026-07-22 certification entry and
+`docs/stage1_compact_package_independent_audit.md`'s Status section for
+full detail.
 
 ---
 
@@ -127,6 +133,10 @@ is a separate, not-yet-started step.
 > see the current-state block at the top of this document and
 > `docs/stage1_compact_package_independent_audit.md`. It is not yet
 > independently certified.
+>
+> **Further update (2026-07-22):** the package has since been independently
+> certified — Gate 4 PASS, 3,114 OK / 0 errors / 0 warnings; see the
+> current-state block at the top of this document.
 
 **Scientific target-transformation + static-preparation primitives increment
 (2026-07-20).** Reviewed existing code before writing anything new (reuse-first):
