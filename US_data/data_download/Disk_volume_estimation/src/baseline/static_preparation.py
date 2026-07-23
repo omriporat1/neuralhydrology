@@ -26,10 +26,12 @@ the signed-off per-column median.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .splits import SplitGenerationError, join_eligible_with_matrix, load_matrix_for_splits, sha256_of
@@ -50,11 +52,20 @@ __all__ = [
     "apply_imputation",
     "build_imputation_manifest",
     "write_imputation_artifacts",
+    "ZeroVarianceFit",
+    "fit_zero_variance_projection",
+    "apply_zero_variance_projection",
+    "build_zero_variance_manifest",
+    "write_zero_variance_manifest",
 ]
 
 _ALGORITHM_ID = "stage1_static_median_imputation_v1"
 _ALGORITHM_VERSION = 1
 _DEFAULT_MODEL_INPUT_ROLE = "model_input"
+
+_ZERO_VARIANCE_MANIFEST_SCHEMA = "stage1_static_zero_variance_projection_v1"
+_ZERO_VARIANCE_MANIFEST_SCHEMA_VERSION = 1
+_ZERO_VARIANCE_REASON = "zero_variance_post_development_imputation"
 
 
 class StaticPreparationError(ValueError):
@@ -347,3 +358,183 @@ def write_imputation_artifacts(out_dir, imputed_df: pd.DataFrame, imputed_mask_d
     paths["imputation_manifest.json"] = manifest_path
 
     return paths
+
+
+# ---------------------------------------------------------------------------
+# Development-population zero-variance trainability projection
+#
+# A run-specific fit/apply projection (not a package-schema change): after
+# development-only median imputation, some model_input columns may be
+# exactly constant over the development-training population and cannot be
+# normalized/trained on. This identifies and freezes that retained/excluded
+# column split so it can be applied unchanged to validation, temporal-test,
+# and spatial-holdout rows without ever recomputing variance on them. The
+# canonical 473-column static matrix and package schema are untouched --
+# see docs/decision_log.md "Finding 1" for why the 32-basin compact-smoke
+# 13-column exclusion must not be reused here.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ZeroVarianceFit:
+    """Frozen zero-variance trainability projection fit on one basin population.
+
+    Excluded columns are exactly constant (finite, post-imputation) over the
+    fit population; retained columns vary. Does not store the fitted matrix.
+    """
+
+    fit_basin_scope: str
+    fit_population_size: int
+    candidate_columns: tuple
+    retained_columns: tuple
+    excluded_columns: tuple
+    exclusion_reason: str
+    exclusion_reasons: dict
+    fit_checksum: str
+
+
+def _zero_variance_fit_checksum(candidate_columns, retained_columns, excluded_columns, fit_population_size) -> str:
+    payload = json.dumps(
+        {
+            "candidate_columns": list(candidate_columns),
+            "retained_columns": list(retained_columns),
+            "excluded_columns": list(excluded_columns),
+            "fit_population_size": fit_population_size,
+        }
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def fit_zero_variance_projection(
+    imputed_static_matrix: pd.DataFrame,
+    development_train_basin_ids,
+    candidate_columns,
+    *,
+    exclusion_reason: str = _ZERO_VARIANCE_REASON,
+) -> ZeroVarianceFit:
+    """Fit the zero-variance trainability projection using **only** the
+    supplied development-training basin subset of ``imputed_static_matrix``
+    (values must already be post development-only-imputation, i.e. finite).
+
+    A candidate column is excluded when every fit-population value is
+    exactly identical; at least one column must be retained. Deterministic
+    regardless of ``imputed_static_matrix`` row order -- the fit population
+    is re-selected and sorted by basin id via :func:`select_basin_rows`.
+    Never recomputes variance for any other population -- see
+    :func:`apply_zero_variance_projection`.
+    """
+    candidate_columns = list(candidate_columns)
+    if len(candidate_columns) != len(set(candidate_columns)):
+        dupes = sorted({c for c in candidate_columns if candidate_columns.count(c) > 1})
+        raise StaticPreparationError(f"duplicate candidate column(s): {dupes}")
+
+    missing_cols = [c for c in candidate_columns if c not in imputed_static_matrix.columns]
+    if missing_cols:
+        raise StaticPreparationError(f"candidate column(s) missing from matrix: {missing_cols}")
+
+    fit_rows = select_basin_rows(imputed_static_matrix, development_train_basin_ids)
+    fit_values = fit_rows[candidate_columns]
+
+    non_finite_cols = [
+        col for col in candidate_columns if not np.all(np.isfinite(fit_values[col].to_numpy(dtype=float)))
+    ]
+    if non_finite_cols:
+        raise StaticPreparationError(
+            f"{len(non_finite_cols)} candidate column(s) have non-finite post-imputation "
+            f"value(s) over the development-training fit population ({len(fit_rows)} basins): "
+            f"{non_finite_cols[:10]}"
+        )
+
+    retained_columns = []
+    excluded_columns = []
+    for col in candidate_columns:
+        if fit_values[col].nunique(dropna=False) <= 1:
+            excluded_columns.append(col)
+        else:
+            retained_columns.append(col)
+
+    if not retained_columns:
+        raise StaticPreparationError(
+            f"all {len(candidate_columns)} candidate column(s) are zero-variance over the "
+            f"development-training fit population ({len(fit_rows)} basins) -- at least one "
+            "retained column is required"
+        )
+
+    exclusion_reasons = {col: exclusion_reason for col in excluded_columns}
+    fit_checksum = _zero_variance_fit_checksum(
+        candidate_columns, retained_columns, excluded_columns, len(fit_rows)
+    )
+
+    return ZeroVarianceFit(
+        fit_basin_scope="development_training_only",
+        fit_population_size=len(fit_rows),
+        candidate_columns=tuple(candidate_columns),
+        retained_columns=tuple(retained_columns),
+        excluded_columns=tuple(excluded_columns),
+        exclusion_reason=exclusion_reason,
+        exclusion_reasons=exclusion_reasons,
+        fit_checksum=fit_checksum,
+    )
+
+
+def apply_zero_variance_projection(imputed_static_matrix: pd.DataFrame, fit: ZeroVarianceFit) -> pd.DataFrame:
+    """Select ``fit``'s frozen retained columns, in their recorded order,
+    from ``imputed_static_matrix`` (development, validation/test, or
+    spatial-holdout rows alike). Never recomputes variance. Preserves row
+    order and basin identity (a plain column selection); fails loud if a
+    retained column is absent from ``imputed_static_matrix``.
+    """
+    missing_cols = [c for c in fit.retained_columns if c not in imputed_static_matrix.columns]
+    if missing_cols:
+        raise StaticPreparationError(f"retained column(s) missing from matrix: {missing_cols}")
+    return imputed_static_matrix[list(fit.retained_columns)].copy()
+
+
+def build_zero_variance_manifest(
+    *,
+    column_manifest_path,
+    fit: ZeroVarianceFit,
+    development_train_basin_list_path=None,
+    imputation_manifest: dict | None = None,
+) -> dict:
+    """Build the narrow, deterministic zero-variance projection manifest.
+
+    ``column_manifest_path`` is the canonical static input-column-role
+    contract (hashed for provenance). ``development_train_basin_list_path``,
+    when supplied, is the split-assignment/basin-list file the development
+    training population was drawn from (hashed). ``imputation_manifest``,
+    when supplied, is the dict returned by :func:`build_imputation_manifest`
+    for the fit's upstream development-only median imputation.
+    """
+    manifest = {
+        "manifest_schema": _ZERO_VARIANCE_MANIFEST_SCHEMA,
+        "manifest_schema_version": _ZERO_VARIANCE_MANIFEST_SCHEMA_VERSION,
+        "method": "exact_zero_variance_post_development_imputation",
+        "fit_basin_scope": fit.fit_basin_scope,
+        "fit_population_size": fit.fit_population_size,
+        "candidate_column_count": len(fit.candidate_columns),
+        "retained_column_count": len(fit.retained_columns),
+        "excluded_column_count": len(fit.excluded_columns),
+        "candidate_columns": list(fit.candidate_columns),
+        "retained_columns": list(fit.retained_columns),
+        "excluded_columns": list(fit.excluded_columns),
+        "exclusion_reason_by_column": dict(fit.exclusion_reasons),
+        "fit_checksum": fit.fit_checksum,
+        "column_manifest_path": str(column_manifest_path),
+        "column_manifest_sha256": sha256_of(column_manifest_path),
+    }
+    if development_train_basin_list_path is not None:
+        manifest["development_train_basin_list_path"] = str(development_train_basin_list_path)
+        manifest["development_train_basin_list_sha256"] = sha256_of(development_train_basin_list_path)
+    if imputation_manifest is not None:
+        manifest["imputation_algorithm_id"] = imputation_manifest.get("algorithm_id")
+        manifest["imputation_input_matrix_sha256"] = imputation_manifest.get("input_matrix_sha256")
+    return manifest
+
+
+def write_zero_variance_manifest(path, manifest: dict, force: bool = False) -> Path:
+    p = Path(path)
+    if p.exists() and not force:
+        raise StaticPreparationError(f"manifest file already exists: {p} (use --force)")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    return p

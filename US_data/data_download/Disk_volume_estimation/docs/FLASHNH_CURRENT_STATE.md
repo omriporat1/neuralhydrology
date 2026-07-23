@@ -1,6 +1,30 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-23 (Versioned package schema (`date`) for future scientific packages — implementation)
+Last updated: 2026-07-23 (Development-population zero-variance trainability projection — mechanism implementation)
+
+## Development-population zero-variance trainability projection — mechanism implementation (2026-07-23)
+
+Added a reusable fit/apply mechanism in `src/baseline/static_preparation.py`
+(`ZeroVarianceFit`, `fit_zero_variance_projection`,
+`apply_zero_variance_projection`, `build_zero_variance_manifest`,
+`write_zero_variance_manifest`) that identifies static `model_input` columns
+with exactly zero variance over the Stage 1 development-training population
+(2,307 basins) **after** development-only median imputation
+(`fit_development_median_imputation`, above/below). This is a **run-specific
+trainability projection, not a package-schema change**: the canonical static
+matrix and Compact/full package contract remain **473 `model_input`
+columns**, unmodified. The fit uses exact post-imputation constancy (no
+near-zero-variance threshold), is fitted once on the 2,307-basin
+development-training population, and its frozen retained/excluded column
+list is meant to be applied unchanged — never recomputed — to validation,
+temporal-test, and spatial-holdout populations. The compact-smoke 13-column
+exclusion list (`docs/decision_log.md` "Finding 1", 2026-07-23) is historical
+evidence for the 32-basin smoke population only and is explicitly not
+reused, imported, or asserted here. **This patch implements the mechanism
+only: it does not compute the real 2,307-basin excluded-column list (no
+h2o access), does not build a package, and does not generate NeuralHydrology
+configs.** 18 focused tests added in `tests/test_static_preparation.py`
+(52/52 passing). Full detail: `docs/decision_log.md` (2026-07-23 entry).
 
 ## Versioned package schema (`date`) for future scientific packages (2026-07-23)
 

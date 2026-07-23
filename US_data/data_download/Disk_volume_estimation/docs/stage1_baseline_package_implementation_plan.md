@@ -1035,6 +1035,24 @@ supersession record.
   NH's behavior on NaN static attributes is still verified on Moriah
   (I-D2-pre / preflight) as a defensive check — post-imputation the package
   should contain none.
+- **Zero-variance trainability projection — mechanism implemented
+  2026-07-23 (`docs/decision_log.md` same-date entry).** After
+  development-only median imputation above, some `model_input` columns may
+  be exactly constant over the development-training population and cannot
+  be normalized/trained on. `fit_zero_variance_projection` /
+  `apply_zero_variance_projection` / `build_zero_variance_manifest`
+  (`src/baseline/static_preparation.py`) fit this **once**, on the
+  2,307-basin development-training population only, using exact
+  post-imputation constancy (no near-zero-variance threshold), and freeze
+  the retained/excluded column list for unchanged reuse across validation,
+  temporal-test, and spatial holdout. **This does not change the package
+  contract** — the authoritative static matrix and package remain 473
+  `model_input` columns; the frozen retained-column list is consumed later
+  by config generation. The 32-basin compact-smoke 13-column zero-variance
+  exclusion (§ "Two findings" in the 2026-07-23 compact-integration-smoke
+  closure) is compact-smoke-specific historical evidence and is **not**
+  reused here. The real 2,307-basin excluded-column list has **not** been
+  computed by this patch (requires h2o access to the full matrix).
 
 ---
 

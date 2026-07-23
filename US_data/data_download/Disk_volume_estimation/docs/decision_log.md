@@ -4,6 +4,78 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-23 Development-population zero-variance trainability projection — mechanism implementation
+
+**Decision.** Implemented a reusable fit/apply mechanism, in the style of
+the existing development-only median-imputation primitives
+(`fit_development_median_imputation` / `apply_imputation`,
+`src/baseline/static_preparation.py`, 2026-07-20 2K-G-I primitives
+increment), that identifies static `model_input` columns with **exactly**
+zero variance over the Stage 1 development-training population (2,307
+basins) after development-only imputation: `ZeroVarianceFit`,
+`fit_zero_variance_projection`, `apply_zero_variance_projection`,
+`build_zero_variance_manifest`, `write_zero_variance_manifest`.
+
+**This is a run-specific trainability projection, not a package-schema
+change.** The canonical static matrix and the authoritative package
+contract remain **473 `model_input` columns**, unmodified —
+`package_netcdf.py`, package serialization, and canonical static-matrix
+construction were not touched. A future config-generation step will consume
+the frozen retained-column manifest produced here; the package itself will
+still carry all 473 columns.
+
+**Method (approved).** Exact post-imputation constancy: a candidate column
+is excluded when every finite post-imputation value across the
+development-training fit population is identical (`nunique(dropna=False) <=
+1`). No epsilon/near-zero-variance threshold — that remains a separate,
+out-of-scope, possible future modeling question. Post-imputation values that
+are still non-finite cause a hard failure rather than a silent zero-variance
+classification. The candidate-column list's supplied order is preserved
+(not alphabetized); the retained list is the canonical order with excluded
+columns removed. The fit is deterministic regardless of the input matrix's
+row order (fit rows are re-selected and sorted by basin id via the existing
+`select_basin_rows`/`join_eligible_with_matrix` path). At least one column
+must be retained, or the fit fails loud.
+
+**Fit/apply separation (binding).** The fit reads **only** the explicitly
+supplied development-training basin IDs — never validation, temporal-test,
+spatial-holdout, or California basins. The frozen retained/excluded column
+list is then applied, unchanged, to any other population via
+`apply_zero_variance_projection` (a plain column selection against the
+frozen list — it never recomputes variance on the target population, so a
+column that happens to be constant only within e.g. the spatial-holdout
+subset is still retained if it varied in the development-training fit).
+
+**Relationship to the compact-smoke 13-column exclusion.** The 32-basin
+compact-smoke zero-variance exclusion list (`CANALS_MAINSTEM_PCT`,
+`CDL_DURUM_WHEAT`, `CDL_ORANGES`, `CDL_RICE`, `HGBC`,
+`PCT_6TH_ORDER_OR_MORE`, `glc_pc_u01`, `glc_pc_u18`, `pnv_pc_u02`,
+`wet_pc_u02`, `wet_pc_u03`, `wet_pc_u07`, `wet_pc_u09` — see the 2026-07-23
+"Compact NeuralHydrology integration smoke" Finding 1, above) remains
+**compact-smoke-specific historical evidence only**. It is not copied,
+imported, asserted, or otherwise treated as an expected result anywhere in
+this implementation or its tests; one test explicitly proves a column
+sharing a name from that list (`CANALS_MAINSTEM_PCT`) is retained when it
+varies in a synthetic development-training population, i.e. that the result
+is computed from data, not hard-coded.
+
+**Not done by this patch.** The real zero-variance list has **not** been
+computed over the actual 2,307-basin development-training population (no
+h2o access in this patch); no package was built; no NeuralHydrology config
+was generated; no model was trained or evaluated; the certified Compact
+Scientific Package and its `package_netcdf.py`/auditor code were not
+touched; near-zero-variance (as opposed to exact) filtering was not
+implemented; nothing was committed.
+
+**Tests.** 18 focused tests added to `tests/test_static_preparation.py`
+covering: dev-train-only fitting with no holdout leakage in either
+direction, row-order independence, candidate-column order preservation,
+constant/varying classification, apply-without-recompute, row-order/basin-
+identity preservation on apply, missing/duplicate basin and column
+rejection, non-finite-value rejection, all-columns-excluded rejection, and
+manifest field/determinism checks. Full suite: 52/52 passing
+(`pytest -q tests/test_static_preparation.py`).
+
 ## 2026-07-23 Versioned package schema (`date`) for future scientific packages — implementation
 
 **Decision.** Added an explicit, versioned NetCDF package-schema contract so

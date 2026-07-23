@@ -14,9 +14,13 @@ import pytest
 from src.baseline.static_preparation import (
     ImputationFit,
     StaticPreparationError,
+    ZeroVarianceFit,
     apply_imputation,
+    apply_zero_variance_projection,
     build_imputation_manifest,
+    build_zero_variance_manifest,
     fit_development_median_imputation,
+    fit_zero_variance_projection,
     load_column_manifest,
     load_development_train_basin_ids,
     load_static_matrix,
@@ -25,6 +29,7 @@ from src.baseline.static_preparation import (
     split_model_input_and_metadata,
     validate_unique_normalized_basin_ids,
     write_imputation_artifacts,
+    write_zero_variance_manifest,
 )
 
 MODEL_INPUT_COLS = ["attr_a", "attr_b", "attr_c"]
@@ -445,3 +450,246 @@ def test_write_imputation_artifacts_refuses_nonempty_dir_without_force(tmp_path)
     with pytest.raises(StaticPreparationError, match="force"):
         write_imputation_artifacts(out_dir, imputed_df, mask_df, manifest)
     write_imputation_artifacts(out_dir, imputed_df, mask_df, manifest, force=True)
+
+
+# ---------------------------------------------------------------------------
+# fit_zero_variance_projection / apply_zero_variance_projection / manifest
+#
+# Development-population trainability projection: identifies static columns
+# with exactly zero variance over the development-training population *after*
+# development-only imputation. Fitted only on development_train rows; frozen
+# and reused unchanged elsewhere. Does not touch the canonical 473-column
+# package/schema -- see docs/decision_log.md "Finding 1" for why the 32-basin
+# compact-smoke 13-column exclusion must never be reused for this population.
+# ---------------------------------------------------------------------------
+
+_ZV_D1, _ZV_D2, _ZV_D3 = "01100001", "01100002", "01100003"
+_ZV_H1, _ZV_H2 = "09100001", "09100002"
+_ZV_DEV_IDS = [_ZV_D1, _ZV_D2, _ZV_D3]
+_ZV_CANDIDATE_COLS = ["attr_vary_all", "attr_const_dev", "attr_vary_dev"]
+
+
+def _zero_variance_matrix():
+    # attr_const_dev: constant (5.0) across dev-train, but varies at holdout
+    #   (1.0 / 2.0) -- must be EXCLUDED (dev-only fit, no leakage from holdout
+    #   variance making it look variable).
+    # attr_vary_dev: varies across dev-train (1.0/2.0/3.0), but is constant
+    #   at holdout (9.0/9.0) -- must be RETAINED (holdout constancy must not
+    #   cause an exclusion; only dev-train values are ever examined).
+    # attr_vary_all: varies everywhere -- ordinary retained column.
+    rows = {
+        _ZV_D1: {"attr_const_dev": 5.0, "attr_vary_dev": 1.0, "attr_vary_all": 10.0},
+        _ZV_D2: {"attr_const_dev": 5.0, "attr_vary_dev": 2.0, "attr_vary_all": 20.0},
+        _ZV_D3: {"attr_const_dev": 5.0, "attr_vary_dev": 3.0, "attr_vary_all": 30.0},
+        _ZV_H1: {"attr_const_dev": 1.0, "attr_vary_dev": 9.0, "attr_vary_all": 40.0},
+        _ZV_H2: {"attr_const_dev": 2.0, "attr_vary_dev": 9.0, "attr_vary_all": 50.0},
+    }
+    return _matrix_df(rows)
+
+
+def test_fit_zero_variance_projection_uses_only_dev_train_rows():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert fit.fit_population_size == 3
+    assert fit.fit_basin_scope == "development_training_only"
+    # attr_const_dev is constant over the 3 dev rows even though the full
+    # matrix (including holdout) is not constant -- proves holdout rows
+    # never influenced the fit.
+    assert "attr_const_dev" in fit.excluded_columns
+
+
+def test_fit_zero_variance_projection_row_order_independent():
+    matrix = _zero_variance_matrix()
+    shuffled = matrix.iloc[::-1]
+    fit_a = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    fit_b = fit_zero_variance_projection(shuffled, list(reversed(_ZV_DEV_IDS)), _ZV_CANDIDATE_COLS)
+    assert fit_a.retained_columns == fit_b.retained_columns
+    assert fit_a.excluded_columns == fit_b.excluded_columns
+    assert fit_a.fit_checksum == fit_b.fit_checksum
+
+
+def test_fit_zero_variance_projection_preserves_candidate_column_order():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert fit.candidate_columns == tuple(_ZV_CANDIDATE_COLS)
+    # attr_const_dev is excluded; the remaining two must keep their supplied
+    # relative order (attr_vary_all before attr_vary_dev), not alphabetical.
+    assert fit.retained_columns == ("attr_vary_all", "attr_vary_dev")
+
+
+def test_fit_zero_variance_projection_excludes_constant_after_imputation_column():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert "attr_const_dev" in fit.excluded_columns
+    assert fit.exclusion_reasons["attr_const_dev"] == "zero_variance_post_development_imputation"
+    assert fit.exclusion_reason == "zero_variance_post_development_imputation"
+
+
+def test_fit_zero_variance_projection_retains_varying_column():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert "attr_vary_all" in fit.retained_columns
+    assert "attr_vary_all" not in fit.excluded_columns
+
+
+def test_fit_zero_variance_projection_excludes_column_constant_only_inside_dev():
+    # Even though attr_const_dev VARIES across the full matrix (holdout rows
+    # 1.0 / 2.0), it is exactly constant across the 3 dev-train rows alone,
+    # so it must be excluded -- proves the fit never widens its population.
+    matrix = _zero_variance_matrix()
+    full_population_values = matrix["attr_const_dev"]
+    assert full_population_values.nunique() > 1  # varies over the WHOLE matrix
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert "attr_const_dev" in fit.excluded_columns
+
+
+def test_fit_zero_variance_projection_retains_column_constant_only_outside_dev():
+    # attr_vary_dev is constant at holdout (9.0/9.0) but varies across the 3
+    # dev-train rows -- must be retained regardless of holdout constancy.
+    matrix = _zero_variance_matrix()
+    holdout_values = matrix.loc[[_ZV_H1, _ZV_H2], "attr_vary_dev"]
+    assert holdout_values.nunique() == 1  # constant at holdout
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    assert "attr_vary_dev" in fit.retained_columns
+
+
+def test_apply_zero_variance_projection_uses_frozen_list_without_recomputing():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    # Apply to the holdout rows only, where attr_vary_dev is itself constant
+    # (9.0/9.0). If apply() recomputed variance on this target subset it
+    # would (wrongly) drop attr_vary_dev; it must not.
+    target = matrix.loc[[_ZV_H1, _ZV_H2]]
+    out = apply_zero_variance_projection(target, fit)
+    assert list(out.columns) == list(fit.retained_columns)
+    assert "attr_vary_dev" in out.columns
+
+
+def test_apply_zero_variance_projection_preserves_row_order_and_basin_identity():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    target = matrix.loc[[_ZV_H2, _ZV_D1, _ZV_H1]]  # deliberately unsorted
+    out = apply_zero_variance_projection(target, fit)
+    assert list(out.index) == [_ZV_H2, _ZV_D1, _ZV_H1]
+    assert out.loc[_ZV_D1, "attr_vary_all"] == pytest.approx(10.0)
+
+
+def test_apply_zero_variance_projection_missing_retained_column_raises():
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    target = matrix.drop(columns=["attr_vary_all"])
+    with pytest.raises(StaticPreparationError, match="missing from matrix"):
+        apply_zero_variance_projection(target, fit)
+
+
+def test_fit_zero_variance_projection_missing_dev_basin_raises():
+    matrix = _zero_variance_matrix()
+    with pytest.raises(StaticPreparationError, match="missing from matrix"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS + ["01999999"], _ZV_CANDIDATE_COLS)
+
+
+def test_fit_zero_variance_projection_duplicate_dev_basin_raises():
+    matrix = _zero_variance_matrix()
+    with pytest.raises(StaticPreparationError, match="duplicate"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS + [_ZV_D1], _ZV_CANDIDATE_COLS)
+
+
+def test_fit_zero_variance_projection_duplicate_candidate_column_raises():
+    matrix = _zero_variance_matrix()
+    with pytest.raises(StaticPreparationError, match="duplicate candidate column"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS + ["attr_vary_all"])
+
+
+def test_fit_zero_variance_projection_missing_candidate_column_raises():
+    matrix = _zero_variance_matrix()
+    with pytest.raises(StaticPreparationError, match="missing from matrix"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS + ["nonexistent_col"])
+
+
+def test_fit_zero_variance_projection_nonfinite_value_raises():
+    matrix = _zero_variance_matrix()
+    matrix.loc[_ZV_D2, "attr_vary_all"] = np.nan
+    with pytest.raises(StaticPreparationError, match="non-finite"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+
+
+def test_fit_zero_variance_projection_all_columns_excluded_raises():
+    rows = {
+        _ZV_D1: {"attr_const_dev": 5.0},
+        _ZV_D2: {"attr_const_dev": 5.0},
+        _ZV_D3: {"attr_const_dev": 5.0},
+    }
+    matrix = _matrix_df(rows)
+    with pytest.raises(StaticPreparationError, match="zero-variance"):
+        fit_zero_variance_projection(matrix, _ZV_DEV_IDS, ["attr_const_dev"])
+
+
+def test_fit_zero_variance_projection_not_influenced_by_hardcoded_compact_list():
+    # Historical compact-smoke evidence excluded (among others) a column
+    # named "CANALS_MAINSTEM_PCT" over its own 32-basin population (see
+    # docs/decision_log.md "Finding 1"). Here it VARIES over the (synthetic)
+    # development-training population and must be retained -- proving the
+    # result is computed from data, not copied from that historical list.
+    rows = {
+        _ZV_D1: {"CANALS_MAINSTEM_PCT": 1.0, "some_other_col": 7.0},
+        _ZV_D2: {"CANALS_MAINSTEM_PCT": 2.0, "some_other_col": 7.0},
+        _ZV_D3: {"CANALS_MAINSTEM_PCT": 3.0, "some_other_col": 7.0},
+    }
+    matrix = _matrix_df(rows)
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, ["CANALS_MAINSTEM_PCT", "some_other_col"])
+    assert "CANALS_MAINSTEM_PCT" in fit.retained_columns
+    assert "some_other_col" in fit.excluded_columns
+
+
+def test_build_zero_variance_manifest_fields(tmp_path):
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    column_manifest_p = _write_manifest(tmp_path, model_input_cols=_ZV_CANDIDATE_COLS, other_role_cols=())
+    basin_list_p = _write_split_assignment(tmp_path, [
+        {"STAID": sid, "STATE": "ME", "split_role": "development_train"} for sid in _ZV_DEV_IDS
+    ])
+
+    manifest = build_zero_variance_manifest(
+        column_manifest_path=column_manifest_p,
+        fit=fit,
+        development_train_basin_list_path=basin_list_p,
+    )
+    assert manifest["manifest_schema"] == "stage1_static_zero_variance_projection_v1"
+    assert manifest["method"] == "exact_zero_variance_post_development_imputation"
+    assert manifest["fit_basin_scope"] == "development_training_only"
+    assert manifest["fit_population_size"] == 3
+    assert manifest["candidate_column_count"] == 3
+    assert manifest["retained_column_count"] == 2
+    assert manifest["excluded_column_count"] == 1
+    assert manifest["retained_columns"] == list(fit.retained_columns)
+    assert manifest["excluded_columns"] == list(fit.excluded_columns)
+    assert manifest["exclusion_reason_by_column"] == {"attr_const_dev": "zero_variance_post_development_imputation"}
+    assert len(manifest["column_manifest_sha256"]) == 64
+    assert len(manifest["development_train_basin_list_sha256"]) == 64
+
+
+def test_build_zero_variance_manifest_deterministic(tmp_path):
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    column_manifest_p = _write_manifest(tmp_path, model_input_cols=_ZV_CANDIDATE_COLS, other_role_cols=())
+
+    manifest_a = build_zero_variance_manifest(column_manifest_path=column_manifest_p, fit=fit)
+    manifest_b = build_zero_variance_manifest(column_manifest_path=column_manifest_p, fit=fit)
+    assert manifest_a == manifest_b
+    assert json.dumps(manifest_a, sort_keys=True) == json.dumps(manifest_b, sort_keys=True)
+
+
+def test_write_zero_variance_manifest_roundtrip_and_force(tmp_path):
+    matrix = _zero_variance_matrix()
+    fit = fit_zero_variance_projection(matrix, _ZV_DEV_IDS, _ZV_CANDIDATE_COLS)
+    column_manifest_p = _write_manifest(tmp_path, model_input_cols=_ZV_CANDIDATE_COLS, other_role_cols=())
+    manifest = build_zero_variance_manifest(column_manifest_path=column_manifest_p, fit=fit)
+
+    out_p = tmp_path / "zero_variance_manifest.json"
+    write_zero_variance_manifest(out_p, manifest)
+    written = json.loads(out_p.read_text(encoding="utf-8"))
+    assert written["retained_column_count"] == 2
+
+    with pytest.raises(StaticPreparationError, match="force"):
+        write_zero_variance_manifest(out_p, manifest)
+    write_zero_variance_manifest(out_p, manifest, force=True)

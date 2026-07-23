@@ -23,6 +23,19 @@ describing the h2o-side mirror) was a minor miscount; the total file count of
 §1–§10 below are preserved as the original planning-phase record; §11
 documents what was actually built.
 
+**Note (2026-07-23): the "near-constant column" discussion below (§5 and
+elsewhere) is preserved as historical planning-phase analysis and was never
+implemented as a matrix-level drop** — the canonical static matrix retains
+all 473 `model_input` columns. Zero-variance handling is instead implemented
+as a separate, later, run-specific fit/apply projection (exact zero variance
+only, no near-zero threshold) fitted on the actual 2,307-basin
+development-training population after development-only imputation —
+`fit_zero_variance_projection` / `apply_zero_variance_projection` /
+`build_zero_variance_manifest` in `src/baseline/static_preparation.py`. See
+`docs/decision_log.md` (2026-07-23 "Development-population zero-variance
+trainability projection" entry) for the implemented mechanism and its
+relationship to the unrelated 32-basin compact-smoke 13-column exclusion.
+
 ## 1. Why this milestone exists
 
 The current canonical static-attribute artifact —
