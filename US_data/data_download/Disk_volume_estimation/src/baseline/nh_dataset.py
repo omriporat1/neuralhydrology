@@ -231,8 +231,58 @@ def _classify_gap_timestamps(gap_timestamps: list, full_timeline: pd.DatetimeInd
     return in_range, n_outside
 
 
+def _adapt_time_to_date(df: pd.DataFrame) -> pd.DataFrame:
+    """In-memory package-to-NeuralHydrology temporal-name compatibility
+    boundary (immediate compatibility fix, not the final production-package
+    schema decision).
+
+    The certified Stage 1 package's NetCDF files use ``time`` as their
+    dimension/coordinate name -- semantically valid xarray/NetCDF, and not
+    something this task changes on disk. NeuralHydrology 1.13's
+    ``BaseDataset._load_or_create_xarray_dataset`` (basedataset.py) requires
+    the per-basin DataFrame's temporal index to be named exactly ``date``
+    (it does ``df_duplicated.groupby('date')`` and later reads
+    ``xr['date']`` on the xarray.Dataset built from this DataFrame via
+    ``xarray.Dataset.from_dataframe``), so an unrenamed ``time`` index fails
+    with ``KeyError: 'date'``. This renames only the index's ``.name``
+    metadata -- values, row order, dtypes, and all columns (including gap
+    flags) are untouched. The production-package coordinate convention will
+    be revisited separately before the full-population baseline is frozen.
+    """
+    index = df.index
+    if isinstance(index, pd.MultiIndex):
+        raise FlashNHDatasetError(
+            "FlashNHDataset._load_basin_data: expected a single-level temporal "
+            f"index, got a MultiIndex with names {index.names!r}"
+        )
+    name = index.name
+    if name == "date":
+        return df
+    if name == "time":
+        if "date" in df.columns:
+            raise FlashNHDatasetError(
+                "FlashNHDataset._load_basin_data: basin data has both a 'time' "
+                "index and a 'date' column; cannot unambiguously adapt to "
+                "NeuralHydrology's required 'date' index name"
+            )
+        return df.rename_axis("date")
+    raise FlashNHDatasetError(
+        f"FlashNHDataset._load_basin_data: expected temporal index named "
+        f"'time' or 'date', got {name!r}"
+    )
+
+
 class FlashNHDataset(GenericDataset):
     """GenericDataset with a Flash-NH validity post-filter on the lookup table."""
+
+    def _load_basin_data(self, basin: str) -> pd.DataFrame:
+        # Narrowest override point: BaseDataset._load_or_create_xarray_dataset
+        # calls self._load_basin_data(basin) once per basin, before any of its
+        # date-name-dependent logic (duplicate handling, frequency inference,
+        # xarray.Dataset.from_dataframe) runs. Call the parent GenericDataset
+        # loader unchanged, then adapt only the temporal index name in memory.
+        df = super()._load_basin_data(basin)
+        return _adapt_time_to_date(df)
 
     def _create_lookup_table(self, xr: xarray.Dataset):
         super()._create_lookup_table(xr)

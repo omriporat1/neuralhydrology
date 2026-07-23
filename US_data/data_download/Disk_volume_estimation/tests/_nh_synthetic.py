@@ -42,6 +42,7 @@ def build_synthetic_package(
     dynamic_input_values: dict = None,
     static_attribute_values: dict = None,
     declared_gap_hours: list = None,
+    coordinate_name: str = "date",
 ) -> Path:
     """Write a tiny GenericDataset-compatible package plus a Flash-NH
     gap_timestamps.json mask artifact under ``base_dir``. Returns the config
@@ -67,6 +68,12 @@ def build_synthetic_package(
     ``masks/gap_timestamps.json`` independent of where NaNs actually live in
     the dynamic arrays -- used to synthesize gap-flag/missingness mismatch
     scenarios. Defaults to ``bad_hours``.
+
+    ``coordinate_name``, if given, overrides the per-basin NetCDF's
+    dimension/coordinate name (default ``"date"``, matching NeuralHydrology
+    1.13's own requirement). Pass ``"time"`` to reproduce the certified
+    Stage 1 package's real on-disk convention, e.g. for the
+    FlashNHDataset ``time``-to-``date`` adapter's regression test.
     """
     target_nan_hours_by_basin = target_nan_hours_by_basin or {}
     if declared_gap_hours is None:
@@ -90,12 +97,12 @@ def build_synthetic_package(
         data_vars = {}
         if dynamic_input_values is not None:
             for name in dynamic_input_names:
-                data_vars[name] = ("date", np.asarray(dynamic_input_values[name][basin], dtype=np.float64))
+                data_vars[name] = (coordinate_name, np.asarray(dynamic_input_values[name][basin], dtype=np.float64))
         else:
             precip = np.arange(N_HOURS, dtype=np.float64)
             for h in bad_hours:
                 precip[h] = np.nan
-            data_vars["precip"] = ("date", precip)
+            data_vars["precip"] = (coordinate_name, precip)
 
         target = np.full(N_HOURS, np.nan, dtype=np.float64)
         for i in range(N_HOURS):
@@ -103,9 +110,9 @@ def build_synthetic_package(
                 target[i] = i + lead_hours
         for h in target_nan_hours_by_basin.get(basin, []):
             target[h] = np.nan
-        data_vars[f"qobs_lead{lead_hours}"] = ("date", target)
+        data_vars[f"qobs_lead{lead_hours}"] = (coordinate_name, target)
 
-        ds = xr.Dataset(data_vars, coords={"date": dates})
+        ds = xr.Dataset(data_vars, coords={coordinate_name: dates})
         ds.to_netcdf(ts_dir / f"{basin}.nc")
 
     for period in ("train", "validation", "test"):

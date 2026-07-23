@@ -31,6 +31,7 @@ from _nh_synthetic import N_HOURS, RESEARCH_START, build_synthetic_package, prep
 
 from src.baseline.nh_dataset import (  # noqa: E402
     FlashNHDatasetError,
+    _adapt_time_to_date,
     _build_research_timeline,
     _normalize_timestamp,
 )
@@ -298,3 +299,144 @@ def test_in_range_unaligned_gap_timestamp_raises(tmp_path):
     # so the misaligned timestamp must raise rather than be silently dropped.
     with pytest.raises(FlashNHDatasetError):
         get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
+
+
+# --- time -> date package-compatibility adapter ----------------------------
+#
+# The certified Stage 1 compact package's NetCDF files use ``time`` as their
+# per-basin dimension/coordinate name. NeuralHydrology 1.13's
+# BaseDataset._load_or_create_xarray_dataset requires this to be named
+# literally ``date`` (df_duplicated.groupby('date'), then xr['date']), so an
+# unrenamed ``time`` index previously failed real Moriah dataset construction
+# with KeyError: 'date' (job 45624540/traceback). These tests prove the
+# FlashNHDataset._load_basin_data override (src/baseline/nh_dataset.py) fixes
+# this through a real, non-mocked get_dataset(...) construction -- not only
+# via the standalone _adapt_time_to_date helper -- and that the underlying
+# validity-mask/lead-boundary/period-boundary filtering behavior proven above
+# is unaffected by the adapter.
+
+
+def _build_and_run_time_named(tmp_path, seq_length):
+    cfg_path = build_synthetic_package(
+        tmp_path,
+        basins=BASINS,
+        seq_length=seq_length,
+        lead_hours=LEAD,
+        bad_hours=BAD_HOURS,
+        target_nan_hours_by_basin=TARGET_NAN_HOURS,
+        coordinate_name="time",
+    )
+    cfg = Config(cfg_path)
+    prepare_run_dirs(cfg, tmp_path, f"timecoord_seq{seq_length}")
+
+    train_ds = get_dataset(cfg=cfg, is_train=True, period="train", scaler={})  # see scaler={} note above
+    val_ds = get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
+    test_ds = get_dataset(cfg=cfg, is_train=False, period="test", scaler=train_ds.scaler)
+    return {"train": train_ds, "validation": val_ds, "test": test_ds}
+
+
+def test_time_named_package_constructs_through_real_get_dataset(tmp_path):
+    # Reproduces the exact real-world package shape (NetCDF coordinate named
+    # 'time', not 'date'). Before the _load_basin_data override existed, this
+    # failed inside NeuralHydrology's own basedataset.py with
+    # KeyError: 'date' -- confirmed by temporarily removing the override (see
+    # validation notes); this test must pass with the override in place.
+    seq_length = 3
+    datasets = _build_and_run_time_named(tmp_path, seq_length)
+
+    for period, ds in datasets.items():
+        for basin in BASINS:
+            expected = _expected_valid_hours(period, seq_length, TARGET_NAN_HOURS[basin])
+            actual = _actual_hours(ds, basin)
+            assert actual == expected, (
+                f"time-coord {period}/{basin}/seq{seq_length}: "
+                f"expected {sorted(expected)}, got {sorted(actual)}"
+            )
+
+
+def test_time_named_package_matches_date_named_package_exactly(tmp_path):
+    # Same fixture parameters, only the coordinate name differs -- the two
+    # packages must produce identical retained-sample sets and identical
+    # filter-stat counts, proving the adapter is purely a naming shim.
+    seq_length = 3
+    date_dir = tmp_path / "date_named"
+    time_dir = tmp_path / "time_named"
+
+    date_cfg = build_synthetic_package(
+        date_dir, basins=BASINS, seq_length=seq_length, lead_hours=LEAD,
+        bad_hours=BAD_HOURS, target_nan_hours_by_basin=TARGET_NAN_HOURS,
+    )
+    time_cfg = build_synthetic_package(
+        time_dir, basins=BASINS, seq_length=seq_length, lead_hours=LEAD,
+        bad_hours=BAD_HOURS, target_nan_hours_by_basin=TARGET_NAN_HOURS,
+        coordinate_name="time",
+    )
+
+    cfg_date = Config(date_cfg)
+    prepare_run_dirs(cfg_date, date_dir, "date_named")
+    cfg_time = Config(time_cfg)
+    prepare_run_dirs(cfg_time, time_dir, "time_named")
+
+    train_date = get_dataset(cfg=cfg_date, is_train=True, period="train", scaler={})
+    val_date = get_dataset(cfg=cfg_date, is_train=False, period="validation", scaler=train_date.scaler)
+    train_time = get_dataset(cfg=cfg_time, is_train=True, period="train", scaler={})
+    val_time = get_dataset(cfg=cfg_time, is_train=False, period="validation", scaler=train_time.scaler)
+
+    for basin in BASINS:
+        assert _actual_hours(val_date, basin) == _actual_hours(val_time, basin)
+
+    stats_date = val_date.flashnh_filter_stats
+    stats_time = val_time.flashnh_filter_stats
+    assert stats_date.n_before == stats_time.n_before
+    assert stats_date.removed_for_forcing_history == stats_time.removed_for_forcing_history
+    assert stats_date.removed_for_period_target_boundary == stats_time.removed_for_period_target_boundary
+    assert stats_date.removed_for_missing_target == stats_time.removed_for_missing_target
+    assert stats_date.n_kept == stats_time.n_kept
+
+
+def test_adapt_time_to_date_preserves_values_order_and_dtype():
+    idx = pd.date_range("2000-01-01", periods=5, freq="h", name="time")
+    df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    adapted = _adapt_time_to_date(df)
+
+    assert adapted.index.name == "date"
+    assert list(adapted.index) == list(idx)  # values and order unchanged
+    assert adapted.index.dtype == idx.dtype
+    pd.testing.assert_frame_equal(
+        adapted.reset_index(drop=True), df.reset_index(drop=True)
+    )  # column values/dtypes untouched
+
+
+def test_adapt_time_to_date_leaves_already_date_named_input_unchanged():
+    idx = pd.date_range("2000-01-01", periods=5, freq="h", name="date")
+    df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    adapted = _adapt_time_to_date(df)
+
+    assert adapted is df  # passthrough, not even a copy
+    assert adapted.index.name == "date"
+
+
+def test_adapt_time_to_date_rejects_ambiguous_time_index_with_date_column():
+    idx = pd.date_range("2000-01-01", periods=5, freq="h", name="time")
+    df = pd.DataFrame({"date": np.arange(5), "precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    with pytest.raises(FlashNHDatasetError):
+        _adapt_time_to_date(df)
+
+
+def test_adapt_time_to_date_rejects_unrecognized_index_name():
+    idx = pd.date_range("2000-01-01", periods=5, freq="h", name="timestamp")
+    df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    with pytest.raises(FlashNHDatasetError):
+        _adapt_time_to_date(df)
+
+
+def test_adapt_time_to_date_rejects_multiindex():
+    idx = pd.MultiIndex.from_product([["a"], pd.date_range("2000-01-01", periods=5, freq="h")], names=["basin", "time"])
+    df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    with pytest.raises(FlashNHDatasetError):
+        _adapt_time_to_date(df)
