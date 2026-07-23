@@ -52,7 +52,7 @@ echo "SLURM_JOB_ID: ${SLURM_JOB_ID}"
 
 echo "=== gate: CPU preflight must be PASS ==="
 test -f "${CPU_PREFLIGHT_RESULT}" || { echo "MISSING CPU preflight result: ${CPU_PREFLIGHT_RESULT}"; exit 1; }
-python -c "
+"${ENV_PREFIX}/bin/python" -c "
 import json, sys
 d = json.load(open('${CPU_PREFLIGHT_RESULT}'))
 print('CPU preflight status:', d.get('status'))
