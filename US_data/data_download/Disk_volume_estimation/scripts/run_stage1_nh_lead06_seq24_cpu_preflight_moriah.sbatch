@@ -121,6 +121,158 @@ fi
 
 CONFIG_YAML="${GENERATED_OUT_DIR}/config.yaml"
 
+# --- smoke-only static-attribute adjustment ------------------------------
+# Real Moriah evidence (CPU-preflight job 45624540 + diagnostic job 45624596)
+# found exactly 13 of the package's 473 static columns have zero (or NaN)
+# standard deviation across this compact package's 32-basin subset, which NH
+# cannot normalize. This is a property of the small compact smoke population,
+# not a package defect -- the full 473-column package stays authoritative.
+# This block recomputes std over the transferred package's real
+# attributes.csv, requires the zero/NaN-std set to equal exactly the 13
+# columns confirmed above, drops only those from this generated config's
+# static_attributes list (order preserved), and writes adjustment evidence.
+# Must not be read as a change to the package contract or to the generator's
+# normal 473-column validation.
+echo "=== smoke-only static-attribute adjustment (32-basin zero-variance exclusion) ==="
+ADJUSTMENT_EVIDENCE="${RESULT_DIR}/smoke_static_adjustment.json"
+python -u -c "
+import csv
+import hashlib
+import json
+import math
+import os
+import sys
+import yaml
+
+config_path = '${CONFIG_YAML}'
+attributes_csv = '${TRANSFERRED_PACKAGE}/attributes/attributes.csv'
+evidence_path = '${ADJUSTMENT_EVIDENCE}'
+
+EXPECTED_EXCLUDED = {
+    'CANALS_MAINSTEM_PCT', 'CDL_DURUM_WHEAT', 'CDL_ORANGES', 'CDL_RICE', 'HGBC',
+    'PCT_6TH_ORDER_OR_MORE', 'glc_pc_u01', 'glc_pc_u18', 'pnv_pc_u02',
+    'wet_pc_u02', 'wet_pc_u03', 'wet_pc_u07', 'wet_pc_u09',
+}
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        h.update(fh.read())
+    return h.hexdigest()
+
+with open(config_path, 'r', encoding='utf-8') as fh:
+    config = yaml.safe_load(fh)
+
+original_sha256 = sha256_of(config_path)
+static_attributes = config.get('static_attributes')
+if not isinstance(static_attributes, list):
+    print('FATAL: config.yaml has no static_attributes list', file=sys.stderr)
+    sys.exit(1)
+original_count = len(static_attributes)
+if original_count != 473:
+    print(f'FATAL: expected 473 static_attributes in generated config, got {original_count}', file=sys.stderr)
+    sys.exit(1)
+
+with open(attributes_csv, 'r', newline='', encoding='utf-8') as fh:
+    reader = csv.reader(fh)
+    header = next(reader)
+    if header[0] != 'gauge_id':
+        print(f'FATAL: expected gauge_id as first attributes.csv column, got {header[0]!r}', file=sys.stderr)
+        sys.exit(1)
+    col_index = {name: i for i, name in enumerate(header[1:])}
+    rows = [row for row in reader]
+
+missing = [c for c in static_attributes if c not in col_index]
+if missing:
+    print(f'FATAL: {len(missing)} config static_attributes missing from attributes.csv header', file=sys.stderr)
+    sys.exit(1)
+
+nonfinite_cells = 0
+zero_or_nan_std_columns = []
+for name in static_attributes:
+    idx = col_index[name]
+    values = []
+    for row in rows:
+        raw = row[idx + 1]
+        try:
+            v = float(raw)
+        except ValueError:
+            v = float('nan')
+        if not math.isfinite(v):
+            nonfinite_cells += 1
+        values.append(v)
+    finite_values = [v for v in values if math.isfinite(v)]
+    if len(finite_values) < 2:
+        zero_or_nan_std_columns.append(name)
+        continue
+    mean = sum(finite_values) / len(finite_values)
+    variance = sum((v - mean) ** 2 for v in finite_values) / (len(finite_values) - 1)
+    std = math.sqrt(variance)
+    if std == 0.0 or math.isnan(std):
+        zero_or_nan_std_columns.append(name)
+
+actual_excluded = set(zero_or_nan_std_columns)
+if nonfinite_cells != 0:
+    print(f'FATAL: expected 0 nonfinite static cells, found {nonfinite_cells}', file=sys.stderr)
+    sys.exit(1)
+if actual_excluded != EXPECTED_EXCLUDED:
+    print('FATAL: zero/NaN-std column set does not match the confirmed 13-column set', file=sys.stderr)
+    print(f'  expected: {sorted(EXPECTED_EXCLUDED)}', file=sys.stderr)
+    print(f'  actual:   {sorted(actual_excluded)}', file=sys.stderr)
+    sys.exit(1)
+
+retained = [c for c in static_attributes if c not in actual_excluded]
+if len(retained) != 460:
+    print(f'FATAL: expected 460 retained static_attributes, got {len(retained)}', file=sys.stderr)
+    sys.exit(1)
+
+config['static_attributes'] = retained
+
+tmp_path = config_path + '.tmp_smoke_adjust'
+with open(tmp_path, 'w', encoding='utf-8') as fh:
+    yaml.safe_dump(config, fh, default_flow_style=False, sort_keys=False)
+os.replace(tmp_path, config_path)
+
+adjusted_sha256 = sha256_of(config_path)
+
+evidence = {
+    'role': 'compact smoke only -- not the full-population baseline',
+    'original_static_count': original_count,
+    'retained_static_count': len(retained),
+    'excluded_count': len(actual_excluded),
+    'excluded_columns': sorted(actual_excluded),
+    'package_attributes_csv': attributes_csv,
+    'config_yaml': config_path,
+    'original_config_sha256': original_sha256,
+    'adjusted_config_sha256': adjusted_sha256,
+    'note': ('This 13-column zero-variance exclusion applies only to the 32-basin '
+             'compact integration smoke. The full 473-column package remains '
+             'authoritative and this exclusion must not automatically be inherited '
+             'by the future full-population baseline.'),
+}
+with open(evidence_path, 'w', encoding='utf-8') as fh:
+    json.dump(evidence, fh, indent=2)
+print(json.dumps(evidence, indent=2))
+"
+ADJUST_STATUS=$?
+if [ "${ADJUST_STATUS}" -ne 0 ]; then
+    python -u -c "
+import json
+out = {
+    'status': 'FAIL',
+    'reason': 'smoke-only static-attribute adjustment failed',
+    'config_yaml': '${CONFIG_YAML}',
+    'static_adjustment_evidence_path': '${ADJUSTMENT_EVIDENCE}',
+    'slurm_job_id': '${SLURM_JOB_ID}',
+    'hostname': __import__('socket').gethostname(),
+}
+json.dump(out, open('${RESULT_JSON}', 'w'), indent=2)
+print(json.dumps(out, indent=2))
+"
+    echo "=== done (exit ${ADJUST_STATUS}) ==="
+    exit ${ADJUST_STATUS}
+fi
+
 echo "=== run structural preflight (Layer 1 + Layer 2 real FlashNHDataset construction) ==="
 python scripts/check_stage1_nh_config_preflight.py \
     --generated-dir "${GENERATED_OUT_DIR}" \
@@ -129,7 +281,7 @@ python scripts/check_stage1_nh_config_preflight.py \
     --expected-seq-length 24 \
     --expected-target-variable qobs_mm_per_h_lead06 \
     --expected-dynamic-inputs mrms_qpe_1h_mm rtma_2t_K rtma_2d_K rtma_2sh_kgkg rtma_10u_ms rtma_10v_ms mrms_qpe_1h_mm_gap rtma_gap \
-    --expected-static-column-count 473 \
+    --expected-static-column-count 460 \
     --expected-predict-last-n 1 \
     --expected-train-start-date 14/10/2020 \
     --expected-train-end-date 31/12/2023 \
@@ -144,22 +296,50 @@ PREFLIGHT_STATUS=$?
 cat "${RESULT_DIR}/structural_preflight_stdout.json"
 echo "=== preflight exit code: ${PREFLIGHT_STATUS} ==="
 
+# The preflight CLI's stdout is a JSON object followed by two human-readable
+# summary print()s, so json.load() on the whole file fails with
+# "Extra data". Parse only the first JSON object via raw_decode, and always
+# write cpu_preflight_result.json -- including when parsing itself fails --
+# so the CPU job never silently omits its result file.
 python -u -c "
-import json, sys
-d = json.load(open('${RESULT_DIR}/structural_preflight_stdout.json'))
-out = {
-    'status': d['status'],
-    'error_count': d['error_count'],
-    'warning_count': d['warning_count'],
-    'ok_count': d['ok_count'],
-    'config_yaml': '${CONFIG_YAML}',
-    'generated_out_dir': '${GENERATED_OUT_DIR}',
-    'slurm_job_id': '${SLURM_JOB_ID}',
-    'hostname': __import__('socket').gethostname(),
-}
+import json
+import sys
+
+stdout_path = '${RESULT_DIR}/structural_preflight_stdout.json'
+try:
+    with open(stdout_path, 'r', encoding='utf-8') as fh:
+        text = fh.read()
+    d, _ = json.JSONDecoder().raw_decode(text)
+    status = d.get('status', 'FAIL')
+    out = {
+        'status': status,
+        'error_count': d.get('error_count'),
+        'warning_count': d.get('warning_count'),
+        'ok_count': d.get('ok_count'),
+        'config_yaml': '${CONFIG_YAML}',
+        'static_count_used': 460,
+        'static_adjustment_evidence_path': '${ADJUSTMENT_EVIDENCE}',
+        'generated_out_dir': '${GENERATED_OUT_DIR}',
+        'slurm_job_id': '${SLURM_JOB_ID}',
+        'hostname': __import__('socket').gethostname(),
+    }
+    exit_ok = (status == 'PASS')
+except Exception as exc:
+    out = {
+        'status': 'FAIL',
+        'reason': f'could not parse structural preflight output: {exc}',
+        'config_yaml': '${CONFIG_YAML}',
+        'static_count_used': 460,
+        'static_adjustment_evidence_path': '${ADJUSTMENT_EVIDENCE}',
+        'generated_out_dir': '${GENERATED_OUT_DIR}',
+        'slurm_job_id': '${SLURM_JOB_ID}',
+        'hostname': __import__('socket').gethostname(),
+    }
+    exit_ok = False
+
 json.dump(out, open('${RESULT_JSON}', 'w'), indent=2)
 print(json.dumps(out, indent=2))
-sys.exit(0 if d['status'] == 'PASS' else 1)
+sys.exit(0 if exit_ok else 1)
 "
 FINAL_STATUS=$?
 
