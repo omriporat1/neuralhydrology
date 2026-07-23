@@ -231,23 +231,39 @@ def _classify_gap_timestamps(gap_timestamps: list, full_timeline: pd.DatetimeInd
     return in_range, n_outside
 
 
-def _adapt_time_to_date(df: pd.DataFrame) -> pd.DataFrame:
-    """In-memory package-to-NeuralHydrology temporal-name compatibility
-    boundary (immediate compatibility fix, not the final production-package
-    schema decision).
+def _adapt_temporal_index_to_date(df: pd.DataFrame) -> pd.DataFrame:
+    """In-memory package-to-NeuralHydrology temporal-index compatibility boundary.
 
-    The certified Stage 1 package's NetCDF files use ``time`` as their
-    dimension/coordinate name -- semantically valid xarray/NetCDF, and not
-    something this task changes on disk. NeuralHydrology 1.13's
-    ``BaseDataset._load_or_create_xarray_dataset`` (basedataset.py) requires
-    the per-basin DataFrame's temporal index to be named exactly ``date``
-    (it does ``df_duplicated.groupby('date')`` and later reads
-    ``xr['date']`` on the xarray.Dataset built from this DataFrame via
-    ``xarray.Dataset.from_dataframe``), so an unrenamed ``time`` index fails
-    with ``KeyError: 'date'``. This renames only the index's ``.name``
-    metadata -- values, row order, dtypes, and all columns (including gap
-    flags) are untouched. The production-package coordinate convention will
-    be revisited separately before the full-population baseline is frozen.
+    NeuralHydrology 1.13's ``BaseDataset._load_or_create_xarray_dataset``
+    (basedataset.py) requires the per-basin DataFrame's temporal index to be
+    named exactly ``date`` (it does ``df_duplicated.groupby('date')`` and
+    later reads ``xr['date']`` on the xarray.Dataset built from this
+    DataFrame via ``xarray.Dataset.from_dataframe``), so an unadapted
+    non-``date`` index fails with ``KeyError: 'date'``.
+
+    This package's on-disk NetCDF package schema identity determines its
+    temporal coordinate name (see ``src/baseline/package_netcdf.py``): the
+    frozen, certified ``stage1_compact_scientific_package_v001`` schema uses
+    ``time``; the ``stage1_scientific_package_v002`` schema used by future
+    scientific package builds uses ``date`` directly. This function is the
+    single place both are reconciled to the one in-memory name
+    NeuralHydrology requires, per basin, at load time -- it never rewrites
+    any on-disk file:
+
+        - index already named ``date``: passed through unchanged (no rename).
+        - index named ``time`` (and no stray ``date`` column present): the
+          index's ``.name`` metadata is renamed to ``date`` -- values, row
+          order, dtypes, and all columns (including gap flags) are untouched.
+        - both a temporal index and a same-named-the-other-way stray column
+          present (e.g. a ``date`` index alongside a ``time`` column, or vice
+          versa), or an index named anything else entirely: raises
+          ``FlashNHDatasetError`` rather than guessing.
+
+    Note that this only resolves NeuralHydrology's own structural loading
+    requirement. It does not mean stock ``GenericDataset`` sample
+    construction reproduces Flash-NH's validity filtering (concerns A/B/C in
+    this module's docstring) -- ``FlashNHDataset._apply_flashnh_filters``
+    remains required regardless of which package schema was loaded.
     """
     index = df.index
     if isinstance(index, pd.MultiIndex):
@@ -257,6 +273,12 @@ def _adapt_time_to_date(df: pd.DataFrame) -> pd.DataFrame:
         )
     name = index.name
     if name == "date":
+        if "time" in df.columns:
+            raise FlashNHDatasetError(
+                "FlashNHDataset._load_basin_data: basin data has both a 'date' "
+                "index and a 'time' column; cannot unambiguously adapt to "
+                "NeuralHydrology's required 'date' index name"
+            )
         return df
     if name == "time":
         if "date" in df.columns:
@@ -282,7 +304,7 @@ class FlashNHDataset(GenericDataset):
         # xarray.Dataset.from_dataframe) runs. Call the parent GenericDataset
         # loader unchanged, then adapt only the temporal index name in memory.
         df = super()._load_basin_data(basin)
-        return _adapt_time_to_date(df)
+        return _adapt_temporal_index_to_date(df)
 
     def _create_lookup_table(self, xr: xarray.Dataset):
         super()._create_lookup_table(xr)

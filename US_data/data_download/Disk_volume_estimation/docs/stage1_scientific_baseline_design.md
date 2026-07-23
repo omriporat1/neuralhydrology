@@ -1038,3 +1038,17 @@ This document does **not** authorize full 2,752-basin package generation,
 training, or any Moriah/California data transfer. All remain separate,
 explicit steps — gated on 2K-G-I's implementation, not on any further
 policy decision.
+
+**Addendum (2026-07-23, schema-support implementation, not a scientific
+decision) — NetCDF package-serialization schema.** Unrelated to any binding decision above:
+`src/baseline/package_netcdf.py` now offers a registered
+`stage1_scientific_package_v002` NetCDF serialization schema (temporal
+coordinate `date`) alongside the frozen legacy
+`stage1_compact_scientific_package_v001` schema (coordinate `time`, used by
+the certified Gate 4 compact package, unchanged). This is a package-format
+implementation detail, not a scientific-policy change; it does not alter
+any target/static/split/gap/loss decision recorded in this document. When
+the 2K-G-I full-package builder implementation runs, it must explicitly
+select the `v002` NetCDF schema (`--package-schema
+stage1_scientific_package_v002`) — see `docs/decision_log.md` (2026-07-23
+"Versioned package schema" entry) for the full contract.

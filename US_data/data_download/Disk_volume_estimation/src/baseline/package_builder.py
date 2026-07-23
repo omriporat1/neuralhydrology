@@ -52,7 +52,15 @@ import xarray as xr
 from .gap_mask_io import MRMS_PRODUCT, RTMA_PRODUCT, write_gap_timestamps_json
 from .lead_targets import DEFAULT_LEADS_HOURS, DEFAULT_VARIABLE_NAME_TEMPLATE, variable_name_for_lead
 from .package_assembly import DYNAMIC_INPUTS, RAW_TARGET_VARIABLE, assemble_basin_package_table
-from .package_netcdf import build_basin_dataset, validate_basin_netcdf_file, write_basin_dataset_netcdf
+from .package_netcdf import (
+    DEFAULT_PACKAGE_NETCDF_SCHEMA,
+    LEGACY_COMPACT_V001_SCHEMA,
+    SCIENTIFIC_V002_SCHEMA,
+    PackageNetCDFSchema,
+    build_basin_dataset,
+    validate_basin_netcdf_file,
+    write_basin_dataset_netcdf,
+)
 from .splits import sha256_of
 from .staid import normalize_staid
 from .static_preparation import model_input_columns_from_manifest
@@ -77,6 +85,24 @@ __all__ = [
 
 SCHEMA_NAME = "stage1_compact_scientific_package_builder_v001"
 SCHEMA_VERSION = 1
+
+#: Closed, explicit mapping from the selected registered NetCDF package
+#: schema to the package's own role identity. Deliberately never inferred
+#: from basin count, output path, basin selection, or scientific policy --
+#: only from which fixed NetCDF schema was selected for the build.
+_PACKAGE_ROLE_BY_NETCDF_SCHEMA_NAME = {
+    LEGACY_COMPACT_V001_SCHEMA.name: "stage1_compact_scientific_package",
+    SCIENTIFIC_V002_SCHEMA.name: "stage1_scientific_package",
+}
+
+
+def _resolve_package_role(package_netcdf_schema: PackageNetCDFSchema) -> str:
+    try:
+        return _PACKAGE_ROLE_BY_NETCDF_SCHEMA_NAME[package_netcdf_schema.name]
+    except KeyError:
+        raise PackageBuilderError(
+            f"no package_role mapping registered for NetCDF schema {package_netcdf_schema.name!r}"
+        ) from None
 
 #: Mirrors config/stage1_scientific_baseline_v001.yaml
 #: ``static_attributes.forbidden_model_inputs``.
@@ -581,6 +607,7 @@ def _build_manifest(
     gap_product_scope: tuple | None,
     write_qc_csv: bool,
     prepared_static_attributes_provenance: dict | None = None,
+    package_netcdf_schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
 ) -> dict:
     lead_variable_names = [
         variable_name_for_lead(h, DEFAULT_VARIABLE_NAME_TEMPLATE) for h in DEFAULT_LEADS_HOURS
@@ -600,7 +627,10 @@ def _build_manifest(
     return {
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
-        "package_role": "stage1_compact_scientific_package",
+        "package_role": _resolve_package_role(package_netcdf_schema),
+        "netcdf_package_schema_name": package_netcdf_schema.name,
+        "netcdf_package_schema_version": package_netcdf_schema.version,
+        "netcdf_time_coordinate": package_netcdf_schema.coordinate_name,
         "basin_count": len(basin_ids),
         "basin_ids": list(basin_ids),
         "timeline": {
@@ -668,7 +698,18 @@ def _write_run_provenance(tmp_package_dir: Path, manifest: dict, *, dry_run: boo
     provenance = {
         "builder_module": "src.baseline.package_builder",
         "builder_schema_version": SCHEMA_VERSION,
+        # Deprecated: this historically named field actually identifies the
+        # builder-manifest schema (manifest["schema_name"]), never the
+        # on-disk NetCDF package schema/coordinate. Kept, unchanged in
+        # meaning, for backward compatibility with existing readers -- use
+        # builder_manifest_schema_name/netcdf_package_schema_name below for
+        # new code.
         "package_schema_name": manifest["schema_name"],
+        "builder_manifest_schema_name": manifest["schema_name"],
+        "builder_manifest_schema_version": manifest["schema_version"],
+        "netcdf_package_schema_name": manifest["netcdf_package_schema_name"],
+        "netcdf_package_schema_version": manifest["netcdf_package_schema_version"],
+        "netcdf_time_coordinate": manifest["netcdf_time_coordinate"],
         "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dry_run": dry_run,
         "basin_count": manifest["basin_count"],
@@ -789,6 +830,7 @@ def build_compact_scientific_package(
     static_preparation_manifest: Mapping | None = None,
     basin_selection_provenance: dict | None = None,
     gap_inventory_provenance: dict | None = None,
+    package_netcdf_schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
 ) -> PackageBuildResult:
     """Build one Stage 1 Compact Scientific Package from already-loaded or
     injectable-loader-backed per-basin inputs.
@@ -844,6 +886,16 @@ def build_compact_scientific_package(
         select ``gap_timestamps`` upstream; when ``policy`` is also given it
         must equal :func:`resolve_gap_product_scope`'s result for that
         policy. Recorded in the manifest either way.
+    package_netcdf_schema: which registered on-disk NetCDF package schema
+        (see :mod:`src.baseline.package_netcdf`) every basin file in this
+        build uses -- resolved once by the caller and applied identically
+        to every basin. Defaults to the frozen legacy
+        ``stage1_compact_scientific_package_v001``/``time`` schema for
+        backward compatibility with existing direct callers; production
+        CLI use must pass this explicitly (see
+        ``scripts/build_stage1_baseline_nh_package.py --package-schema``)
+        so a future scientific package can never silently fall back to the
+        legacy schema.
     overwrite: refuse an existing destination unless True; even when True,
         the previous complete destination is preserved until the freshly
         built replacement has fully passed validation.
@@ -914,11 +966,13 @@ def build_compact_scientific_package(
                     policy=policy,
                     expected_index=expected_index,
                 )
-                dataset = build_basin_dataset(table, basin_id)
+                dataset = build_basin_dataset(table, basin_id, schema=package_netcdf_schema)
                 nc_relative = Path("time_series") / f"{basin_id}.nc"
                 nc_path = tmp_package_dir / nc_relative
-                write_basin_dataset_netcdf(dataset, nc_path, overwrite=False, create_parent=True)
-                validate_basin_netcdf_file(nc_path, table, basin_id)
+                write_basin_dataset_netcdf(
+                    dataset, nc_path, overwrite=False, create_parent=True, schema=package_netcdf_schema
+                )
+                validate_basin_netcdf_file(nc_path, table, basin_id, schema=package_netcdf_schema)
                 per_basin_files.append((basin_id, nc_relative, nc_path))
 
                 if write_qc_csv:
@@ -946,6 +1000,7 @@ def build_compact_scientific_package(
             gap_inventory_provenance=gap_inventory_provenance,
             gap_product_scope=resolved_gap_product_scope,
             write_qc_csv=write_qc_csv,
+            package_netcdf_schema=package_netcdf_schema,
         )
         _write_manifests(tmp_package_dir, manifest, checksums)
         _write_run_provenance(tmp_package_dir, manifest, dry_run=dry_run)

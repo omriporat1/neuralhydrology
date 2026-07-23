@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,13 @@ __all__ = [
     "SCHEMA_VERSION",
     "NETCDF_ENGINE",
     "EXPECTED_VARIABLES",
+    "PackageNetCDFSchema",
+    "LEGACY_COMPACT_V001_SCHEMA",
+    "SCIENTIFIC_V002_SCHEMA",
+    "DEFAULT_PACKAGE_NETCDF_SCHEMA",
+    "REGISTERED_PACKAGE_NETCDF_SCHEMAS",
+    "resolve_package_netcdf_schema",
+    "validate_package_netcdf_schema_registry",
     "build_basin_dataset",
     "write_basin_dataset_netcdf",
     "validate_basin_netcdf_file",
@@ -75,9 +83,146 @@ __all__ = [
 
 _HOUR = pd.Timedelta(hours=1)
 
+
+class PackageNetCDFError(ValueError):
+    """Raised for an invalid assembled table, gauge ID, or NetCDF I/O contract."""
+
+
 #: Package/schema identity recorded in every file's dataset-level attrs.
+#: This is the frozen, certified Compact Scientific Package v001 identity --
+#: never changed -- and remains the low-level serializer default so existing
+#: callers/tests that do not pass ``schema=`` explicitly keep building
+#: 'time'-coordinate files exactly as before.
 SCHEMA_NAME = "stage1_compact_scientific_package_v001"
 SCHEMA_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Package NetCDF schema registry: the explicit, closed set of on-disk
+# NetCDF package identities this serializer knows how to write/validate.
+# Schema identity determines the temporal coordinate/dimension name -- there
+# is no free-form/independent coordinate-name option and no inference from
+# basin count, output path, or any other context. New schemas are added here
+# only, never constructed ad hoc by a caller.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PackageNetCDFSchema:
+    """One registered on-disk package NetCDF schema identity.
+
+    ``coordinate_name`` is fully determined by ``name``/``version`` --
+    callers select a schema by identity, never by supplying a coordinate
+    name independently.
+    """
+
+    name: str
+    version: int
+    coordinate_name: str
+
+
+#: The certified, frozen Compact Scientific Package v001 schema. Actual v001
+#: package files on disk are never rewritten to any other schema.
+LEGACY_COMPACT_V001_SCHEMA = PackageNetCDFSchema(
+    name=SCHEMA_NAME, version=SCHEMA_VERSION, coordinate_name="time"
+)
+
+#: The production schema for future full scientific packages. Uses ``date``
+#: as its on-disk coordinate/dimension name so packages built against it are
+#: structurally compatible with NeuralHydrology 1.13's own temporal-index
+#: expectation without requiring FlashNHDataset's legacy time->date adapter.
+#: Basin population size is not part of this schema's identity.
+SCIENTIFIC_V002_SCHEMA = PackageNetCDFSchema(
+    name="stage1_scientific_package_v002", version=2, coordinate_name="date"
+)
+
+#: The complete, closed set of registered schemas. Order is registration
+#: order and carries no other meaning.
+REGISTERED_PACKAGE_NETCDF_SCHEMAS: tuple[PackageNetCDFSchema, ...] = (
+    LEGACY_COMPACT_V001_SCHEMA,
+    SCIENTIFIC_V002_SCHEMA,
+)
+
+#: Low-level serializer default -- preserves backward compatibility for
+#: historical/direct callers that do not pass ``schema=`` explicitly.
+#: Production package-builder use must select a schema explicitly instead of
+#: relying on this default (see src/baseline/package_builder.py).
+DEFAULT_PACKAGE_NETCDF_SCHEMA = LEGACY_COMPACT_V001_SCHEMA
+
+#: Dataset-level ``description`` attribute, keyed by schema name. The v001
+#: text is the original, certified wording and must never change (real v001
+#: package files on disk are never rewritten); v002 uses its own wording.
+_DATASET_DESCRIPTION_BY_SCHEMA_NAME: dict[str, str] = {
+    LEGACY_COMPACT_V001_SCHEMA.name: (
+        "Stage 1 Compact Scientific Package per-basin time-series file "
+        "(dynamic forcing inputs, raw discharge, lead targets)."
+    ),
+    SCIENTIFIC_V002_SCHEMA.name: (
+        "Stage 1 scientific package per-basin time-series file "
+        "(dynamic forcing inputs, raw discharge, lead targets)."
+    ),
+}
+
+
+def _resolve_dataset_description(schema: PackageNetCDFSchema) -> str:
+    try:
+        return _DATASET_DESCRIPTION_BY_SCHEMA_NAME[schema.name]
+    except KeyError:
+        raise PackageNetCDFError(
+            f"no dataset description registered for NetCDF schema {schema.name!r}"
+        ) from None
+
+
+def validate_package_netcdf_schema_registry() -> None:
+    """Fail loudly if :data:`REGISTERED_PACKAGE_NETCDF_SCHEMAS` is internally
+    inconsistent: duplicate schema names, or two schemas sharing a
+    coordinate name (which would make coordinate-based schema detection
+    ambiguous). Called at import time so a broken registration can never
+    ship silently; also safe to call again from a focused test."""
+    names = [s.name for s in REGISTERED_PACKAGE_NETCDF_SCHEMAS]
+    if len(names) != len(set(names)):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise PackageNetCDFError(f"duplicate registered package NetCDF schema name(s): {dupes}")
+    coordinate_names = [s.coordinate_name for s in REGISTERED_PACKAGE_NETCDF_SCHEMAS]
+    if len(coordinate_names) != len(set(coordinate_names)):
+        dupes = sorted({c for c in coordinate_names if coordinate_names.count(c) > 1})
+        raise PackageNetCDFError(
+            f"two or more registered package NetCDF schemas share coordinate name(s): {dupes}"
+        )
+
+
+def resolve_package_netcdf_schema(name: str) -> PackageNetCDFSchema:
+    """Resolve a registered schema by its exact ``name``.
+
+    No arbitrary schema construction from caller input: only the fixed,
+    registered identities in :data:`REGISTERED_PACKAGE_NETCDF_SCHEMAS` are
+    ever returned.
+    """
+    for schema in REGISTERED_PACKAGE_NETCDF_SCHEMAS:
+        if schema.name == name:
+            return schema
+    known = sorted(s.name for s in REGISTERED_PACKAGE_NETCDF_SCHEMAS)
+    raise PackageNetCDFError(f"unknown package NetCDF schema name {name!r}; registered schemas: {known}")
+
+
+def _require_registered_schema(schema: PackageNetCDFSchema) -> None:
+    """Reject any ``schema`` that is not exactly one of the registered
+
+    identities in :data:`REGISTERED_PACKAGE_NETCDF_SCHEMAS`. Every public
+    entry point below accepts a ``schema=`` argument for caller convenience,
+    but must never silently serialize/validate against an arbitrary
+    caller-constructed :class:`PackageNetCDFSchema` (e.g. one with a made-up
+    name/version/coordinate combination) -- only the fixed, closed registry
+    is ever a valid target.
+    """
+    if schema not in REGISTERED_PACKAGE_NETCDF_SCHEMAS:
+        known = sorted(s.name for s in REGISTERED_PACKAGE_NETCDF_SCHEMAS)
+        raise PackageNetCDFError(
+            f"schema {schema!r} is not one of the registered package NetCDF schemas: {known}"
+        )
+
+
+validate_package_netcdf_schema_registry()
 
 #: The only NetCDF backend installed/tested in this environment; pinned
 #: explicitly for both writing and read-back validation.
@@ -113,10 +258,6 @@ _UNITS: dict[str, str] = {
 for _name in _LEAD_VARIABLES:
     _UNITS[_name] = "mm h-1"
 del _name
-
-
-class PackageNetCDFError(ValueError):
-    """Raised for an invalid assembled table, gauge ID, or NetCDF I/O contract."""
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +400,12 @@ def _validate_table(table, dynamic_inputs=EXPECTED_VARIABLES) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_basin_dataset(table: pd.DataFrame, gauge_id: str) -> xr.Dataset:
+def build_basin_dataset(
+    table: pd.DataFrame,
+    gauge_id: str,
+    *,
+    schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
+) -> xr.Dataset:
     """Convert one validated assembled basin table into an in-memory
     ``xarray.Dataset``.
 
@@ -274,13 +420,22 @@ def build_basin_dataset(table: pd.DataFrame, gauge_id: str) -> xr.Dataset:
         be in that function's canonical form -- it is never itself
         normalized, re-padded, or cast to integer, and is preserved exactly
         in the returned dataset's attributes.
+    schema: the registered :class:`PackageNetCDFSchema` this dataset is
+        built for -- determines the on-disk temporal coordinate/dimension
+        name and the stamped ``package_schema_name``/``package_schema_version``
+        attrs. Defaults to the frozen legacy Compact Scientific Package v001
+        schema (``time`` coordinate) for backward compatibility with
+        existing callers; production package-builder use must pass this
+        explicitly (see src/baseline/package_builder.py).
 
     Performs no filesystem access. Does not fill, interpolate, aggregate,
     shift, or convert any scientific value -- this is a serialization layer,
     not an assembly layer.
     """
+    _require_registered_schema(schema)
     gauge_id = _validate_gauge_id(gauge_id)
     _validate_table(table)
+    coordinate_name = schema.coordinate_name
 
     index = table.index
     epoch = index[0]
@@ -293,24 +448,21 @@ def build_basin_dataset(table: pd.DataFrame, gauge_id: str) -> xr.Dataset:
             arr = values.astype(np.int8)
         else:
             arr = values.astype(np.float32)
-        data_vars[name] = (("time",), arr)
+        data_vars[name] = ((coordinate_name,), arr)
 
-    ds = xr.Dataset(data_vars, coords={"time": index.to_numpy(copy=True)})
+    ds = xr.Dataset(data_vars, coords={coordinate_name: index.to_numpy(copy=True)})
 
     ds.attrs = {
         "gauge_id": gauge_id,
-        "package_schema_name": SCHEMA_NAME,
-        "package_schema_version": SCHEMA_VERSION,
-        "description": (
-            "Stage 1 Compact Scientific Package per-basin time-series file "
-            "(dynamic forcing inputs, raw discharge, lead targets)."
-        ),
+        "package_schema_name": schema.name,
+        "package_schema_version": schema.version,
+        "description": _resolve_dataset_description(schema),
         "created_by": "src.baseline.package_netcdf.build_basin_dataset",
     }
-    ds["time"].attrs = {
+    ds[coordinate_name].attrs = {
         "description": "UTC hourly timestamps (timezone-naive; no offset stored)",
     }
-    ds["time"].encoding = {
+    ds[coordinate_name].encoding = {
         "units": time_units,
         "calendar": "proleptic_gregorian",
         "dtype": "int64",
@@ -351,21 +503,25 @@ def build_basin_dataset(table: pd.DataFrame, gauge_id: str) -> xr.Dataset:
 # ---------------------------------------------------------------------------
 
 
-def _validate_basin_dataset_contract(dataset: xr.Dataset) -> None:
+def _validate_basin_dataset_contract(
+    dataset: xr.Dataset,
+    *,
+    schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
+) -> None:
     if not isinstance(dataset, xr.Dataset):
         raise PackageNetCDFError(f"dataset must be an xarray.Dataset, got {type(dataset)!r}")
 
     actual_schema_name = dataset.attrs.get("package_schema_name")
-    if actual_schema_name != SCHEMA_NAME:
+    if actual_schema_name != schema.name:
         raise PackageNetCDFError(
             f"dataset package_schema_name mismatch: got {actual_schema_name!r}, "
-            f"expected {SCHEMA_NAME!r}"
+            f"expected {schema.name!r}"
         )
     actual_schema_version = dataset.attrs.get("package_schema_version")
-    if actual_schema_version != SCHEMA_VERSION:
+    if actual_schema_version != schema.version:
         raise PackageNetCDFError(
             f"dataset package_schema_version mismatch: got {actual_schema_version!r}, "
-            f"expected {SCHEMA_VERSION!r}"
+            f"expected {schema.version!r}"
         )
 
     gauge_id = dataset.attrs.get("gauge_id")
@@ -373,27 +529,29 @@ def _validate_basin_dataset_contract(dataset: xr.Dataset) -> None:
         raise PackageNetCDFError("dataset is missing required attrs['gauge_id']")
     _validate_gauge_id(gauge_id)
 
-    if "time" not in dataset.dims:
+    coordinate_name = schema.coordinate_name
+    if coordinate_name not in dataset.dims:
         raise PackageNetCDFError(
-            f"dataset must have a 'time' dimension, got dims {tuple(dataset.dims)}"
+            f"dataset must have a {coordinate_name!r} dimension for schema {schema.name!r}, "
+            f"got dims {tuple(dataset.dims)}"
         )
     if len(dataset.dims) != 1:
         raise PackageNetCDFError(
-            f"dataset must have exactly one dimension named 'time', got dims "
+            f"dataset must have exactly one dimension named {coordinate_name!r}, got dims "
             f"{tuple(dataset.dims)}"
         )
-    if "time" not in dataset.coords:
-        raise PackageNetCDFError("dataset must have a 'time' coordinate")
-    if dataset.sizes["time"] == 0:
-        raise PackageNetCDFError("dataset 'time' coordinate must not be empty")
+    if coordinate_name not in dataset.coords:
+        raise PackageNetCDFError(f"dataset must have a {coordinate_name!r} coordinate")
+    if dataset.sizes[coordinate_name] == 0:
+        raise PackageNetCDFError(f"dataset {coordinate_name!r} coordinate must not be empty")
 
     try:
-        time_index = pd.DatetimeIndex(dataset["time"].values)
+        time_index = pd.DatetimeIndex(dataset[coordinate_name].values)
     except (TypeError, ValueError) as exc:
         raise PackageNetCDFError(
-            f"dataset time coordinate could not be decoded as datetimes: {exc}"
+            f"dataset {coordinate_name!r} coordinate could not be decoded as datetimes: {exc}"
         ) from exc
-    _validate_hourly_index(time_index, "dataset time coordinate")
+    _validate_hourly_index(time_index, f"dataset {coordinate_name!r} coordinate")
 
     actual_vars = set(dataset.data_vars)
     expected_vars = set(EXPECTED_VARIABLES)
@@ -404,16 +562,17 @@ def _validate_basin_dataset_contract(dataset: xr.Dataset) -> None:
             f"dataset variable set mismatch: missing {missing}, unapproved extra {extra}"
         )
 
-    n_time = dataset.sizes["time"]
+    n_time = dataset.sizes[coordinate_name]
     for name in EXPECTED_VARIABLES:
         var = dataset[name]
-        if tuple(var.dims) != ("time",):
+        if tuple(var.dims) != (coordinate_name,):
             raise PackageNetCDFError(
-                f"{name} has unexpected dimensions {var.dims}, expected ('time',)"
+                f"{name} has unexpected dimensions {var.dims}, expected ({coordinate_name!r},)"
             )
-        if var.sizes["time"] != n_time:
+        if var.sizes[coordinate_name] != n_time:
             raise PackageNetCDFError(
-                f"{name} length {var.sizes['time']} does not match time length {n_time}"
+                f"{name} length {var.sizes[coordinate_name]} does not match "
+                f"{coordinate_name} length {n_time}"
             )
 
         expected_units = _UNITS[name]
@@ -479,6 +638,7 @@ def write_basin_dataset_netcdf(
     *,
     overwrite: bool = False,
     create_parent: bool = False,
+    schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
 ) -> Path:
     """Atomically write ``dataset`` to one NetCDF file at ``path``.
 
@@ -495,8 +655,12 @@ def write_basin_dataset_netcdf(
     destination is left unchanged when ``overwrite=True``. Refuses to
     overwrite an existing destination unless ``overwrite=True``. The parent
     directory is created only if ``create_parent=True`` is explicitly passed.
+    ``schema`` must match the schema the dataset was built against (see
+    :func:`build_basin_dataset`); defaults to the frozen legacy Compact
+    Scientific Package v001 schema for backward compatibility.
     """
-    _validate_basin_dataset_contract(dataset)
+    _require_registered_schema(schema)
+    _validate_basin_dataset_contract(dataset, schema=schema)
 
     destination = Path(path)
     if destination.exists() and not overwrite:
@@ -521,7 +685,7 @@ def write_basin_dataset_netcdf(
         dataset.to_netcdf(str(tmp_path), engine=NETCDF_ENGINE)
         with xr.open_dataset(tmp_path, engine=NETCDF_ENGINE) as reopened:
             reopened.load()
-            _validate_basin_dataset_contract(reopened)
+            _validate_basin_dataset_contract(reopened, schema=schema)
         os.replace(str(tmp_path), str(destination))
     except Exception:
         if tmp_path.exists():
@@ -541,22 +705,28 @@ def validate_basin_netcdf_file(
     gauge_id: str,
     *,
     rtol: float = 1.0e-5,
+    schema: PackageNetCDFSchema = DEFAULT_PACKAGE_NETCDF_SCHEMA,
 ) -> None:
     """Read one basin NetCDF file back from disk and verify it matches
     ``table``/``gauge_id`` exactly (local serialization integrity check --
     it does not replace the future independent whole-package auditor).
 
-    Checks: exact gauge ID; exact time coordinate and row count; exact
+    Checks: exact gauge ID; exact temporal coordinate and row count; exact
     expected variable names; expected dimensions; unit metadata; gap flags
     remain binary and complete; NaN locations match ``table`` for every
     scientific variable; all finite numeric values match within ``rtol``.
+    ``schema`` selects which registered schema (and therefore which
+    coordinate name) the file is expected to conform to; defaults to the
+    frozen legacy Compact Scientific Package v001 schema.
     """
+    _require_registered_schema(schema)
     gauge_id = _validate_gauge_id(gauge_id)
     _validate_table(table)
+    coordinate_name = schema.coordinate_name
 
     with xr.open_dataset(Path(path), engine=NETCDF_ENGINE) as ds:
         ds.load()
-        _validate_basin_dataset_contract(ds)
+        _validate_basin_dataset_contract(ds, schema=schema)
 
         actual_gauge_id = ds.attrs.get("gauge_id")
         if actual_gauge_id != gauge_id:
@@ -564,14 +734,14 @@ def validate_basin_netcdf_file(
                 f"gauge_id mismatch: file has {actual_gauge_id!r}, expected {gauge_id!r}"
             )
 
-        if len(ds["time"]) != len(table.index):
+        if len(ds[coordinate_name]) != len(table.index):
             raise PackageNetCDFError(
-                f"time row count mismatch: file has {len(ds['time'])}, "
+                f"{coordinate_name} row count mismatch: file has {len(ds[coordinate_name])}, "
                 f"expected {len(table.index)}"
             )
-        actual_time = pd.DatetimeIndex(ds["time"].values)
+        actual_time = pd.DatetimeIndex(ds[coordinate_name].values)
         if not actual_time.equals(table.index):
-            raise PackageNetCDFError("time coordinate does not match table.index exactly")
+            raise PackageNetCDFError(f"{coordinate_name} coordinate does not match table.index exactly")
 
         for name in EXPECTED_VARIABLES:
             var = ds[name]

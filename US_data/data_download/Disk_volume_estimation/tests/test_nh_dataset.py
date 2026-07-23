@@ -31,7 +31,7 @@ from _nh_synthetic import N_HOURS, RESEARCH_START, build_synthetic_package, prep
 
 from src.baseline.nh_dataset import (  # noqa: E402
     FlashNHDatasetError,
-    _adapt_time_to_date,
+    _adapt_temporal_index_to_date,
     _build_research_timeline,
     _normalize_timestamp,
 )
@@ -301,19 +301,25 @@ def test_in_range_unaligned_gap_timestamp_raises(tmp_path):
         get_dataset(cfg=cfg, is_train=False, period="validation", scaler=train_ds.scaler)
 
 
-# --- time -> date package-compatibility adapter ----------------------------
+# --- time/date package-compatibility adapter --------------------------------
 #
-# The certified Stage 1 compact package's NetCDF files use ``time`` as their
-# per-basin dimension/coordinate name. NeuralHydrology 1.13's
-# BaseDataset._load_or_create_xarray_dataset requires this to be named
-# literally ``date`` (df_duplicated.groupby('date'), then xr['date']), so an
-# unrenamed ``time`` index previously failed real Moriah dataset construction
-# with KeyError: 'date' (job 45624540/traceback). These tests prove the
-# FlashNHDataset._load_basin_data override (src/baseline/nh_dataset.py) fixes
-# this through a real, non-mocked get_dataset(...) construction -- not only
-# via the standalone _adapt_time_to_date helper -- and that the underlying
+# The frozen, certified stage1_compact_scientific_package_v001 schema's
+# NetCDF files use ``time`` as their per-basin dimension/coordinate name; the
+# newer stage1_scientific_package_v002 schema (src/baseline/package_netcdf.py)
+# uses ``date`` directly. NeuralHydrology 1.13's
+# BaseDataset._load_or_create_xarray_dataset requires the in-memory DataFrame
+# index to be named literally ``date`` (df_duplicated.groupby('date'), then
+# xr['date']), so an unadapted ``time`` index previously failed real Moriah
+# dataset construction with KeyError: 'date' (job 45624540/traceback). These
+# tests prove the FlashNHDataset._load_basin_data override
+# (src/baseline/nh_dataset.py) handles both on-disk coordinate names through a
+# real, non-mocked get_dataset(...) construction -- not only via the
+# standalone _adapt_temporal_index_to_date helper -- and that the underlying
 # validity-mask/lead-boundary/period-boundary filtering behavior proven above
-# is unaffected by the adapter.
+# is unaffected by the adapter. Stock NeuralHydrology structural compatibility
+# with either coordinate name does not mean stock GenericDataset reproduces
+# Flash-NH's own sample-validity filtering -- FlashNHDataset remains required
+# regardless of which package schema was loaded.
 
 
 def _build_and_run_time_named(tmp_path, seq_length):
@@ -394,11 +400,11 @@ def test_time_named_package_matches_date_named_package_exactly(tmp_path):
     assert stats_date.n_kept == stats_time.n_kept
 
 
-def test_adapt_time_to_date_preserves_values_order_and_dtype():
+def test_adapt_temporal_index_to_date_renames_time_only_index():
     idx = pd.date_range("2000-01-01", periods=5, freq="h", name="time")
     df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
 
-    adapted = _adapt_time_to_date(df)
+    adapted = _adapt_temporal_index_to_date(df)
 
     assert adapted.index.name == "date"
     assert list(adapted.index) == list(idx)  # values and order unchanged
@@ -408,35 +414,45 @@ def test_adapt_time_to_date_preserves_values_order_and_dtype():
     )  # column values/dtypes untouched
 
 
-def test_adapt_time_to_date_leaves_already_date_named_input_unchanged():
+def test_adapt_temporal_index_to_date_leaves_already_date_named_input_unchanged():
     idx = pd.date_range("2000-01-01", periods=5, freq="h", name="date")
     df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
 
-    adapted = _adapt_time_to_date(df)
+    adapted = _adapt_temporal_index_to_date(df)
 
     assert adapted is df  # passthrough, not even a copy
     assert adapted.index.name == "date"
 
 
-def test_adapt_time_to_date_rejects_ambiguous_time_index_with_date_column():
+def test_adapt_temporal_index_to_date_rejects_time_index_with_stray_date_column():
     idx = pd.date_range("2000-01-01", periods=5, freq="h", name="time")
     df = pd.DataFrame({"date": np.arange(5), "precip": np.arange(5, dtype=np.float64)}, index=idx)
 
     with pytest.raises(FlashNHDatasetError):
-        _adapt_time_to_date(df)
+        _adapt_temporal_index_to_date(df)
 
 
-def test_adapt_time_to_date_rejects_unrecognized_index_name():
+def test_adapt_temporal_index_to_date_rejects_date_index_with_stray_time_column():
+    # Both present, the other way around: a 'date' index alongside a stray
+    # 'time' column must also fail loudly, not silently pass through.
+    idx = pd.date_range("2000-01-01", periods=5, freq="h", name="date")
+    df = pd.DataFrame({"time": np.arange(5), "precip": np.arange(5, dtype=np.float64)}, index=idx)
+
+    with pytest.raises(FlashNHDatasetError):
+        _adapt_temporal_index_to_date(df)
+
+
+def test_adapt_temporal_index_to_date_rejects_unrecognized_index_name():
     idx = pd.date_range("2000-01-01", periods=5, freq="h", name="timestamp")
     df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
 
     with pytest.raises(FlashNHDatasetError):
-        _adapt_time_to_date(df)
+        _adapt_temporal_index_to_date(df)
 
 
-def test_adapt_time_to_date_rejects_multiindex():
+def test_adapt_temporal_index_to_date_rejects_multiindex():
     idx = pd.MultiIndex.from_product([["a"], pd.date_range("2000-01-01", periods=5, freq="h")], names=["basin", "time"])
     df = pd.DataFrame({"precip": np.arange(5, dtype=np.float64)}, index=idx)
 
     with pytest.raises(FlashNHDatasetError):
-        _adapt_time_to_date(df)
+        _adapt_temporal_index_to_date(df)

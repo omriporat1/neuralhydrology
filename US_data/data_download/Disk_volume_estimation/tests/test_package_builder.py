@@ -88,7 +88,8 @@ def _build(tmp_path, *, basin_ids=BASIN_IDS, n=10, evidence=True, write_qc_csv=F
            dry_run=False, gap_timestamps=None, static_attributes=None, loader=None, expected_index=None,
            forbidden_static_columns=None, static_model_input_columns=None, policy=None,
            static_column_manifest=None, gap_product_scope=None, static_attributes_provenance=None,
-           prepared_static_attributes_provenance=None, static_preparation_manifest=None):
+           prepared_static_attributes_provenance=None, static_preparation_manifest=None,
+           package_netcdf_schema=None):
     idx = expected_index if expected_index is not None else _hourly_index(n)
     kwargs = dict(
         basin_ids=basin_ids,
@@ -113,6 +114,8 @@ def _build(tmp_path, *, basin_ids=BASIN_IDS, n=10, evidence=True, write_qc_csv=F
     )
     if forbidden_static_columns is not None:
         kwargs["forbidden_static_columns"] = forbidden_static_columns
+    if package_netcdf_schema is not None:
+        kwargs["package_netcdf_schema"] = package_netcdf_schema
     return build_compact_scientific_package(**kwargs)
 
 
@@ -1164,6 +1167,7 @@ def test_cli_wires_static_preparation_manifest_and_policy_dynamic_inputs(tmp_pat
 
     argv = [
         "--policy-yaml", "unused_policy.yaml",
+        "--package-schema", "stage1_compact_scientific_package_v001",
         "--basin-ids-file", "unused_basins.txt",
         "--static-attributes-parquet", str(static_attributes_parquet),
         "--static-column-manifest", "unused_manifest.json",
@@ -1176,6 +1180,7 @@ def test_cli_wires_static_preparation_manifest_and_policy_dynamic_inputs(tmp_pat
     ]
     rc = module.main(argv)
     assert rc == 0
+    assert captured_build_kwargs["package_netcdf_schema"].name == "stage1_compact_scientific_package_v001"
 
     # policy["dynamic_inputs"] is threaded through to the loader, unmodified.
     assert captured_loader_kwargs["dynamic_inputs"] == ["input_a", "input_b", "input_c"]
@@ -1199,3 +1204,138 @@ def test_cli_wires_static_preparation_manifest_and_policy_dynamic_inputs(tmp_pat
         "matrix_name": "stage1_static_attributes_v002",
         "sha256": "z" * 64,
     }
+
+
+# ---------------------------------------------------------------------------
+# Versioned NetCDF package schema (builder + provenance)
+# ---------------------------------------------------------------------------
+
+from src.baseline.package_netcdf import (  # noqa: E402
+    LEGACY_COMPACT_V001_SCHEMA,
+    SCIENTIFIC_V002_SCHEMA,
+)
+
+
+def test_cli_requires_explicit_package_schema_argument(tmp_path):
+    script = REPO_ROOT / "scripts" / "build_stage1_baseline_nh_package.py"
+    argv = [
+        sys.executable, str(script),
+        "--policy-yaml", "unused_policy.yaml",
+        "--basin-ids-file", "unused_basins.txt",
+        "--static-attributes-parquet", "unused.parquet",
+        "--static-column-manifest", "unused_manifest.json",
+        "--area-csv", "unused_area.csv",
+        "--forcing-root", "unused_forcing_root",
+        "--qobs-root", "unused_qobs_root",
+        "--gap-inventory-csv", "unused_gap.csv",
+        "--output-package-root", str(tmp_path / "package"),
+    ]
+    result = subprocess.run(argv, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "--package-schema" in result.stderr
+
+
+def test_cli_rejects_unknown_package_schema_argument(tmp_path):
+    script = REPO_ROOT / "scripts" / "build_stage1_baseline_nh_package.py"
+    argv = [
+        sys.executable, str(script),
+        "--policy-yaml", "unused_policy.yaml",
+        "--package-schema", "not_a_registered_schema",
+        "--basin-ids-file", "unused_basins.txt",
+        "--static-attributes-parquet", "unused.parquet",
+        "--static-column-manifest", "unused_manifest.json",
+        "--area-csv", "unused_area.csv",
+        "--forcing-root", "unused_forcing_root",
+        "--qobs-root", "unused_qobs_root",
+        "--gap-inventory-csv", "unused_gap.csv",
+        "--output-package-root", str(tmp_path / "package"),
+    ]
+    result = subprocess.run(argv, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "--package-schema" in result.stderr
+
+
+@pytest.mark.parametrize("schema", [LEGACY_COMPACT_V001_SCHEMA, SCIENTIFIC_V002_SCHEMA])
+def test_build_applies_one_selected_schema_to_every_basin_in_package(tmp_path, schema):
+    result = _build(tmp_path, package_netcdf_schema=schema)
+    ts_dir = tmp_path / "package" / "time_series"
+    for basin_id in BASIN_IDS:
+        with xr.open_dataset(ts_dir / f"{basin_id}.nc") as ds:
+            assert set(ds.dims) == {schema.coordinate_name}
+            assert ds.attrs["package_schema_name"] == schema.name
+            assert ds.attrs["package_schema_version"] == schema.version
+    assert result.manifest["netcdf_package_schema_name"] == schema.name
+    assert result.manifest["netcdf_package_schema_version"] == schema.version
+    assert result.manifest["netcdf_time_coordinate"] == schema.coordinate_name
+
+
+def test_build_default_schema_is_legacy_v001_time_for_backward_compatible_direct_callers(tmp_path):
+    result = _build(tmp_path)
+    assert result.manifest["netcdf_package_schema_name"] == LEGACY_COMPACT_V001_SCHEMA.name
+    assert result.manifest["netcdf_package_schema_version"] == LEGACY_COMPACT_V001_SCHEMA.version
+    assert result.manifest["netcdf_time_coordinate"] == "time"
+    with xr.open_dataset(tmp_path / "package" / "time_series" / f"{BASIN_IDS[0]}.nc") as ds:
+        assert "time" in ds.dims
+
+
+def test_manifest_records_true_netcdf_schema_name_and_version_and_coordinate(tmp_path):
+    result = _build(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    manifest = result.manifest
+    assert manifest["netcdf_package_schema_name"] == "stage1_scientific_package_v002"
+    assert manifest["netcdf_package_schema_version"] == 2
+    assert manifest["netcdf_time_coordinate"] == "date"
+    # The builder-manifest identity is a distinct concept and must not be
+    # overwritten by the NetCDF package schema.
+    assert manifest["schema_name"] == package_builder_module.SCHEMA_NAME
+    assert manifest["schema_version"] == package_builder_module.SCHEMA_VERSION
+
+
+def test_run_provenance_distinguishes_builder_manifest_identity_from_netcdf_package_identity(tmp_path):
+    _build(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    provenance = json.loads((tmp_path / "package" / "run_provenance.json").read_text(encoding="utf-8"))
+
+    assert provenance["builder_manifest_schema_name"] == package_builder_module.SCHEMA_NAME
+    assert provenance["builder_manifest_schema_version"] == package_builder_module.SCHEMA_VERSION
+    assert provenance["netcdf_package_schema_name"] == "stage1_scientific_package_v002"
+    assert provenance["netcdf_package_schema_version"] == 2
+    assert provenance["netcdf_time_coordinate"] == "date"
+
+    # Deprecated legacy field is preserved with its previous (builder-
+    # manifest) meaning, not silently repurposed to mean the NetCDF schema.
+    assert provenance["package_schema_name"] == provenance["builder_manifest_schema_name"]
+    assert provenance["package_schema_name"] != provenance["netcdf_package_schema_name"]
+
+
+def test_run_provenance_legacy_field_preserved_for_default_legacy_build(tmp_path):
+    _build(tmp_path)
+    provenance = json.loads((tmp_path / "package" / "run_provenance.json").read_text(encoding="utf-8"))
+    assert provenance["package_schema_name"] == package_builder_module.SCHEMA_NAME
+    assert provenance["netcdf_package_schema_name"] == LEGACY_COMPACT_V001_SCHEMA.name
+    assert provenance["netcdf_time_coordinate"] == "time"
+
+
+# ---------------------------------------------------------------------------
+# package_role derived from the selected NetCDF schema (correction round)
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_package_role_is_compact_for_legacy_v001_schema(tmp_path):
+    result = _build(tmp_path, package_netcdf_schema=LEGACY_COMPACT_V001_SCHEMA)
+    assert result.manifest["package_role"] == "stage1_compact_scientific_package"
+
+
+def test_manifest_package_role_is_scientific_for_v002_schema_not_compact(tmp_path):
+    result = _build(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    assert result.manifest["package_role"] == "stage1_scientific_package"
+    assert "compact" not in result.manifest["package_role"]
+
+
+def test_manifest_package_role_defaults_to_compact_for_backward_compatible_direct_callers(tmp_path):
+    result = _build(tmp_path)
+    assert result.manifest["package_role"] == "stage1_compact_scientific_package"
+
+
+@pytest.mark.parametrize("basin_ids", [BASIN_IDS, BASIN_IDS[:1]])
+def test_manifest_package_role_independent_of_basin_count(tmp_path, basin_ids):
+    result = _build(tmp_path, basin_ids=basin_ids, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    assert result.manifest["package_role"] == "stage1_scientific_package"

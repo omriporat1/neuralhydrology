@@ -25,6 +25,19 @@ split_valid`); the 2K-G-G loss table is now treated as a conservative upper
 bound, with I-D1 producing the implementation-authoritative counts (§12, §13,
 §20 I-D1, §21 updated).
 
+**Addendum (2026-07-23, schema-support implementation) — versioned package
+schema required for any future full package build.** `scripts/build_stage1_baseline_nh_package.py`
+now requires an explicit `--package-schema` argument. The full-population
+scientific package this plan describes has not yet been built, but when it
+is, the build **must** explicitly pass `--package-schema
+stage1_scientific_package_v002` (temporal coordinate `date`) — the CLI has
+no default and will not infer this from basin count or output path. The
+already-certified 32-basin Compact Scientific Package (Gate 4, `time`
+coordinate, `stage1_compact_scientific_package_v001`) is unaffected and
+remains frozen. See `docs/decision_log.md` (2026-07-23 "Versioned package
+schema" entry) for the full schema/provenance/auditor/`FlashNHDataset`
+contract.
+
 Authority hierarchy (not re-decided here):
 - `docs/FLASHNH_CURRENT_STATE.md` — top-level current status.
 - `docs/stage1_scientific_baseline_design.md` — **binding scientific policy**

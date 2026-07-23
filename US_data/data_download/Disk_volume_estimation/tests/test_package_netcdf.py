@@ -18,12 +18,18 @@ import xarray as xr
 from src.baseline.package_assembly import assemble_basin_package_table
 from src.baseline.package_netcdf import (
     EXPECTED_VARIABLES,
+    LEGACY_COMPACT_V001_SCHEMA,
     NETCDF_ENGINE,
-    PackageNetCDFError,
+    REGISTERED_PACKAGE_NETCDF_SCHEMAS,
     SCHEMA_NAME,
     SCHEMA_VERSION,
+    SCIENTIFIC_V002_SCHEMA,
+    PackageNetCDFError,
+    PackageNetCDFSchema,
     build_basin_dataset,
+    resolve_package_netcdf_schema,
     validate_basin_netcdf_file,
+    validate_package_netcdf_schema_registry,
     write_basin_dataset_netcdf,
 )
 
@@ -392,6 +398,22 @@ def test_existing_destination_rejected_by_default(tmp_path):
         write_basin_dataset_netcdf(ds, path)
 
 
+# ---------------------------------------------------------------------------
+# 26. arbitrary caller-constructed schemas rejected (correction round
+#     hardening: only the fixed, registered schema identities are ever
+#     valid, never an ad hoc PackageNetCDFSchema instance)
+# ---------------------------------------------------------------------------
+
+
+def test_unregistered_schema_rejected():
+    table = _assembled_table()
+    bogus_schema = PackageNetCDFSchema(
+        name="not_a_registered_schema_v999", version=999, coordinate_name="time"
+    )
+    with pytest.raises(PackageNetCDFError, match="not one of the registered"):
+        build_basin_dataset(table, "01019000", schema=bogus_schema)
+
+
 def test_explicit_overwrite_succeeds(tmp_path):
     table = _assembled_table()
     ds = build_basin_dataset(table, "01019000")
@@ -596,11 +618,11 @@ def test_post_write_contract_failure_prevents_promotion_and_cleans_up_temp(tmp_p
     original_validate = package_netcdf._validate_basin_dataset_contract
     calls = {"n": 0}
 
-    def _fail_on_second_call(dataset):
+    def _fail_on_second_call(dataset, **kwargs):
         calls["n"] += 1
         if calls["n"] >= 2:
             raise PackageNetCDFError("simulated post-write contract failure")
-        original_validate(dataset)
+        original_validate(dataset, **kwargs)
 
     monkeypatch.setattr(package_netcdf, "_validate_basin_dataset_contract", _fail_on_second_call)
     with pytest.raises(PackageNetCDFError, match="simulated post-write contract failure"):
@@ -621,11 +643,11 @@ def test_post_write_contract_failure_leaves_existing_destination_unchanged(tmp_p
     original_validate = package_netcdf._validate_basin_dataset_contract
     calls = {"n": 0}
 
-    def _fail_on_second_call(dataset):
+    def _fail_on_second_call(dataset, **kwargs):
         calls["n"] += 1
         if calls["n"] >= 2:
             raise PackageNetCDFError("simulated post-write contract failure")
-        original_validate(dataset)
+        original_validate(dataset, **kwargs)
 
     monkeypatch.setattr(package_netcdf, "_validate_basin_dataset_contract", _fail_on_second_call)
     with pytest.raises(PackageNetCDFError, match="simulated post-write contract failure"):
@@ -633,3 +655,161 @@ def test_post_write_contract_failure_leaves_existing_destination_unchanged(tmp_p
 
     assert path.read_bytes() == original_bytes
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Versioned package schema (v001 'time' legacy / v002 'date' scientific)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_v001_schema_with_time_coordinate_passes(tmp_path):
+    table = _assembled_table(n=10)
+    ds = build_basin_dataset(table, "01019000", schema=LEGACY_COMPACT_V001_SCHEMA)
+    assert set(ds.dims) == {"time"}
+    path = tmp_path / "basin.nc"
+    write_basin_dataset_netcdf(ds, path, schema=LEGACY_COMPACT_V001_SCHEMA)
+    validate_basin_netcdf_file(path, table, "01019000", schema=LEGACY_COMPACT_V001_SCHEMA)
+
+
+def test_legacy_v001_schema_rejects_date_coordinate(tmp_path):
+    table = _assembled_table(n=10)
+    ds = build_basin_dataset(table, "01019000", schema=LEGACY_COMPACT_V001_SCHEMA)
+    ds = ds.rename({"time": "date"})
+    path = tmp_path / "basin.nc"
+    with pytest.raises(PackageNetCDFError, match="date"):
+        write_basin_dataset_netcdf(ds, path, schema=LEGACY_COMPACT_V001_SCHEMA)
+
+
+def test_scientific_v002_schema_with_date_coordinate_passes(tmp_path):
+    table = _assembled_table(n=10)
+    ds = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+    assert set(ds.dims) == {"date"}
+    for name in EXPECTED_VARIABLES:
+        assert ds[name].dims == ("date",)
+    assert ds.attrs["package_schema_name"] == SCIENTIFIC_V002_SCHEMA.name
+    assert ds.attrs["package_schema_version"] == SCIENTIFIC_V002_SCHEMA.version
+    path = tmp_path / "basin.nc"
+    write_basin_dataset_netcdf(ds, path, schema=SCIENTIFIC_V002_SCHEMA)
+    validate_basin_netcdf_file(path, table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+
+
+def test_scientific_v002_schema_rejects_time_coordinate(tmp_path):
+    table = _assembled_table(n=10)
+    ds = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+    ds = ds.rename({"date": "time"})
+    path = tmp_path / "basin.nc"
+    with pytest.raises(PackageNetCDFError, match="time"):
+        write_basin_dataset_netcdf(ds, path, schema=SCIENTIFIC_V002_SCHEMA)
+
+
+def test_dataset_with_both_time_and_date_dimensions_rejected(tmp_path):
+    table = _assembled_table(n=6)
+    ds = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+    # Fabricate a second, bogus 'time' dimension alongside the real 'date' one.
+    bogus = ds.copy()
+    bogus = bogus.assign_coords(time=("time", np.arange(len(ds["date"]))))
+    bogus["mrms_qpe_1h_mm"] = (("date",), ds["mrms_qpe_1h_mm"].values)
+    bogus["_extra_time_var"] = (("time",), np.zeros(len(ds["date"])))
+    path = tmp_path / "basin.nc"
+    with pytest.raises(PackageNetCDFError):
+        write_basin_dataset_netcdf(bogus, path, schema=SCIENTIFIC_V002_SCHEMA)
+
+
+def test_dataset_with_neither_time_nor_date_dimension_rejected(tmp_path):
+    table = _assembled_table(n=6)
+    ds = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+    ds = ds.rename({"date": "hour_index"})
+    path = tmp_path / "basin.nc"
+    with pytest.raises(PackageNetCDFError):
+        write_basin_dataset_netcdf(ds, path, schema=SCIENTIFIC_V002_SCHEMA)
+
+
+def test_resolve_package_netcdf_schema_rejects_unknown_name():
+    with pytest.raises(PackageNetCDFError, match="unknown"):
+        resolve_package_netcdf_schema("not_a_registered_schema")
+
+
+@pytest.mark.parametrize("schema", REGISTERED_PACKAGE_NETCDF_SCHEMAS)
+def test_resolve_package_netcdf_schema_accepts_every_registered_name(schema):
+    assert resolve_package_netcdf_schema(schema.name) is schema
+
+
+def test_schema_registry_validator_passes_for_the_real_registry():
+    validate_package_netcdf_schema_registry()
+
+
+def test_schema_registry_validator_rejects_duplicate_names(monkeypatch):
+    import src.baseline.package_netcdf as package_netcdf
+
+    duplicated = (
+        LEGACY_COMPACT_V001_SCHEMA,
+        PackageNetCDFSchema(name=LEGACY_COMPACT_V001_SCHEMA.name, version=99, coordinate_name="date"),
+    )
+    monkeypatch.setattr(package_netcdf, "REGISTERED_PACKAGE_NETCDF_SCHEMAS", duplicated)
+    with pytest.raises(PackageNetCDFError, match="duplicate"):
+        validate_package_netcdf_schema_registry()
+
+
+def test_schema_registry_validator_rejects_shared_coordinate_name(monkeypatch):
+    import src.baseline.package_netcdf as package_netcdf
+
+    clashing = (
+        LEGACY_COMPACT_V001_SCHEMA,
+        PackageNetCDFSchema(name="stage1_scientific_package_v002", version=2, coordinate_name="time"),
+    )
+    monkeypatch.setattr(package_netcdf, "REGISTERED_PACKAGE_NETCDF_SCHEMAS", clashing)
+    with pytest.raises(PackageNetCDFError, match="coordinate"):
+        validate_package_netcdf_schema_registry()
+
+
+def test_timestamp_values_unchanged_between_v001_and_v002_schemas(tmp_path):
+    table = _assembled_table(n=20)
+
+    ds_v001 = build_basin_dataset(table, "01019000", schema=LEGACY_COMPACT_V001_SCHEMA)
+    ds_v002 = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+
+    time_values = pd.DatetimeIndex(ds_v001["time"].values)
+    date_values = pd.DatetimeIndex(ds_v002["date"].values)
+    assert time_values.equals(date_values)
+    assert time_values.equals(table.index)
+
+    for name in EXPECTED_VARIABLES:
+        np.testing.assert_array_equal(ds_v001[name].values, ds_v002[name].values)
+
+    path_v001 = tmp_path / "v001.nc"
+    path_v002 = tmp_path / "v002.nc"
+    write_basin_dataset_netcdf(ds_v001, path_v001, schema=LEGACY_COMPACT_V001_SCHEMA)
+    write_basin_dataset_netcdf(ds_v002, path_v002, schema=SCIENTIFIC_V002_SCHEMA)
+    with xr.open_dataset(path_v001, engine=NETCDF_ENGINE) as reopened_v001, \
+            xr.open_dataset(path_v002, engine=NETCDF_ENGINE) as reopened_v002:
+        assert pd.DatetimeIndex(reopened_v001["time"].values).equals(
+            pd.DatetimeIndex(reopened_v002["date"].values)
+        )
+        assert reopened_v001.attrs["package_schema_name"] == LEGACY_COMPACT_V001_SCHEMA.name
+        assert reopened_v001.attrs["package_schema_version"] == LEGACY_COMPACT_V001_SCHEMA.version
+        assert reopened_v002.attrs["package_schema_name"] == SCIENTIFIC_V002_SCHEMA.name
+        assert reopened_v002.attrs["package_schema_version"] == SCIENTIFIC_V002_SCHEMA.version
+
+
+# ---------------------------------------------------------------------------
+# 28. dataset-level description text is schema-specific (correction round:
+#     the original, certified v001 wording must be preserved exactly)
+# ---------------------------------------------------------------------------
+
+
+def test_dataset_description_preserved_for_legacy_v001_schema():
+    table = _assembled_table()
+    ds = build_basin_dataset(table, "01019000", schema=LEGACY_COMPACT_V001_SCHEMA)
+    assert ds.attrs["description"] == (
+        "Stage 1 Compact Scientific Package per-basin time-series file "
+        "(dynamic forcing inputs, raw discharge, lead targets)."
+    )
+
+
+def test_dataset_description_for_v002_schema():
+    table = _assembled_table()
+    ds = build_basin_dataset(table, "01019000", schema=SCIENTIFIC_V002_SCHEMA)
+    assert ds.attrs["description"] == (
+        "Stage 1 scientific package per-basin time-series file "
+        "(dynamic forcing inputs, raw discharge, lead targets)."
+    )

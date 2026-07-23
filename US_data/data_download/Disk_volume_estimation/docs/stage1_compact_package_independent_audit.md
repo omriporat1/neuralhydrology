@@ -25,6 +25,27 @@ This document continues to describe the auditor's design, independence
 boundary, and comparison rules as reusable reference documentation for any
 future re-run (e.g. against a rebuilt or expanded package).
 
+**Addendum (2026-07-23, schema-support implementation) — versioned package
+schema (`date`) for future scientific packages.** A new NetCDF package schema,
+`stage1_scientific_package_v002` (temporal coordinate `date`), was added
+alongside the frozen legacy schema `stage1_compact_scientific_package_v001`
+(temporal coordinate `time`, unchanged) in `src/baseline/package_netcdf.py`.
+This certified compact v001 package is **not rewritten and remains frozen
+with `time`** — this addendum documents auditor behavior only, not a
+package rebuild. The auditor was extended, independently, to check the
+declared NetCDF package schema/temporal coordinate rather than assuming
+`time`: it re-declares its own accepted schema identities and expected
+coordinate names from scratch (still without importing
+`src.baseline.package_netcdf`'s registry) and enforces them from disk. See
+the new checks folded into item 4 below and the new
+`netcdf_package_schema_identity_recognized`,
+`netcdf_temporal_coordinate_present`,
+`netcdf_temporal_coordinate_matches_declared_schema`,
+`package_all_basins_same_netcdf_schema`, and
+`netcdf_matches_run_provenance_schema` checks. No real package was built or
+audited by this addendum; coverage is via `tests/test_package_audit.py`
+synthetic fixtures only.
+
 ## Purpose
 
 A builder's own self-checks cannot certify the builder's own output: if the
@@ -106,7 +127,7 @@ canonical h2o audit.
 1. **Exact package layout** — every file below the package root is recursively enumerated; the check fails on any missing required file *and* on any unexpected top-level entry or extra file not part of the defined package contract (`check_package_layout`, `check_exact_package_layout`).
 2. **Full provenance-binding checksums** — every file in `manifests/file_checksums.csv` and `manifests/package_manifest.json` is recomputed from bytes on disk and compared to the declared value; in addition, every authoritative package artifact (`time_series/*.nc`, `attributes/attributes.csv`, `basins/basin_ids.txt`, `masks/gap_timestamps.json`, `manifests/package_manifest.json`, `manifests/file_checksums.csv`, `run_provenance.json`) and every upstream source file actually compared by the audit (all forcing source parquets, all qobs source NetCDFs, the imputed-value-mask parquet) is independently checksummed from disk bytes — never copied from any manifest under audit — and bound into `audit_manifest.json` as deterministic basin-keyed mappings (`check_checksums_and_manifest`, `compute_package_artifact_checksums_independent`, `compute_source_checksums_independent`).
 3. **Basin membership and order** — `basins/basin_ids.txt` and the `time_series/*.nc` file set are compared, exactly, to the accepted basin selection (`check_basin_membership`).
-4. **NetCDF dimensions/dtypes/units/metadata/timeline** — variable order, per-variable dtype (`float32` continuous / `int8` gap flags), per-variable `units` attribute, `gauge_id` attribute, the exact canonical hourly timeline, the single `time` dimension and its size, every variable's dimension tuple, the dataset-level `package_schema_name`/`package_schema_version` attributes, gap-flag `flag_values`/`flag_meanings` attributes, the raw-qobs `role="audit_provenance_not_training_target"` attribute, and every lead-target's `role="training_target"`/`lead_hours` attributes — all independently re-read and compared against the real Gate 2 serialization contract inspected read-only in `package_netcdf.py` (never imported or called) (`audit_basin_netcdf`).
+4. **NetCDF dimensions/dtypes/units/metadata/timeline** — variable order, per-variable dtype (`float32` continuous / `int8` gap flags), per-variable `units` attribute, `gauge_id` attribute, the exact canonical hourly timeline, the single temporal dimension and its size, every variable's dimension tuple, the dataset-level `package_schema_name`/`package_schema_version` attributes, gap-flag `flag_values`/`flag_meanings` attributes, the raw-qobs `role="audit_provenance_not_training_target"` attribute, and every lead-target's `role="training_target"`/`lead_hours` attributes — all independently re-read and compared against the real Gate 2 serialization contract inspected read-only in `package_netcdf.py` (never imported or called) (`audit_basin_netcdf`). **(2026-07-23 addendum)** The temporal dimension name itself is no longer assumed to be `time`: the auditor independently redeclares which package-schema identities it accepts and which coordinate name each implies, then verifies that exactly one of `time`/`date` is present per basin file (`netcdf_temporal_coordinate_present`), that it matches the schema declared on that file (`netcdf_temporal_coordinate_matches_declared_schema`), that the declared schema identity is one it recognizes (`netcdf_package_schema_identity_recognized`), that every basin in the package declares the same schema identity (`package_all_basins_same_netcdf_schema`), and that the package manifest and `run_provenance.json` both agree with the schema/coordinate actually found on disk (`netcdf_matches_run_provenance_schema`).
 5. **Dynamic inputs vs. forcing source** — all 8 approved forcing variables, full-array, against the raw forcing parquet.
 6. **Raw qobs vs. source** — `qobs_m3s`, full-array, against the raw qobs NetCDF.
 7. **Unit conversion** — `q_mm_per_h = q_m3s * 3.6 / area_km2`, re-derived independently (not imported), compared against every lead-target's implied base series.

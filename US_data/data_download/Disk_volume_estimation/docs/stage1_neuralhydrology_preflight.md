@@ -1,7 +1,22 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-07-23 (Compact NeuralHydrology integration smoke — CLOSED, CPU preflight + GPU training + validation/test evaluation all PASS)
+**Updated:** 2026-07-23 (Versioned package schema (`date`) for future scientific packages — implementation)
+
+**Versioned package schema addendum (2026-07-23, schema-support
+implementation):** the certified compact package below uses NetCDF temporal
+coordinate `time` and is unaffected/frozen. A new registered schema,
+`stage1_scientific_package_v002` (coordinate `date` — matching
+NeuralHydrology 1.13's internal requirement, see the compact-smoke Finding 2
+below), is now available in `src/baseline/package_netcdf.py` for future full
+scientific packages; the package-builder CLI requires selecting it
+explicitly via `--package-schema`. `FlashNHDataset`'s compatibility adapter
+(`src/baseline/nh_dataset.py::_adapt_temporal_index_to_date`, renamed from
+`_adapt_time_to_date`) now passes a `date`-coordinate package through
+unchanged and still adapts a `time`-coordinate package in memory only,
+failing loudly if both or neither coordinate is present. No real package
+was built by this addendum. Full detail: `docs/decision_log.md` (2026-07-23
+"Versioned package schema" entry).
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).

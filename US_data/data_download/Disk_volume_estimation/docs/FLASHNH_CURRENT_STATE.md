@@ -1,6 +1,40 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-23 (Compact NeuralHydrology integration smoke — CLOSED, CPU preflight + GPU training + validation/test evaluation all PASS)
+Last updated: 2026-07-23 (Versioned package schema (`date`) for future scientific packages — implementation)
+
+## Versioned package schema (`date`) for future scientific packages (2026-07-23)
+
+**Schema-support implementation addendum** (code, tests, and documentation
+together — not a docs-only change). Added an explicit,
+versioned NetCDF package-schema registry (`src/baseline/package_netcdf.py`)
+so future full scientific packages can use temporal coordinate `date`
+(`stage1_scientific_package_v002`, version 2) while the certified compact
+package below **remains exactly as built and certified: frozen, on disk,
+with coordinate `time`** (`stage1_compact_scientific_package_v001`, version
+1, unchanged default at the low-level serializer). The package-builder CLI
+now requires an explicit `--package-schema` choice — no default, no
+inference from basin count/path/output name — so a future production build
+cannot silently emit a legacy `time` package by omission. Provenance now
+records both the (corrected, deprecated-but-preserved)
+`package_schema_name` builder-manifest identity and five new explicit
+fields (`builder_manifest_schema_name`, `builder_manifest_schema_version`,
+`netcdf_package_schema_name`, `netcdf_package_schema_version`,
+`netcdf_time_coordinate`). The independent auditor
+(`src/baseline/package_audit.py`) now checks the declared/actual NetCDF
+schema and coordinate from disk without importing the schema registry it
+audits. `FlashNHDataset`'s `time`→`date` compatibility adapter
+(`src/baseline/nh_dataset.py`) is renamed `_adapt_temporal_index_to_date`
+and now handles all four coordinate-presence combinations explicitly
+(pass through `date`; rename `time`; fail loudly on both or neither, in
+either direction). Structural NH compatibility with a `date`-coordinate
+package does not imply stock `GenericDataset` reproduces Flash-NH's own
+sample-validity filtering — `FlashNHDataset` remains required either way.
+**No real package was built by this patch; h2o/Moriah were not accessed;
+the certified compact v001 package was not touched.** Full detail:
+`docs/decision_log.md` (2026-07-23 "Versioned package schema" entry) and
+`docs/stage1_compact_package_independent_audit.md` (2026-07-23 addendum).
+
+---
 
 ## Current milestone
 

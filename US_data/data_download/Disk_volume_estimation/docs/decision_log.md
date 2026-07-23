@@ -4,6 +4,95 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-23 Versioned package schema (`date`) for future scientific packages — implementation
+
+**Decision.** Added an explicit, versioned NetCDF package-schema contract so
+that future full scientific packages can use the temporal coordinate name
+`date` (required by NeuralHydrology 1.13's own loading path, see Finding 2
+below) **without** ever touching the certified compact v001 package, which
+remains frozen with `time` on disk. Two registered schemas now exist in
+`src/baseline/package_netcdf.py`: `stage1_compact_scientific_package_v001`
+(version 1, coordinate `time`, default for backward compatibility at the
+low-level serializer, unchanged behavior) and
+`stage1_scientific_package_v002` (version 2, coordinate `date`, for future
+production packages). Basin-population size is explicitly not part of
+schema identity. The package-builder CLI
+(`scripts/build_stage1_baseline_nh_package.py`) now requires an explicit
+`--package-schema` argument restricted to the two registered names — there
+is no default and no inference from basin count, path, or output name, so a
+future production build cannot silently emit a legacy `time` package by
+omission.
+
+**Provenance correction.** The pre-existing `package_schema_name` field (in
+both the package manifest and `run_provenance.json`) documented the
+*builder-manifest* identity, not the NetCDF package schema — a misleading
+name given the new distinction. It is **preserved unchanged, marked
+deprecated**, not repurposed or deleted. Five new explicit fields were added
+to both the manifest and run provenance: `builder_manifest_schema_name`,
+`builder_manifest_schema_version`, `netcdf_package_schema_name`,
+`netcdf_package_schema_version`, `netcdf_time_coordinate`.
+
+**Auditor independence preserved.** `src/baseline/package_audit.py` was
+extended to check the declared/actual NetCDF package schema and temporal
+coordinate without importing `src.baseline.package_netcdf`'s schema
+registry — it independently redeclares its own accepted schema identities
+and expected coordinate names, then verifies them from disk (new checks:
+`netcdf_temporal_coordinate_present`,
+`netcdf_temporal_coordinate_matches_declared_schema`,
+`netcdf_package_schema_identity_recognized`,
+`package_all_basins_same_netcdf_schema`,
+`netcdf_matches_run_provenance_schema`). See
+`docs/stage1_compact_package_independent_audit.md`'s 2026-07-23 addendum.
+
+**Genuine bug found and fixed during test-writing (not part of the original
+design).** `run_audit()`'s aggregate same-schema check sorted a `set` of
+schema-identity tuples with a bare `sorted(...)`; when a basin's temporal
+coordinate cannot be determined (both `time` and `date` present, or
+neither), `audit_basin_netcdf` returns a tuple with `None` in the
+coordinate-name position, and Python cannot order `None` against `str` —
+this crashed with `TypeError` instead of reporting the (already-flagged)
+structural error cleanly. Fixed with a string-coercing sort key. This would
+have crashed the auditor on any real malformed "both/neither temporal
+dimension" package; found only because the new both/neither tests were
+added.
+
+**`FlashNHDataset` compatibility (renames the Finding-2 adapter below).**
+`src/baseline/nh_dataset.py`'s adapter — previously named
+`_adapt_time_to_date` (see Finding 2 in the entry immediately below) — is
+renamed to `_adapt_temporal_index_to_date` and now implements the full
+three-way contract: a `date`-named index passes through unchanged; a
+`time`-named index is renamed in memory only (on-disk files/timestamp
+values never touched); both-present or neither-present fails loudly
+(`FlashNHDatasetError`), in both directions (a `date` index with a stray
+`time` column now also fails loudly — previously only the reverse ambiguity
+was guarded). A package becoming structurally `date`-compatible with stock
+NeuralHydrology does **not** mean `GenericDataset` reproduces Flash-NH's own
+sample-validity filtering — `FlashNHDataset` remains required regardless of
+on-disk coordinate name.
+
+**Scope.** This is a schema-support implementation addendum — code, tests,
+and documentation together, not a docs-only change. No real package was
+built; h2o and Moriah were not accessed; the certified compact v001 package
+artifacts were not touched. Tests: `tests/test_package_netcdf.py`,
+`tests/test_package_builder.py`, `tests/test_package_audit.py`,
+`tests/test_nh_dataset.py`, `tests/test_nh_structural_preflight.py` — exact
+pass/fail counts recorded in the implementation report, not duplicated
+here. The work is local/repository-only.
+
+**Files changed.** `src/baseline/package_netcdf.py`,
+`src/baseline/package_builder.py`,
+`scripts/build_stage1_baseline_nh_package.py`,
+`src/baseline/package_audit.py`, `src/baseline/nh_dataset.py`,
+`tests/test_package_netcdf.py`, `tests/test_package_builder.py`,
+`tests/test_package_audit.py`, `tests/test_nh_dataset.py`,
+`docs/FLASHNH_CURRENT_STATE.md`, `docs/decision_log.md` (this entry),
+`docs/stage1_compact_package_independent_audit.md`,
+`docs/stage1_baseline_package_implementation_plan.md`,
+`docs/stage1_neuralhydrology_preflight.md`,
+`docs/stage1_scientific_baseline_design.md`.
+
+---
+
 ## 2026-07-23 Compact NeuralHydrology integration smoke — CLOSED
 
 **Decision.** The compact-package NH integration-validation effort opened by
@@ -47,7 +136,10 @@ certified compact v001 NetCDFs use dimension/coordinate name `time`.
 NeuralHydrology 1.13 internally requires the temporal index name `date` in
 parts of its `GenericDataset` loading path. The smoke used an in-memory
 `FlashNHDataset._load_basin_data` adapter (`_adapt_time_to_date` in
-`src/baseline/nh_dataset.py`) that renames only the DataFrame index's
+`src/baseline/nh_dataset.py` — **renamed `_adapt_temporal_index_to_date` by
+the 2026-07-23 "Versioned package schema" entry above**, same behavior for
+this `time` case, plus new explicit `date`/v002 pass-through and
+both/neither fail-loud handling) that renames only the DataFrame index's
 `.name` metadata from `time` to `date` after calling
 `GenericDataset._load_basin_data` unchanged; timestamp values, row order,
 dtypes, NaNs, and all on-disk files are untouched. **Binding rule:** v001

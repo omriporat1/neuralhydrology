@@ -75,6 +75,9 @@ __all__ = [
     "read_forcing_parquet_independent",
     "read_qobs_series_independent",
     "read_package_basin_netcdf_independent",
+    "read_run_provenance_json_independent",
+    "resolve_expected_netcdf_package_schema_independent",
+    "package_declares_historical_v001_compatibility_lineage",
     "load_gap_inventory_independent",
     "reconstruct_gap_timestamps_independent",
     "read_gap_timestamps_json_independent",
@@ -142,6 +145,95 @@ RTMA_PRODUCT = "rtma_conus_aws_2p5km"
 # (SCHEMA_NAME/SCHEMA_VERSION above). The two must never be confused.
 PACKAGE_SCHEMA_NAME = "stage1_compact_scientific_package_v001"
 PACKAGE_SCHEMA_VERSION = 1
+
+# The scientific v002 counterpart, independently declared here alongside the
+# legacy identity above.
+SCIENTIFIC_V002_SCHEMA_NAME = "stage1_scientific_package_v002"
+SCIENTIFIC_V002_SCHEMA_VERSION = 2
+
+# Independently redeclared registry of every recognized on-disk NetCDF
+# package schema identity -> {version, coordinate_name}. Mirrors (does not
+# import) src.baseline.package_netcdf.REGISTERED_PACKAGE_NETCDF_SCHEMAS --
+# re-declared here, from the certified/approved schema contract, so a bug in
+# that module's own registry cannot also blind this audit. A basin file, a
+# package manifest, or a run-provenance record is only ever "recognized" if
+# its declared identity appears in this dict AND its version/coordinate
+# agree with the entry below.
+AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS = {
+    PACKAGE_SCHEMA_NAME: {"version": PACKAGE_SCHEMA_VERSION, "coordinate_name": "time"},
+    SCIENTIFIC_V002_SCHEMA_NAME: {"version": SCIENTIFIC_V002_SCHEMA_VERSION, "coordinate_name": "date"},
+}
+AUDIT_RECOGNIZED_TEMPORAL_COORDINATE_NAMES = frozenset(
+    entry["coordinate_name"] for entry in AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS.values()
+)
+
+# Narrow, exact-lineage compatibility contract for the real, already-built,
+# already-certified Compact Scientific Package v001: that package's manifest
+# and run_provenance.json predate the netcdf_package_schema_*/
+# netcdf_time_coordinate fields entirely, and the package must never be
+# rewritten just to re-audit it. This is deliberately NOT a generic "missing
+# metadata is acceptable" fallback -- it only applies when a source
+# identifies itself, independently, through the exact frozen historical
+# compact-v001 builder/manifest lineage below. Re-declared independently of
+# src.baseline.package_builder.SCHEMA_NAME/SCHEMA_VERSION (never imported).
+HISTORICAL_BUILDER_MANIFEST_SCHEMA_NAME = "stage1_compact_scientific_package_builder_v001"
+HISTORICAL_BUILDER_MANIFEST_SCHEMA_VERSION = 1
+HISTORICAL_BUILDER_MODULE = "src.baseline.package_builder"
+HISTORICAL_PACKAGE_ROLE = "stage1_compact_scientific_package"
+
+# The exact NetCDF package schema independently applied under the historical
+# v001 compatibility contract -- identical in content to the
+# AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS[PACKAGE_SCHEMA_NAME] entry, spelled
+# out on its own so the fallback's intent reads standalone.
+HISTORICAL_V001_EXPECTED_NETCDF_SCHEMA = {
+    "name": PACKAGE_SCHEMA_NAME,
+    "version": PACKAGE_SCHEMA_VERSION,
+    "coordinate_name": "time",
+}
+
+
+def _package_manifest_declares_historical_v001_lineage(manifest: Mapping) -> bool:
+    """True only for the exact frozen historical compact-v001 builder-manifest identity.
+
+    Checked against fields that existed in the manifest before this schema
+    patch (``schema_name``, ``schema_version``, ``package_role``) -- never
+    against the newly introduced ``netcdf_package_schema_*``/
+    ``netcdf_time_coordinate`` fields, since a real historical manifest
+    cannot have those.
+    """
+    return (
+        manifest.get("schema_name") == HISTORICAL_BUILDER_MANIFEST_SCHEMA_NAME
+        and manifest.get("schema_version") == HISTORICAL_BUILDER_MANIFEST_SCHEMA_VERSION
+        and manifest.get("package_role") == HISTORICAL_PACKAGE_ROLE
+    )
+
+
+def _run_provenance_declares_historical_v001_lineage(run_provenance: Mapping) -> bool:
+    """True only for the exact frozen historical compact-v001 provenance identity.
+
+    Checked against fields that existed in run_provenance.json before this
+    schema patch (``builder_module``, the deprecated ``package_schema_name``)
+    -- never against the newly introduced ``builder_manifest_schema_*``/
+    ``netcdf_package_schema_*``/``netcdf_time_coordinate`` fields.
+    """
+    return (
+        run_provenance.get("builder_module") == HISTORICAL_BUILDER_MODULE
+        and run_provenance.get("package_schema_name") == HISTORICAL_BUILDER_MANIFEST_SCHEMA_NAME
+    )
+
+
+def package_declares_historical_v001_compatibility_lineage(
+    manifest: Mapping, run_provenance: Mapping
+) -> bool:
+    """True only when BOTH the manifest and run_provenance independently agree
+
+    that this package is the exact frozen historical compact-v001 lineage.
+    Requiring agreement from both sources keeps the fallback restricted to
+    the real historical package rather than a partially-tampered one.
+    """
+    return _package_manifest_declares_historical_v001_lineage(
+        manifest
+    ) and _run_provenance_declares_historical_v001_lineage(run_provenance)
 
 # Re-declared independently of the attrs written by
 # src.baseline.package_netcdf.build_basin_dataset -- the actual Gate 2
@@ -611,7 +703,13 @@ def read_package_basin_netcdf_independent(path) -> dict:
     """Independently read one package basin NetCDF file's contents.
 
     Uses xarray purely as a neutral I/O library; does not call any function
-    from ``src.baseline.package_netcdf``.
+    from ``src.baseline.package_netcdf``. Does not assume a coordinate name:
+    ``temporal_dims_present`` reports every recognized (``time``/``date``)
+    coordinate actually found as a dimension, and ``time_index`` is only
+    populated when exactly one is present -- the strict "exactly one, and
+    it's the right one" judgment is made by the caller
+    (:func:`audit_basin_netcdf`), not here, so both/neither/wrong-coordinate
+    cases can each be reported as their own distinct check.
     """
     p = Path(path)
     if not p.is_file():
@@ -621,11 +719,15 @@ def read_package_basin_netcdf_independent(path) -> dict:
         gauge_id = ds.attrs.get("gauge_id")
         package_schema_name = ds.attrs.get("package_schema_name")
         package_schema_version = ds.attrs.get("package_schema_version")
-        if "time" not in ds.coords:
-            raise PackageAuditError(f"{p}: no 'time' coordinate found")
-        time_index = pd.DatetimeIndex(ds["time"].values)
-        if time_index.tz is not None:
-            time_index = time_index.tz_convert("UTC").tz_localize(None)
+        temporal_dims_present = sorted(
+            str(name) for name in ds.dims if str(name) in AUDIT_RECOGNIZED_TEMPORAL_COORDINATE_NAMES
+        )
+        time_index = None
+        if len(temporal_dims_present) == 1:
+            coord_name = temporal_dims_present[0]
+            time_index = pd.DatetimeIndex(ds[coord_name].values)
+            if time_index.tz is not None:
+                time_index = time_index.tz_convert("UTC").tz_localize(None)
         dataset_dims = {str(name): int(size) for name, size in dict(ds.sizes).items()}
         variable_order = list(ds.data_vars)
         variables = {name: np.asarray(ds[name].values) for name in variable_order}
@@ -637,6 +739,7 @@ def read_package_basin_netcdf_independent(path) -> dict:
         "gauge_id": gauge_id,
         "package_schema_name": package_schema_name,
         "package_schema_version": package_schema_version,
+        "temporal_dims_present": temporal_dims_present,
         "dataset_dims": dataset_dims,
         "time_index": time_index,
         "variable_order": variable_order,
@@ -646,6 +749,118 @@ def read_package_basin_netcdf_independent(path) -> dict:
         "variable_dims": variable_dims,
         "variable_attrs": variable_attrs,
     }
+
+
+def read_run_provenance_json_independent(report: "AuditReport", package_root) -> dict:
+    """Independently read ``run_provenance.json``'s raw content.
+
+    Records a ``run_provenance_readable`` check and returns ``{}`` (never
+    raises) on any read/parse failure, mirroring
+    :func:`check_checksums_and_manifest`'s tolerant-read-then-report pattern
+    so a missing/corrupt provenance file fails the audit cleanly instead of
+    crashing the run.
+    """
+    path = Path(package_root) / "run_provenance.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        report.error("run_provenance_readable", str(exc))
+        return {}
+    report.ok("run_provenance_readable")
+    return data
+
+
+def resolve_expected_netcdf_package_schema_independent(
+    report: "AuditReport",
+    *,
+    source_label: str,
+    declared: Mapping,
+    historical_lineage_recognized: bool = False,
+) -> Optional[dict]:
+    """Independently validate one source's declared NetCDF package schema.
+
+    ``declared`` is either the package manifest or the run-provenance
+    record; ``source_label`` (e.g. ``"package_manifest"``/``"run_provenance"``)
+    namespaces the emitted check IDs. Checks, in order: the name/version/
+    coordinate fields are all present; the declared name is a recognized
+    schema identity (independently redeclared in
+    ``AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS`` -- never imported from
+    ``src.baseline.package_netcdf``); the declared version and coordinate
+    agree with that registry entry. Returns the resolved
+    ``{"name", "version", "coordinate_name"}`` only if every check passes,
+    else ``None``.
+
+    If all three fields are absent AND ``historical_lineage_recognized`` is
+    True (the caller has independently confirmed this source belongs to the
+    exact frozen historical compact-v001 lineage -- see
+    :func:`package_declares_historical_v001_compatibility_lineage`), the
+    frozen ``HISTORICAL_V001_EXPECTED_NETCDF_SCHEMA`` is applied instead of
+    failing. This is a narrow, exact-lineage compatibility path, not a
+    generic "missing metadata is fine" fallback: any other missing-field
+    combination, or an unrecognized lineage, still fails as before.
+    """
+    name = declared.get("netcdf_package_schema_name")
+    version = declared.get("netcdf_package_schema_version")
+    coordinate_name = declared.get("netcdf_time_coordinate")
+
+    if name is None and version is None and coordinate_name is None and historical_lineage_recognized:
+        report.ok(
+            f"{source_label}_netcdf_schema_historical_v001_compatibility_used",
+            "explicit netcdf_package_schema_name/version/netcdf_time_coordinate fields are absent from "
+            f"{source_label}; recognized the exact frozen historical compact-v001 builder/manifest lineage, "
+            "so the historical NetCDF schema is applied independently without requiring the package to be "
+            f"rewritten: {HISTORICAL_V001_EXPECTED_NETCDF_SCHEMA}",
+        )
+        return dict(HISTORICAL_V001_EXPECTED_NETCDF_SCHEMA)
+
+    if name is not None:
+        report.ok(f"{source_label}_netcdf_schema_name_present")
+    else:
+        report.error(f"{source_label}_netcdf_schema_name_present", "netcdf_package_schema_name is missing")
+
+    if version is not None:
+        report.ok(f"{source_label}_netcdf_schema_version_present")
+    else:
+        report.error(f"{source_label}_netcdf_schema_version_present", "netcdf_package_schema_version is missing")
+
+    if coordinate_name is not None:
+        report.ok(f"{source_label}_netcdf_schema_coordinate_present")
+    else:
+        report.error(f"{source_label}_netcdf_schema_coordinate_present", "netcdf_time_coordinate is missing")
+
+    if name is None or version is None or coordinate_name is None:
+        return None
+
+    registry_entry = AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS.get(name)
+    if registry_entry is None:
+        report.error(
+            f"{source_label}_netcdf_schema_identity_recognized",
+            f"unrecognized netcdf_package_schema_name {name!r}; recognized: "
+            f"{sorted(AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS)}",
+        )
+        return None
+    report.ok(f"{source_label}_netcdf_schema_identity_recognized")
+
+    if version == registry_entry["version"]:
+        report.ok(f"{source_label}_netcdf_schema_version_matches_registry")
+    else:
+        report.error(
+            f"{source_label}_netcdf_schema_version_matches_registry",
+            f"declared version {version!r} != registry version {registry_entry['version']!r} for {name!r}",
+        )
+        return None
+
+    if coordinate_name == registry_entry["coordinate_name"]:
+        report.ok(f"{source_label}_netcdf_schema_coordinate_matches_registry")
+    else:
+        report.error(
+            f"{source_label}_netcdf_schema_coordinate_matches_registry",
+            f"declared coordinate {coordinate_name!r} != registry coordinate "
+            f"{registry_entry['coordinate_name']!r} for {name!r}",
+        )
+        return None
+
+    return {"name": name, "version": version, "coordinate_name": coordinate_name}
 
 
 def load_gap_inventory_independent(csv_path) -> pd.DataFrame:
@@ -891,12 +1106,28 @@ def audit_basin_netcdf(
     qobs_root,
     area_km2: float,
     package_float32_rtol: float,
-) -> None:
+    expected_schema: Optional[dict] = None,
+    expected_schema_from_provenance: Optional[dict] = None,
+) -> Optional[tuple]:
+    """Audit one basin NetCDF file. Returns the file's own independently-read
+    ``(package_schema_name, package_schema_version, coordinate_name)``
+    identity tuple (or ``None`` if the file could not be read, or the
+    coordinate could not be determined) so the caller can additionally check
+    every basin file in a package shares the same identity.
+
+    ``expected_schema``/``expected_schema_from_provenance`` are the resolved,
+    independently-validated schema declarations from the package manifest
+    and run-provenance record respectively (see
+    :func:`resolve_expected_netcdf_package_schema_independent`); either may
+    be ``None`` if that source's declaration failed to resolve, in which
+    case the corresponding cross-check is skipped here (already reported as
+    a failure at the source-resolution level).
+    """
     try:
         disk = read_package_basin_netcdf_independent(nc_path)
     except PackageAuditError as exc:
         report.error(f"netcdf_readable[{basin_id}]", str(exc))
-        return
+        return None
 
     if disk["gauge_id"] == basin_id:
         report.ok(f"netcdf_gauge_id[{basin_id}]")
@@ -908,25 +1139,94 @@ def audit_basin_netcdf(
     else:
         report.error(f"netcdf_variable_order[{basin_id}]", f"got {disk['variable_order']}")
 
-    if disk["time_index"].equals(expected_index):
-        report.ok(f"netcdf_timeline_exact[{basin_id}]", str(len(expected_index)))
-    else:
-        report.error(f"netcdf_timeline_exact[{basin_id}]", "time index does not equal expected canonical timeline")
+    disk_schema_name = disk["package_schema_name"]
+    disk_schema_version = disk["package_schema_version"]
+    temporal_dims_present = disk["temporal_dims_present"]
 
-    if disk["package_schema_name"] == PACKAGE_SCHEMA_NAME and disk["package_schema_version"] == PACKAGE_SCHEMA_VERSION:
+    if disk_schema_name is not None:
+        report.ok(f"netcdf_package_schema_name_present[{basin_id}]")
+    else:
+        report.error(f"netcdf_package_schema_name_present[{basin_id}]", "package_schema_name attribute missing")
+
+    if disk_schema_version is not None:
+        report.ok(f"netcdf_package_schema_version_present[{basin_id}]")
+    else:
+        report.error(f"netcdf_package_schema_version_present[{basin_id}]", "package_schema_version attribute missing")
+
+    registry_entry = AUDIT_RECOGNIZED_PACKAGE_NETCDF_SCHEMAS.get(disk_schema_name)
+    if registry_entry is not None:
+        report.ok(f"netcdf_package_schema_identity_recognized[{basin_id}]")
+    else:
+        report.error(
+            f"netcdf_package_schema_identity_recognized[{basin_id}]",
+            f"unrecognized package_schema_name {disk_schema_name!r} on disk",
+        )
+
+    # Preserved check ID / comparison semantics: the basin file's own
+    # embedded identity must match the package's declared (manifest) schema
+    # exactly -- this is what previously only ever checked against the
+    # frozen legacy v001 identity.
+    if (
+        expected_schema is not None
+        and disk_schema_name == expected_schema["name"]
+        and disk_schema_version == expected_schema["version"]
+    ):
         report.ok(f"netcdf_package_schema[{basin_id}]")
     else:
         report.error(
             f"netcdf_package_schema[{basin_id}]",
-            f"got name={disk['package_schema_name']!r} version={disk['package_schema_version']!r}, "
-            f"expected name={PACKAGE_SCHEMA_NAME!r} version={PACKAGE_SCHEMA_VERSION!r}",
+            f"got name={disk_schema_name!r} version={disk_schema_version!r}, "
+            f"expected name={(expected_schema or {}).get('name')!r} "
+            f"version={(expected_schema or {}).get('version')!r}",
         )
 
-    expected_dims = {"time": len(expected_index)}
-    if disk["dataset_dims"] == expected_dims:
-        report.ok(f"netcdf_dataset_dims[{basin_id}]", str(expected_dims))
+    if expected_schema_from_provenance is not None:
+        if (
+            disk_schema_name == expected_schema_from_provenance["name"]
+            and disk_schema_version == expected_schema_from_provenance["version"]
+        ):
+            report.ok(f"netcdf_matches_run_provenance_schema[{basin_id}]")
+        else:
+            report.error(
+                f"netcdf_matches_run_provenance_schema[{basin_id}]",
+                f"got name={disk_schema_name!r} version={disk_schema_version!r}, "
+                f"run_provenance declares name={expected_schema_from_provenance['name']!r} "
+                f"version={expected_schema_from_provenance['version']!r}",
+            )
+
+    if len(temporal_dims_present) == 1:
+        report.ok(f"netcdf_temporal_coordinate_present[{basin_id}]", temporal_dims_present[0])
     else:
-        report.error(f"netcdf_dataset_dims[{basin_id}]", f"got {disk['dataset_dims']}, expected {expected_dims}")
+        report.error(
+            f"netcdf_temporal_coordinate_present[{basin_id}]",
+            f"expected exactly one of {sorted(AUDIT_RECOGNIZED_TEMPORAL_COORDINATE_NAMES)} as a dimension, "
+            f"found {temporal_dims_present}",
+        )
+
+    coordinate_name = temporal_dims_present[0] if len(temporal_dims_present) == 1 else None
+    if expected_schema is not None:
+        if temporal_dims_present == [expected_schema["coordinate_name"]]:
+            report.ok(f"netcdf_temporal_coordinate_matches_declared_schema[{basin_id}]")
+        else:
+            report.error(
+                f"netcdf_temporal_coordinate_matches_declared_schema[{basin_id}]",
+                f"declared schema {expected_schema['name']!r} requires coordinate "
+                f"{expected_schema['coordinate_name']!r}, found {temporal_dims_present}",
+            )
+
+    if coordinate_name is not None:
+        expected_dims = {coordinate_name: len(expected_index)}
+        if disk["dataset_dims"] == expected_dims:
+            report.ok(f"netcdf_dataset_dims[{basin_id}]", str(expected_dims))
+        else:
+            report.error(f"netcdf_dataset_dims[{basin_id}]", f"got {disk['dataset_dims']}, expected {expected_dims}")
+    else:
+        report.error(f"netcdf_dataset_dims[{basin_id}]", f"cannot determine dataset dims: dataset_dims={disk['dataset_dims']}")
+
+    if disk["time_index"] is not None and disk["time_index"].equals(expected_index):
+        report.ok(f"netcdf_timeline_exact[{basin_id}]", str(len(expected_index)))
+    else:
+        report.error(f"netcdf_timeline_exact[{basin_id}]", "time index does not equal expected canonical timeline")
 
     for name in EXPECTED_VARIABLES:
         expected_units = UNITS[name]
@@ -943,9 +1243,9 @@ def audit_basin_netcdf(
         else:
             report.error(f"netcdf_dtype[{basin_id}][{name}]", f"got {actual_dtype!r}, expected {expected_dtype!r}")
 
-        expected_var_dims = ("time",)
+        expected_var_dims = (coordinate_name,) if coordinate_name is not None else None
         actual_var_dims = disk["variable_dims"].get(name)
-        if actual_var_dims == expected_var_dims:
+        if expected_var_dims is not None and actual_var_dims == expected_var_dims:
             report.ok(f"netcdf_variable_dims[{basin_id}][{name}]")
         else:
             report.error(
@@ -998,7 +1298,7 @@ def audit_basin_netcdf(
         qobs_series = read_qobs_series_independent(qobs_root, basin_id)
     except PackageAuditError as exc:
         report.error(f"raw_source_readable[{basin_id}]", str(exc))
-        return
+        return (disk_schema_name, disk_schema_version, coordinate_name)
 
     if forcing.index.equals(expected_index):
         report.ok(f"forcing_source_timeline_exact[{basin_id}]")
@@ -1071,6 +1371,8 @@ def audit_basin_netcdf(
                 f"got role={lead_attrs.get('role')!r} lead_hours={lead_attrs.get('lead_hours')!r}, "
                 f"expected role={LEAD_TARGET_ROLE!r} lead_hours={lead_hours!r}",
             )
+
+    return (disk_schema_name, disk_schema_version, coordinate_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1717,17 +2019,35 @@ def run_audit(
     check_exact_package_layout(report, package_root, accepted_basin_ids)
 
     manifest = check_checksums_and_manifest(report, package_root)
+    run_provenance = read_run_provenance_json_independent(report, package_root)
+
+    historical_lineage_recognized = package_declares_historical_v001_compatibility_lineage(
+        manifest, run_provenance
+    )
+    expected_schema_from_manifest = resolve_expected_netcdf_package_schema_independent(
+        report,
+        source_label="package_manifest",
+        declared=manifest,
+        historical_lineage_recognized=historical_lineage_recognized,
+    )
+    expected_schema_from_provenance = resolve_expected_netcdf_package_schema_independent(
+        report,
+        source_label="run_provenance",
+        declared=run_provenance,
+        historical_lineage_recognized=historical_lineage_recognized,
+    )
 
     expected_index = derive_expected_index_independent(policy)
     area_by_basin = read_area_csv_independent(area_csv_path)
     package_float32_rtol = float(policy["audit"]["package_float32_rtol"])
 
+    disk_schema_identities = []
     for basin_id in accepted_basin_ids:
         nc_path = package_root / "time_series" / f"{basin_id}.nc"
         if basin_id not in area_by_basin:
             report.error(f"area_available[{basin_id}]", "no DRAIN_SQKM area found in area source")
             continue
-        audit_basin_netcdf(
+        identity = audit_basin_netcdf(
             report,
             basin_id=basin_id,
             nc_path=nc_path,
@@ -1736,6 +2056,28 @@ def run_audit(
             qobs_root=qobs_root,
             area_km2=area_by_basin[basin_id],
             package_float32_rtol=package_float32_rtol,
+            expected_schema=expected_schema_from_manifest,
+            expected_schema_from_provenance=expected_schema_from_provenance,
+        )
+        if identity is not None:
+            disk_schema_identities.append(identity)
+
+    # Sorted via a string-coercing key rather than raw tuple comparison: a
+    # basin file whose coordinate could not be determined (both/neither
+    # present -- already reported as its own ERROR by
+    # netcdf_temporal_coordinate_present) contributes an identity tuple with
+    # a ``None`` coordinate_name, and Python cannot order ``None`` against
+    # ``str`` when a plain tuple sort compares that position.
+    distinct_disk_schema_identities = sorted(
+        set(disk_schema_identities),
+        key=lambda identity: tuple("" if v is None else str(v) for v in identity),
+    )
+    if len(distinct_disk_schema_identities) <= 1:
+        report.ok("package_all_basins_same_netcdf_schema", str(distinct_disk_schema_identities))
+    else:
+        report.error(
+            "package_all_basins_same_netcdf_schema",
+            f"mixed NetCDF package schema identities across basin files: {distinct_disk_schema_identities}",
         )
 
     audit_static_attributes(

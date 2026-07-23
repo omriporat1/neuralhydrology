@@ -23,6 +23,7 @@ import pytest
 import xarray as xr
 
 from src.baseline.package_builder import build_compact_scientific_package, default_local_basin_source_loader
+from src.baseline.package_netcdf import DEFAULT_PACKAGE_NETCDF_SCHEMA, SCIENTIFIC_V002_SCHEMA
 from src.baseline import package_audit
 
 BASIN_IDS = ("01019000", "02146000", "03303000")
@@ -116,7 +117,15 @@ def _default_imputation_artifacts(tmp_path):
     return imputation_manifest_path, imputed_value_mask_path
 
 
-def _build_package(tmp_path, *, idx=None, gap_timestamps=None, static_values=None, write_qc_csv=False):
+def _build_package(
+    tmp_path,
+    *,
+    idx=None,
+    gap_timestamps=None,
+    static_values=None,
+    write_qc_csv=False,
+    package_netcdf_schema=None,
+):
     idx = idx if idx is not None else _hourly_index()
     forcing_root, qobs_root, area_csv = _write_source_tree(tmp_path, idx)
     area_by_basin = {b: AREA_KM2[b] for b in BASIN_IDS}
@@ -153,7 +162,7 @@ def _build_package(tmp_path, *, idx=None, gap_timestamps=None, static_values=Non
     )
 
     evidence_root = tmp_path / "evidence" if write_qc_csv else None
-    result = build_compact_scientific_package(
+    build_kwargs = dict(
         basin_ids=BASIN_IDS,
         load_basin_source=loader,
         static_attributes=static_attributes,
@@ -164,6 +173,9 @@ def _build_package(tmp_path, *, idx=None, gap_timestamps=None, static_values=Non
         evidence_root=evidence_root,
         write_qc_csv=write_qc_csv,
     )
+    if package_netcdf_schema is not None:
+        build_kwargs["package_netcdf_schema"] = package_netcdf_schema
+    result = build_compact_scientific_package(**build_kwargs)
 
     policy = {
         "period": {
@@ -927,3 +939,325 @@ def test_run_audit_fails_when_auditor_repo_unresolvable(tmp_path):
     non_git_dir.mkdir()
     with pytest.raises(package_audit.PackageAuditError):
         _run(fixture, auditor_repo_root=non_git_dir)
+
+
+# ---------------------------------------------------------------------------
+# 21. versioned package schema (date) -- independent auditor coverage
+# ---------------------------------------------------------------------------
+
+
+def _rename_temporal_coordinate(nc_path, old_name, new_name):
+    """Rename a basin NetCDF's temporal dimension/coordinate, preserving attrs.
+
+    Goes through xarray's own load-then-rename-then-write round trip rather
+    than netCDF4's low-level ``renameDimension``/``renameVariable``: renaming
+    a coordinate dimension and its associated variable separately via the
+    raw netCDF4 API left the file's CF time-decoding corrupted (observed as
+    a spurious ``OverflowError``/``ValueError`` on the next read), whereas
+    xarray keeps the coordinate's encoding consistent across the rename.
+    """
+    with xr.open_dataset(nc_path, engine="netcdf4") as ds:
+        loaded = ds.load()
+    renamed = loaded.rename({old_name: new_name})
+    renamed.to_netcdf(nc_path, mode="w", engine="netcdf4")
+
+
+def _add_extra_temporal_dimension(nc_path, existing_name, extra_name):
+    with netCDF4.Dataset(nc_path, "r+") as ds:
+        n = len(ds.dimensions[existing_name])
+        ds.createDimension(extra_name, n)
+        var = ds.createVariable(extra_name, "f8", (extra_name,))
+        var[:] = np.arange(n, dtype=np.float64)
+
+
+def _set_manifest_netcdf_schema_fields(fixture, *, name, version, coordinate_name):
+    manifest_path = fixture["package_root"] / "manifests" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["netcdf_package_schema_name"] = name
+    manifest["netcdf_package_schema_version"] = version
+    manifest["netcdf_time_coordinate"] = coordinate_name
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _set_run_provenance_netcdf_schema_fields(fixture, *, name, version, coordinate_name):
+    provenance_path = fixture["package_root"] / "run_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["netcdf_package_schema_name"] = name
+    provenance["netcdf_package_schema_version"] = version
+    provenance["netcdf_time_coordinate"] = coordinate_name
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+
+def test_full_audit_passes_for_correct_v002_date_package(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    report, diagnostics = _run(fixture)
+    assert report.status == "PASS", report.failed_messages()
+    assert report.error_count == 0
+    assert diagnostics["audit_manifest"]["build_git_commit"] == "test-commit"
+
+
+def test_fails_when_disk_coordinate_is_date_but_declared_schema_is_v001(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    basin_id = BASIN_IDS[0]
+    _rename_temporal_coordinate(_nc_path(fixture, basin_id), "time", "date")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_temporal_coordinate_matches_declared_schema[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_fails_when_disk_coordinate_is_time_but_declared_schema_is_v002(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    basin_id = BASIN_IDS[0]
+    _rename_temporal_coordinate(_nc_path(fixture, basin_id), "date", "time")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_temporal_coordinate_matches_declared_schema[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_fails_when_netcdf_has_both_time_and_date_dimensions(tmp_path):
+    fixture = _build_package(tmp_path)
+    basin_id = BASIN_IDS[0]
+    _add_extra_temporal_dimension(_nc_path(fixture, basin_id), "time", "date")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_temporal_coordinate_present[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_fails_when_netcdf_has_neither_time_nor_date_dimension(tmp_path):
+    fixture = _build_package(tmp_path)
+    basin_id = BASIN_IDS[0]
+    _rename_temporal_coordinate(_nc_path(fixture, basin_id), "time", "when")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_temporal_coordinate_present[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_fails_for_unrecognized_netcdf_package_schema_name(tmp_path):
+    fixture = _build_package(tmp_path)
+    basin_id = BASIN_IDS[0]
+    with netCDF4.Dataset(_nc_path(fixture, basin_id), "r+") as ds:
+        ds.setncattr("package_schema_name", "totally_unrecognized_schema_v999")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_package_schema_identity_recognized[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_fails_when_basin_netcdf_files_declare_mixed_schema_identities(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    basin_id = BASIN_IDS[0]
+    with netCDF4.Dataset(_nc_path(fixture, basin_id), "r+") as ds:
+        ds.setncattr("package_schema_name", SCIENTIFIC_V002_SCHEMA.name)
+        ds.setncattr("package_schema_version", SCIENTIFIC_V002_SCHEMA.version)
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == "package_all_basins_same_netcdf_schema" and r.severity == "ERROR" for r in report.records
+    )
+
+
+def test_fails_when_manifest_declares_different_schema_than_netcdf_files(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    basin_id = BASIN_IDS[0]
+    _set_manifest_netcdf_schema_fields(
+        fixture,
+        name=SCIENTIFIC_V002_SCHEMA.name,
+        version=SCIENTIFIC_V002_SCHEMA.version,
+        coordinate_name=SCIENTIFIC_V002_SCHEMA.coordinate_name,
+    )
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(r.check_id == f"netcdf_package_schema[{basin_id}]" and r.severity == "ERROR" for r in report.records)
+
+
+def test_fails_when_run_provenance_declares_different_schema_than_netcdf_files(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    basin_id = BASIN_IDS[0]
+    _set_run_provenance_netcdf_schema_fields(
+        fixture,
+        name=SCIENTIFIC_V002_SCHEMA.name,
+        version=SCIENTIFIC_V002_SCHEMA.version,
+        coordinate_name=SCIENTIFIC_V002_SCHEMA.coordinate_name,
+    )
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_matches_run_provenance_schema[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. historical v001 metadata compatibility fallback (correction round)
+# ---------------------------------------------------------------------------
+#
+# The real, already-built, already-certified Compact Scientific Package v001
+# predates the netcdf_package_schema_*/netcdf_time_coordinate fields
+# entirely and must never be rewritten just to re-audit it. These tests
+# simulate that real historical state by building a genuine v001 package
+# with the current builder (which always writes the new fields) and then
+# stripping those fields back out, while leaving every pre-existing
+# builder/manifest identity field (schema_name, schema_version, package_role,
+# builder_module, the deprecated package_schema_name) untouched -- exactly
+# what a real historical manifest/run_provenance.json looks like.
+
+
+def _delete_manifest_netcdf_schema_fields(fixture):
+    manifest_path = fixture["package_root"] / "manifests" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in ("netcdf_package_schema_name", "netcdf_package_schema_version", "netcdf_time_coordinate"):
+        manifest.pop(key, None)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _delete_run_provenance_netcdf_schema_fields(fixture):
+    provenance_path = fixture["package_root"] / "run_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    for key in ("netcdf_package_schema_name", "netcdf_package_schema_version", "netcdf_time_coordinate"):
+        provenance.pop(key, None)
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+
+def _set_manifest_netcdf_schema_name_only(fixture, name):
+    """Leave name present but strip version/coordinate -- a partial, not
+
+    all-or-none, declaration that must never resolve via the historical
+    fallback (that fallback only applies when all three fields are absent).
+    """
+    manifest_path = fixture["package_root"] / "manifests" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("netcdf_package_schema_version", None)
+    manifest.pop("netcdf_time_coordinate", None)
+    manifest["netcdf_package_schema_name"] = name
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_historical_v001_fallback_used_when_explicit_fields_absent_and_lineage_recognized(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    _delete_manifest_netcdf_schema_fields(fixture)
+    _delete_run_provenance_netcdf_schema_fields(fixture)
+
+    report, _ = _run(fixture)
+    assert report.status == "PASS", report.failed_messages()
+    assert report.error_count == 0
+    assert any(
+        r.check_id == "package_manifest_netcdf_schema_historical_v001_compatibility_used" and r.severity == "OK"
+        for r in report.records
+    )
+    assert any(
+        r.check_id == "run_provenance_netcdf_schema_historical_v001_compatibility_used" and r.severity == "OK"
+        for r in report.records
+    )
+
+
+def test_historical_v001_fallback_still_fails_when_a_basin_file_declares_v002(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    _delete_manifest_netcdf_schema_fields(fixture)
+    _delete_run_provenance_netcdf_schema_fields(fixture)
+    basin_id = BASIN_IDS[0]
+    with netCDF4.Dataset(_nc_path(fixture, basin_id), "r+") as ds:
+        ds.setncattr("package_schema_name", SCIENTIFIC_V002_SCHEMA.name)
+        ds.setncattr("package_schema_version", SCIENTIFIC_V002_SCHEMA.version)
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_package_schema[{basin_id}]" and r.severity == "ERROR" for r in report.records
+    )
+
+
+def test_historical_v001_fallback_still_fails_when_a_basin_file_uses_date_coordinate(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    _delete_manifest_netcdf_schema_fields(fixture)
+    _delete_run_provenance_netcdf_schema_fields(fixture)
+    basin_id = BASIN_IDS[0]
+    _rename_temporal_coordinate(_nc_path(fixture, basin_id), "time", "date")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == f"netcdf_temporal_coordinate_matches_declared_schema[{basin_id}]" and r.severity == "ERROR"
+        for r in report.records
+    )
+
+
+def test_missing_netcdf_schema_fields_fails_when_builder_lineage_not_recognized(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    _delete_manifest_netcdf_schema_fields(fixture)
+    _delete_run_provenance_netcdf_schema_fields(fixture)
+
+    manifest_path = fixture["package_root"] / "manifests" / "package_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_name"] = "some_other_unrecognized_builder_v001"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == "package_manifest_netcdf_schema_name_present" and r.severity == "ERROR"
+        for r in report.records
+    )
+    assert not any(
+        r.check_id == "package_manifest_netcdf_schema_historical_v001_compatibility_used"
+        for r in report.records
+    )
+
+
+def test_partial_netcdf_schema_fields_in_manifest_fails_even_with_historical_lineage(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=DEFAULT_PACKAGE_NETCDF_SCHEMA)
+    _set_manifest_netcdf_schema_name_only(fixture, DEFAULT_PACKAGE_NETCDF_SCHEMA.name)
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == "package_manifest_netcdf_schema_version_present" and r.severity == "ERROR"
+        for r in report.records
+    )
+    assert any(
+        r.check_id == "package_manifest_netcdf_schema_coordinate_present" and r.severity == "ERROR"
+        for r in report.records
+    )
+    assert not any(
+        r.check_id == "package_manifest_netcdf_schema_historical_v001_compatibility_used"
+        for r in report.records
+    )
+
+
+def test_v002_package_missing_explicit_fields_fails_and_does_not_use_historical_fallback(tmp_path):
+    fixture = _build_package(tmp_path, package_netcdf_schema=SCIENTIFIC_V002_SCHEMA)
+    _delete_manifest_netcdf_schema_fields(fixture)
+    _delete_run_provenance_netcdf_schema_fields(fixture)
+
+    report, _ = _run(fixture)
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == "package_manifest_netcdf_schema_name_present" and r.severity == "ERROR"
+        for r in report.records
+    )
+    assert any(
+        r.check_id == "run_provenance_netcdf_schema_name_present" and r.severity == "ERROR"
+        for r in report.records
+    )
+    assert not any("historical_v001_compatibility_used" in r.check_id for r in report.records)

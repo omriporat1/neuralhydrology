@@ -27,14 +27,31 @@ from src.baseline.package_builder import (  # noqa: E402
     resolve_gap_product_scope,
     build_compact_scientific_package,
 )
+from src.baseline.package_netcdf import (  # noqa: E402
+    REGISTERED_PACKAGE_NETCDF_SCHEMAS,
+    resolve_package_netcdf_schema,
+)
 from src.baseline.policy import load_stage1_baseline_policy, validate_stage1_baseline_policy  # noqa: E402
 from src.baseline.splits import sha256_of  # noqa: E402
 from src.baseline.static_preparation import load_static_matrix  # noqa: E402
+
+_REGISTERED_PACKAGE_SCHEMA_NAMES = tuple(s.name for s in REGISTERED_PACKAGE_NETCDF_SCHEMAS)
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy-yaml", required=True, help="Path to the validated Stage 1 policy YAML.")
+    parser.add_argument(
+        "--package-schema",
+        required=True,
+        choices=_REGISTERED_PACKAGE_SCHEMA_NAMES,
+        help=(
+            "Registered on-disk NetCDF package schema to build every basin file with "
+            "(see src.baseline.package_netcdf). Must be selected explicitly -- there is "
+            "no default -- so a production build can never silently produce a legacy "
+            f"'time'-coordinate package. One of: {', '.join(_REGISTERED_PACKAGE_SCHEMA_NAMES)}."
+        ),
+    )
     parser.add_argument(
         "--basin-ids-file", required=True, help="Text file with one basin ID per line (exact package membership)."
     )
@@ -69,6 +86,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+
+    package_netcdf_schema = resolve_package_netcdf_schema(args.package_schema)
 
     policy = validate_stage1_baseline_policy(load_stage1_baseline_policy(args.policy_yaml))
     expected_index = derive_expected_index_from_policy(policy)
@@ -135,6 +154,7 @@ def main(argv=None) -> int:
         static_preparation_manifest=static_preparation_manifest,
         basin_selection_provenance={"basin_ids_file": str(Path(args.basin_ids_file))},
         gap_inventory_provenance={"gap_inventory_csv": str(Path(args.gap_inventory_csv))},
+        package_netcdf_schema=package_netcdf_schema,
     )
 
     print(
