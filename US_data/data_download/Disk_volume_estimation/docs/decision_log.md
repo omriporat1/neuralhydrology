@@ -4,7 +4,78 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-23 Compact NeuralHydrology integration smoke — CLOSED
+
+**Decision.** The compact-package NH integration-validation effort opened by
+the 2026-07-22 increment (below) is closed. Three Moriah Slurm jobs ran in
+sequence against the certified 32-basin Compact Scientific Package and all
+passed: CPU structural preflight (job `45624926`, `glacier` partition, 39 OK
+/ 0 warnings / 0 errors; real `FlashNHDataset` construction for train,
+validation, and test; finite training scaler reused unchanged by validation
+and test; all admitted samples finite; admitted counts train 851,339 /
+validation 274,347 / test 263,637), GPU training smoke (job `45625002`,
+`catfish` partition, NVIDIA L4; target `qobs_mm_per_h_lead06`, sequence
+length 24, 32 basins, 2 epochs, 460 static inputs; epoch 1 loss 0.40205,
+epoch 2 loss 0.38727; run directory
+`/sci/labs/efratmorin/omripo/Flash-NH/runs/stage1_nh_config_lead06_seq24_v001/runs/stage1_compact_lead06_seq24_v001_2307_135829`),
+and explicit validation (2024) + test (2025) evaluation of the epoch-2
+checkpoint (job `45625077`; evaluation audit 217 OK / 0 warnings / 0 errors;
+metrics NSE, RMSE, KGE, Pearson-r, Beta-KGE; `validation_metrics.csv`,
+`validation_results.p`, `test_metrics.csv`, `test_results.p` retained).
+Metric values are not interpreted scientifically here — this was an
+integration smoke, not a tuned or reportable baseline experiment. This gate
+is passed and is **not** to be extended into ad hoc hyperparameter tuning;
+the next work is planning the first scientifically meaningful Stage 1
+baseline experiments.
+
+**Finding 1 — compact-smoke-only zero-variance static exclusion.** Across
+the 32-basin smoke population only, 13 of the 473 static `model_input`
+attributes had zero standard deviation and could not be normalized by
+NeuralHydrology: `CANALS_MAINSTEM_PCT`, `CDL_DURUM_WHEAT`, `CDL_ORANGES`,
+`CDL_RICE`, `HGBC`, `PCT_6TH_ORDER_OR_MORE`, `glc_pc_u01`, `glc_pc_u18`,
+`pnv_pc_u02`, `wet_pc_u02`, `wet_pc_u03`, `wet_pc_u07`, `wet_pc_u09`. The
+GPU training smoke therefore used 460 of 473 static inputs. This is not a
+package defect: the full 473-column Compact Scientific Package remains
+authoritative and was not modified. **Binding rule:** this 13-column
+exclusion list is compact-smoke-only and must **not** be carried forward
+automatically into the full-population baseline; the full-population
+baseline must independently identify zero-variance columns over its own
+actual training population.
+
+**Finding 2 — `time` vs. `date` temporal-coordinate adapter.** The
+certified compact v001 NetCDFs use dimension/coordinate name `time`.
+NeuralHydrology 1.13 internally requires the temporal index name `date` in
+parts of its `GenericDataset` loading path. The smoke used an in-memory
+`FlashNHDataset._load_basin_data` adapter (`_adapt_time_to_date` in
+`src/baseline/nh_dataset.py`) that renames only the DataFrame index's
+`.name` metadata from `time` to `date` after calling
+`GenericDataset._load_basin_data` unchanged; timestamp values, row order,
+dtypes, NaNs, and all on-disk files are untouched. **Binding rule:** v001
+must not be modified in place; this adapter is an immediate compatibility
+boundary, not a resolved format decision. Before the final production
+package format is frozen, the on-disk temporal-coordinate convention must
+be explicitly resolved, and any resulting change must be generated and
+audited as a new package version rather than silently rewriting v001.
+
+**Unaffected / not reopened.** The certified Compact Scientific Package
+(Gate 4) was not modified, rebuilt, or regenerated. No scientific decision
+from prior gates was reopened.
+
+**Not done.** Final hyperparameters, final sequence length, the
+full-population static-feature set, the production-package coordinate
+convention, lead 1/3/12 h performance, and any spatial-holdout or
+full-population scientific conclusion — none of these are established by
+this closure.
+
+---
+
 ## 2026-07-22 NH config-generation + structural-preflight local implementation increment
+
+> **Superseded (2026-07-23):** "no NH training run" below describes
+> accurately what this specific increment did. Real dataset construction,
+> GPU training, and explicit validation/test evaluation have since run and
+> passed — see the 2026-07-23 "Compact NeuralHydrology integration smoke —
+> CLOSED" entry above.
 
 **Scope.** Following Gate 4 certification (below), this is the first local
 implementation increment for compact-package NH integration-validation.

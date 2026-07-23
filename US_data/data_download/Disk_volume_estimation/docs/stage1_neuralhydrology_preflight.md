@@ -1,7 +1,7 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-07-02 (Smoke 1 meteorology PASS on Moriah)
+**Updated:** 2026-07-23 (Compact NeuralHydrology integration smoke — CLOSED, CPU preflight + GPU training + validation/test evaluation all PASS)
 
 **2G status:** COMPLETE (2026-06-09) — January 2023 pilot package built and audited.
 **2K-G-A status:** DESIGN COMPLETE — full-period pilot design frozen with corrections (2026-06-30).
@@ -20,6 +20,38 @@ saved. NOT a scientific baseline.
 6 RTMA vars + MRMS QPE, `seq_length: 24`, 3 epochs, loss NSE 0.00422→0.00335 (finite,
 decreasing). `rtma_2d_K` non-null confirms dewpoint fix. NOT a scientific baseline.
 Next: lookback-expansion tests (72/168/336 h) and attribute-source cleanup.
+
+> **Superseded (2026-07-23):** the "Next" pointer above (lookback-expansion
+> tests, attribute-source cleanup) was itself superseded by later work
+> recorded in `docs/FLASHNH_CURRENT_STATE.md` before the compact NH
+> integration smoke below was ever started. It is retained here as
+> historical record, not as the current next step.
+
+**Compact NH integration smoke status: CLOSED (2026-07-23) — CPU preflight,
+GPU training, and explicit validation/test evaluation all PASS**, run
+against the Gate-4-certified 32-basin Compact Scientific Package (a
+structurally different, newer package than the 5-basin Smoke 0/1 pilot
+package documented in Part I below). CPU structural preflight (Slurm job
+`45624926`): real `FlashNHDataset` construction PASS for train, validation,
+and test; 39 checks OK, 0 warnings, 0 errors; training scaler finite and
+reused unchanged by validation/test; all admitted samples finite (train
+851,339 / validation 274,347 / test 263,637). GPU training (Slurm job
+`45625002`, NVIDIA L4): target `qobs_mm_per_h_lead06`, `seq_length: 24`, 32
+basins, 2 epochs, 460 static inputs (13 of 473 excluded for zero variance
+across this smoke's basin population only); epoch 1/2 average loss
+0.40205/0.38727; checkpoints, optimizer state, and scaler
+(`train_data/train_data_scaler.yml`) saved. Explicit validation (2024) and
+test (2025) evaluation of the epoch-2 checkpoint (Slurm job `45625077`):
+evaluation audit 217 OK, 0 warnings, 0 errors; `validation_metrics.csv`,
+`validation_results.p`, `test_metrics.csv`, `test_results.p` retained;
+metrics NSE, RMSE, KGE, Pearson-r, Beta-KGE produced (not scientifically
+interpreted here). NOT a scientific baseline: does not establish final
+hyperparameters, sequence length, the full-population static-feature set,
+lead-time performance, or spatial-holdout conclusions. Next: planning the
+first scientifically meaningful Stage 1 baseline experiments. Full findings
+(the 13-column exclusion list; the `time`→`date` compatibility adapter and
+its scope boundary) and closure record: `docs/FLASHNH_CURRENT_STATE.md` and
+`docs/decision_log.md` (2026-07-23 entries).
 
 ---
 

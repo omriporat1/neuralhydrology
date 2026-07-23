@@ -1,8 +1,92 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-22 (NH config-generation + structural-preflight local implementation increment)
+Last updated: 2026-07-23 (Compact NeuralHydrology integration smoke — CLOSED, CPU preflight + GPU training + validation/test evaluation all PASS)
 
 ## Current milestone
+
+**Compact NeuralHydrology integration smoke — CLOSED (CPU preflight + GPU
+training + explicit validation/test evaluation all PASS, 2026-07-23).** This
+closes the compact-package NH integration-validation effort opened by the
+2026-07-22 config-generation/structural-preflight increment (below). Three
+Moriah Slurm jobs, run in sequence against the certified 32-basin Compact
+Scientific Package (Gate 4, below), all passed:
+
+- **CPU structural preflight — job `45624926`** (Moriah `glacier`
+  partition/CPU node class). 39 checks OK, 0 warnings, 0 errors. Real
+  `FlashNHDataset` construction succeeded for train, validation, and test;
+  the training scaler was finite; validation and test reused the training
+  scaler unchanged; every admitted sample inspected by the preflight was
+  finite. Admitted sample counts: train 851,339; validation 274,347; test
+  263,637.
+- **GPU training smoke — job `45625002`** (Moriah `catfish` partition,
+  NVIDIA L4). Target `qobs_mm_per_h_lead06`, sequence length 24, 32 basins,
+  2 epochs, 460 static inputs (see exclusion note below). Epoch 1 average
+  loss 0.40205; epoch 2 average loss 0.38727. Run directory:
+  `/sci/labs/efratmorin/omripo/Flash-NH/runs/stage1_nh_config_lead06_seq24_v001/runs/stage1_compact_lead06_seq24_v001_2307_135829`.
+  Retained artifacts: `config.yml`, `model_epoch001.pt`, `model_epoch002.pt`,
+  `optimizer_state_epoch001.pt`, `optimizer_state_epoch002.pt`,
+  `train_data/train_data_scaler.yml`, `output.log`, TensorBoard event file.
+- **Explicit validation + test evaluation — job `45625077`.** Evaluated the
+  epoch-2 checkpoint from the run above: validation period calendar-year
+  2024, test period calendar-year 2025. Evaluation audit: 217 OK, 0
+  warnings, 0 errors. Metrics produced: NSE, RMSE, KGE, Pearson-r, Beta-KGE.
+  Retained outputs: `validation/model_epoch002/validation_metrics.csv`,
+  `validation/model_epoch002/validation_results.p`,
+  `test/model_epoch002/test_metrics.csv`,
+  `test/model_epoch002/test_results.p`. Metric values are not interpreted
+  scientifically here — this was an integration smoke, not a tuned or
+  reportable baseline experiment.
+
+**What this proves.** The Stage 1 package-to-NeuralHydrology pipeline can,
+end to end: (1) construct real datasets from the certified Compact
+Scientific Package; (2) apply filtering and reuse a single training scaler
+across periods without leakage; (3) train on Moriah GPU; (4) save and
+reload checkpoints; (5) evaluate held-out validation and test periods; (6)
+retain metrics and prediction artifacts on disk.
+
+**What this does not prove.** Final model skill; final hyperparameters;
+final sequence length; final static-feature set for the full basin
+population; final production-package temporal-coordinate convention;
+performance at lead 1 h, 3 h, or 12 h; any spatial-holdout or
+full-population scientific conclusion. This closure is an integration gate,
+not a scientific result, and is not itself grounds to begin ad hoc
+hyperparameter tuning.
+
+**Two findings recorded, not resolved, by this closure** — see
+`docs/decision_log.md` (2026-07-23 entry) for full detail:
+
+1. *Compact-smoke-only zero-variance static exclusion.* Across the 32-basin
+   smoke population only (not the full package), 13 static attributes had
+   zero standard deviation and were excluded for this smoke only (460 of 473
+   used): `CANALS_MAINSTEM_PCT`, `CDL_DURUM_WHEAT`, `CDL_ORANGES`,
+   `CDL_RICE`, `HGBC`, `PCT_6TH_ORDER_OR_MORE`, `glc_pc_u01`, `glc_pc_u18`,
+   `pnv_pc_u02`, `wet_pc_u02`, `wet_pc_u03`, `wet_pc_u07`, `wet_pc_u09`. The
+   full 473-column Compact Scientific Package remains authoritative and
+   unchanged; this exclusion list must **not** be inherited automatically by
+   the full-population baseline, which must independently identify
+   zero-variance columns over its own training population.
+2. *`time` vs. `date` temporal-coordinate adapter.* The certified compact
+   v001 NetCDFs use dimension/coordinate name `time`; NeuralHydrology 1.13
+   requires `date` internally. `FlashNHDataset` applies an in-memory
+   index-name-only adapter (`src/baseline/nh_dataset.py`); on-disk v001
+   files are unchanged. The final on-disk temporal-coordinate convention
+   must still be explicitly resolved before the production package format is
+   frozen; any such change belongs in a new package version, not a silent
+   rewrite of v001.
+
+**Next phase.** Planning the first scientifically meaningful Stage 1
+baseline experiments (hyperparameters, sequence-length/lead sweep, the
+static-feature set for the full population, spatial-holdout evaluation) —
+not implied or started by this closure.
+
+---
+
+### Predecessor: NH config-generation + structural-preflight local implementation increment (2026-07-22)
+
+> **Superseded (2026-07-23):** the "no training" scope below describes
+> accurately what this specific increment did. Real dataset construction,
+> GPU training, and explicit validation/test evaluation have since run and
+> passed — see "Current milestone" above.
 
 **NH config-generation + structural-preflight local implementation increment
 (2026-07-22, local-only, no h2o/Moriah access, no training).** Following
