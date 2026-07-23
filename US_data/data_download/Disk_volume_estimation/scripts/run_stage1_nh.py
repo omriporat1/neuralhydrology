@@ -9,7 +9,17 @@ interactive or batch Python process.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+# Direct execution (`python scripts/run_stage1_nh.py ...`) puts scripts/ --
+# not the repository work directory -- at the front of sys.path, so the
+# sibling top-level package `src` is otherwise unimportable regardless of the
+# caller's current working directory. Insert the repo work directory
+# (this file's parent's parent) before importing src.baseline.nh_register.
+_REPO_WORKDIR = Path(__file__).resolve().parent.parent
+if str(_REPO_WORKDIR) not in sys.path:
+    sys.path.insert(0, str(_REPO_WORKDIR))
 
 from src.baseline.nh_register import register_flashnh_dataset
 
