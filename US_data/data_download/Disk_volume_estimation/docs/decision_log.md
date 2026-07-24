@@ -4,6 +4,44 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-24 Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS
+
+**Result.** The Gate 4 independent auditor (`src/baseline/package_audit.py`,
+`scripts/audit_stage1_compact_scientific_package.py`, `tests/test_package_audit.py`, commit
+`98b7d42f23963e76e02ad3991d7298d3ada98ee3`) was rerun for real on h2o, in full mode, against the
+authoritative full non-California Stage 1 Scientific Package at
+`/data42/omrip/Flash-NH/tmp/stage1_scientific_package_v002` (2,307 development-training + 250
+spatial-holdout basins, build commit `61d3819deb55240652276765c6a96d12ed3ce539`). **Status: PASS —
+0 errors, 1 warning, 260,870 OK checks (260,871 total).** Audit output written to
+`/data42/omrip/Flash-NH/tmp/stage1_scientific_package_v002_gate4_audit/full_rerun_20260724T110557Z`.
+The transferred evidence archive was independently reviewed locally; its SHA-256
+(`9cc9f8e63d6c9825c2bf765106a20a58ce0560a1d733bc815ec0846f02071ed0`) was verified against the
+transfer, and every generated-output checksum inside it was independently recomputed and matched
+byte-exact. The build commit and the auditor commit remain intentionally distinct identities.
+
+**This rerun follows an earlier FAILED full audit (errors=9) of the same package**, root-caused to
+two auditor-side false positives (not package defects) and fixed in this commit:
+1. A 1-float32-ULP tolerance (`QC_CSV_STORAGE_ULP_TOLERANCE`) for the non-authoritative
+   QC-CSV-versus-NetCDF finite-value comparison only, absorbing a confirmed xarray/netcdf4
+   write-path rounding artifact. Does not relax any authoritative package-content check.
+2. `imputed_value_mask_basin_order` split into a strict, ERROR-severity
+   `imputed_value_mask_basin_membership` check and a separate, non-blocking WARNING-severity
+   `imputed_value_mask_basin_order` check — because every downstream imputation-placement check
+   re-indexes the mask by basin label, so row order alone cannot affect correctness.
+
+**The single remaining warning** is exactly `imputed_value_mask_basin_order`: exact basin-index
+membership against the accepted 2,557-basin selection (zero missing, zero extra) with a differing
+row order. Non-blocking by construction — `imputed_value_mask_basin_membership` reports OK, and
+audit `status` is derived solely from `error_count`.
+
+**Not done in this closure.** The package was **not** rebuilt (`build_git_commit` unchanged at
+`61d3819...`); no static artifact or other source input was modified — `imputed_value_mask.parquet`
+(sha256 `a22c8bf9...816437df`) and `imputed_static_attributes.parquet`
+(sha256 `5be00a3b...23c91823b8bd4b6e24`) match the values already recorded above. No Moriah
+transfer, no NeuralHydrology configuration generation, and no training occurred. **This closes the
+production package build-and-independent-audit phase for `stage1_scientific_package_v002`; it does
+not establish scientific model skill.**
+
 ## 2026-07-24 Full non-California static-attribute preparation — real h2o run PASS
 
 **Decision.** Ran `scripts/prepare_stage1_full_static_attributes.py` for real on h2o (not a

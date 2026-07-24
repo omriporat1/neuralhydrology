@@ -1,6 +1,35 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-24 (Full non-California static-attribute preparation — real h2o run PASS)
+Last updated: 2026-07-24 (Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS)
+
+## Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS (2026-07-24)
+
+The Gate 4 independent auditor (`src/baseline/package_audit.py`, commit
+`98b7d42f23963e76e02ad3991d7298d3ada98ee3`) reran for real on h2o, in full mode, against
+`/data42/omrip/Flash-NH/tmp/stage1_scientific_package_v002` (2,307 development-training + 250
+spatial-holdout non-California basins, build commit `61d3819deb55240652276765c6a96d12ed3ce539`).
+
+**Result: PASS — 0 errors, 1 warning, 260,870 OK checks.** Audit output:
+`/data42/omrip/Flash-NH/tmp/stage1_scientific_package_v002_gate4_audit/full_rerun_20260724T110557Z`.
+Evidence archive SHA-256 `9cc9f8e63d6c9825c2bf765106a20a58ce0560a1d733bc815ec0846f02071ed0`,
+transferred locally and independently verified (checksums, arithmetic tally, provenance).
+
+The single warning, `imputed_value_mask_basin_order`, is non-blocking: exact mask basin-index
+membership passed with zero missing/extra basins (`imputed_value_mask_basin_membership`: OK); only
+row order differs, and every downstream imputation-placement check re-indexes the mask by basin
+label, so order alone cannot affect correctness.
+
+This rerun follows and fixes an earlier FAILED full audit (errors=9) of the same package. The
+auditor patch (same commit) introduced: (1) a 1-float32-ULP tolerance for the non-authoritative
+QC-CSV-versus-NetCDF finite comparison only, absorbing a confirmed xarray/netcdf4 write-path
+rounding artifact; (2) separate strict mask-membership (ERROR) and non-blocking mask-order
+(WARNING) checks, replacing a single check that conflated the two.
+
+**The package itself was not rebuilt** (`build_git_commit` unchanged), and no static artifact or
+other source input was modified. No Moriah transfer, no NeuralHydrology configuration generation,
+and no training occurred. **This closes the production package build-and-independent-audit phase
+for `stage1_scientific_package_v002`; it does not establish scientific model skill.** Full detail:
+`docs/decision_log.md` (2026-07-24 Gate 4 entry).
 
 ## Full non-California static-attribute preparation — real h2o run PASS (2026-07-24)
 
