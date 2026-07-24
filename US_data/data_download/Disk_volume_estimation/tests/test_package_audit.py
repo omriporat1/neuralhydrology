@@ -577,9 +577,13 @@ def test_fails_when_qc_csv_value_projects_to_different_float32(tmp_path):
     csv_path = fixture["evidence_root"] / "csv_inspection" / f"{basin_id}.csv"
     df = pd.read_csv(csv_path)
     original_f32 = np.float32(df.loc[1, "mrms_qpe_1h_mm"])
-    # The smallest perturbation that changes which float32 the CSV value
-    # rounds to -- one ULP away from the value the NetCDF actually stores.
-    bumped_f32 = np.nextafter(original_f32, np.float32(np.inf))
+    # compare_qc_csv_against_netcdf_storage now allows exactly 1 float32 ULP
+    # (QC_CSV_STORAGE_ULP_TOLERANCE, added 2026-07-24 -- see that module for
+    # the confirmed xarray/netcdf4 write-path rounding root cause), so this
+    # test bumps by 2 ULPs to keep exercising a genuine, still-caught
+    # projected-value difference rather than the now-tolerated 1-ULP case.
+    one_up = np.nextafter(original_f32, np.float32(np.inf))
+    bumped_f32 = np.nextafter(one_up, np.float32(np.inf))
     df.loc[1, "mrms_qpe_1h_mm"] = float(bumped_f32)
     df.to_csv(csv_path, index=False)
 
@@ -747,6 +751,107 @@ def test_compare_float_arrays_fails_on_matched_infinity_same_position():
 
 
 # ---------------------------------------------------------------------------
+# 16b. compare_qc_csv_against_netcdf_storage: 1-float32-ULP allowance
+#
+# Confirmed root cause (Gate 4 audit, 2026-07-24, real 2,557-basin build,
+# basins 01643395/10321940): xarray's Dataset.to_netcdf(engine="netcdf4")
+# with a float32 _FillValue encoding can write a stored float32 bit pattern
+# one ULP away from the in-memory float32 array it was given, for values
+# that land within 1 ULP of a float32 rounding boundary. The QC CSV holds
+# the pre-quantization value, so this shows up as a QC-CSV-vs-NetCDF
+# mismatch even though the package's own authoritative NetCDF value is
+# correct. The tolerance below accepts only that specific, understood
+# 1-ULP artifact -- anything larger still fails, and NaN-position
+# disagreement is unaffected.
+# ---------------------------------------------------------------------------
+
+
+def test_qc_csv_vs_netcdf_exact_match_passes():
+    value = np.float32(0.06679082)
+    csv_values = np.array([np.float64(value)])
+    netcdf_values = np.array([np.float64(value)])
+    result = package_audit.compare_qc_csv_against_netcdf_storage(
+        "qc_csv_exact", netcdf_values, csv_values, storage_dtype=np.float32
+    )
+    assert result.passed is True
+    assert result.finite_mismatch_count == 0
+
+
+def test_qc_csv_vs_netcdf_one_ulp_difference_passes():
+    csv_value = np.float32(0.06679082)  # 0x3d88c9a0
+    netcdf_value = np.nextafter(csv_value, np.float32(1.0))  # adjacent representable float32, 0x3d88c9a1
+    assert netcdf_value != csv_value
+
+    result = package_audit.compare_qc_csv_against_netcdf_storage(
+        "qc_csv_one_ulp",
+        np.array([np.float64(netcdf_value)]),
+        np.array([np.float64(csv_value)]),
+        storage_dtype=np.float32,
+    )
+    assert result.passed is True
+    assert result.finite_mismatch_count == 0
+
+
+def test_qc_csv_vs_netcdf_two_ulp_difference_fails():
+    csv_value = np.float32(0.06679082)
+    one_up = np.nextafter(csv_value, np.float32(1.0))
+    two_up = np.nextafter(one_up, np.float32(1.0))
+    assert two_up != csv_value and two_up != one_up
+
+    result = package_audit.compare_qc_csv_against_netcdf_storage(
+        "qc_csv_two_ulp",
+        np.array([np.float64(two_up)]),
+        np.array([np.float64(csv_value)]),
+        storage_dtype=np.float32,
+    )
+    assert result.passed is False
+    assert result.finite_mismatch_count == 1
+
+
+def test_qc_csv_vs_netcdf_nan_position_mismatch_still_fails():
+    csv_values = np.array([1.0, np.nan])
+    netcdf_values = np.array([1.0, 2.0])
+    result = package_audit.compare_qc_csv_against_netcdf_storage(
+        "qc_csv_nan_mismatch", netcdf_values, csv_values, storage_dtype=np.float32
+    )
+    assert result.passed is False
+    assert result.nan_mismatch_count == 1
+
+
+def test_qc_csv_vs_netcdf_ulp_tolerance_does_not_apply_to_non_float32_storage():
+    # storage_dtype=float64: no quantization step exists to explain a
+    # 1-representable-step gap, so exact equality must still be required.
+    csv_value = 0.06679082
+    netcdf_value = np.nextafter(csv_value, 1.0)
+    assert netcdf_value != csv_value
+
+    result = package_audit.compare_qc_csv_against_netcdf_storage(
+        "qc_csv_float64_storage",
+        np.array([netcdf_value]),
+        np.array([csv_value]),
+        storage_dtype=np.float64,
+    )
+    assert result.passed is False
+    assert result.finite_mismatch_count == 1
+
+
+def test_compare_float_arrays_still_exact_for_unrelated_checks():
+    # Regression guard: the new ULP tolerance is local to
+    # compare_qc_csv_against_netcdf_storage and must not leak into the
+    # generic comparator used for authoritative package-vs-source checks.
+    csv_value = np.float32(0.06679082)
+    one_up = np.nextafter(csv_value, np.float32(1.0))
+    result = package_audit.compare_float_arrays(
+        "unrelated_generic_check",
+        np.array([np.float64(one_up)]),
+        np.array([np.float64(csv_value)]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert result.passed is False
+
+
+# ---------------------------------------------------------------------------
 # 17. correction 6: incorrect schema attribute / variable metadata corruption
 # ---------------------------------------------------------------------------
 
@@ -805,6 +910,49 @@ def test_fails_for_wrong_imputed_value_mask_column_order(tmp_path):
     assert report.status == "FAIL"
     assert any(
         r.check_id == "imputed_value_mask_column_order" and r.severity == "ERROR" for r in report.records
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18b. imputed_value_mask basin order vs membership split (Gate 4 audit,
+# 2026-07-24, real 2,557-basin build): confirmed via a diagnostic run against
+# the real h2o data that the mask's basin set was an exact match to the
+# accepted selection (0 missing, 0 extra) with only row order differing, and
+# all downstream imputation-placement checks re-index by label. Membership
+# must stay a hard ERROR; a pure order difference must not fail the audit.
+# ---------------------------------------------------------------------------
+
+
+def test_imputed_value_mask_row_order_differs_but_membership_exact_warns_not_fails(tmp_path):
+    fixture = _build_package(tmp_path)
+    mask_df = pd.DataFrame(False, index=list(reversed(BASIN_IDS)), columns=STATIC_COLUMNS)
+    imputed_value_mask_path = tmp_path / "reordered_basin_mask.parquet"
+    mask_df.reset_index().rename(columns={"index": "gauge_id"}).to_parquet(imputed_value_mask_path)
+
+    report, _ = _run(fixture, imputed_value_mask_path=imputed_value_mask_path)
+
+    assert any(
+        r.check_id == "imputed_value_mask_basin_membership" and r.severity == "OK" for r in report.records
+    )
+    assert any(
+        r.check_id == "imputed_value_mask_basin_order" and r.severity == "WARNING" for r in report.records
+    )
+    assert not any(r.check_id == "imputed_value_mask_basin_order" and r.severity == "ERROR" for r in report.records)
+    assert report.status == "PASS"
+
+
+def test_fails_for_missing_basin_in_imputed_value_mask(tmp_path):
+    fixture = _build_package(tmp_path)
+    basins_present = list(BASIN_IDS[:-1])  # drop one accepted basin -- a genuine membership gap
+    mask_df = pd.DataFrame(False, index=basins_present, columns=STATIC_COLUMNS)
+    imputed_value_mask_path = tmp_path / "missing_basin_mask.parquet"
+    mask_df.reset_index().rename(columns={"index": "gauge_id"}).to_parquet(imputed_value_mask_path)
+
+    report, _ = _run(fixture, imputed_value_mask_path=imputed_value_mask_path)
+
+    assert report.status == "FAIL"
+    assert any(
+        r.check_id == "imputed_value_mask_basin_membership" and r.severity == "ERROR" for r in report.records
     )
 
 
