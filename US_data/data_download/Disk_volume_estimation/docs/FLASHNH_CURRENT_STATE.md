@@ -1,6 +1,47 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-24 (Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS)
+Last updated: 2026-07-24 (Commit-readiness review + safeguard fixes for the full-population NH config-generation increment)
+
+## Commit-readiness review of the full-population NH config-generation increment — two safeguard fixes (2026-07-24)
+
+Review-only pass (no transfer/Moriah/Slurm/training) over the increment directly below. Found and
+fixed two gaps in distinguishing the `spatial_holdout` bundle from a trainable experiment (a
+custom marker cannot live inside `config.yaml` itself — NH 1.13's `Config._check_cfg_keys` rejects
+unrecognized keys): (1) the holdout bundle's default `experiment_name` now gets a
+`_spatial_holdout_test_only_eval` suffix instead of colliding with the development bundle's name;
+(2) `write_generated_config` now writes a sibling `TEST_ONLY_DO_NOT_TRAIN.txt` for the holdout
+bundle only, and `check_generated_config_structure`'s holdout-role path requires it to exist. Added
+9 tests (full-population totals now 14 + 15 = 29 passing). Re-ran the synthetic dry run and this
+time directly read the generated `config.yaml`/marker/basin-list files; ran the preflight CLI
+end-to-end (`--skip-dataset-construction`) — PASS, 56 OK, 0 errors. Full suite: 889 passed, 0 failed
+(known Windows `os.rename` flake in `test_package_builder.py` did not reproduce this run; separately
+re-confirmed passing in isolation, unrelated to this patch). Nothing committed. Full detail:
+`docs/decision_log.md` (2026-07-24 "Commit-readiness review..." entry).
+
+## Full-population (development + spatial-holdout) NH config-generation + structural-preflight local implementation increment (2026-07-24)
+
+**Local-only** (no h2o/Moriah access, no package rebuild, no training). Extends the 2026-07-22
+compact-package config-generation/structural-preflight machinery (below) to the certified full
+non-California package (Gate 4, below: 2,307 development-training + 250 spatial-holdout basins).
+Renders the single lead06/seq24 scientific configuration as **two strictly separated bundles**:
+a `development` bundle (train == validation == temporal-test, the 2,307 development basins across
+different date periods) and a test-only `spatial_holdout` bundle (train/validation lists are the
+development population, never a holdout basin; test list is the 250 holdout basins). New basin-
+membership validation requires the package's basin set to equal exactly the
+`development_train` ∪ `spatial_holdout_nonca` union (no California, no overlap, no missing/extra,
+exact 2,307/250 counts). New `src/baseline/nh_structural_preflight.py` check
+(`check_flashnh_external_scaler_test_construction`) constructs only the holdout `test`-period
+dataset, reusing the development-fitted scaler unchanged and never touching the holdout config's
+`train_dir`. Two new CLIs: `scripts/generate_stage1_full_population_nh_config.py` and
+`scripts/check_stage1_full_population_nh_config_preflight.py` (package root always supplied via
+`--package-root`, never hard-coded). 20 new tests passing (10 in `tests/test_nh_full_population_
+config_generation.py`, 10 in `tests/test_nh_full_population_structural_preflight.py`); all 41
+pre-existing compact-package tests unaffected. Verified via a local dry run against a synthetic
+2,557-basin fake package (matching the real split union): generator produced the expected
+development/holdout basin-count contracts; preflight (`--skip-dataset-construction`) reported PASS,
+55 OK checks, 0 errors. **Not done:** package transfer, real Moriah Slurm preflight, real
+full-population dataset loading, training, or the remaining 15 lead × sequence-length
+configurations. Full detail: `docs/decision_log.md` (2026-07-24 entry, same title).
 
 ## Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS (2026-07-24)
 

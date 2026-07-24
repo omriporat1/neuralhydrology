@@ -4,6 +4,158 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-24 Commit-readiness review of the full-population NH config-generation increment — two safeguard fixes
+
+**Scope.** Focused adversarial-validation review (no package transfer, no Moriah/Slurm work, no
+training, no sweep generation) of the full-population config-generation/structural-preflight
+increment documented immediately below, checking the two-bundle design's holdout-safety, scaler
+provenance, basin-membership equality, two-config consistency, and minimality properties.
+
+**Findings and fixes.** Two real, minimal gaps were found and fixed, both in how the
+`spatial_holdout` bundle is distinguished from a normal trainable experiment (NH 1.13's
+`Config._check_cfg_keys` rejects any config.yaml key outside its own property list, so a
+`population_role`-style marker cannot live inside `config.yaml` itself — confirmed by direct
+`inspect.getsource` inspection of the installed NH 1.13 `Config` class):
+
+1. `write_generated_config`'s default `experiment_name` was previously identical for the
+   `development` and `spatial_holdout` bundles (both `stage1_compact_lead06_seq24_v001` unless a
+   caller explicitly overrode it). Fixed: when `population_role == "spatial_holdout_test_only"` and
+   no explicit `experiment_name` is given, a `_spatial_holdout_test_only_eval` suffix is appended.
+   Confirmed non-breaking: no existing test asserted the old default value.
+2. Added a sibling `TEST_ONLY_DO_NOT_TRAIN.txt` file, written by `write_generated_config` only for
+   the `spatial_holdout` bundle, explaining the bundle is test-only evaluation machinery and that its
+   train/validation basin lists are the development population present only to satisfy NH's config
+   schema. `check_generated_config_structure`'s existing `require_identical_basin_sets=False`
+   (holdout-role) branch now requires this file to exist (`test_only_marker_file_present`); the
+   `development`-role path (`require_identical_basin_sets=True`, the default) is untouched.
+
+**New tests.** 9 added (4 in `tests/test_nh_full_population_config_generation.py`, 5 in
+`tests/test_nh_full_population_structural_preflight.py`; full-population totals now 14 + 15 = 29),
+covering: a normalization-collision duplicate (short zero-padded STAID vs. its already-8-digit
+form); a California basin substituted for a development basin while preserving the exact 2,557
+total count; the distinguishable default `experiment_name`; the marker file present for the holdout
+bundle and absent for the development bundle; the marker-file-missing preflight error; a development
+basin leaking into the holdout bundle's own `test_basins.txt` (mirroring the existing
+holdout-basin-into-train test); post-generation `dynamic_inputs` order-drift detection; and a
+non-empty but structurally malformed external scaler.
+
+**Verified without new code.** Non-eight-character STAID support: the real
+`development_train.txt`/`spatial_holdout_nonca.txt` union already contains 5 fifteen-character
+STAIDs, exercised end-to-end by the existing real-splits happy-path test. Static-column-count edge
+cases (472/474/473-with-duplicate): `validate_static_attribute_contract` (unchanged, reused as-is)
+checks for internal duplicates unconditionally before the count check and uses an exact `!=`
+equality comparison, so both a wrong-count and a duplicate-within-473 input are already
+structurally rejected; no full-population-specific test was added for this pre-existing,
+unmodified compact-package function.
+
+**Validation.** All 29 full-population tests, all 41 pre-existing compact-package tests, and the
+directly-affected NH dataset tests pass (91 total). Full suite (`pytest tests/ -q`, 889 tests): 889
+passed, 0 failed, on this run — the known Windows `os.rename`-based flake in
+`tests/test_package_builder.py::test_repeated_builds_produce_equivalent_manifest` did not reproduce;
+it was separately re-confirmed to pass in isolation, and nothing in this increment touches
+`src/baseline/package_builder.py`. Repeated the synthetic 2,557-basin dry run and this time directly
+read the generated `config.yaml` files, the `TEST_ONLY_DO_NOT_TRAIN.txt` marker, and the basin-list
+`.txt` artifacts (not only prior JSON summaries): development train/validation/test are each exactly
+the 2,307 development basins; spatial-holdout train/validation are exactly the 2,307 development
+basins with 0 overlap against its 250-basin test set; the preflight CLI end-to-end
+(`--skip-dataset-construction`, placeholder NetCDFs) reports **PASS — 56 OK, 0 errors, 0 warnings**,
+including the new `test_only_marker_file_present` check.
+
+**Not done / out of scope for this review.** No package transfer, Moriah dataset construction, Slurm
+preflight, training, or sweep/config-matrix work — unchanged from the increment below. Nothing was
+committed as part of this review.
+
+---
+
+## 2026-07-24 Full-population (development + spatial-holdout) NH config-generation + structural-preflight local implementation increment
+
+**Scope.** Local-only implementation increment (no h2o/Moriah access, no data transfer, no NH
+training run, no Slurm job, no package rebuild) extending the 2026-07-22 compact-package
+config-generation/structural-preflight machinery (above/below) to the certified full non-California
+package (`stage1_scientific_package_v002`, 2,307 development-training + 250 spatial-holdout basins,
+Gate 4 PASS). Renders and validates exactly one scientific configuration — lead 6 h, sequence length
+24 h, target `qobs_mm_per_h_lead06`, the 8 approved dynamic inputs in binding order, all 473 retained
+static `model_input` attributes, train 2020-10-14→2023-12-31 / validation 2024 / test 2025 — as
+**two strictly separated config bundles**, not one:
+
+- **`development`** bundle: train == validation == temporal-test, the 2,307 `development_train`
+  basins (only the date period differs across the three periods).
+- **`spatial_holdout`** bundle: test-only; its own train/validation basin lists are the
+  *development* population (2,307 basins), never a holdout basin, so the bundle cannot be misused
+  to fit or validate on holdout basins; its test list is the 250 `spatial_holdout_nonca` basins.
+
+This mirrors the binding basin-role separation: the 250 spatial-holdout basins may only ever be
+evaluated, never used for training, normalization/scaler fitting, validation, early stopping, or
+checkpoint/config selection; temporal testing (development basins, 2025) and spatial-holdout
+testing (holdout basins, 2025) are distinct evaluation roles despite sharing the same calendar test
+period.
+
+**New/changed code.** `src/baseline/nh_config_generation.py`: two new pinned constants
+(`EXPECTED_DEVELOPMENT_BASIN_COUNT = 2307`, `EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT = 250`, not
+CLI-exposed); `FullPopulationBasinMembership` and `validate_full_population_basin_membership`
+(requires the package's basin set to equal *exactly* the union of the canonical
+`development_train`/`spatial_holdout_nonca` splits — no subset, no extra, no California, no
+dev/holdout overlap, no duplicates, exact 2,307/250 counts); `GeneratedConfigBundle` extended with
+`population_role`, `train_basin_ids`, `validation_basin_ids`, `test_basin_ids` (all default `None`,
+preserving old single-population behavior byte-for-byte when unused);
+`generate_stage1_full_population_nh_config_bundles` (builds both bundles from one shared
+policy/common-kwargs render, so both bundles share one set of period dates);
+`write_generated_config` extended to honor the new per-period basin-id overrides (falling back to
+`bundle.basin_ids` when unset) and to record `population_role`/`train_basin_count`/
+`validation_basin_count`/`test_basin_count` in `generation_manifest.json`. `src/baseline/
+nh_structural_preflight.py`: `check_generated_config_structure` extended with
+`expected_train_basin_count`/`expected_validation_basin_count`/`expected_test_basin_count`,
+`require_identical_basin_sets` (default `True`, preserves old behavior), `require_test_disjoint_
+from_train_validation`, and `expect_generated_basins_equal_package_manifest` (default `True`);
+`check_flashnh_external_scaler_test_construction` (constructs only the `test`-period
+`FlashNHDataset` against the spatial-holdout bundle, reusing an externally supplied scaler
+unchanged, never fitting a new one, never touching `cfg.train_dir`); `run_full_population_
+structural_preflight` (composes both bundles' structural checks plus, unless skipped, real
+`FlashNHDataset` construction — development train/validation/test, then spatial-holdout test-only
+reusing the development scaler). Two new thin CLIs: `scripts/generate_stage1_full_population_nh_
+config.py` and `scripts/check_stage1_full_population_nh_config_preflight.py` (package-root passed
+via required `--package-root`, never hard-coded; Moriah path only ever appears as a caller-supplied
+argument value).
+
+**Test coverage.** 20 new tests, all passing: 10 in `tests/test_nh_full_population_config_
+generation.py` (basin-membership validation against the real committed canonical splits — exact
+union acceptance, missing/extra/California/duplicate/overlap rejection — plus end-to-end dual-bundle
+generation and written-file contract checks) and 10 in `tests/test_nh_full_population_structural_
+preflight.py` (5 real-scale Layer-1 structural tests using the real 2,307/250 split-derived basin
+lists with placeholder NetCDF files, since `_find_basin_netcdf` only checks file existence; 5
+tests against a tiny synthetic 4-basin fixture exercising the external-scaler test-only construction
+directly — real orchestrator Layer-1 checks are pinned to the real 2,307/250 counts and are not
+compatible with a tiny synthetic fixture, so full-orchestrator end-to-end coverage uses
+`run_dataset_construction=False` against the real-scale fixture instead). All 41 pre-existing
+compact-package tests (`tests/test_nh_config_generation.py`, `tests/test_nh_structural_
+preflight.py`) continue to pass unaffected. Full-suite regression run (`pytest tests/ -q`, 880
+tests): 879 passed, 1 failed — `tests/test_package_builder.py::test_repeated_builds_produce_
+equivalent_manifest`, the same pre-existing non-deterministic Windows `os.rename`-based flakiness
+already logged in the 2026-07-22 entry below; it predates this increment, is unrelated to any file
+touched here, and passed on an isolated rerun.
+
+**Local dry run.** Built a synthetic 2,557-basin fake package matching the real
+`development_train.txt` (2,307) + `spatial_holdout_nonca.txt` (250) union, ran both new CLIs
+end-to-end: the generator produced a `development` bundle with train/validation/test all equal to
+the 2,307 development basins and a `spatial_holdout` bundle with train/validation equal to the
+2,307 development basins and test equal to the 250 holdout basins; the preflight script (with
+`--skip-dataset-construction`, since no real package or NetCDF payloads were built) reported
+**PASS — 55 OK checks, 0 errors, 0 warnings**. Temporary directories were removed after the dry run;
+no output was committed.
+
+**Unaffected / not reopened.** The certified Compact Scientific Package and the full
+`stage1_scientific_package_v002` package were not modified, rebuilt, or transferred. No h2o or
+Moriah connection was made. No training was run. No Slurm file was written. Only the single
+lead06/seq24 configuration was rendered, as two role-separated bundles — not the full 16-config
+matrix. The existing `scaler={}` safeguard at train-period `get_dataset()` call sites (2026-07-22
+entry, below) was preserved and reused, not redesigned.
+
+**Not done.** Package transfer to Moriah, the real Moriah Slurm structural-preflight run, real
+full-population dataset loading, model training/evaluation, and generation of the remaining 15
+lead × sequence-length configurations all remain not done.
+
+---
+
 ## 2026-07-24 Gate 4 — Full non-California Scientific Package (v002) independently audited — PASS
 
 **Result.** The Gate 4 independent auditor (`src/baseline/package_audit.py`,

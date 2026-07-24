@@ -34,6 +34,7 @@ import xarray as xr
 import yaml
 
 from .gap_mask_io import GapMaskIOError, load_gap_timestamps_json
+from .nh_config_generation import EXPECTED_DEVELOPMENT_BASIN_COUNT, EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT
 from .nh_register import FLASHNH_DATASET_KEY, register_flashnh_dataset
 from .package_audit import AuditReport
 from .staid import normalize_staid
@@ -45,8 +46,10 @@ __all__ = [
     "RTMA_CONTINUOUS_VARIABLES",
     "check_generated_config_structure",
     "check_flashnh_dataset_construction",
+    "check_flashnh_external_scaler_test_construction",
     "inspect_dynamic_nan_inventory",
     "run_structural_preflight",
+    "run_full_population_structural_preflight",
 ]
 
 _FORBIDDEN_KEY_SUBSTRINGS = (
@@ -148,12 +151,31 @@ def check_generated_config_structure(
     expected_dates: dict,
     raw_target_variable: str = "qobs_m3s",
     repo_root=None,
+    expected_train_basin_count: "int | None" = None,
+    expected_validation_basin_count: "int | None" = None,
+    expected_test_basin_count: "int | None" = None,
+    require_identical_basin_sets: bool = True,
+    require_test_disjoint_from_train_validation: bool = False,
+    expect_generated_basins_equal_package_manifest: bool = True,
 ) -> dict:
     """File-only checks against a generated config bundle + the package it
     was rendered against. Returns the parsed ``{"config": ..., "manifest":
     ...}`` for callers that want to inspect more. Records checks on
     ``report``; never raises for a failed *check* (only for a structurally
-    unreadable input, via ``NHStructuralPreflightError``)."""
+    unreadable input, via ``NHStructuralPreflightError``).
+
+    The ``expected_train_basin_count``/``expected_validation_basin_count``/
+    ``expected_test_basin_count``/``require_identical_basin_sets``/
+    ``require_test_disjoint_from_train_validation``/
+    ``expect_generated_basins_equal_package_manifest`` parameters exist only
+    for the full-population dev/spatial-holdout bundle pair (see
+    ``src.baseline.nh_config_generation.generate_stage1_full_population_nh_config_bundles``),
+    whose package (2,557 basins) is a strict superset of any one generated
+    bundle's own basin population and whose two bundles deliberately do NOT
+    share one identical train/validation/test basin set. Every default here
+    reproduces the original single-population (compact-package) checks
+    exactly -- passing none of these keeps this function's behavior
+    byte-for-byte unchanged."""
     generated_dir = Path(generated_dir)
     package_root = Path(package_root)
 
@@ -249,6 +271,11 @@ def check_generated_config_structure(
     else:
         report.ok("dates_exact")
 
+    per_period_expected_count = {
+        "train": expected_train_basin_count if expected_train_basin_count is not None else expected_basin_count,
+        "validation": expected_validation_basin_count if expected_validation_basin_count is not None else expected_basin_count,
+        "test": expected_test_basin_count if expected_test_basin_count is not None else expected_basin_count,
+    }
     basin_lists = {}
     for label, path in (
         ("train", required["train_basins.txt"]),
@@ -257,28 +284,62 @@ def check_generated_config_structure(
     ):
         lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         basin_lists[label] = lines
-        if len(lines) == expected_basin_count and len(set(lines)) == expected_basin_count:
+        expected_count = per_period_expected_count[label]
+        if len(lines) == expected_count and len(set(lines)) == expected_count:
             report.ok(f"basin_membership_count[{label}]", f"{len(lines)} basins")
         else:
             report.error(
                 f"basin_membership_count[{label}]",
-                f"expected {expected_basin_count} unique basins, got {len(lines)} ({len(set(lines))} unique)",
+                f"expected {expected_count} unique basins, got {len(lines)} ({len(set(lines))} unique)",
             )
 
     train_set, val_set, test_set = set(basin_lists["train"]), set(basin_lists["validation"]), set(basin_lists["test"])
-    if train_set == val_set == test_set:
-        report.ok("basin_membership_identical_across_periods")
+    if require_identical_basin_sets:
+        if train_set == val_set == test_set:
+            report.ok("basin_membership_identical_across_periods")
+        else:
+            report.error(
+                "basin_membership_identical_across_periods",
+                "train/validation/test basin lists are not identical (temporal-only separation requires identical basins)",
+            )
     else:
-        report.error(
-            "basin_membership_identical_across_periods",
-            "train/validation/test basin lists are not identical (temporal-only separation requires identical basins)",
-        )
+        if train_set == val_set:
+            report.ok("basin_membership_train_validation_identical")
+        else:
+            report.error(
+                "basin_membership_train_validation_identical",
+                "train and validation basin lists must be identical (both are the development-only fitting population)",
+            )
+        if require_test_disjoint_from_train_validation:
+            overlap = sorted(test_set & (train_set | val_set))
+            if overlap:
+                report.error(
+                    "basin_membership_test_disjoint_from_train_validation",
+                    f"test basin(s) overlap train/validation: {overlap}",
+                )
+            else:
+                report.ok("basin_membership_test_disjoint_from_train_validation")
 
-    missing_nc = [b for b in sorted(train_set) if _find_basin_netcdf(package_root, b) is None]
+        # A role-differentiated bundle (train/validation != test) is exactly
+        # the shape a spatial-holdout evaluation bundle takes; require its
+        # filesystem-level "do not train this" safeguard (see
+        # nh_config_generation.write_generated_config) since NH's own
+        # Config._check_cfg_keys forbids marking this inside config.yaml.
+        marker_path = generated_dir / "TEST_ONLY_DO_NOT_TRAIN.txt"
+        if marker_path.is_file():
+            report.ok("test_only_marker_file_present")
+        else:
+            report.error(
+                "test_only_marker_file_present",
+                f"missing required test-only safeguard marker file: {marker_path}",
+            )
+
+    all_referenced_basins = train_set | val_set | test_set
+    missing_nc = [b for b in sorted(all_referenced_basins) if _find_basin_netcdf(package_root, b) is None]
     if missing_nc:
         report.error("basin_netcdf_present", f"basin(s) with no time-series NetCDF: {missing_nc}")
     else:
-        report.ok("basin_netcdf_present", f"{len(train_set)} basin(s) all have a time-series NetCDF")
+        report.ok("basin_netcdf_present", f"{len(all_referenced_basins)} basin(s) all have a time-series NetCDF")
 
     gap_path = package_root / "masks" / "gap_timestamps.json"
     try:
@@ -323,13 +384,23 @@ def check_generated_config_structure(
         # four other sources catches any divergence introduced after
         # generation (e.g. a hand-edited or stale basin file) that a mere
         # train==validation==test check would miss.
+        #
+        # This exact-equality contract only holds when the package's own
+        # population IS the generated bundle's population (the compact
+        # single-population case). A full-population bundle's package is a
+        # strict superset (2,557 basins == 2,307 development + 250
+        # spatial-holdout) of any one bundle's own basin lists, so
+        # expect_generated_basins_equal_package_manifest=False switches to a
+        # subset check instead (every generated basin id must still be a
+        # real package member; the package is never required to equal one
+        # bundle's population).
         try:
             package_basin_ids = sorted(normalize_staid(b) for b in package_manifest.get("basin_ids", []))
         except (TypeError, ValueError) as exc:
             report.error("basin_ids_exact_equality_all_sources", f"could not normalize package manifest basin_ids: {exc}")
             package_basin_ids = None
 
-        if package_basin_ids is not None:
+        if package_basin_ids is not None and expect_generated_basins_equal_package_manifest:
             generation_basin_ids = list(manifest.get("basin_ids", []))
             sources = {
                 "package_manifest": package_basin_ids,
@@ -350,6 +421,20 @@ def check_generated_config_structure(
                     "basin_ids_exact_equality_all_sources",
                     f"{len(package_basin_ids)} basin(s) identical, same order, across package manifest, "
                     "generation manifest, and train/validation/test lists",
+                )
+        elif package_basin_ids is not None:
+            package_basin_id_set = set(package_basin_ids)
+            not_in_package = sorted(all_referenced_basins - package_basin_id_set)
+            if not_in_package:
+                report.error(
+                    "basin_ids_subset_of_package_manifest",
+                    f"generated basin id(s) not present in the package manifest's basin_ids: {not_in_package}",
+                )
+            else:
+                report.ok(
+                    "basin_ids_subset_of_package_manifest",
+                    f"{len(all_referenced_basins)} generated basin(s) all present in the "
+                    f"{len(package_basin_id_set)}-basin package manifest",
                 )
     else:
         report.error("package_manifest_identity_consistent", f"package manifest not found: {package_manifest_path}")
@@ -490,6 +575,84 @@ def check_flashnh_dataset_construction(report: AuditReport, config_path, *, regi
     return datasets
 
 
+def check_flashnh_external_scaler_test_construction(
+    report: AuditReport, config_path, *, external_scaler: dict, register: bool = True
+) -> dict:
+    """Construct only the ``test``-period ``FlashNHDataset`` from a test-only
+    (spatial-holdout) generated config, reusing an externally supplied,
+    already-fitted scaler (e.g. the development-training scaler from
+    :func:`check_flashnh_dataset_construction` run against the *development*
+    bundle's config). Never fits a new scaler and never constructs a
+    train/validation dataset from this config -- this is the dataset-
+    construction-time counterpart of the basin-list safeguard in
+    :func:`generate_stage1_full_population_nh_config_bundles`: a
+    spatial-holdout evaluation must never influence normalization.
+
+    NH mechanics note: ``BaseDataset.__init__`` only requires ``cfg.train_dir``
+    to exist for an ``is_train=True`` construction (it writes ``id_to_int.yml``/
+    scaler/lookup-table artifacts there); an eval-period (``is_train=False``)
+    construction with a non-empty externally supplied ``scaler`` never reads
+    or writes ``cfg.train_dir``, so this function does not need one set up.
+    """
+    if register:
+        register_flashnh_dataset()
+    from neuralhydrology.datasetzoo import get_dataset
+    from neuralhydrology.utils.config import Config
+    import torch
+
+    cfg = Config(Path(config_path))
+    if cfg.dataset == FLASHNH_DATASET_KEY:
+        report.ok("holdout_dataset_registered_key")
+    else:
+        report.error(
+            "holdout_dataset_registered_key", f"cfg.dataset == {cfg.dataset!r}, expected {FLASHNH_DATASET_KEY!r}"
+        )
+
+    if not external_scaler:
+        report.error(
+            "holdout_test_dataset_construction",
+            "external_scaler must be the already-fitted development-training scaler, got empty/falsy",
+        )
+        return {}
+
+    try:
+        test_ds = get_dataset(cfg=cfg, is_train=False, period="test", scaler=external_scaler)
+    except Exception as exc:  # noqa: BLE001 -- surfaced as a report failure, not a crash
+        report.error("holdout_test_dataset_construction", str(exc))
+        return {}
+    report.ok("holdout_test_dataset_construction")
+
+    if _scalers_equal(external_scaler, test_ds.scaler):
+        report.ok("holdout_scaler_reused_unchanged")
+    else:
+        report.error(
+            "holdout_scaler_reused_unchanged",
+            "spatial-holdout test dataset scaler differs from the supplied development-training scaler",
+        )
+
+    n_nonfinite = 0
+    for i in range(len(test_ds)):
+        sample = test_ds[i]
+        for v in sample["x_d"].values():
+            if not torch.isfinite(v).all():
+                n_nonfinite += 1
+    if n_nonfinite:
+        report.error(
+            "holdout_finite_admitted_batches",
+            f"{n_nonfinite} non-finite x_d tensor(s) among {len(test_ds)} sample(s)",
+        )
+    else:
+        report.ok("holdout_finite_admitted_batches", f"{len(test_ds)} admitted sample(s), all finite")
+
+    stats = getattr(test_ds, "flashnh_filter_stats", None)
+    if stats is None:
+        report.error("holdout_filter_stats_available", "flashnh_filter_stats not populated")
+    else:
+        report.ok("holdout_filter_stats_available", str(stats))
+
+    return {"test": test_ds}
+
+
 # ---------------------------------------------------------------------------
 # Task item 6: read-only real-package NaN inventory (no NeuralHydrology import)
 # ---------------------------------------------------------------------------
@@ -623,4 +786,89 @@ def run_structural_preflight(
     if run_dataset_construction and report.error_count == 0:
         config_path = Path(generated_dir) / "config.yaml"
         check_flashnh_dataset_construction(report, config_path)
+    return report
+
+
+def run_full_population_structural_preflight(
+    *,
+    development_generated_dir,
+    spatial_holdout_generated_dir,
+    package_root,
+    expected_seq_length: int,
+    expected_target_variable: str,
+    expected_dynamic_inputs: list,
+    expected_static_column_count: int,
+    expected_predict_last_n,
+    expected_dates: dict,
+    repo_root=None,
+    run_dataset_construction: bool = True,
+) -> AuditReport:
+    """Compose the full-population dev + spatial-holdout structural preflight
+    into one :class:`AuditReport`.
+
+    Development bundle: same checks as :func:`run_structural_preflight`
+    (train==validation==test, all 2,307 development basins, Layer 2 fits its
+    own scaler from the ``train`` period). Spatial-holdout bundle: train/
+    validation basin lists must equal the *development* population (never a
+    holdout basin), test basin list must be exactly the 250 spatial-holdout
+    basins and disjoint from train/validation; Layer 2 (if the development
+    Layer 2 succeeded) constructs only the holdout ``test`` dataset, reusing
+    the development bundle's already-fitted training scaler unchanged --
+    never fitting a new one. Both bundles' packages are the same certified
+    full non-CA population package, a strict superset of either bundle's own
+    basin list, so both structural checks use
+    ``expect_generated_basins_equal_package_manifest=False``. Never runs
+    training."""
+    report = AuditReport()
+
+    check_generated_config_structure(
+        report,
+        generated_dir=development_generated_dir,
+        package_root=package_root,
+        expected_basin_count=EXPECTED_DEVELOPMENT_BASIN_COUNT,
+        expected_seq_length=expected_seq_length,
+        expected_target_variable=expected_target_variable,
+        expected_dynamic_inputs=expected_dynamic_inputs,
+        expected_static_column_count=expected_static_column_count,
+        expected_predict_last_n=expected_predict_last_n,
+        expected_dates=expected_dates,
+        repo_root=repo_root,
+        expect_generated_basins_equal_package_manifest=False,
+    )
+
+    train_ds = None
+    if run_dataset_construction and report.error_count == 0:
+        dev_config_path = Path(development_generated_dir) / "config.yaml"
+        datasets = check_flashnh_dataset_construction(report, dev_config_path)
+        train_ds = datasets.get("train")
+
+    check_generated_config_structure(
+        report,
+        generated_dir=spatial_holdout_generated_dir,
+        package_root=package_root,
+        expected_basin_count=EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT,
+        expected_train_basin_count=EXPECTED_DEVELOPMENT_BASIN_COUNT,
+        expected_validation_basin_count=EXPECTED_DEVELOPMENT_BASIN_COUNT,
+        expected_test_basin_count=EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT,
+        expected_seq_length=expected_seq_length,
+        expected_target_variable=expected_target_variable,
+        expected_dynamic_inputs=expected_dynamic_inputs,
+        expected_static_column_count=expected_static_column_count,
+        expected_predict_last_n=expected_predict_last_n,
+        expected_dates=expected_dates,
+        repo_root=repo_root,
+        require_identical_basin_sets=False,
+        require_test_disjoint_from_train_validation=True,
+        expect_generated_basins_equal_package_manifest=False,
+    )
+
+    if run_dataset_construction and train_ds is not None:
+        holdout_config_path = Path(spatial_holdout_generated_dir) / "config.yaml"
+        check_flashnh_external_scaler_test_construction(report, holdout_config_path, external_scaler=train_ds.scaler)
+    elif run_dataset_construction:
+        report.error(
+            "holdout_test_dataset_construction",
+            "skipped: no development-training scaler available (development Layer 2 did not succeed)",
+        )
+
     return report

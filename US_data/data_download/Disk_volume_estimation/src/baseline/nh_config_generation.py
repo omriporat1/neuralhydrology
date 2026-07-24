@@ -60,6 +60,10 @@ __all__ = [
     "NHConfigGenerationError",
     "StaticAttributeContractResult",
     "GeneratedConfigBundle",
+    "FullPopulationBasinMembership",
+    "FullPopulationConfigBundles",
+    "EXPECTED_DEVELOPMENT_BASIN_COUNT",
+    "EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT",
     "read_package_manifest",
     "read_package_attribute_columns",
     "resolve_target_variable",
@@ -69,10 +73,20 @@ __all__ = [
     "validate_dynamic_inputs",
     "validate_static_attribute_contract",
     "validate_basin_membership",
+    "validate_full_population_basin_membership",
     "build_nh_config_mapping",
     "generate_stage1_nh_config",
+    "generate_stage1_full_population_nh_config_bundles",
     "write_generated_config",
 ]
+
+# Pinned facts about the certified stage1_scientific_package_v002 full non-CA
+# population (see docs/decision_log.md's Gate 4 PASS entry and
+# scripts/prepare_stage1_full_static_attributes.py's identically pinned
+# constants). Never exposed as a CLI argument: a caller cannot silently ask
+# for a different split size, only the canonical one.
+EXPECTED_DEVELOPMENT_BASIN_COUNT = 2307
+EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT = 250
 
 
 class NHConfigGenerationError(ValueError):
@@ -159,6 +173,16 @@ class GeneratedConfigBundle:
     generated_at_utc: str
     git_commit: "str | None"
     package_type: str = "compact_temporal_integration_validation"
+    # Population-role fields (task: full-population dev/spatial-holdout
+    # separation). All default to None/"identical_all_periods", which
+    # preserves the original single-population behavior byte-for-byte:
+    # write_generated_config() falls back to basin_ids for every period when
+    # these are unset. Only generate_stage1_full_population_nh_config_bundles
+    # sets them explicitly.
+    population_role: str = "identical_all_periods"
+    train_basin_ids: "list | None" = None
+    validation_basin_ids: "list | None" = None
+    test_basin_ids: "list | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +397,98 @@ def validate_basin_membership(package_manifest: dict, splits_dir) -> list:
     return sorted(package_basins)
 
 
+@dataclass(frozen=True)
+class FullPopulationBasinMembership:
+    """Partition of a full-population (dev + spatial-holdout) package's basin
+    IDs into their two strictly separated scientific roles. Both lists are
+    sorted, normalized STAIDs; neither ever contains a California basin."""
+
+    development_basins: list
+    spatial_holdout_basins: list
+
+
+def validate_full_population_basin_membership(package_manifest: dict, splits_dir) -> FullPopulationBasinMembership:
+    """Partition a full non-CA population package's basins into the
+    ``development_train`` (2,307) and ``spatial_holdout_nonca`` (250) roles,
+    failing loudly on any deviation from the certified Stage 1 contract:
+    duplicate/malformed IDs, dev/holdout overlap (should be structurally
+    impossible from the canonical split files, but re-checked here rather
+    than assumed), any California basin present, a package basin that is
+    neither a dev nor a holdout member, a dev/holdout member missing from the
+    package, or either partition not being exactly the pinned expected size.
+
+    Unlike :func:`validate_basin_membership` (which requires every package
+    basin to be a ``development_train`` member -- the compact 32-basin
+    package's contract), this function is for the certified full
+    non-California population package
+    (``stage1_scientific_package_v002``, 2,557 basins == 2,307 + 250) and
+    returns both roles instead of a single combined list, so callers can keep
+    them in strictly separate config bundles.
+    """
+    splits_dir = Path(splits_dir)
+    raw_basin_ids = package_manifest.get("basin_ids", [])
+    if not raw_basin_ids:
+        raise NHConfigGenerationError("package manifest has no basin_ids recorded")
+
+    package_basins = []
+    for raw in raw_basin_ids:
+        try:
+            package_basins.append(normalize_staid(raw))
+        except (TypeError, ValueError) as exc:
+            raise NHConfigGenerationError(f"malformed basin id {raw!r} in package manifest: {exc}") from exc
+    if len(package_basins) != len(set(package_basins)):
+        raise NHConfigGenerationError("package manifest basin_ids contains duplicates after normalization")
+    package_basin_set = set(package_basins)
+
+    try:
+        development_train = set(load_eligible_basins(splits_dir / "development_train.txt"))
+        spatial_holdout = set(load_eligible_basins(splits_dir / "spatial_holdout_nonca.txt"))
+        california_all = set(load_eligible_basins(splits_dir / "california_all.txt"))
+    except SplitGenerationError as exc:
+        raise NHConfigGenerationError(f"could not read canonical split file(s): {exc}") from exc
+
+    dev_holdout_overlap = sorted(development_train & spatial_holdout)
+    if dev_holdout_overlap:
+        raise NHConfigGenerationError(
+            f"canonical development_train and spatial_holdout_nonca splits overlap: {dev_holdout_overlap}"
+        )
+
+    california_overlap = sorted(package_basin_set & california_all)
+    if california_overlap:
+        raise NHConfigGenerationError(
+            f"package basin(s) include California basin(s), forbidden for the non-CA full population: "
+            f"{california_overlap}"
+        )
+
+    expected_union = development_train | spatial_holdout
+    missing_from_package = sorted(expected_union - package_basin_set)
+    extra_in_package = sorted(package_basin_set - expected_union)
+    if missing_from_package or extra_in_package:
+        raise NHConfigGenerationError(
+            "package basin_ids do not exactly equal the union of the canonical development_train and "
+            f"spatial_holdout_nonca splits: missing={missing_from_package} extra={extra_in_package}"
+        )
+
+    development_basins = sorted(package_basin_set & development_train)
+    spatial_holdout_basins = sorted(package_basin_set & spatial_holdout)
+
+    if len(development_basins) != EXPECTED_DEVELOPMENT_BASIN_COUNT:
+        raise NHConfigGenerationError(
+            f"expected exactly {EXPECTED_DEVELOPMENT_BASIN_COUNT} development basins, "
+            f"got {len(development_basins)}"
+        )
+    if len(spatial_holdout_basins) != EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT:
+        raise NHConfigGenerationError(
+            f"expected exactly {EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT} spatial-holdout basins, "
+            f"got {len(spatial_holdout_basins)}"
+        )
+
+    return FullPopulationBasinMembership(
+        development_basins=development_basins,
+        spatial_holdout_basins=spatial_holdout_basins,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config mapping construction
 # ---------------------------------------------------------------------------
@@ -522,6 +638,142 @@ def generate_stage1_nh_config(
     )
 
 
+@dataclass(frozen=True)
+class FullPopulationConfigBundles:
+    """The two strictly-separated config bundles for one full-population
+    (lead, seq_length) configuration: a development bundle (train/validation/
+    temporal-test all drawn from the 2,307 development basins, differing only
+    by date period) and a spatial-holdout bundle (test-only, drawn from the
+    250 spatial-holdout basins, whose train/validation basin lists are the
+    *development* bundle's -- so a holdout basin can never appear in a
+    training or validation basin list even if this bundle's config is
+    misused directly)."""
+
+    development: GeneratedConfigBundle
+    spatial_holdout: GeneratedConfigBundle
+    basin_membership: FullPopulationBasinMembership
+
+
+def generate_stage1_full_population_nh_config_bundles(
+    *,
+    policy_path,
+    package_root,
+    splits_dir,
+    lead_hours: int,
+    seq_length: int,
+    static_column_manifest_path=None,
+) -> FullPopulationConfigBundles:
+    """Generate the development + spatial-holdout config bundle pair for one
+    approved (lead, seq_length) combination against the certified full
+    non-CA population package (``stage1_scientific_package_v002``, 2,557
+    basins).
+
+    Reuses every validation/mapping function from
+    :func:`generate_stage1_nh_config` unchanged (policy loading, seq_length/
+    lead_hours/target-variable/dynamic-input/static-attribute-contract
+    validation, :func:`build_nh_config_mapping`) -- the only new logic is
+    :func:`validate_full_population_basin_membership`'s dev/spatial-holdout
+    partition (replacing :func:`validate_basin_membership`'s single-population
+    check) and assembling two bundles instead of one from that partition.
+
+    The spatial-holdout bundle's ``basin_ids`` is the 250-basin holdout
+    population (its own scientific contract); its ``test_basin_ids`` is the
+    same 250 basins, while ``train_basin_ids``/``validation_basin_ids`` are
+    the *development* bundle's 2,307 basins -- so this bundle's own generated
+    ``train_basins.txt``/``validation_basins.txt`` never contain a
+    spatial-holdout basin. Evaluating the spatial-holdout bundle must reuse
+    the development bundle's fitted training scaler (never fit a new one);
+    see ``src.baseline.nh_structural_preflight.check_flashnh_external_scaler_test_construction``
+    for the corresponding dataset-construction-time safeguard.
+    """
+    policy_path = Path(policy_path)
+    package_root = Path(package_root)
+    splits_dir = Path(splits_dir)
+
+    try:
+        policy = load_stage1_baseline_policy(policy_path)
+    except Stage1BaselinePolicyError as exc:
+        raise NHConfigGenerationError(f"policy failed validation: {exc}") from exc
+
+    validate_seq_length(seq_length, policy)
+    validate_lead_hours(lead_hours, policy)
+
+    target_variable = resolve_target_variable(lead_hours, policy["target"]["variable_name_template"])
+    validate_target_variables([target_variable], policy)
+
+    package_manifest = read_package_manifest(package_root)
+    package_attribute_columns = read_package_attribute_columns(package_root)
+
+    dynamic_inputs = list(policy["dynamic_inputs"])
+    validate_dynamic_inputs(package_manifest.get("dynamic_variables", []), policy)
+
+    static_result = validate_static_attribute_contract(
+        policy,
+        package_manifest,
+        package_attribute_columns,
+        static_column_manifest_path=static_column_manifest_path,
+    )
+
+    basin_membership = validate_full_population_basin_membership(package_manifest, splits_dir)
+
+    config_mapping = build_nh_config_mapping(
+        policy=policy,
+        target_variable=target_variable,
+        seq_length=seq_length,
+        dynamic_inputs=dynamic_inputs,
+        static_attributes=static_result.columns,
+    )
+
+    package_manifest_identity = {
+        "schema_name": package_manifest.get("schema_name"),
+        "schema_version": package_manifest.get("schema_version"),
+        "package_role": package_manifest.get("package_role"),
+        "basin_count": package_manifest.get("basin_count"),
+        "static_model_input_columns_sha256": package_manifest.get("static_model_input_columns_sha256"),
+    }
+
+    generated_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    git_commit = _get_git_commit()
+
+    common_kwargs = dict(
+        config_mapping=config_mapping,
+        lead_hours=lead_hours,
+        seq_length=seq_length,
+        target_variable=target_variable,
+        dynamic_inputs=dynamic_inputs,
+        static_attribute_result=static_result,
+        package_root=str(package_root),
+        package_manifest_identity=package_manifest_identity,
+        policy_path=str(policy_path),
+        policy_sha256=sha256_of(policy_path),
+        splits_dir=str(splits_dir),
+        generated_at_utc=generated_at_utc,
+        git_commit=git_commit,
+    )
+
+    development_bundle = GeneratedConfigBundle(
+        basin_ids=basin_membership.development_basins,
+        package_type="full_population_development",
+        population_role="development_identical_all_periods",
+        **common_kwargs,
+    )
+    spatial_holdout_bundle = GeneratedConfigBundle(
+        basin_ids=basin_membership.spatial_holdout_basins,
+        package_type="full_population_spatial_holdout_test_only",
+        population_role="spatial_holdout_test_only",
+        train_basin_ids=basin_membership.development_basins,
+        validation_basin_ids=basin_membership.development_basins,
+        test_basin_ids=basin_membership.spatial_holdout_basins,
+        **common_kwargs,
+    )
+
+    return FullPopulationConfigBundles(
+        development=development_bundle,
+        spatial_holdout=spatial_holdout_bundle,
+        basin_membership=basin_membership,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Writer (the only function in this module that touches disk for output)
 # ---------------------------------------------------------------------------
@@ -563,13 +815,31 @@ def write_generated_config(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     exp_name = experiment_name or f"stage1_compact_lead{bundle.lead_hours:02d}_seq{bundle.seq_length}_v001"
+    if experiment_name is None and bundle.population_role == "spatial_holdout_test_only":
+        # Deliberately distinct from the development bundle's default name so the
+        # two bundles never collide and a holdout config is not mistaken for an
+        # independently trainable experiment (review: holdout bundle safety).
+        exp_name = f"{exp_name}_spatial_holdout_test_only_eval"
 
-    basin_list_text = "\n".join(bundle.basin_ids) + "\n"
+    # Per-period basin lists default to bundle.basin_ids (preserves the
+    # original single-population train==validation==test behavior exactly);
+    # a full-population spatial-holdout bundle overrides train/validation to
+    # the development population instead (see
+    # generate_stage1_full_population_nh_config_bundles), so a holdout basin
+    # can never appear in a training or validation basin-list file.
+    train_ids = bundle.train_basin_ids if bundle.train_basin_ids is not None else bundle.basin_ids
+    validation_ids = bundle.validation_basin_ids if bundle.validation_basin_ids is not None else bundle.basin_ids
+    test_ids = bundle.test_basin_ids if bundle.test_basin_ids is not None else bundle.basin_ids
+
     train_basin_file = out_dir / "train_basins.txt"
     validation_basin_file = out_dir / "validation_basins.txt"
     test_basin_file = out_dir / "test_basins.txt"
-    for p in (train_basin_file, validation_basin_file, test_basin_file):
-        _atomic_write_text(p, basin_list_text)
+    for p, ids in (
+        (train_basin_file, train_ids),
+        (validation_basin_file, validation_ids),
+        (test_basin_file, test_ids),
+    ):
+        _atomic_write_text(p, "\n".join(ids) + "\n")
 
     run_dir = out_dir / "runs"
 
@@ -592,6 +862,31 @@ def write_generated_config(
         "test_basins.txt": test_basin_file,
         "config.yaml": config_path,
     }
+
+    if bundle.population_role == "spatial_holdout_test_only":
+        # NH 1.13's Config._check_cfg_keys rejects any unrecognized top-level
+        # key, so this safeguard cannot live inside config.yaml itself -- it
+        # must be a sibling file NH never reads.
+        marker_path = out_dir / "TEST_ONLY_DO_NOT_TRAIN.txt"
+        _atomic_write_text(
+            marker_path,
+            "This config bundle is SPATIAL-HOLDOUT TEST-ONLY EVALUATION MACHINERY.\n"
+            "Do NOT run a trainer against this config.yaml.\n"
+            "\n"
+            "Its train_basin_file / validation_basin_file list the DEVELOPMENT\n"
+            "population, never a holdout basin -- they are present only because\n"
+            "NeuralHydrology's config schema requires train/validation basin files\n"
+            "and date ranges to exist. Fitting against this bundle would silently\n"
+            "reuse development data and produce a misleading, meaningless run.\n"
+            "\n"
+            "Construct only the 'test' period, supplying the already-fitted\n"
+            "development-training scaler as an explicit external scaler; never fit\n"
+            "a new scaler from this bundle. See\n"
+            "src/baseline/nh_structural_preflight.py::"
+            "check_flashnh_external_scaler_test_construction and the full-population\n"
+            "config-generation entry in docs/decision_log.md.\n",
+        )
+        written_paths["TEST_ONLY_DO_NOT_TRAIN.txt"] = marker_path
     artifact_sha256 = {name: sha256_of(p) for name, p in sorted(written_paths.items())}
 
     generation_manifest = {
@@ -624,6 +919,10 @@ def write_generated_config(
         },
         "basin_count": len(bundle.basin_ids),
         "basin_ids": bundle.basin_ids,
+        "population_role": bundle.population_role,
+        "train_basin_count": len(train_ids),
+        "validation_basin_count": len(validation_ids),
+        "test_basin_count": len(test_ids),
         "package_root": bundle.package_root,
         "package_manifest_identity": bundle.package_manifest_identity,
         "policy_path": bundle.policy_path,
