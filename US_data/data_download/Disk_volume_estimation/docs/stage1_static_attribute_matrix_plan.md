@@ -831,3 +831,27 @@ the static-imputation primitive (`src/baseline/static_preparation.py`) is
 unchanged code. **Not done as of this docs-only closure:** no NH package has
 been built; no training has run; nothing beyond this documentation update
 has been committed.
+
+## 14. Full non-California static preparation — real h2o run PASS (2026-07-24)
+
+Real execution (not a dry-run) of the full-population mechanism described in §13, via the
+production orchestration script `scripts/prepare_stage1_full_static_attributes.py` (committed
+2026-07-24 as `61d3819`), run for real on h2o against the accepted v002 matrix above and the
+canonical `config/stage1_baseline_splits_v001/` split lists.
+
+**Result: PASS.** Development-only median imputation fit on the 2,307-basin development-training
+population, applied unchanged to the full 2,557-basin non-California package population (2,307
+development-training + 250 spatial holdout); the spatial holdout did not influence fitting. All
+473 candidate `model_input` columns were retained by the development-only exact zero-variance
+projection; 0 excluded. Zero remaining missing values after imputation; no column was entirely
+missing in the fit population. Because 0 columns were excluded, the retained static table equals
+the imputed static table exactly (identical sha256). The 32-basin compact-smoke 13-column
+zero-variance exclusion remains historical only and was not reused.
+
+Generated artifacts (h2o-resident, not committed):
+`/data42/omrip/Flash-NH/tmp/stage1_full_static_attributes_v001/`. Full checksum set and per-file
+paths: `docs/decision_log.md` (2026-07-24 entry). The full 473-column retained list is in
+`retained_static_columns.txt` (473 lines) — not reproduced here, matching the convention in §13.
+
+**Not done in this phase:** no NetCDF package was built; the static-preparation script/tests were
+not modified; no NeuralHydrology configs were generated.

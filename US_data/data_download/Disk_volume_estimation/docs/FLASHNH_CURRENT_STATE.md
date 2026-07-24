@@ -1,6 +1,42 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-23 (Development-population zero-variance trainability projection — mechanism implementation)
+Last updated: 2026-07-24 (Full non-California static-attribute preparation — real h2o run PASS)
+
+## Full non-California static-attribute preparation — real h2o run PASS (2026-07-24)
+
+Real (not synthetic/dry-run) execution of `scripts/prepare_stage1_full_static_attributes.py`
+on h2o against the canonical `stage1_static_attributes_v002` matrix. Development-only median
+imputation (fit on the 2,307 development-training basins only) followed by a development-only
+exact post-imputation zero-variance trainability projection, both frozen and applied unchanged
+to the full 2,557-basin non-California package population (2,307 development-training + 250
+spatial holdout). The spatial holdout did not influence either fit.
+
+**Result: 473 candidate `model_input` columns → 473 retained, 0 excluded.** All 473 canonical
+static model-input columns will be used by the first full-population Stage 1 model — the
+canonical package contract is unchanged at 473 columns. No column was entirely missing in the
+2,307-basin fit population, and zero missing values remain anywhere after imputation. Because 0
+columns were excluded, the retained static table is byte-identical to the imputed static table.
+The 32-basin compact-smoke 13-column zero-variance exclusion (2026-07-23 "Compact
+NeuralHydrology integration smoke" Finding 1, below) is compact-population-specific historical
+evidence only and was confirmed **not** reused, inherited, or reopened by this run.
+
+Output (h2o-resident, generated evidence, **not committed**):
+`/data42/omrip/Flash-NH/tmp/stage1_full_static_attributes_v001/` (`imputed_static_attributes.parquet`,
+`imputed_value_mask.parquet`, `retained_static_attributes.parquet`, manifests, column lists,
+`run_summary.json`).
+
+Key checksums (SHA-256):
+```
+input matrix (stage1_static_attributes_v002.parquet):
+4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297
+
+imputed_static_attributes.parquet / retained_static_attributes.parquet (identical):
+5be00a3b068351bffd40a3cf72991a3df888700034831123c91823b8bd4b6e24
+```
+
+Full counts, per-artifact checksums, and the modeling decision: `docs/decision_log.md`
+(2026-07-24 entry). **No NetCDF package was built by this run.** Next step: full 2,557-basin
+v002 package build and independent audit — see `docs/stage1_baseline_package_implementation_plan.md`.
 
 ## Development-population zero-variance trainability projection — mechanism implementation (2026-07-23)
 

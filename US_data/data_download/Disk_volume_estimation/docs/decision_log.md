@@ -4,6 +4,91 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-24 Full non-California static-attribute preparation — real h2o run PASS
+
+**Decision.** Ran `scripts/prepare_stage1_full_static_attributes.py` for real on h2o (not a
+synthetic/dry-run) against the canonical `stage1_static_attributes_v002` matrix
+(`/data42/omrip/Flash-NH/data/static_attributes/stage1_static_attributes_v002/stage1_static_attributes_v002.parquet`,
+sha256 `4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297`), orchestrating the
+existing development-only median-imputation and development-only exact zero-variance
+trainability-projection primitives (`src/baseline/static_preparation.py`, see the 2026-07-20 and
+2026-07-23 entries below) end to end for the first time against the real basin population.
+
+**Populations (binding, verified directly from the returned evidence — not from a prior summary).**
+Fit population: 2,307 development-training basins
+(`config/stage1_baseline_splits_v001/development_train.txt`, sha256
+`397ab432564c18c3abc5158a47ada2b28840bbf6f0c213d2475444fded33858f`). Applied to the full
+2,557-basin non-California package population (2,307 development-training + 250 spatial holdout,
+`config/stage1_baseline_splits_v001/spatial_holdout_nonca.txt`, sha256
+`76d1c546e703b1b5aa8f4a3ead971327de0151dae4fcce0c90b1272da0f587b7`). Both manifests record
+`fit_basin_scope: "development_training_only"`; the spatial holdout did not influence imputation
+medians or zero-variance detection.
+
+**Result.** 473 candidate `model_input` columns → **473 retained, 0 excluded**
+(`zero_variance_manifest.json`: `candidate_column_count=473`, `retained_column_count=473`,
+`excluded_column_count=0`, `excluded_columns=[]`). No column was entirely missing in the
+2,307-basin fit population (`imputation_manifest.json`: `columns_all_nan_in_fit_population=[]`).
+Zero remaining missing values after imputation across all 473 columns for all 2,557 applied basins
+(`n_missing_after_apply=0` for every column, confirmed by grep over the full manifest). Because 0
+columns were excluded, the retained static table is byte-identical to the imputed static table
+(`retained_static_attributes.parquet` and `imputed_static_attributes.parquet` share sha256
+`5be00a3b068351bffd40a3cf72991a3df888700034831123c91823b8bd4b6e24`). The full retained-column list
+is in `retained_static_columns.txt` (473 lines) / `zero_variance_manifest.json`; not reproduced here.
+
+**Modeling decision.** Use all 473 canonical static `model_input` columns for the first
+full-population Stage 1 model — no run-specific static-column reduction applies. The 32-basin
+compact-smoke 13-column zero-variance exclusion (2026-07-23 "Compact NeuralHydrology integration
+smoke" Finding 1, below) remains compact-population-specific historical evidence only and was
+confirmed **not** reused, inherited, or reopened by this run.
+
+**Output (h2o-resident, generated evidence, not committed).**
+`/data42/omrip/Flash-NH/tmp/stage1_full_static_attributes_v001/` — `imputed_static_attributes.parquet`,
+`imputed_value_mask.parquet`, `imputation_manifest.json`, `retained_static_attributes.parquet`,
+`zero_variance_manifest.json`, `retained_static_columns.txt`, `excluded_zero_variance_columns.txt`,
+`run_summary.json`. A smaller evidence bundle (manifests, column lists, log, checksum files — not
+the parquet tables) was transferred locally to
+`tmp/stage1_full_static_attributes_v001_evidence/` (untracked, not committed).
+
+**Checksums** (from `run_summary.json` / `evidence_checksums.txt` / `parquet_checksums.txt`; all
+standard 64-hex-character SHA-256, cross-verified consistent across all three files):
+```
+input matrix (stage1_static_attributes_v002.parquet):
+4954a320d9e720dfaef29c05f77a505183e10bae4891cf06161958e17cdb2297
+
+column manifest (stage1_static_attributes_v002_column_manifest.json):
+02505eb4893e6848f7cbc4eabd2cdf40dd6aee64156d41744aebcbe4409f0e00
+
+development_train.txt:
+397ab432564c18c3abc5158a47ada2b28840bbf6f0c213d2475444fded33858f
+
+spatial_holdout_nonca.txt:
+76d1c546e703b1b5aa8f4a3ead971327de0151dae4fcce0c90b1272da0f587b7
+
+imputation_manifest.json:
+6c814ebc76d9ac1e7f2986499f9e491a3e19382af89e1a54bed9b18df8d295be
+
+zero_variance_manifest.json:
+d05d5956486e7cea23b389116f2aa2a5220ecac39f02368bfadea722fbbb6d00
+
+retained_static_columns.txt:
+4da4379eb93aee629dc4b93d54b13198f6c17937886b28cfd34fb01721726bd9
+
+excluded_zero_variance_columns.txt (empty file — 0 excluded columns):
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+
+imputed_static_attributes.parquet / retained_static_attributes.parquet (identical):
+5be00a3b068351bffd40a3cf72991a3df888700034831123c91823b8bd4b6e24
+
+imputed_value_mask.parquet:
+a22c8bf92639d46d93343380cf1eac6ced43ed7defd56c1a25f9c6ea816437df
+```
+
+**Not done in this phase.** No NetCDF package was built; `src/baseline/package_builder.py` was not
+invoked; no NeuralHydrology configs were generated; no training ran; the static-preparation
+script/tests (`scripts/prepare_stage1_full_static_attributes.py`,
+`tests/test_prepare_stage1_full_static_attributes.py`, committed 2026-07-24 as `61d3819`) were not
+modified in this pass — this entry is a docs-only closure of the real-run evidence recorded above.
+
 ## 2026-07-23 Development-population zero-variance trainability projection — mechanism implementation
 
 **Decision.** Implemented a reusable fit/apply mechanism, in the style of

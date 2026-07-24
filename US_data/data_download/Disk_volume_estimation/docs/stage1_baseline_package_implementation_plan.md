@@ -1053,6 +1053,18 @@ supersession record.
   closure) is compact-smoke-specific historical evidence and is **not**
   reused here. The real 2,307-basin excluded-column list has **not** been
   computed by this patch (requires h2o access to the full matrix).
+  **Superseded 2026-07-24:** the real 2,307-basin fit / 2,557-basin apply run
+  has now been executed for real on h2o via
+  `scripts/prepare_stage1_full_static_attributes.py`. Result: **PASS** — all
+  473 candidate columns retained, 0 excluded; zero remaining missing values;
+  the spatial holdout did not influence fitting. **The package input static
+  table for the first full-population Stage 1 model is
+  `/data42/omrip/Flash-NH/tmp/stage1_full_static_attributes_v001/imputed_static_attributes.parquet`
+  (h2o-resident, not committed); the package must include all 473 static
+  `model_input` attributes — no run-specific static-column reduction is
+  needed for the first full model. Full-population static preparation is
+  now complete, and the full 2,557-basin v002 package build is unblocked.**
+  Full counts and checksums: `docs/decision_log.md` (2026-07-24 entry).
 
 ---
 
