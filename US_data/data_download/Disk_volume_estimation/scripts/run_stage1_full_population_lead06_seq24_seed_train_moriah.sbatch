@@ -2,7 +2,7 @@
 #SBATCH --job-name=flashnh-fullpop-lead06-seq24-seed-train-v001
 #SBATCH --partition=catfish
 #SBATCH --gres=gpu:l4:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --signal=B:TERM@180
@@ -44,6 +44,25 @@
 # worker processes exceeds 64G. Raised to --mem=128G (catfish-04 has ~1TB
 # RealMemory, so ample headroom); no model/training hyperparameter was
 # touched. See docs/decision_log.md.
+#
+# --cpus-per-task correction (2026-07-25, user-directed, separate from the
+# one permitted --mem correction above -- this is a mid-run performance
+# adjustment, not a bug fix): the initial 8-CPU/num_workers=4 configuration
+# ran successfully (job 45640083, epochs 1-3 completed cleanly: training
+# ~40min/19min/19min, validation ~20min/10min/10min -- measured from
+# checkpoint file timestamps and log inspection), but validation runs at a
+# flat ~2.1 basins/sec, consistent with a CPU-bound per-basin data-loading
+# bottleneck rather than GPU compute. The user explicitly asked to raise
+# --cpus-per-task (8->16) and the run directory's config.yml num_workers
+# (4->12) after epoch 3 to compare epoch timing before/after, then resume via
+# `continue_run` (which reloads run_dir/config.yml fresh on every resume, so
+# the num_workers edit takes effect with no risk of silently reverting --
+# confirmed directly against neuralhydrology/nh_run.py's continue_run, which
+# only re-reads an external --config-file override if one is explicitly
+# passed, and this script's `continue` call passes none). catfish-01 had 64
+# CPUs total with only 16 allocated across all jobs at the time, so ample
+# headroom. No model/training hyperparameter was touched. See
+# docs/decision_log.md.
 #
 # Restart-safety: full-population training (2,307 basins x ~45,720 hourly
 # timestamps, 40 epochs) may not fit inside one 24h Slurm allocation. This

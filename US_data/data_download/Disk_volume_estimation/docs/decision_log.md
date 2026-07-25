@@ -3100,3 +3100,29 @@ task's "exactly ONE narrow, documented resource correction" allowance,
 `--mem` was raised from `64G` to `128G` (catfish-04 has ~1TB RealMemory, so
 ample headroom); no other setting (partition, GRES, batch size, workers,
 etc.) was changed. Job resubmitted after this fix.
+
+**Decision 4 — user-directed mid-run `--cpus-per-task`/`num_workers` increase
+(2026-07-25, separate from the one `--mem` correction above).** After the
+`--mem` fix, job 45640083 ran cleanly through epochs 1-3 with
+`--cpus-per-task=8` / `num_workers=4`: training took ~40min (epoch 1, includes
+one-time setup), ~19min (epoch 2), ~19min (epoch 3); validation (2,307 basins)
+took ~20min (epoch 1), ~10min (epoch 2), ~10min (epoch 3) (measured from
+on-disk checkpoint-file timestamps and log inspection; validation ran at a
+flat ~2.1 basins/sec throughout, consistent with a CPU-bound per-basin
+data-loading bottleneck rather than GPU compute). The user explicitly asked,
+mid-run, to stop after epoch 3's validation finished (confirmed via the
+appearance of the epoch 4 training progress bar in the log) specifically to
+capture this before/after timing baseline, then raise `--cpus-per-task`
+(8->16) and the run directory's own `config.yml` `num_workers` (4->12) and
+resume, to see whether it speeds up the CPU-bound validation phase. This is a
+Slurm-resource and dataloader-parallelism change only, not a model or
+training hyperparameter, and was explicitly directed by the user rather than
+an autonomous correction. Verified against
+`neuralhydrology/nh_run.py`'s `continue_run()` (loads `run_dir/config.yml`
+fresh on every resume; only overridden if an external `--config-file` is
+explicitly passed, which this script's `continue` call never does), so
+editing the run directory's `config.yml` directly before resubmitting is
+sufficient — no risk of the resume silently reverting to the old
+`num_workers` value. Job 45640083 was cancelled cleanly (not wall-time-killed)
+at 2:00:04 elapsed with epoch 3's checkpoint already on disk, and resubmitted
+after these changes.
