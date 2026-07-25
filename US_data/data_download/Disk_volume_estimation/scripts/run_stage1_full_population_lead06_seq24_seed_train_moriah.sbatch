@@ -3,7 +3,7 @@
 #SBATCH --partition=catfish
 #SBATCH --gres=gpu:l4:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=224G
 #SBATCH --time=24:00:00
 #SBATCH --signal=B:TERM@180
 #SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/fullpop-lead06-seq24-seed-train-%j.out
@@ -63,6 +63,20 @@
 # CPUs total with only 16 allocated across all jobs at the time, so ample
 # headroom. No model/training hyperparameter was touched. See
 # docs/decision_log.md.
+#
+# --mem correction #2 (2026-07-25, user-directed follow-up to the
+# --cpus-per-task correction above, not a new independent hyperparameter
+# change): the resumed job (45640233) under num_workers=12/--cpus-per-task=16
+# was OOM-killed 19:30 into epoch 4 TRAINING (not data loading), at
+# MaxRSS=133360076K (~133.4G) against the then --mem=128G limit (see
+# `sacct -j 45640233` and its "Detected 1 oom-kill event(s)" stderr line). No
+# model_epoch004.pt was written; the safe resume point remained epoch 3's
+# checkpoint from job 45640083. Raising num_workers 4->12 (3x) evidently added
+# enough per-dataloader-worker memory overhead to exceed the 128G ceiling that
+# had been sufficient at num_workers=4. Raised --mem to 224G (catfish-01 had
+# ~849G free of ~1TB RealMemory at the time, confirmed via `scontrol show node
+# catfish-01`); num_workers=12/--cpus-per-task=16 both left unchanged. No
+# model/training hyperparameter was touched. See docs/decision_log.md.
 #
 # Restart-safety: full-population training (2,307 basins x ~45,720 hourly
 # timestamps, 40 epochs) may not fit inside one 24h Slurm allocation. This

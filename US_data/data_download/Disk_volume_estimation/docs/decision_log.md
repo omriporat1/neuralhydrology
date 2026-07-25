@@ -3126,3 +3126,24 @@ sufficient — no risk of the resume silently reverting to the old
 `num_workers` value. Job 45640083 was cancelled cleanly (not wall-time-killed)
 at 2:00:04 elapsed with epoch 3's checkpoint already on disk, and resubmitted
 after these changes.
+
+**Decision 5 — user-directed follow-up `--mem` increase after a second OOM
+(2026-07-25).** The job resubmitted under Decision 4's `num_workers=12`/
+`--cpus-per-task=16` (job 45640233) correctly resumed from epoch 3's
+checkpoint but was OOM-killed 19:30 into epoch 4 *training* (not data
+loading), at `MaxRSS=133360076K` (~133.4G) against the then `--mem=128G`
+limit (`sacct -j 45640233`: `OUT_OF_MEMORY`; stderr: "Detected 1 oom-kill
+event(s)"). No `model_epoch004.pt` was written, so the safe resume point
+remained epoch 3's checkpoint. Raising `num_workers` 3x (4->12) evidently
+added enough per-dataloader-worker memory overhead to exceed the 128G ceiling
+that had been sufficient at `num_workers=4` — this is itself a useful,
+concrete finding about the memory/parallelism tradeoff for this dataset size.
+Consulted the user on how to proceed (raise `--mem` further and keep
+`num_workers=12`; dial `num_workers` back to a smaller compromise value; or
+revert to the known-good `--cpus-per-task=8`/`num_workers=4`/`--mem=128G`
+configuration). User chose to raise `--mem` further while keeping
+`num_workers=12`/`--cpus-per-task=16` unchanged. `scontrol show node
+catfish-01` showed ~849G free of ~1TB total `RealMemory` at the time, so
+`--mem` was raised from `128G` to `224G` in
+`run_stage1_full_population_lead06_seq24_seed_train_moriah.sbatch`; no
+model/training hyperparameter was touched. Job resubmitted after this fix.
