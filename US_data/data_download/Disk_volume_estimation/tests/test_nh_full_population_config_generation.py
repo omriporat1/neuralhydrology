@@ -326,7 +326,7 @@ def test_seed_run_profile_renders_exact_documented_hyperparameters(tmp_path):
     # Sec 9c documented seed hyperparameters, rendered exactly.
     assert cfg["model"] == "cudalstm"
     assert cfg["hidden_size"] == 128
-    assert cfg["dropout"] == 0.25
+    assert cfg["output_dropout"] == 0.25
     assert cfg["batch_size"] == 256
     assert cfg["optimizer"] == "Adam"
     assert cfg["learning_rate"] == 0.001
@@ -338,7 +338,7 @@ def test_seed_run_profile_renders_exact_documented_hyperparameters(tmp_path):
     assert cfg["device"] == "cuda:0"
 
     manifest = json.loads(dev_paths["generation_manifest.json"].read_text(encoding="utf-8"))
-    assert manifest["run_profile_values"]["dropout"] == 0.25
+    assert manifest["run_profile_values"]["output_dropout"] == 0.25
     assert manifest["run_profile_values"]["epochs"] == 40
     assert manifest["run_profile_values"]["loss"] == "NSE"
 

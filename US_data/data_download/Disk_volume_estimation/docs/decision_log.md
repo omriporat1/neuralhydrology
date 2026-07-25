@@ -3037,11 +3037,20 @@ non-compact-smoke run.
 Sec 9c documents the seed profile as "initial seed / first-viable-config
 only," with two fields given as ranges rather than exact values. Both were
 resolved narrowly, without inventing outside the documented range:
-  - `dropout` (~0.2–0.3 documented) → **0.25** (range midpoint). The
-    `dropout` config key name (not `output_dropout`) is confirmed by
-    existing NH 1.13 config precedent already in this repo
-    (`scripts/build_stage1_neuralhydrology_january_pilot.py`,
-    `scripts/build_stage1_neuralhydrology_january_with_recovery.py`).
+  - `dropout` (~0.2–0.3 documented) → **0.25** (range midpoint). **Correction
+    (2026-07-25):** this entry originally claimed the config key name was
+    plain `dropout`, citing
+    `scripts/build_stage1_neuralhydrology_january_pilot.py` as NH 1.13
+    precedent. That script is an unrun placeholder template (explicitly
+    commented "LSTM placeholder -- update before running"), not executed
+    evidence, and the key name was wrong. The real seed-training job
+    (45639408) crashed immediately on Moriah with
+    `ValueError: ['dropout'] are not recognized config keys.` The correct
+    key, confirmed directly against the installed NH 1.13 package
+    (`neuralhydrology/utils/config.py`'s `Config.output_dropout` property,
+    `self._cfg.get("output_dropout", 0.0)`), is **`output_dropout`**. Fixed
+    in `_INITIAL_SEED_TRAINING_PROFILE`, its manifest note, and the
+    corresponding tests; job resubmitted.
   - `epochs` ("max 30–50, with early stopping" documented) → **40** (range
     midpoint), trained as a fixed epoch count with per-epoch checkpointing
     (`save_weights_every: 1`, `validate_every: 1`). NH 1.13 has no confirmed

@@ -172,10 +172,18 @@ _COMPACT_SMOKE_RUN_PROFILE = {
 # ("initial seed / first-viable-config only") wherever that table gives an
 # exact value; two documented ranges required a narrow, non-inventive
 # resolution, recorded here rather than left implicit:
-#   - dropout ("~0.2-0.3"): resolved to the range midpoint, 0.25. The
-#     "dropout" config key name (not "output_dropout") is confirmed by
-#     existing NH 1.13 config precedent in this repo (e.g.
-#     scripts/build_stage1_neuralhydrology_january_pilot.py).
+#   - dropout ("~0.2-0.3"): resolved to the range midpoint, 0.25. The config
+#     key name is "output_dropout" (not "dropout") -- confirmed directly
+#     against the installed NH 1.13 package on Moriah
+#     (neuralhydrology/utils/config.py's Config.output_dropout property,
+#     `self._cfg.get("output_dropout", 0.0)`). An earlier version of this
+#     comment cited scripts/build_stage1_neuralhydrology_january_pilot.py as
+#     precedent for the plain "dropout" key name; that script is an unrun
+#     placeholder template (explicitly commented "LSTM placeholder -- update
+#     before running"), not executed evidence, and the key name it used was
+#     wrong -- caught only when job 45639408's real training run crashed
+#     immediately with `ValueError: ['dropout'] are not recognized config
+#     keys.` See docs/decision_log.md.
 #   - epochs ("max 30-50, with early stopping"): resolved to the range
 #     midpoint, 40. NH 1.13 has no confirmed native early-stopping/patience
 #     config key anywhere in this repo's own prior source inspection; this
@@ -203,7 +211,7 @@ _COMPACT_SMOKE_RUN_PROFILE = {
 _INITIAL_SEED_TRAINING_PROFILE = {
     "model": "cudalstm",
     "hidden_size": 128,
-    "dropout": 0.25,
+    "output_dropout": 0.25,
     "batch_size": 256,
     "optimizer": "Adam",
     "learning_rate": 0.001,
@@ -237,7 +245,7 @@ _RUN_PROFILE_NOTES = {
         "baseline or a hyperparameter-tuning seed."
     ),
     INITIAL_SEED_RUN_PROFILE_NAME: (
-        "model/hidden_size/dropout/optimizer/loss/epochs/etc. are the initial "
+        "model/hidden_size/output_dropout/optimizer/loss/epochs/etc. are the initial "
         "full-population seed run / not tuned / not the official Stage 1 "
         "benchmark. Sourced from docs/stage1_scientific_baseline_design.md "
         "Sec 9c; this is the first real full-population training run, not the "

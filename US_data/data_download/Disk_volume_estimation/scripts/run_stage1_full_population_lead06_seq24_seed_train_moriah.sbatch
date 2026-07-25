@@ -14,7 +14,7 @@
 # directive; see docs/decision_log.md's "initial full-population seed
 # training profile" entry). Trains the frozen
 # initial_full_population_seed_v001 profile (cudalstm, hidden_size 128,
-# dropout 0.25, batch_size 256, Adam lr 1e-3, NSE loss, 40 epochs,
+# output_dropout 0.25, batch_size 256, Adam lr 1e-3, NSE loss, 40 epochs,
 # checkpoint+validate every epoch, validate_n_random_basins = full 2,307-
 # basin development population) against the DEVELOPMENT bundle only
 # (2,307 basins, train 2020-10-14..2023-12-31). Never the spatial_holdout
