@@ -34,7 +34,11 @@ import xarray as xr
 import yaml
 
 from .gap_mask_io import GapMaskIOError, load_gap_timestamps_json
-from .nh_config_generation import EXPECTED_DEVELOPMENT_BASIN_COUNT, EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT
+from .nh_config_generation import (
+    EXPECTED_DEVELOPMENT_BASIN_COUNT,
+    EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT,
+    HOLDOUT_MARKER_FILENAME,
+)
 from .nh_register import FLASHNH_DATASET_KEY, register_flashnh_dataset
 from .package_audit import AuditReport
 from .staid import normalize_staid
@@ -325,7 +329,7 @@ def check_generated_config_structure(
         # filesystem-level "do not train this" safeguard (see
         # nh_config_generation.write_generated_config) since NH's own
         # Config._check_cfg_keys forbids marking this inside config.yaml.
-        marker_path = generated_dir / "TEST_ONLY_DO_NOT_TRAIN.txt"
+        marker_path = generated_dir / HOLDOUT_MARKER_FILENAME
         if marker_path.is_file():
             report.ok("test_only_marker_file_present")
         else:

@@ -42,10 +42,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.baseline.nh_config_generation import (
+    COMPACT_SMOKE_RUN_PROFILE_NAME,
+    INITIAL_SEED_RUN_PROFILE_NAME,
     NHConfigGenerationError,
     generate_stage1_full_population_nh_config_bundles,
     write_generated_config,
 )
+
+_KNOWN_RUN_PROFILES = (COMPACT_SMOKE_RUN_PROFILE_NAME, INITIAL_SEED_RUN_PROFILE_NAME)
 
 
 def _fail(message: str) -> None:
@@ -74,6 +78,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--out-dir", required=True,
                    help="Output directory; development/ and spatial_holdout/ subdirectories are written under it")
     p.add_argument("--force", action="store_true", help="Allow writing into non-empty output subdirectories")
+    p.add_argument("--run-profile", default=COMPACT_SMOKE_RUN_PROFILE_NAME, choices=_KNOWN_RUN_PROFILES,
+                   help="Named training-hyperparameter profile to render into config.yaml "
+                        f"(default: {COMPACT_SMOKE_RUN_PROFILE_NAME}, preserving prior behavior). "
+                        f"Use {INITIAL_SEED_RUN_PROFILE_NAME!r} for the initial full-population "
+                        "scientific seed run.")
     return p.parse_args(argv)
 
 
@@ -88,6 +97,7 @@ def main(argv=None) -> int:
             lead_hours=args.lead_hours,
             seq_length=args.seq_length,
             static_column_manifest_path=args.static_column_manifest,
+            run_profile_name=args.run_profile,
         )
     except NHConfigGenerationError as exc:
         _fail(str(exc))
@@ -113,6 +123,7 @@ def main(argv=None) -> int:
         "seq_length": bundles.development.seq_length,
         "target_variable": bundles.development.target_variable,
         "static_attribute_count": bundles.development.static_attribute_result.count,
+        "run_profile": args.run_profile,
         "development": {
             "config_yaml": str(development_paths["config.yaml"]),
             "generation_manifest": str(development_paths["generation_manifest.json"]),

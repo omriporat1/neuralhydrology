@@ -23,8 +23,10 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.baseline.nh_config_generation import (  # noqa: E402
+    COMPACT_SMOKE_RUN_PROFILE_NAME,
     EXPECTED_DEVELOPMENT_BASIN_COUNT,
     EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT,
+    INITIAL_SEED_RUN_PROFILE_NAME,
     NHConfigGenerationError,
     generate_stage1_full_population_nh_config_bundles,
     validate_full_population_basin_membership,
@@ -266,4 +268,105 @@ def test_generate_full_population_bundles_rejects_partial_package(tmp_path):
         generate_stage1_full_population_nh_config_bundles(
             policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
             lead_hours=6, seq_length=24,
+        )
+
+
+# ---------------------------------------------------------------------------
+# run_profile selection: initial full-population scientific seed profile
+# ---------------------------------------------------------------------------
+
+def test_default_run_profile_is_compact_smoke_and_unaffected(tmp_path):
+    # No run_profile_name passed -- must be byte-identical to prior behavior.
+    package_root = _build_fake_package(tmp_path / "package", REAL_FULL_UNION)
+    bundles = generate_stage1_full_population_nh_config_bundles(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+    )
+    assert bundles.development.run_profile_name == COMPACT_SMOKE_RUN_PROFILE_NAME
+    dev_paths = write_generated_config(bundles.development, tmp_path / "out" / "development")
+    manifest = json.loads(dev_paths["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["compact_smoke_run_profile"] is True
+    cfg = yaml.safe_load(dev_paths["config.yaml"].read_text(encoding="utf-8"))
+    assert cfg["hidden_size"] == 64
+    assert cfg["loss"] == "MSE"
+    assert cfg["epochs"] == 2
+
+
+def test_seed_run_profile_excludes_compact_smoke_marker(tmp_path):
+    package_root = _build_fake_package(tmp_path / "package", REAL_FULL_UNION)
+    bundles = generate_stage1_full_population_nh_config_bundles(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+        run_profile_name=INITIAL_SEED_RUN_PROFILE_NAME,
+    )
+    dev_paths = write_generated_config(bundles.development, tmp_path / "out" / "development")
+    manifest = json.loads(dev_paths["generation_manifest.json"].read_text(encoding="utf-8"))
+
+    # Must NOT contain compact_smoke_run_profile: true (or at all).
+    assert "compact_smoke_run_profile" not in manifest
+    assert "compact_smoke_run_profile_note" not in manifest
+
+    assert manifest["run_profile_name"] == INITIAL_SEED_RUN_PROFILE_NAME
+    note = manifest["run_profile_note"]
+    assert "initial full-population seed run" in note
+    assert "not tuned" in note
+    assert "not the official Stage 1 benchmark" in note
+
+
+def test_seed_run_profile_renders_exact_documented_hyperparameters(tmp_path):
+    package_root = _build_fake_package(tmp_path / "package", REAL_FULL_UNION)
+    bundles = generate_stage1_full_population_nh_config_bundles(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+        run_profile_name=INITIAL_SEED_RUN_PROFILE_NAME,
+    )
+    dev_paths = write_generated_config(bundles.development, tmp_path / "out" / "development")
+    cfg = yaml.safe_load(dev_paths["config.yaml"].read_text(encoding="utf-8"))
+
+    # Sec 9c documented seed hyperparameters, rendered exactly.
+    assert cfg["model"] == "cudalstm"
+    assert cfg["hidden_size"] == 128
+    assert cfg["dropout"] == 0.25
+    assert cfg["batch_size"] == 256
+    assert cfg["optimizer"] == "Adam"
+    assert cfg["learning_rate"] == 0.001
+    assert cfg["loss"] == "NSE"
+    assert cfg["epochs"] == 40
+    assert cfg["save_weights_every"] == 1
+    assert cfg["validate_every"] == 1
+    assert cfg["validate_n_random_basins"] == EXPECTED_DEVELOPMENT_BASIN_COUNT
+    assert cfg["device"] == "cuda:0"
+
+    manifest = json.loads(dev_paths["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["run_profile_values"]["dropout"] == 0.25
+    assert manifest["run_profile_values"]["epochs"] == 40
+    assert manifest["run_profile_values"]["loss"] == "NSE"
+
+
+def test_seed_run_profile_applies_identically_to_spatial_holdout_bundle(tmp_path):
+    # The holdout bundle's config.yaml must carry the same seed profile (even
+    # though it is test-only and never trained against) so its config.yaml is
+    # not silently a different, undocumented profile.
+    package_root = _build_fake_package(tmp_path / "package", REAL_FULL_UNION)
+    bundles = generate_stage1_full_population_nh_config_bundles(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+        run_profile_name=INITIAL_SEED_RUN_PROFILE_NAME,
+    )
+    assert bundles.spatial_holdout.run_profile_name == INITIAL_SEED_RUN_PROFILE_NAME
+    holdout_paths = write_generated_config(bundles.spatial_holdout, tmp_path / "out" / "spatial_holdout")
+    holdout_cfg = yaml.safe_load(holdout_paths["config.yaml"].read_text(encoding="utf-8"))
+    assert holdout_cfg["hidden_size"] == 128
+    assert holdout_cfg["loss"] == "NSE"
+    holdout_manifest = json.loads(holdout_paths["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert "compact_smoke_run_profile" not in holdout_manifest
+
+
+def test_generate_full_population_bundles_rejects_unknown_run_profile(tmp_path):
+    package_root = _build_fake_package(tmp_path / "package", REAL_FULL_UNION)
+    with pytest.raises(NHConfigGenerationError):
+        generate_stage1_full_population_nh_config_bundles(
+            policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+            lead_hours=6, seq_length=24,
+            run_profile_name="not_a_real_profile",
         )

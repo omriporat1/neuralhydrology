@@ -3007,3 +3007,72 @@ as-is, not rewritten to falsely appear to have used v002.
 artifacts (runtime or audit-form), NeuralHydrology integration code, and
 Slurm files remain not implemented — this patch only reconciled planning
 documentation with the already-accepted v002/32-basin state.
+
+## 2026-07-25 Stage 1 — Milestone: initial full-population seed training profile
+
+Following the full-population Moriah launch-readiness gate PASS (job
+45634112, 2,307 development / 250 spatial-holdout basins, lead06/seq24),
+work began on the first real full-population scientific seed training run.
+Two small, bounded decisions were required to render a runnable config
+without inventing new science; both are recorded here rather than only in
+code comments.
+
+**Decision 1 — named run-profile mechanism.** `src/baseline/nh_config_generation.py`
+previously merged exactly one hardcoded technical profile
+(`_COMPACT_SMOKE_RUN_PROFILE`) into every generated config, always recording
+`compact_smoke_run_profile: true` in the generation manifest. This is now a
+named-profile registry (`_RUN_PROFILES`, keyed by
+`COMPACT_SMOKE_RUN_PROFILE_NAME` / `INITIAL_SEED_RUN_PROFILE_NAME`) selected
+via a new `run_profile_name` parameter on `build_nh_config_mapping`,
+`generate_stage1_nh_config`, and `generate_stage1_full_population_nh_config_bundles`
+(default unchanged: `compact_smoke_v1`, so every existing caller/test is
+unaffected). The generation manifest now always carries a generic
+`run_profile_name` / `run_profile_values` / `run_profile_note` block; the
+legacy `compact_smoke_run_profile: true` key is preserved byte-for-byte only
+when that profile is actually used, and is never written (not even as
+`false`) for any other profile — omission, not a false value, marks a
+non-compact-smoke run.
+
+**Decision 2 — initial seed hyperparameter values.** `docs/stage1_scientific_baseline_design.md`
+Sec 9c documents the seed profile as "initial seed / first-viable-config
+only," with two fields given as ranges rather than exact values. Both were
+resolved narrowly, without inventing outside the documented range:
+  - `dropout` (~0.2–0.3 documented) → **0.25** (range midpoint). The
+    `dropout` config key name (not `output_dropout`) is confirmed by
+    existing NH 1.13 config precedent already in this repo
+    (`scripts/build_stage1_neuralhydrology_january_pilot.py`,
+    `scripts/build_stage1_neuralhydrology_january_with_recovery.py`).
+  - `epochs` ("max 30–50, with early stopping" documented) → **40** (range
+    midpoint), trained as a fixed epoch count with per-epoch checkpointing
+    (`save_weights_every: 1`, `validate_every: 1`). NH 1.13 has no confirmed
+    native early-stopping/patience config key anywhere in this repo's prior
+    source inspection; this project's own Sec 9d selection rule (best epoch
+    by validation raw-space NSE, chosen post-hoc after training completes)
+    already **is** the early-stopping mechanism for this project — no live
+    early-stopping callback was implemented or is needed.
+  - `loss` (Sec 7: "likely an NSE-family loss," target-scaling-dependent and
+    left open) → resolved to NH's built-in `NSE` loss, consistent with that
+    steer and with this project's own prior Smoke 1 run (job 45370873,
+    `loss: NSE`).
+  - `validate_n_random_basins` → set to the full 2,307-basin development
+    population (not a subsample), mirroring the compact profile's own
+    convention of covering every available basin every epoch. This is
+    required (not merely a preference): the post-hoc checkpoint-selection
+    step compares validation metrics across epochs, which is only a fair
+    comparison if every epoch validates the identical basin set.
+  - `hidden_size` (128), `batch_size` (256), `optimizer` (Adam), `learning_rate`
+    (1e-3), and `model` (cudalstm) are taken directly from Sec 9c's exact
+    values, unchanged.
+
+Neither decision met the task's stop-and-ask bar (a genuinely unresolved,
+contradictory value that prevents a runnable config): both ranges had a
+defensible, non-inventive midpoint resolution, and the early-stopping
+mechanism question was already answered by this project's own existing
+checkpoint-selection convention.
+
+**Not done in this entry.** No training was run yet. The raw-space (m³/s)
+evaluation layer, the GPU training Slurm script, and the basin-area
+self-derivation approach (package NetCDFs carry no `DRAIN_SQKM` field; area
+is instead derived from the algebraic identity relating each basin's
+diagnostic `qobs_m3s` series to its built `qobs_mm_per_h_lead06` target) are
+addressed separately as part of the same seed-run implementation increment.

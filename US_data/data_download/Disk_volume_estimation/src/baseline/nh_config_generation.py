@@ -64,6 +64,11 @@ __all__ = [
     "FullPopulationConfigBundles",
     "EXPECTED_DEVELOPMENT_BASIN_COUNT",
     "EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT",
+    "COMPACT_SMOKE_RUN_PROFILE_NAME",
+    "INITIAL_SEED_RUN_PROFILE_NAME",
+    "HOLDOUT_MARKER_FILENAME",
+    "HoldoutBundleTrainingRejected",
+    "raise_if_holdout_bundle",
     "read_package_manifest",
     "read_package_attribute_columns",
     "resolve_target_variable",
@@ -93,6 +98,35 @@ class NHConfigGenerationError(ValueError):
     """Raised for an invalid config-generation input, package/policy mismatch,
     or contract violation (multi-target, raw-target-as-target, static/dynamic
     mismatch, non-canonical basin membership, forbidden config key, etc.)."""
+
+
+# Sibling-file safeguard name for a spatial-holdout (test-only) generated
+# bundle -- see write_generated_config's rationale (NH's own
+# Config._check_cfg_keys forbids marking this inside config.yaml itself, so
+# it must be a file NH never reads).
+HOLDOUT_MARKER_FILENAME = "TEST_ONLY_DO_NOT_TRAIN.txt"
+
+
+class HoldoutBundleTrainingRejected(NHConfigGenerationError):
+    """Raised by raise_if_holdout_bundle when a training entrypoint is
+    pointed at a spatial-holdout (test-only) generated config directory."""
+
+
+def raise_if_holdout_bundle(generated_dir) -> None:
+    """Guard for any training entrypoint (the GPU training sbatch script,
+    ``scripts/run_stage1_nh.py train``/``continue`` callers): refuses to
+    proceed if ``generated_dir`` is a spatial-holdout bundle, identified by
+    the presence of :data:`HOLDOUT_MARKER_FILENAME`. This is the only
+    reliable holdout/development discriminator available to a training
+    launcher, since the holdout bundle's config.yaml otherwise looks like an
+    ordinary runnable NH config (its train/validation basin lists are the
+    development population, by design -- see write_generated_config)."""
+    marker_path = Path(generated_dir) / HOLDOUT_MARKER_FILENAME
+    if marker_path.is_file():
+        raise HoldoutBundleTrainingRejected(
+            f"refusing to train: {generated_dir} is a SPATIAL-HOLDOUT TEST-ONLY bundle "
+            f"(found {marker_path}). Point the training launcher at the development bundle instead."
+        )
 
 
 # Frozen compact smoke-run profile: the runnable NH 1.13 training settings
@@ -128,6 +162,87 @@ _COMPACT_SMOKE_RUN_PROFILE = {
     "epochs": 2,
     "device": "cuda:0",
     "verbose": 0,
+}
+
+# Initial full-population seed training profile: the FIRST real scientific
+# training run against the certified 2,307-basin development population
+# (stage1_scientific_package_v002, lead06/seq24). This is an initial,
+# untuned seed -- not the official Stage 1 benchmark, not a sweep result.
+# Values are taken from docs/stage1_scientific_baseline_design.md Sec 9c
+# ("initial seed / first-viable-config only") wherever that table gives an
+# exact value; two documented ranges required a narrow, non-inventive
+# resolution, recorded here rather than left implicit:
+#   - dropout ("~0.2-0.3"): resolved to the range midpoint, 0.25. The
+#     "dropout" config key name (not "output_dropout") is confirmed by
+#     existing NH 1.13 config precedent in this repo (e.g.
+#     scripts/build_stage1_neuralhydrology_january_pilot.py).
+#   - epochs ("max 30-50, with early stopping"): resolved to the range
+#     midpoint, 40. NH 1.13 has no confirmed native early-stopping/patience
+#     config key anywhere in this repo's own prior source inspection; this
+#     project's established convention (already required independently by
+#     this task's own checkpoint-selection step) is instead to train a fixed
+#     epoch count with per-epoch checkpointing (save_weights_every=1,
+#     validate_every=1) and select the best epoch post-hoc from validation
+#     metrics -- i.e. Sec 9d's "Validation raw-space NSE" selection rule IS
+#     the early-stopping mechanism for this project, not a live callback.
+#   - loss: Sec 7 leaves the training loss "likely an NSE-family loss"
+#     (target-scaling-dependent, not yet pinned to one formula); resolved to
+#     NH's built-in "NSE" loss, consistent with that steer and with this
+#     project's own prior Smoke 1 run (job 45370873, loss: NSE).
+#   - validate_n_random_basins: set to the full development population size
+#     (not a subsample), mirroring the compact profile's own convention of
+#     covering every available basin every epoch -- required so that
+#     per-epoch validation coverage is identical across epochs, which the
+#     post-hoc checkpoint-selection step (Part E) depends on for a fair
+#     cross-epoch comparison.
+#   - num_workers / verbose: operational-only settings (GPU data-loading
+#     parallelism, log verbosity), not scientific hyperparameters; chosen for
+#     a real multi-hour GPU run rather than the compact profile's CPU-safe
+#     single-process/quiet smoke-run defaults.
+# See docs/decision_log.md for the recorded decision entry.
+_INITIAL_SEED_TRAINING_PROFILE = {
+    "model": "cudalstm",
+    "hidden_size": 128,
+    "dropout": 0.25,
+    "batch_size": 256,
+    "optimizer": "Adam",
+    "learning_rate": 0.001,
+    "loss": "NSE",
+    "save_weights_every": 1,
+    "validate_every": 1,
+    "validate_n_random_basins": EXPECTED_DEVELOPMENT_BASIN_COUNT,
+    "log_interval": 50,
+    "num_workers": 4,
+    "epochs": 40,
+    "device": "cuda:0",
+    "verbose": 1,
+}
+
+# Canonical run-profile registry: name -> (hyperparameter mapping, manifest
+# note). New profiles must be added here, never spliced in ad hoc, so every
+# generated manifest can unambiguously record which named profile it used.
+COMPACT_SMOKE_RUN_PROFILE_NAME = "compact_smoke_v1"
+INITIAL_SEED_RUN_PROFILE_NAME = "initial_full_population_seed_v001"
+
+_RUN_PROFILES = {
+    COMPACT_SMOKE_RUN_PROFILE_NAME: _COMPACT_SMOKE_RUN_PROFILE,
+    INITIAL_SEED_RUN_PROFILE_NAME: _INITIAL_SEED_TRAINING_PROFILE,
+}
+
+_RUN_PROFILE_NOTES = {
+    COMPACT_SMOKE_RUN_PROFILE_NAME: (
+        "model/hidden_size/optimizer/loss/epochs/etc. are the frozen "
+        "compact-smoke-run technical settings for the first lead06/seq24 "
+        "integration-validation training run; they are NOT the scientific "
+        "baseline or a hyperparameter-tuning seed."
+    ),
+    INITIAL_SEED_RUN_PROFILE_NAME: (
+        "model/hidden_size/dropout/optimizer/loss/epochs/etc. are the initial "
+        "full-population seed run / not tuned / not the official Stage 1 "
+        "benchmark. Sourced from docs/stage1_scientific_baseline_design.md "
+        "Sec 9c; this is the first real full-population training run, not the "
+        "result of a hyperparameter sweep."
+    ),
 }
 
 _FORBIDDEN_KEY_SUBSTRINGS = (
@@ -183,6 +298,11 @@ class GeneratedConfigBundle:
     train_basin_ids: "list | None" = None
     validation_basin_ids: "list | None" = None
     test_basin_ids: "list | None" = None
+    # Defaults to the pre-existing compact-smoke profile, which preserves
+    # every previous caller's behavior byte-for-byte. Only a caller that
+    # explicitly asks for a different named profile (see _RUN_PROFILES)
+    # gets something else.
+    run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -505,11 +625,20 @@ def build_nh_config_mapping(
     seq_length: int,
     dynamic_inputs: list,
     static_attributes: list,
+    run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
     data_dir, or run_dir -- those depend on the concrete output directory and
-    are filled in by :func:`write_generated_config`."""
+    are filled in by :func:`write_generated_config`.
+
+    ``run_profile_name`` selects which named training-hyperparameter profile
+    (see ``_RUN_PROFILES``) is merged in; it defaults to the compact-smoke
+    profile so every pre-existing caller is unaffected."""
+    if run_profile_name not in _RUN_PROFILES:
+        raise NHConfigGenerationError(
+            f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
+        )
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -539,7 +668,7 @@ def build_nh_config_mapping(
         "dynamic_inputs": list(dynamic_inputs),
         "static_attributes": list(static_attributes),
     }
-    mapping.update(_COMPACT_SMOKE_RUN_PROFILE)
+    mapping.update(_RUN_PROFILES[run_profile_name])
     # nan_handling_method deliberately absent: hard-exclusion baseline
     # (accepted finding #7); never set as a defensive backstop here.
     return mapping
@@ -573,10 +702,16 @@ def generate_stage1_nh_config(
     lead_hours: int,
     seq_length: int,
     static_column_manifest_path=None,
+    run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
     splits_dir = Path(splits_dir)
+
+    if run_profile_name not in _RUN_PROFILES:
+        raise NHConfigGenerationError(
+            f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
+        )
 
     try:
         policy = load_stage1_baseline_policy(policy_path)
@@ -610,6 +745,7 @@ def generate_stage1_nh_config(
         seq_length=seq_length,
         dynamic_inputs=dynamic_inputs,
         static_attributes=static_result.columns,
+        run_profile_name=run_profile_name,
     )
 
     package_manifest_identity = {
@@ -635,6 +771,7 @@ def generate_stage1_nh_config(
         splits_dir=str(splits_dir),
         generated_at_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         git_commit=_get_git_commit(),
+        run_profile_name=run_profile_name,
     )
 
 
@@ -662,6 +799,7 @@ def generate_stage1_full_population_nh_config_bundles(
     lead_hours: int,
     seq_length: int,
     static_column_manifest_path=None,
+    run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
 ) -> FullPopulationConfigBundles:
     """Generate the development + spatial-holdout config bundle pair for one
     approved (lead, seq_length) combination against the certified full
@@ -689,6 +827,11 @@ def generate_stage1_full_population_nh_config_bundles(
     policy_path = Path(policy_path)
     package_root = Path(package_root)
     splits_dir = Path(splits_dir)
+
+    if run_profile_name not in _RUN_PROFILES:
+        raise NHConfigGenerationError(
+            f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
+        )
 
     try:
         policy = load_stage1_baseline_policy(policy_path)
@@ -722,6 +865,7 @@ def generate_stage1_full_population_nh_config_bundles(
         seq_length=seq_length,
         dynamic_inputs=dynamic_inputs,
         static_attributes=static_result.columns,
+        run_profile_name=run_profile_name,
     )
 
     package_manifest_identity = {
@@ -749,6 +893,7 @@ def generate_stage1_full_population_nh_config_bundles(
         splits_dir=str(splits_dir),
         generated_at_utc=generated_at_utc,
         git_commit=git_commit,
+        run_profile_name=run_profile_name,
     )
 
     development_bundle = GeneratedConfigBundle(
@@ -867,7 +1012,7 @@ def write_generated_config(
         # NH 1.13's Config._check_cfg_keys rejects any unrecognized top-level
         # key, so this safeguard cannot live inside config.yaml itself -- it
         # must be a sibling file NH never reads.
-        marker_path = out_dir / "TEST_ONLY_DO_NOT_TRAIN.txt"
+        marker_path = out_dir / HOLDOUT_MARKER_FILENAME
         _atomic_write_text(
             marker_path,
             "This config bundle is SPATIAL-HOLDOUT TEST-ONLY EVALUATION MACHINERY.\n"
@@ -886,7 +1031,7 @@ def write_generated_config(
             "check_flashnh_external_scaler_test_construction and the full-population\n"
             "config-generation entry in docs/decision_log.md.\n",
         )
-        written_paths["TEST_ONLY_DO_NOT_TRAIN.txt"] = marker_path
+        written_paths[HOLDOUT_MARKER_FILENAME] = marker_path
     artifact_sha256 = {name: sha256_of(p) for name, p in sorted(written_paths.items())}
 
     generation_manifest = {
@@ -928,12 +1073,22 @@ def write_generated_config(
         "policy_path": bundle.policy_path,
         "policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
-        "compact_smoke_run_profile": True,
-        "compact_smoke_run_profile_note": (
-            "model/hidden_size/optimizer/loss/epochs/etc. are the frozen "
-            "compact-smoke-run technical settings for this first lead06/seq24 "
-            "integration-validation training run; they are NOT the scientific "
-            "baseline or a hyperparameter-tuning seed."
+        "run_profile_name": bundle.run_profile_name,
+        "run_profile_values": dict(_RUN_PROFILES[bundle.run_profile_name]),
+        "run_profile_note": _RUN_PROFILE_NOTES[bundle.run_profile_name],
+        **(
+            # Legacy field, preserved byte-for-byte ONLY for the compact-smoke
+            # profile so pre-existing consumers/tests of this exact key are
+            # unaffected. Deliberately absent (never written as False) for
+            # every other profile, per this task's explicit requirement that
+            # a seed-run manifest must not contain `compact_smoke_run_profile:
+            # true` -- omission, not a False value, is the unambiguous signal.
+            {
+                "compact_smoke_run_profile": True,
+                "compact_smoke_run_profile_note": _RUN_PROFILE_NOTES[COMPACT_SMOKE_RUN_PROFILE_NAME],
+            }
+            if bundle.run_profile_name == COMPACT_SMOKE_RUN_PROFILE_NAME
+            else {}
         ),
         "nh_runtime_dataset_key": full_mapping["dataset"],
         "nh_runtime_dataset_key_note": (

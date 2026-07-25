@@ -1,7 +1,10 @@
-"""Thin Flash-NH entrypoint for NeuralHydrology 1.13 train/eval runs.
+"""Thin Flash-NH entrypoint for NeuralHydrology 1.13 train/continue/eval runs.
 
 Registers FlashNHDataset under the "flashnh" dataset key, then delegates to
-neuralhydrology.nh_run.start_run (train) or
+neuralhydrology.nh_run.start_run (train), neuralhydrology.nh_run.continue_run
+(continue, restart-safe resume of an interrupted run from its own run_dir --
+mirrors `nh-run continue_training --run-dir ...` exactly, see
+docs/decision_log.md's confirmed `nh-run --help` mode list), or
 neuralhydrology.evaluation.evaluate.start_evaluation (eval, built inline so an
 optional --metrics list can be applied to the loaded Config in memory without
 writing back to the run's config.yml). Contains no modeling or
@@ -34,6 +37,22 @@ def main() -> None:
     train_parser = subparsers.add_parser("train", help="Run neuralhydrology.nh_run.start_run")
     train_parser.add_argument("config_file", type=Path)
 
+    continue_parser = subparsers.add_parser(
+        "continue", help="Resume an interrupted run via neuralhydrology.nh_run.continue_run"
+    )
+    continue_parser.add_argument("run_dir", type=Path)
+    continue_parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional overlay config file merged on top of run_dir/config.yml (e.g. to raise "
+            "'epochs' beyond the original value for a wall-time-limited restart). If omitted, "
+            "resumes strictly under the run's own frozen config.yml, using whichever epoch "
+            "checkpoint neuralhydrology.nh_run.continue_run finds latest in run_dir."
+        ),
+    )
+
     eval_parser = subparsers.add_parser(
         "eval", help="Run neuralhydrology.evaluation.evaluate.start_evaluation on a completed run"
     )
@@ -65,6 +84,10 @@ def main() -> None:
         from neuralhydrology.nh_run import start_run
 
         start_run(config_file=args.config_file)
+    elif args.command == "continue":
+        from neuralhydrology.nh_run import continue_run
+
+        continue_run(run_dir=args.run_dir, config_file=args.config_file)
     elif args.command == "eval":
         # Built directly (instead of neuralhydrology.nh_run.eval_run) only so
         # --metrics can be applied to the in-memory Config before evaluation;
