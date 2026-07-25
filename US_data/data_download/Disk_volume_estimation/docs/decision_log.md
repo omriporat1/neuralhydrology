@@ -3085,3 +3085,18 @@ self-derivation approach (package NetCDFs carry no `DRAIN_SQKM` field; area
 is instead derived from the algebraic identity relating each basin's
 diagnostic `qobs_m3s` series to its built `qobs_mm_per_h_lead06` target) are
 addressed separately as part of the same seed-run implementation increment.
+
+**Decision 3 — the one permitted resource correction (`--mem`).** After the
+`output_dropout` key fix, the first real training attempt (job 45639481)
+started cleanly (CUDA detected, both guards passed, the full 2,307-basin
+dataset loaded) but was killed by the Slurm cgroup OOM handler ~26 minutes
+in, before completing epoch 0 or writing any checkpoint (`sacct -j 45639481`:
+`OUT_OF_MEMORY`, `MaxRSS=66741204K` against the script's original
+`--mem=64G`; stderr: "Detected 1 oom-kill event(s)"). This is a genuine
+infrastructure sizing problem, not a model-skill or hyperparameter issue —
+`--mem` is a Slurm resource request, not a training hyperparameter. Per the
+task's "exactly ONE narrow, documented resource correction" allowance,
+`run_stage1_full_population_lead06_seq24_seed_train_moriah.sbatch`'s
+`--mem` was raised from `64G` to `128G` (catfish-04 has ~1TB RealMemory, so
+ample headroom); no other setting (partition, GRES, batch size, workers,
+etc.) was changed. Job resubmitted after this fix.

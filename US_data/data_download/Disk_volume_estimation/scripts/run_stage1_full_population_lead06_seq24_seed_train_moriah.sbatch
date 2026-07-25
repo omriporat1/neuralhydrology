@@ -3,7 +3,7 @@
 #SBATCH --partition=catfish
 #SBATCH --gres=gpu:l4:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --signal=B:TERM@180
 #SBATCH --output=/sci/labs/efratmorin/omripo/Flash-NH/logs/fullpop-lead06-seq24-seed-train-%j.out
@@ -35,6 +35,15 @@
 # L4 proves inadequate (OOM / infeasible epoch runtime) -- the directive
 # permits exactly ONE narrow, documented resource correction; do not tune
 # model hyperparameters in response to a resource problem.
+#
+# --mem correction (2026-07-25, the one permitted resource correction): the
+# first real attempt (job 45639481) was OOM-killed 26 min in, before any
+# checkpoint, at MaxRSS 66.7G against the original --mem=64G request (see
+# `sacct -j 45639481` and the "Detected 1 oom-kill event(s)" stderr line).
+# Full-population dataset loading (2,307 basins) plus num_workers=4 dataloader
+# worker processes exceeds 64G. Raised to --mem=128G (catfish-04 has ~1TB
+# RealMemory, so ample headroom); no model/training hyperparameter was
+# touched. See docs/decision_log.md.
 #
 # Restart-safety: full-population training (2,307 basins x ~45,720 hourly
 # timestamps, 40 epochs) may not fit inside one 24h Slurm allocation. This
