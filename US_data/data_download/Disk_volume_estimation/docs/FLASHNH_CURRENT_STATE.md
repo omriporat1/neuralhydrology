@@ -1,6 +1,81 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-24 (Commit-readiness review + safeguard fixes for the full-population NH config-generation increment)
+Last updated: 2026-07-26 (Stage 1 full-population seed training run — CLOSED)
+
+## Stage 1 full-population seed training run — CLOSED (2026-07-25 training / 2026-07-26 evidence closure)
+
+**Scope.** First full-population CudaLSTM training run on the certified 2,307
+development-training basins (Gate 4 package, non-California). Target
+`qobs_mm_per_h_lead06`, `seq_length: 24`. Training ran epochs 1–11 (epochs
+1–3 as the initial job, epochs 4–11 as a resumed continuation after two OOM
+kills — see `docs/decision_log.md` Decisions 3–5) and was then stopped
+(clean cancellation at the epoch-11 checkpoint, not a crash). A complete
+raw-space (m³/s) development-validation evaluation (calendar year 2024) was
+run for **all 11 checkpoints**: 2,307 basins evaluated, 0 area-excluded,
+**19,747,262 admitted samples for every single checkpoint** (identical
+denominator across all 11 epochs — confirms no silent sample-set drift
+between checkpoints). **No temporal-test or spatial-holdout data was
+accessed at any point.** Full evidence bundle:
+`reports/seed_validation_review_v001/` (local, untracked; see
+`docs/decision_log.md` for the closure decisions and checksums).
+
+**Checkpoint comparison result: a broad validation plateau, no scientifically
+clear winning epoch.** Per-basin raw-space NSE (development validation,
+2024):
+- Epoch **7** has the maximum **median** per-basin NSE (≈0.2401) — adopted
+  as the primary run-level selection statistic (see decision below).
+- Epoch **6** has the maximum **pooled** (sample-concatenated) NSE (≈0.4651).
+- Epoch **9** has the least-negative **mean** per-basin NSE, but mean NSE is
+  dominated by a handful of extreme negative outliers and is not used as the
+  primary selection criterion.
+- All three aggregation methods disagree on the top epoch.
+- Roughly 78–81% of basins have NSE > 0, ~12–13% have NSE > 0.5, ~19–22%
+  have NSE < 0, essentially flat across all 11 epochs with no improving
+  trend — consistent with training having already plateaued well before the
+  epoch-11 cancellation.
+
+**Decisions adopted at closure (full text: `docs/decision_log.md`,
+2026-07-26 entries):**
+1. **Median per-basin raw-space NSE** on development validation is the
+   primary run/checkpoint-selection metric going forward.
+2. Mean per-basin NSE and pooled NSE are retained as **diagnostics**, not
+   primary selection metrics.
+3. Future evaluations report the full distribution (p1/p5/p10/p25/p50/p75/
+   p90/p95/p99) plus NSE sign fractions, not just a single summary number.
+4. Early-stopping policy for future runs: save every epoch; no stop before
+   epoch 6; official validation every 2–3 epochs; minimum meaningful
+   improvement 0.005 median NSE; patience 3 validation events; max 30–40
+   epochs; best checkpoint retained; temporal-test/spatial-holdout data is
+   never used for stopping or selection.
+5. Test sets (temporal-test, spatial-holdout) remain sealed during
+   optimization.
+6. **This seed run is a successful pipeline proof and an initial
+   optimization baseline — it is not a tuned model and not the official
+   Stage 1 benchmark.**
+7. Epoch 7 may be recorded as the deterministic representative of the
+   plateau under the adopted median-NSE rule, but is **not** scientifically
+   meaningfully superior to the nearby checkpoints (6, 9, 10 are all within
+   noise on median NSE).
+
+**Operational findings** (full detail: `docs/stage1_neuralhydrology_preflight.md`):
+raising the training job to `--cpus-per-task=16`/`num_workers=12` (from
+`8`/`4`) produced no measurable training or validation speedup (validation
+held a flat ~2.1 basins/sec before and after) while pushing peak memory to
+~223 GiB against a 224G allocation — **this configuration must not become
+the default** for future Stage 1 seed runs. The epoch-3→epoch-4 resume
+restored model weights and full Adam optimizer state correctly but reseeds
+RNG to the fixed `cfg.seed` rather than continuing the pre-interruption
+stream (NeuralHydrology has no dataloader shuffle-state serialization) — the
+continuation is scientifically valid but not bitwise-equivalent to an
+uninterrupted run.
+
+**Not established by this run:** final hyperparameters, sequence length,
+lead time, the full architecture (in particular a learned static
+representation, not yet designed), temporal-test or spatial-holdout
+performance, or W&B tracking. **Next phase: "Stage 1 validation and
+optimization foundation"** — percentile diagnostics, a deterministic
+hydrograph atlas, a learned static representation, a screening validation
+subset, W&B tracking, and the first embedded-static CudaLSTM candidate.
 
 ## Commit-readiness review of the full-population NH config-generation increment — two safeguard fixes (2026-07-24)
 

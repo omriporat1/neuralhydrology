@@ -3147,3 +3147,95 @@ catfish-01` showed ~849G free of ~1TB total `RealMemory` at the time, so
 `--mem` was raised from `128G` to `224G` in
 `run_stage1_full_population_lead06_seq24_seed_train_moriah.sbatch`; no
 model/training hyperparameter was touched. Job resubmitted after this fix.
+
+## 2026-07-26 — Stage 1 full-population seed-run closure decisions
+
+Closure and handoff task, not a new experiment. The job resubmitted under
+Decision 5's `--mem=224G` (job 45640243) was cancelled cleanly by the user
+at the epoch-11 checkpoint ceiling, `MaxRSS=234046840K` (~223.2 GiB against
+the 224G allocation — within ~1 GiB of a third OOM). No epoch-12 checkpoint
+was produced. A complete raw-space (m³/s) development-validation evaluation
+(2,307 basins, calendar year 2024) was then run for all 11 checkpoints;
+every epoch admitted an identical 19,747,262 samples. Full comparison:
+`reports/seed_validation_review_v001/aggregate/seed_ckpt_comparison_report_epochs1to11.{json,md}`.
+Per-epoch median NSE 0.2168–0.2401, mean NSE -69.80 to -7.73, pooled NSE
+0.4234–0.4651 — median (epoch 7) and pooled (epoch 6) disagree, mean (epoch
+9) is outlier-dominated. No monotonic trend across epochs; training had
+plateaued well before the epoch-11 cancellation.
+
+**Decision 6 — seed-run outcome.** The full-population seed run (2,307
+development basins, `qobs_mm_per_h_lead06`, `seq_length: 24`, epochs 1–11)
+is closed as a **successful pipeline proof and initial optimization
+baseline**. It is explicitly **not** a tuned model and **not** the official
+Stage 1 benchmark. No temporal-test or spatial-holdout data was accessed at
+any point in this run or its evaluation.
+
+**Decision 7 — median per-basin raw-space NSE is the primary selection
+metric.** Because the three natural cross-basin aggregations of per-basin
+NSE (median, mean, pooled) disagree on the top checkpoint (epoch 7, 9, and 6
+respectively) and mean NSE is dominated by extreme negative outliers on a
+small subset of basins, **median per-basin raw-space NSE on development
+validation** is adopted as the primary run/checkpoint-selection statistic
+project-wide going forward. Mean per-basin NSE and pooled NSE are retained
+as secondary diagnostics only. This resolves the gap flagged in
+`docs/stage1_scientific_baseline_design.md` §7 (mean-NSE-can-hide-failure)
+and formalizes the previously undocumented `selection_basis:
+"development_validation_only_raw_space_median_nse"` convention already used
+by `scripts/evaluate_stage1_seed_raw_space.py`.
+
+**Decision 8 — no scientifically meaningful winner across the plateau.**
+Epoch 7 (max median NSE, ≈0.2401) is recorded as the deterministic
+representative checkpoint of this seed run under the Decision 7 rule, but
+this is **not** a claim that epoch 7 is scientifically meaningfully
+superior to nearby checkpoints (6, 9, 10 are within noise on median NSE).
+NSE-sign fractions (~78–81% positive, ~12–13% > 0.5, ~19–22% negative) and
+all secondary metrics are essentially flat across all 11 epochs.
+
+**Decision 9 — required distribution reporting.** Future raw-space
+evaluations must report the per-basin metric distribution
+(p1/p5/p10/p25/p50/p75/p90/p95/p99) and NSE sign fractions (>0, >0.5, <0),
+not just a single summary statistic — this is what surfaced the Decision 7
+disagreement and must not be lost in future reporting.
+
+**Decision 10 — early-stopping policy for future Stage 1 runs.** Save every
+epoch's checkpoint. No stop before epoch 6. Run the official raw-space
+validation every 2–3 epochs (not every epoch — validation throughput is the
+CPU-bound bottleneck, see Decision 11 and
+`docs/stage1_neuralhydrology_preflight.md`). Minimum meaningful improvement:
+0.005 median NSE between successive official validation events. Patience: 3
+validation events without meeting the minimum improvement. Maximum 30–40
+epochs. Retain the best checkpoint by median NSE. Temporal-test and
+spatial-holdout data are never used for stopping or selection decisions.
+
+**Decision 11 — the 12-worker/224G configuration must not become the
+default.** The `--cpus-per-task=16`/`num_workers=12` change tested in
+Decision 4 produced no measurable training or validation speedup (validation
+held a flat ~2.1 basins/sec before and after — see
+`seed_ckpt_comparison_report_epochs1to11.md`) while requiring the `--mem`
+ceiling to be raised to 224G (Decision 5) and running within ~1 GiB of a
+third OOM at cancellation. This combination is a **known-expensive,
+no-benefit configuration** and must not be used as the default for future
+Stage 1 runs without first diagnosing the actual validation bottleneck
+(suspected: per-basin data loading, not GPU compute or worker count).
+
+**Decision 12 — resume integrity finding, formalized.** The epoch-3 →
+epoch-4 continuation (Decisions 3–5) restores model weights and full Adam
+optimizer state correctly via NeuralHydrology's `continue_run()`, but
+reseeds `random`/`numpy`/`torch`/`torch.cuda` RNG to the fixed `cfg.seed`
+rather than continuing the pre-interruption stream, and NeuralHydrology has
+no dataloader shuffle-state serialization. **The continuation is
+scientifically valid but not bitwise-equivalent** to an uninterrupted
+11-epoch run — a standing caveat on any comparison spanning the epoch-3/
+epoch-4 boundary, and on any future run that resumes after an interruption.
+
+**Decision 13 — learned static representation deferred to next phase.** The
+checkpoint-comparison plateau, combined with the current static-attribute
+handling (raw concatenated attributes, no learned embedding), indicates a
+learned static representation will likely be required to meaningfully move
+past this plateau. This is **not** designed or implemented here — it is
+explicitly in scope for the next phase ("Stage 1 validation and
+optimization foundation").
+
+**Not done in this entry.** No training, no re-evaluation, no temporal-test
+or spatial-holdout access. This entry only records closure decisions over
+already-completed, already-evidenced work.

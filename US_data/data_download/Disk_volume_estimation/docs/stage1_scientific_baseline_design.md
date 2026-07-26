@@ -561,6 +561,17 @@ revision separates them explicitly: the training loss is still open pending
 lower-risk **evaluation** default (adopt now — it's a reporting choice with
 no training-time consequence).
 
+**Seed-run closure addendum (2026-07-26) — cross-basin aggregation
+resolved.** The gap this section previously left open (mean vs. median vs.
+pooled NSE across basins) is now resolved: **median per-basin raw-space
+NSE** is the primary cross-basin selection statistic (mean NSE is
+outlier-dominated and unsuitable as a primary criterion; pooled NSE is
+retained as a diagnostic). Required distribution reporting is now
+p1/p5/p10/p25/p50/p75/p90/p95/p99 plus NSE sign fractions (>0, >0.5, <0),
+not just the mean called for above. See `docs/decision_log.md` (2026-07-26,
+Decisions 7 and 9) for the full rationale — this is a policy pointer only,
+not a re-derivation.
+
 ## 8. Train / validation / test protocol — temporal split (APPROVED, revised dates)
 
 **APPROVED (2026-07-06) — replaces the 2026-07-03 dates:**
@@ -786,6 +797,19 @@ model-selection objective. High-flow/event metrics are logged as secondary
 diagnostics during the sweep, not part of the objective yet. Composite
 objectives (e.g. `NSE_raw` + a high-flow NSE term) can be discussed later,
 after event metrics (§7) mature — not designed here.
+
+**Seed-run closure addendum (2026-07-26) — early-stopping policy and sealed
+test sets, binding.** "Validation raw-space NSE" above is specifically
+**median** per-basin raw-space NSE on development validation (§7 addendum).
+Early stopping for future runs: save every epoch; no stop before epoch 6;
+official validation every 2–3 epochs; minimum meaningful improvement 0.005
+median NSE between validation events; patience 3 validation events; maximum
+30–40 epochs; retain the best checkpoint by median NSE. **Temporal-test and
+spatial-holdout data remain sealed throughout optimization** — never read
+for stopping, selection, or sweep decisions. Full rationale and evidence:
+`docs/decision_log.md` (2026-07-26, Decision 10). This addendum records
+policy only; the next phase's architecture, W&B, and screening-subset design
+are out of scope here.
 
 ## 10. W&B logging / sweep policy — expanded
 

@@ -1,7 +1,58 @@
 # Flash-NH Stage 1 — NeuralHydrology Package Preflight
 
 **Created:** 2026-06-09 (Milestone 2G — January 2023 pilot)
-**Updated:** 2026-07-23 (Versioned package schema (`date`) for future scientific packages — implementation)
+**Updated:** 2026-07-26 (Full-population seed-run operational findings — closure)
+
+**Full-population seed-run operational findings (2026-07-26, closure of the
+first full-population training run — see `docs/FLASHNH_CURRENT_STATE.md`
+and `docs/decision_log.md` 2026-07-26 entries for the scientific-selection
+side of this closure; this addendum is resource/runtime facts only).**
+
+- **Training succeeded end-to-end at full population.** CudaLSTM,
+  2,307 development basins, `qobs_mm_per_h_lead06`, `seq_length: 24`,
+  epochs 1–11 (job `45639481` → OOM → `45640083` (epochs 1–3) → `45640233`
+  → OOM → `45640243` (epochs 4–11, resumed)). All 11 checkpoints and
+  optimizer states saved.
+- **Validation/evaluation runtime is the throughput bottleneck, not
+  training.** Per-epoch training: ~40 min (epoch 1, includes one-time
+  setup), ~19 min steady-state. Per-epoch validation (2,307 basins): ~20 min
+  (epoch 1), ~10 min steady-state — a flat **~2.1 basins/sec**, consistent
+  with a CPU-bound per-basin data-loading bottleneck rather than GPU
+  compute. This throughput did not change after the worker-count experiment
+  below, confirming the bottleneck is not dataloader parallelism.
+- **Memory behavior.** `--mem=64G` (script default) OOM-killed within the
+  first epoch (`MaxRSS≈66.7G`). `--mem=128G` with `num_workers=4` ran
+  cleanly through epochs 1–3. Raising to `num_workers=12` under the same
+  `--mem=128G` OOM-killed 19:30 into epoch-4 training (`MaxRSS≈133.4G`) —
+  i.e. tripling `num_workers` alone pushed memory past a ceiling that had
+  been sufficient at `num_workers=4`. `--mem=224G` with `num_workers=12`
+  completed epochs 4–11 but finished within ~1 GiB of a third OOM
+  (`MaxRSS≈223.2G` at cancellation).
+- **Worker-count experiment: no measurable benefit.** `--cpus-per-task=16`/
+  `num_workers=12` (vs. the working `8`/`4` baseline) produced **no
+  measurable training or validation speedup** — validation throughput was
+  the same flat ~2.1 basins/sec before and after — while requiring the
+  `--mem` ceiling to be raised from 128G to 224G. **Recommended future
+  resource baseline: `--cpus-per-task=8`/`num_workers=4`/`--mem=128G`** (the
+  last configuration with a comfortable memory margin and no observed
+  downside); do **not** default to the 12-worker/224G configuration used to
+  finish this run. If validation throughput needs to improve, profile the
+  per-basin data-loading path directly (suspected bottleneck) before scaling
+  worker count again.
+- **Resume behavior.** `continue_run()` correctly reloads `run_dir/
+  config.yml` fresh on every resume (only overridden by an explicit
+  `--config-file`, never passed by this script's `continue` invocation), so
+  editing the run directory's `config.yml` directly before resubmitting is
+  sufficient to change `num_workers` across a resume — confirmed safe, no
+  risk of silently reverting. Resume restores model weights and full Adam
+  optimizer state correctly, but reseeds RNG to the fixed `cfg.seed` rather
+  than continuing the pre-interruption stream (NH has no dataloader
+  shuffle-state serialization) — scientifically valid but not
+  bitwise-equivalent across an interruption boundary.
+- **Future validation cadence.** Given the ~10–20 min per-epoch validation
+  cost, run official raw-space validation every 2–3 epochs rather than every
+  epoch for future longer runs (see `docs/decision_log.md` Decision 10,
+  2026-07-26).
 
 **Versioned package schema addendum (2026-07-23, schema-support
 implementation):** the certified compact package below uses NetCDF temporal
