@@ -1,0 +1,37 @@
+# Flash-NH Stage 1 -- W&B tracking operational policy configuration
+# policy_name: stage1_wandb_tracking_policy_v001
+#
+# Implements section 10's binding decisions (docs/
+# stage1_validation_optimization_foundation.md, "Part F"): TRACKING ONLY --
+# no sweep, no automated hyperparameter search, no full training run launch
+# is implied or performed by this policy or the module that reads it.
+#
+# Portable policy ONLY: no machine paths, no credentials. WANDB_API_KEY (if
+# "online" mode is ever used) must already be present in the operator's
+# environment -- this policy file and src/baseline/wandb_tracking.py never
+# read, store, or log it.
+
+policy_name: stage1_wandb_tracking_policy_v001
+policy_version: "1"
+created: "2026-07-26"
+
+# Master switch. OFF by default: this phase implements tracking plumbing
+# only, and does not require or launch any training run to exercise it.
+enabled: false
+
+# "disabled": never imports/touches wandb; records to an in-memory sink only.
+# "offline": wandb's local offline mode -- no network calls, no login.
+# "online": real wandb backend; requires WANDB_API_KEY already set by the
+#           operator in the shell environment.
+mode: disabled
+
+project: flashnh-stage1
+entity: null
+tags: ["stage1", "baseline"]
+
+# Hard ceiling (bytes) for any artifact reference this module will accept.
+# Enforces section 10's "never log large prediction pickles/checkpoints/
+# NetCDF/Parquet by default" -- compact config/manifest/small-JSON
+# references only. 1 MiB is generous for those file kinds while still
+# structurally blocking anything checkpoint/NetCDF/Parquet-sized.
+max_artifact_reference_bytes: 1048576

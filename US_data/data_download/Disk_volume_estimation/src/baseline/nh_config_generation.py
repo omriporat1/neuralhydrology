@@ -66,6 +66,9 @@ __all__ = [
     "EXPECTED_SPATIAL_HOLDOUT_BASIN_COUNT",
     "COMPACT_SMOKE_RUN_PROFILE_NAME",
     "INITIAL_SEED_RUN_PROFILE_NAME",
+    "EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME",
+    "KNOWN_RUN_PROFILE_NAMES",
+    "validate_statics_embedding_spec",
     "HOLDOUT_MARKER_FILENAME",
     "HoldoutBundleTrainingRejected",
     "raise_if_holdout_bundle",
@@ -226,16 +229,64 @@ _INITIAL_SEED_TRAINING_PROFILE = {
     "verbose": 1,
 }
 
+# Embedded-static CudaLSTM PILOT profile (Part I, section 13). Per Part B's
+# static-pathway audit (reports/stage1_validation_optimization_foundation_v001/
+# part_b_static_pathway_audit/static_pathway_audit.md), the seed run's
+# `statics_embedding` config key was absent, which NH 1.13 resolves to
+# `nn.Identity()` -- raw concatenation, no learned static representation.
+# Section 2.5 permits a first embedded-static candidate only because that
+# audit confirmed the seed did NOT already use an equivalent learned
+# representation; this profile is that candidate.
+#
+# This is a DESIGN/CONFIG + STRUCTURAL-SMOKE-ONLY profile, not a scientific
+# candidate to be trained in this phase (section 13's explicit scope). It is
+# therefore built on top of the small, CPU-safe COMPACT_SMOKE_RUN_PROFILE
+# (32-basin compact package, 2 epochs) rather than the full-population seed
+# profile -- the only change relative to that compact-smoke baseline is the
+# addition of `statics_embedding`, isolating exactly the one architectural
+# axis this candidate exists to exercise. hiddens=[128, 64] and dropout=0.1
+# are a reasonable, unremarkable first FC-embedding shape (final width 64
+# comparable in order of magnitude to the compact profile's own hidden_size),
+# not a tuned choice -- no training is run against this profile in this
+# phase, so there is nothing to tune yet.
+_EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE = {
+    "model": "cudalstm",
+    "hidden_size": 64,
+    "batch_size": 64,
+    "optimizer": "Adam",
+    "learning_rate": 0.001,
+    "loss": "MSE",
+    "save_weights_every": 1,
+    "validate_every": 1,
+    "validate_n_random_basins": 32,
+    "log_interval": 50,
+    "num_workers": 0,
+    "epochs": 2,
+    "device": "cuda:0",
+    "verbose": 0,
+    "statics_embedding": {
+        "type": "fc",
+        "hiddens": [128, 64],
+        "activation": "tanh",
+        "dropout": 0.1,
+    },
+}
+
 # Canonical run-profile registry: name -> (hyperparameter mapping, manifest
 # note). New profiles must be added here, never spliced in ad hoc, so every
 # generated manifest can unambiguously record which named profile it used.
 COMPACT_SMOKE_RUN_PROFILE_NAME = "compact_smoke_v1"
 INITIAL_SEED_RUN_PROFILE_NAME = "initial_full_population_seed_v001"
+EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME = "embedded_static_cudalstm_pilot"
 
 _RUN_PROFILES = {
     COMPACT_SMOKE_RUN_PROFILE_NAME: _COMPACT_SMOKE_RUN_PROFILE,
     INITIAL_SEED_RUN_PROFILE_NAME: _INITIAL_SEED_TRAINING_PROFILE,
+    EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME: _EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE,
 }
+
+# Sorted, public list of known run-profile names, for CLI --help/choices use.
+KNOWN_RUN_PROFILE_NAMES = tuple(sorted(_RUN_PROFILES))
 
 _RUN_PROFILE_NOTES = {
     COMPACT_SMOKE_RUN_PROFILE_NAME: (
@@ -250,6 +301,13 @@ _RUN_PROFILE_NOTES = {
         "benchmark. Sourced from docs/stage1_scientific_baseline_design.md "
         "Sec 9c; this is the first real full-population training run, not the "
         "result of a hyperparameter sweep."
+    ),
+    EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME: (
+        "First embedded-static CudaLSTM candidate (section 13, Part I): adds a "
+        "learned `statics_embedding` FC network on top of the compact-smoke "
+        "technical settings. DESIGN/CONFIG + STRUCTURAL-SMOKE-ONLY -- not "
+        "trained in this phase, not a tuned candidate, not a claim that this "
+        "embedding shape is optimal."
     ),
 }
 
@@ -679,7 +737,45 @@ def build_nh_config_mapping(
     mapping.update(_RUN_PROFILES[run_profile_name])
     # nan_handling_method deliberately absent: hard-exclusion baseline
     # (accepted finding #7); never set as a defensive backstop here.
+    if "statics_embedding" in mapping:
+        validate_statics_embedding_spec(mapping["statics_embedding"])
     return mapping
+
+
+_ALLOWED_STATICS_EMBEDDING_ACTIVATIONS = ("tanh", "sigmoid", "linear")
+
+
+def validate_statics_embedding_spec(spec: dict) -> None:
+    """Structurally validate a ``statics_embedding`` config spec (section 13,
+    Part I). Pure Python only -- no torch/NeuralHydrology import, so this
+    check can run at config-generation time, before any training dependency
+    is even needed.
+
+    Per Part B's (section 6) audit of ``neuralhydrology/modelzoo/inputlayer.py``,
+    NH 1.13's FC embedding spec requires exactly: ``type: "fc"``, a non-empty
+    list of positive-int ``hiddens``, an ``activation`` from NH's supported
+    set, and a ``dropout`` in ``[0, 1)``."""
+    if not isinstance(spec, dict):
+        raise NHConfigGenerationError(f"statics_embedding must be a mapping, got {type(spec).__name__}")
+
+    if spec.get("type") != "fc":
+        raise NHConfigGenerationError(f"statics_embedding.type must be 'fc', got {spec.get('type')!r}")
+
+    hiddens = spec.get("hiddens")
+    if not isinstance(hiddens, list) or not hiddens:
+        raise NHConfigGenerationError(f"statics_embedding.hiddens must be a non-empty list, got {hiddens!r}")
+    if not all(isinstance(h, int) and not isinstance(h, bool) and h > 0 for h in hiddens):
+        raise NHConfigGenerationError(f"statics_embedding.hiddens must all be positive ints, got {hiddens!r}")
+
+    activation = spec.get("activation")
+    if activation not in _ALLOWED_STATICS_EMBEDDING_ACTIVATIONS:
+        raise NHConfigGenerationError(
+            f"statics_embedding.activation must be one of {_ALLOWED_STATICS_EMBEDDING_ACTIVATIONS}, got {activation!r}"
+        )
+
+    dropout = spec.get("dropout")
+    if not isinstance(dropout, (int, float)) or isinstance(dropout, bool) or not (0 <= dropout < 1):
+        raise NHConfigGenerationError(f"statics_embedding.dropout must be in [0, 1), got {dropout!r}")
 
 
 def _get_git_commit(cwd=None) -> "str | None":

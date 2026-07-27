@@ -19,6 +19,9 @@ import pytest
 import yaml
 
 from src.baseline.nh_config_generation import (
+    COMPACT_SMOKE_RUN_PROFILE_NAME,
+    EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME,
+    KNOWN_RUN_PROFILE_NAMES,
     NHConfigGenerationError,
     generate_stage1_nh_config,
     read_package_attribute_columns,
@@ -27,6 +30,7 @@ from src.baseline.nh_config_generation import (
     validate_lead_hours,
     validate_seq_length,
     validate_static_attribute_contract,
+    validate_statics_embedding_spec,
     validate_target_variables,
     write_generated_config,
 )
@@ -396,3 +400,97 @@ def test_generation_manifest_checksums_and_identity(tmp_path):
     assert manifest["nan_handling_method"] is None
     assert manifest["compact_smoke_run_profile"] is True
     assert manifest["nh_runtime_dataset_key"] == "flashnh"
+
+
+# ---------------------------------------------------------------------------
+# 22. Part I (section 13): embedded-static CudaLSTM pilot profile
+# ---------------------------------------------------------------------------
+
+def test_embedded_static_profile_is_registered_and_design_smoke_only():
+    assert EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME in KNOWN_RUN_PROFILE_NAMES
+    assert EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME == "embedded_static_cudalstm_pilot"
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"type": "fc", "hiddens": [128, 64], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [32], "activation": "sigmoid", "dropout": 0.0},
+        {"type": "fc", "hiddens": [16], "activation": "linear", "dropout": 0.999},
+    ],
+)
+def test_validate_statics_embedding_spec_accepts_valid_specs(spec):
+    validate_statics_embedding_spec(spec)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "not-a-dict",
+        {"type": "lstm", "hiddens": [64], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": "64", "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [0], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [-1], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [64.0], "activation": "tanh", "dropout": 0.1},
+        {"type": "fc", "hiddens": [64], "activation": "relu", "dropout": 0.1},
+        {"type": "fc", "hiddens": [64], "activation": "tanh", "dropout": 1.0},
+        {"type": "fc", "hiddens": [64], "activation": "tanh", "dropout": -0.1},
+        {"type": "fc", "hiddens": [64], "activation": "tanh", "dropout": "0.1"},
+    ],
+)
+def test_validate_statics_embedding_spec_rejects_invalid_specs(spec):
+    with pytest.raises(NHConfigGenerationError):
+        validate_statics_embedding_spec(spec)
+
+
+def test_generate_embedded_static_cudalstm_pilot_end_to_end(tmp_path):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    bundle = generate_stage1_nh_config(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+        run_profile_name=EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME,
+    )
+    assert bundle.run_profile_name == EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME
+    assert bundle.config_mapping["statics_embedding"]["type"] == "fc"
+
+    written = write_generated_config(bundle, tmp_path / "out", experiment_name="test_embedded_static_pilot")
+    cfg = yaml.safe_load(written["config.yaml"].read_text(encoding="utf-8"))
+    assert cfg["statics_embedding"] == {
+        "type": "fc",
+        "hiddens": [128, 64],
+        "activation": "tanh",
+        "dropout": 0.1,
+    }
+    assert cfg["model"] == "cudalstm"
+    # This is a structural-smoke config only -- not the full-population seed
+    # profile's epoch/hidden_size/batch_size scale (section 13 scope).
+    assert cfg["epochs"] == 2
+
+    manifest = json.loads(written["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["run_profile_name"] == EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME
+    assert "compact_smoke_run_profile" not in manifest
+
+
+def test_generate_rejects_invalid_statics_embedding_in_profile(tmp_path, monkeypatch):
+    import src.baseline.nh_config_generation as mod
+
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    bad_profile_name = "test_bad_statics_embedding_profile"
+    monkeypatch.setitem(mod._RUN_PROFILES, bad_profile_name, {
+        "model": "cudalstm",
+        "hidden_size": 64,
+        "epochs": 2,
+        "statics_embedding": {"type": "fc", "hiddens": [], "activation": "tanh", "dropout": 0.1},
+    })
+    monkeypatch.setitem(mod._RUN_PROFILE_NOTES, bad_profile_name, "test fixture")
+
+    with pytest.raises(NHConfigGenerationError):
+        generate_stage1_nh_config(
+            policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+            lead_hours=6, seq_length=24, run_profile_name=bad_profile_name,
+        )

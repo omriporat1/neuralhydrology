@@ -1,0 +1,147 @@
+# Flash-NH Stage 1 -- frozen validation-screening subset configuration
+# selection_name: stage1_screening_subset_v001
+#
+# Machine-readable design input for
+# scripts/generate_stage1_screening_subset.py. Part D of the "Stage 1
+# validation and optimization foundation" task
+# (docs/stage1_validation_optimization_foundation.md, section 8). Records the
+# seed, target count, and stratification policy so the selector reads policy
+# from config rather than hard-coding decisions, mirroring
+# config/stage1_hydrograph_atlas_selection_v001.yaml's convention.
+#
+# Portable policy ONLY: no machine paths (h2o/Moriah/local absolute paths),
+# no credentials, no Slurm resources, no run-specific output paths.
+
+selection_name: stage1_screening_subset_v001
+policy_version: "1"
+created: "2026-07-26"
+revised: "2026-07-26"
+purpose: >
+  A fixed, seeded, proportionally-stratified subset (target ~400, range
+  300-500) of the canonical non-California development_train pool, for fast,
+  frequent development-validation feedback during optimization (screening,
+  pruning, early-stopping decisions, broad run comparison). Per section 8.4,
+  this subset is NOT authoritative -- the full 2,307-basin development
+  validation remains authoritative for final run/checkpoint selection.
+  Stratified by (at minimum): macro-region (broader than HUC02), basin-area
+  tercile, aridity tercile, flow-variability (flashiness) tercile, and
+  seed-validation-skill quartile. Uses a single seeded, largest-remainder
+  proportional allocation across the composite 5-dimension cell key --
+  deliberately not an allocation optimizer.
+
+algorithm_id: stage1_screening_subset_proportional_composite_stratum_selection_v1
+algorithm_version: 1
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Target count
+# ---------------------------------------------------------------------------
+target_count: 400
+min_target_count: 300
+max_target_count: 500
+
+# ---------------------------------------------------------------------------
+# Selection universe (required input): the canonical spatial-split assignment
+# CSV (config/stage1_baseline_splits_v001/split_assignment.csv), filtered to
+# this split_role. Identical convention to
+# config/stage1_hydrograph_atlas_selection_v001.yaml -- any other role
+# present in the same file is out of scope and must never be selected.
+# ---------------------------------------------------------------------------
+selection_universe:
+  required_split_role: development_train
+  forbidden_state: "CA"
+  forbidden_split_roles:
+    - spatial_holdout_nonca
+    - california_finetune_train
+    - california_holdout
+  required_columns:
+    - STAID
+    - split_role
+    - STATE
+    - HUC02
+    - area_class
+    - hydro_class
+
+# ---------------------------------------------------------------------------
+# Stratification: a single composite cell key of 5 dimensions --
+# macro_region x area_class x hydro_class x flow_var_class x skill_stratum.
+# min_quota_per_nonempty_cell is deliberately 0: with ~2,307 basins spread
+# across this many joint cells, most cells are small, so this is a pure
+# largest-remainder PROPORTIONAL allocation (a cell's expected share of
+# target_count is proportional to its share of the universe) rather than a
+# "one guaranteed basin per cell" quota rule (which would force target_count
+# above ~500 given how many joint cells exist). Marginal balance across each
+# dimension individually -- not joint-cell coverage -- is the section 8.1
+# "reasonable balance" criterion this is checked against.
+# ---------------------------------------------------------------------------
+stratification:
+  cell_dims: [macro_region, area_class, hydro_class, flow_var_class, skill_stratum]
+  area_class_valid_values: [low, middle, high]
+  hydro_class_valid_values: [low, middle, high, missing]
+  flow_var_class_valid_values: [low, middle, high]
+  skill_stratum_valid_values:
+    - severe_failure_lower_tail
+    - weak
+    - typical
+    - strong
+  min_quota_per_nonempty_cell: 0
+
+# ---------------------------------------------------------------------------
+# Flow-variability (flashiness) tercile: computed fresh, at selection time,
+# from the observed-flow Richards-Baker Flashiness Index (RBI) already
+# computed for WY2024 in
+# reports/flashnh_usgs_rbi_screening_wy2024_v001/usgs_rbi_screening_results.csv
+# (column "rbi"), verified to cover all 2,307 development_train basins with
+# screening_status == RBI_READY (2026-07-26 verification, this task). Uses
+# src.baseline.splits.compute_tercile_edges / assign_tercile_class unchanged
+# (np.quantile, linear interpolation, edges at 1/3, 2/3) -- no new tercile
+# method is introduced. This is an observed-data static covariate, not a
+# model-prediction signal, so it introduces no test-set or prediction-error
+# leakage.
+# ---------------------------------------------------------------------------
+flow_variability:
+  source_value_column: rbi
+  source_staid_column: STAID
+
+# ---------------------------------------------------------------------------
+# Skill-stratum definition (mirrors section 7.1's method exactly): quartile
+# edges (p25/p50/p75) computed fresh, at selection time, from a supplied
+# per-basin raw-space validation NSE table, restricted to the selection
+# universe. Reuses src.baseline.hydrograph_atlas_selection.
+# compute_skill_quartile_edges / assign_skill_stratum unchanged. The supplied
+# per-basin NSE table is diagnostic-only evidence from one already-completed
+# epoch of the certified seed run (epoch009, the same epoch Part C's
+# hydrograph-atlas selection used) -- NOT a checkpoint-freeze decision.
+# ---------------------------------------------------------------------------
+skill_stratum:
+  quantile_edges: [0.25, 0.5, 0.75]
+  labels:
+    below_p25: severe_failure_lower_tail
+    p25_to_p50: weak
+    p50_to_p75: typical
+    at_or_above_p75: strong
+
+# ---------------------------------------------------------------------------
+# Geographic grouping: reused verbatim from
+# config/stage1_hydrograph_atlas_selection_v001.yaml's geography.macro_regions
+# mapping (same explicit, versioned, never-inferred HUC02 -> macro-region
+# mapping). Duplicated here (rather than cross-referenced) so this policy
+# file is self-contained and portable on its own, per this repo's policy-file
+# convention. Unlike Part C's atlas selection, macro_region here is used
+# directly as the "HUC02 or broader macroregion" grid dimension itself
+# (section 8.1 explicitly allows either), not an east/west collapse of it.
+# ---------------------------------------------------------------------------
+geography:
+  macro_region_map_version: 1
+  macro_regions:
+    northeast_mid_atlantic: ["01", "02"]
+    southeast: ["03"]
+    great_lakes_ohio_tennessee: ["04", "05", "06"]
+    mississippi: ["07", "08"]
+    plains_missouri_south_central: ["09", "10U", "10L", "11", "12", "13"]
+    colorado_great_basin: ["14", "15", "16"]
+    pacific_northwest_california: ["17", "18"]
+    alaska_hawaii_other: ["19", "20", "21"]
+
+output:
+  default_subdir_name: stage1_screening_subset_v001

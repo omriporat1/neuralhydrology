@@ -27,7 +27,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.baseline.nh_config_generation import NHConfigGenerationError, generate_stage1_nh_config, write_generated_config
+from src.baseline.nh_config_generation import (
+    COMPACT_SMOKE_RUN_PROFILE_NAME,
+    KNOWN_RUN_PROFILE_NAMES,
+    NHConfigGenerationError,
+    generate_stage1_nh_config,
+    write_generated_config,
+)
 
 
 def _fail(message: str) -> None:
@@ -49,6 +55,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--lead-hours", type=int, required=True, help="One of the policy-approved leads (hours)")
     p.add_argument("--seq-length", type=int, required=True, help="One of the policy-approved sequence lengths (hours)")
     p.add_argument("--experiment-name", default=None, help="Override the generated experiment_name")
+    p.add_argument("--run-profile", default=COMPACT_SMOKE_RUN_PROFILE_NAME, choices=KNOWN_RUN_PROFILE_NAMES,
+                   help="Named training-hyperparameter profile to merge in (default preserves prior behavior)")
     p.add_argument("--out-dir", required=True, help="Output directory for the rendered config + basin lists + manifest")
     p.add_argument("--force", action="store_true", help="Allow writing into a non-empty --out-dir")
     return p.parse_args(argv)
@@ -65,6 +73,7 @@ def main(argv=None) -> int:
             lead_hours=args.lead_hours,
             seq_length=args.seq_length,
             static_column_manifest_path=args.static_column_manifest,
+            run_profile_name=args.run_profile,
         )
     except NHConfigGenerationError as exc:
         _fail(str(exc))
@@ -87,6 +96,7 @@ def main(argv=None) -> int:
         "seq_length": bundle.seq_length,
         "target_variable": bundle.target_variable,
         "static_attribute_count": bundle.static_attribute_result.count,
+        "run_profile_name": bundle.run_profile_name,
     }, indent=2))
     return 0
 

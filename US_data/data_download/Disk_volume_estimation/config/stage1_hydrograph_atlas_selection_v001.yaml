@@ -1,0 +1,141 @@
+# Flash-NH Stage 1 -- Hydrograph-Atlas basin selection configuration
+# selection_name: stage1_hydrograph_atlas_selection_v001
+#
+# Machine-readable design input for
+# scripts/generate_stage1_hydrograph_atlas_selection.py. Part C of the
+# "Stage 1 validation and optimization foundation" task
+# (docs/stage1_validation_optimization_foundation.md, section 7). Records the
+# seed, target count, and stratification policy so the selector reads policy
+# from config rather than hard-coding decisions, mirroring
+# config/stage1_compact_package_selection_v001.yaml's convention.
+#
+# Portable policy ONLY: no machine paths (h2o/Moriah/local absolute paths),
+# no credentials, no Slurm resources, no run-specific output paths.
+
+selection_name: stage1_hydrograph_atlas_selection_v001
+policy_version: "1"
+created: "2026-07-26"
+revised: "2026-07-26"
+purpose: >
+  Deterministic selection of a compact (~24) basin subset drawn strictly from
+  the canonical non-California development-basin pool, stratified by
+  validation-skill quartile x area-class tercile x east/west geographic side,
+  for model-trust and scientific-diagnosis purposes only. This is NOT a
+  favorable-example selection: per Part C section 7.2, no visual preference,
+  no prediction-error inspection beyond the chosen validation metric, and no
+  test-set/temporal-test/spatial-holdout behavior may influence the pick.
+  Does not build NH packages, does not train models, does not generate the
+  final observed/predicted event panel.
+
+algorithm_id: stage1_hydrograph_atlas_skill_area_geo_quota_selection_v1
+algorithm_version: 1
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Target count
+# ---------------------------------------------------------------------------
+target_count: 24
+min_target_count: 18
+max_target_count: 30
+
+# ---------------------------------------------------------------------------
+# Selection universe (required input): the canonical spatial-split assignment
+# CSV (config/stage1_baseline_splits_v001/split_assignment.csv), filtered to
+# this split_role. Identical convention to
+# config/stage1_compact_package_selection_v001.yaml -- any other role present
+# in the same file is out of scope and must never be selected.
+# ---------------------------------------------------------------------------
+selection_universe:
+  required_split_role: development_train
+  forbidden_state: "CA"
+  forbidden_split_roles:
+    - spatial_holdout_nonca
+    - california_finetune_train
+    - california_holdout
+  required_columns:
+    - STAID
+    - split_role
+    - STATE
+    - HUC02
+    - area_class
+    - hydro_class
+
+# ---------------------------------------------------------------------------
+# Primary stratification: skill_stratum (computed by this selector from a
+# supplied per-basin raw-space NSE table -- see skill_stratum_source below)
+# x area_class (reused directly from the canonical split's own tercile
+# field -- no new area-class edges are computed here, identical to the
+# compact-package convention).
+# ---------------------------------------------------------------------------
+stratification:
+  cell_dims: [skill_stratum, area_class]
+  area_class_valid_values: [low, middle, high]
+  skill_stratum_valid_values:
+    - severe_failure_lower_tail
+    - weak
+    - typical
+    - strong
+  min_quota_per_nonempty_cell: 1
+
+# ---------------------------------------------------------------------------
+# Skill-stratum definition (section 7.1: "Use validation NSE only for skill
+# stratification"). Quartile edges (p25/p50/p75) are computed fresh, at
+# selection time, from the supplied per-basin raw-space NSE table, restricted
+# to the development_train universe -- deterministic given that table, no
+# manual thresholds. This mirrors src/baseline/splits.py's
+# compute_tercile_edges() method (np.quantile, linear interpolation) but with
+# 3 edges / 4 classes instead of 2 edges / 3 classes.
+#
+# The per-basin NSE table itself is diagnostic-only evidence from one epoch
+# of the certified seed run (see docs/stage1_validation_optimization_foundation.md,
+# "Part C: skill-stratum source epoch"); it is NOT a checkpoint-freeze
+# decision (section 2.3's checkpoint-selection policy is separate and
+# untouched by this file).
+# ---------------------------------------------------------------------------
+skill_stratum:
+  quantile_edges: [0.25, 0.5, 0.75]
+  labels:
+    below_p25: severe_failure_lower_tail
+    p25_to_p50: weak
+    p50_to_p75: typical
+    at_or_above_p75: strong
+
+# ---------------------------------------------------------------------------
+# Geographic breadth: reused verbatim from
+# config/stage1_compact_package_selection_v001.yaml's geography.macro_regions
+# / east_macro_regions / west_macro_regions (same explicit, versioned,
+# never-inferred HUC02 -> macro-region -> east/west mapping). Duplicated here
+# (rather than cross-referenced) so this policy file is self-contained and
+# portable on its own, per this repo's policy-file convention. Unlike the
+# compact-package selector, geo_side (east/west only, "other" excluded) is
+# used as a HARD third grid dimension here (section 7.1's "two broad
+# geographic ... classes"), not merely a soft breadth check -- so every
+# development_train basin must resolve to exactly "east" or "west"; a basin
+# resolving to "other" is out of scope for this grid (none exist in the
+# non-CA development_train pool as of this policy's writing -- see
+# docs/stage1_validation_optimization_foundation.md verification note).
+# ---------------------------------------------------------------------------
+geography:
+  distinct_huc02_soft_minimum: 6
+  macro_region_map_version: 1
+  macro_regions:
+    northeast_mid_atlantic: ["01", "02"]
+    southeast: ["03"]
+    great_lakes_ohio_tennessee: ["04", "05", "06"]
+    mississippi: ["07", "08"]
+    plains_missouri_south_central: ["09", "10U", "10L", "11", "12", "13"]
+    colorado_great_basin: ["14", "15", "16"]
+    pacific_northwest_california: ["17", "18"]
+    alaska_hawaii_other: ["19", "20", "21"]
+  east_macro_regions:
+    - northeast_mid_atlantic
+    - southeast
+    - great_lakes_ohio_tennessee
+    - mississippi
+  west_macro_regions:
+    - plains_missouri_south_central
+    - colorado_great_basin
+    - pacific_northwest_california
+
+output:
+  default_subdir_name: stage1_hydrograph_atlas_selection_v001

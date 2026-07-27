@@ -1,0 +1,40 @@
+# Flash-NH Stage 1 -- early-stopping operational policy configuration
+# policy_name: stage1_early_stopping_policy_v001
+#
+# Implements section 2.3's binding decisions verbatim (docs/
+# stage1_validation_optimization_foundation.md, "Part E"). This is an
+# OPERATIONAL STARTING POLICY, explicitly revisable later per section 2.3 --
+# not a claim that these are optimal values.
+#
+# Portable policy ONLY: no machine paths, no credentials, no Slurm resources.
+
+policy_name: stage1_early_stopping_policy_v001
+policy_version: "1"
+created: "2026-07-26"
+
+# Monitored metric: median per-basin raw-space NSE, computed on the
+# development-validation population (screening subset or full population,
+# per the caller's choice of "official validation event" cadence) -- never
+# the temporal test or spatial holdout set. See section 2.1/2.2.
+metric_name: median_per_basin_raw_space_nse
+higher_is_better: true
+
+# No stop before this epoch (section 2.3).
+min_epoch_before_stop: 6
+
+# Minimum absolute improvement in the monitored metric to reset the
+# no-improvement counter (section 2.3).
+min_delta: 0.005
+
+# Patience, in OFFICIAL VALIDATION EVENTS (not epochs) without a
+# >= min_delta improvement, before stopping is triggered (section 2.3).
+# Official validation events are expected every 2-3 epochs per the
+# operational cadence in section 2.3 / Part G, but this module does not
+# itself enforce that cadence -- it only ever sees the events the caller
+# actually records.
+patience_events: 3
+
+# Absolute epoch budget ceiling (section 2.3: "max budget 30-40 epochs").
+# 40 is adopted as the operational default (the upper end of the specified
+# range), revisable per section 2.3.
+max_epoch_budget: 40
