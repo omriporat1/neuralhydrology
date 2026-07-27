@@ -811,6 +811,23 @@ for stopping, selection, or sweep decisions. Full rationale and evidence:
 policy only; the next phase's architecture, W&B, and screening-subset design
 are out of scope here.
 
+**Validation-and-optimization-foundation phase closure (2026-07-26).** The
+"next phase" flagged above is now implemented as a design/tooling
+foundation (no training run launched): the early-stopping policy above is
+now an executable, restart-safe state machine
+(`config/stage1_early_stopping_policy_v001.yaml`,
+`src/baseline/early_stopping.py`; real training-orchestration integration
+remains pending); a **provisional operational screening subset v001** (400
+basins) now exists for cheap per-epoch comparisons — accepted for
+operational use (2026-07-27 final status resolution, `docs/decision_log.md`),
+not yet permanently frozen or scientifically authoritative; full-population
+validation remains authoritative
+(`src/baseline/screening_subset_selection.py`); and a first embedded-static
+CudaLSTM candidate profile (`embedded_static_cudalstm_pilot`) now exists as
+a design/config + structural-smoke artifact only (§9c's staged architecture
+strategy, stage 2). See `docs/stage1_validation_optimization_foundation.md`
+for the full account; no item above is superseded, only operationalized.
+
 ## 10. W&B logging / sweep policy — expanded
 
 **Expanded (2026-07-06)** beyond the 2026-07-03 draft's config/provenance-only
@@ -837,6 +854,17 @@ Policy (unchanged from the 2026-07-03 draft, still recommended now):
   run** — this document only records the policy.
 - Credentials: W&B API key follows the same rule as all other credentials in
   `docs/repo_policy.md` — never committed, never logged.
+
+**Tracking module now exists (2026-07-26), disabled by default.**
+`config/stage1_wandb_tracking_policy_v001.yaml` +
+`src/baseline/wandb_tracking.py` implement the mechanics for the logging
+policy above (hyperparameters, scientific metrics, resource/telemetry
+metrics, compact artifact references) behind an `enabled: false` /
+`mode: disabled` default that never imports or touches the `wandb` package.
+This module never launches a sweep or a training run and never decides
+*which* fields a training harness passes to it — that remains a future
+training-harness integration decision, not something this module presumes.
+See `docs/stage1_validation_optimization_foundation.md` (Part F).
 
 ## 11. Slurm partition / GRES parameterization policy — kept flexible
 

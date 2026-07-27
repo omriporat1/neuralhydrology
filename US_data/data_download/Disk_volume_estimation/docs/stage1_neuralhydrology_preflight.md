@@ -54,6 +54,19 @@ side of this closure; this addendum is resource/runtime facts only).**
   epoch for future longer runs (see `docs/decision_log.md` Decision 10,
   2026-07-26).
 
+**Validation-and-optimization-foundation phase addendum (2026-07-26):** the
+recommended future resource baseline above (`--cpus-per-task=8`/
+`num_workers=4`/`--mem=128G`) and the every-2–3-epoch validation cadence are
+both reaffirmed, unchanged, as the Part G operational-defaults recommendation
+for the next Stage 1 training run — see
+`docs/stage1_validation_optimization_foundation.md` for the full account,
+including the **provisional operational screening subset v001** (Part D,
+400 basins) for that reduced-cadence validation — accepted operationally,
+not yet permanently frozen (2026-07-27 final status resolution,
+`docs/decision_log.md`) — and an executable early-stopping policy engine
+(Part E; real training-orchestration integration remains pending)
+implementing Decision 10 above in code.
+
 **Versioned package schema addendum (2026-07-23, schema-support
 implementation):** the certified compact package below uses NetCDF temporal
 coordinate `time` and is unaffected/frozen. A new registered schema,

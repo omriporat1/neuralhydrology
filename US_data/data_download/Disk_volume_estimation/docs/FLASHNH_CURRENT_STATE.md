@@ -1,6 +1,73 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-26 (Stage 1 full-population seed training run — CLOSED)
+Last updated: 2026-07-26 (Stage 1 validation and optimization foundation — Parts A-K complete)
+
+## Stage 1 validation and optimization foundation — Parts A-K complete (2026-07-26)
+
+Design/tooling/documentation foundation phase, opened immediately after the
+seed-run closure below. **No training run was launched in this phase.**
+Full index: `docs/stage1_validation_optimization_foundation.md`; evidence:
+`reports/stage1_validation_optimization_foundation_v001/` (untracked).
+
+Delivered: seed percentile-diagnostic closure — the center of the NSE
+distribution (p25-p99) was effectively flat across all 11 epochs, while
+lower-tail percentiles (p1/p5) were unstable and non-monotonic; supports the
+adopted early-stopping policy without yet justifying making it more
+aggressive from one raw-static run (Part A); confirmation that the seed run
+used raw static-attribute concatenation, not a learned embedding (Part B,
+static-pathway audit); a **deterministic provisional hydrograph-atlas
+selection v001** — selection/event-design tooling complete, 24-basin
+realization balanced by skill stratum/area class/east-west geography; the
+final observed-vs-predicted atlas is not yet generated and the realization
+may be revised when it is, without reopening the selection framework (Part
+C); a **provisional operational screening subset v001** — 400 basins,
+deterministic, reproducible, multiply stratified, tracking the full
+2,307-basin population well across all 11 seed-run epochs (Spearman 0.90,
+Kendall 0.82, max abs. diff 0.0053); accepted for operational use, not yet
+permanently frozen or scientifically authoritative; full population remains
+authoritative for final run/checkpoint/architecture/hyperparameter
+selection; prospective subset-vs-full comparison planned over the first ~3-5
+materially different future optimization runs (Part D); an early-stopping
+policy engine, implemented and tested, with real training-orchestration
+integration still pending — reviewed after ~3-5 future optimization runs,
+not tightened now (Part E, `src/baseline/early_stopping.py`); an optional,
+disabled-by-default W&B tracking wrapper, implemented and tested, with
+integration into a real training/validation harness still pending — future
+runs are not yet automatically logged (Part F,
+`src/baseline/wandb_tracking.py`); evidence-grounded next-run operational
+defaults (Part G); an architecture-strategy status note declaring no winner
+(Part H); a first embedded-static CudaLSTM candidate profile,
+`embedded_static_cudalstm_pilot` — a **structural-smoke-only** config
+profile; `[128, 64]`/tanh/dropout 0.1 are untuned construction values;
+embedding dimension, depth, activation, and dropout remain future
+architecture-specific hyperparameters; based deliberately on compact-smoke
+settings; not authorized for full-population scientific training; the first
+real full-population embedded-static candidates will be created in the
+optimization phase, not now (Part I, extends
+`src/baseline/nh_config_generation.py`); disposition of two retained
+diagnostic utility scripts, left untracked pending dedicated tests (Part J,
+revised 2026-07-27); and full test verification (Part K: 189 new/extended
+focused tests, full-repository regression suite effectively 1094/1094
+passing).
+
+**Commit-readiness pass and final status resolution (2026-07-27):** an
+epoch-7 vs. epoch-9 anchor-epoch sensitivity check for Parts C/D's skill
+stratification found exact basin membership is sensitive to the anchor
+checkpoint (75.8% stratum retention, 11.4%/6.7% basin-overlap Jaccard) —
+expected given the selection design's many small composite strata and
+seeded within-cell draws. This does not invalidate either artifact's
+operational purpose; both are reclassified as provisional (above) rather
+than settled, and the epoch-9 candidates are retained unchanged (no
+regeneration, no replacement, no new skill definition). See
+`docs/stage1_validation_optimization_foundation.md` ("Commit-readiness
+pass" section), `docs/decision_log.md` (2026-07-27 final status resolution
+entry), and
+`reports/stage1_validation_optimization_foundation_v001/commit_readiness_epoch7_epoch9_sensitivity/`.
+
+**Not done in this phase** (unchanged, next phase's scope): no hyperparameter
+sweep, no embedded-static or EA-LSTM training run, no temporal-test or
+spatial-holdout evaluation, no change to the certified Compact Scientific
+Package or canonical basin splits.
 
 ## Stage 1 full-population seed training run — CLOSED (2026-07-25 training / 2026-07-26 evidence closure)
 

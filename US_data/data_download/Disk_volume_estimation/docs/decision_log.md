@@ -3239,3 +3239,253 @@ optimization foundation").
 **Not done in this entry.** No training, no re-evaluation, no temporal-test
 or spatial-holdout access. This entry only records closure decisions over
 already-completed, already-evidenced work.
+
+## 2026-07-26 — Stage 1 validation and optimization foundation — Parts A-K decisions
+
+Design/tooling/documentation foundation phase, opened immediately after the
+seed-run closure above (Decision 13). **No training run was launched in
+this phase; no hyperparameter sweep was run; temporal-test and
+spatial-holdout data were never accessed.** Full account:
+`docs/stage1_validation_optimization_foundation.md`; evidence:
+`reports/stage1_validation_optimization_foundation_v001/` (untracked).
+
+**Decision 1 — static-pathway audit confirms a learned embedding is a
+genuinely novel architectural variant.** Direct inspection of
+`neuralhydrology/modelzoo/cudalstm.py` and `inputlayer.py` against the
+seed run's own generated configs confirms `statics_embedding` was absent
+(NH 1.13 resolves this to `nn.Identity()`, i.e. raw concatenation of all
+473 static attributes). This resolves Decision 13's open question: a first
+embedded-static candidate is not a relabeling of the seed's own
+architecture, and is therefore in scope as a design-only candidate (see
+Decision 5 below).
+
+**Decision 2 — 400-basin frozen development-validation screening subset
+adopted for future per-epoch comparisons.** Selected deterministically
+(seed=42) from the 2,307 development-training basins. Validated against
+all 11 seed-run checkpoints: the subset's per-epoch median NSE tracks the
+full-population median NSE closely (Spearman 0.90, Kendall 0.82, max
+absolute difference 0.0053). Adopted as the recommended per-epoch
+comparison mechanism for future training runs, reserving full-population
+validation for finalist checkpoints only (see Decision 6).
+
+**Decision 3 — early-stopping policy (Decision 10 above) is now an
+executable, restart-safe state machine**, not policy prose alone:
+`config/stage1_early_stopping_policy_v001.yaml` +
+`src/baseline/early_stopping.py`. Idempotent replay of the last recorded
+event, hard rejection of out-of-order/inconsistent replay, and best-
+checkpoint retention are all enforced in code, not left to a training
+script's own bookkeeping. 29 focused tests pass, including a structural
+proof that no public function accepts a test/holdout-shaped parameter.
+
+**Decision 4 — optional W&B tracking module added, disabled by default.**
+`config/stage1_wandb_tracking_policy_v001.yaml` (`enabled: false`, `mode:
+disabled`) + `src/baseline/wandb_tracking.py`. Every logged item is
+mirrored in-memory regardless of backend; credential-shaped keys are
+rejected structurally; artifact references above a small size ceiling
+(1 MiB default) are refused, so large prediction/checkpoint/NetCDF/Parquet
+files can never be logged through this module. This module never launches
+a sweep or a training run and does not itself decide which fields a future
+training harness passes to it. 30 focused tests pass.
+
+**Decision 5 — first embedded-static CudaLSTM candidate, design/config +
+structural-smoke only.** `embedded_static_cudalstm_pilot` run profile added
+to `src/baseline/nh_config_generation.py`: the existing compact-smoke
+technical settings (small scale, 2 epochs) plus one addition,
+`statics_embedding: {type: fc, hiddens: [128, 64], activation: tanh,
+dropout: 0.1}`, validated structurally by a new
+`validate_statics_embedding_spec()` function. **Not trained, not compared
+against the seed run, no winner declared** — this is exactly the scope
+Decision 13 flagged as the next phase's responsibility, and no further than
+that.
+
+**Decision 6 — corrected operational-defaults recommendation for the next
+Stage 1 training run.** An initial draft of the next-run resource
+recommendation (never committed) mistakenly proposed keeping the seed run's
+mid-run-escalated `--cpus-per-task=16`/`num_workers=12`/`--mem=224G`
+configuration as the default. This was caught and corrected before being
+committed: per Decision 11 above, that configuration produced **no
+measurable speedup** and only existed because Decision 4's (2026-07-25,
+seed-run) worker increase forced Decision 5's (2026-07-25, seed-run) memory
+increase. The corrected recommendation reverts to the last known-good,
+comfortably-margined configuration: `--cpus-per-task=8`, `num_workers=4`,
+`--mem=128G` — unchanged from the seed run's own Decision 3 fix, before its
+Decision 4 experiment. The new recommendation this phase actually adds is
+independent of that reverted point: use the Decision 2 screening subset for
+per-epoch validation cadence, reserving full-population validation for
+finalist checkpoints.
+
+**Decision 7 — two ad hoc diagnostic scripts retained, not promoted or
+discarded.** `scripts/aggregate_stage1_seed_checkpoint_report.py` and
+`scripts/dump_per_basin_table.py` (both already used to produce the
+committed-evidence-pending `reports/seed_validation_review_v001/` report)
+are recommended to be kept and committed under `scripts/` unmodified — both
+are thin, structurally test/holdout-safe (`--period` hardcoded to
+`"validation"`) wrappers over already-certified, already-tested evaluation
+functions, not generic library code warranting promotion into
+`src/baseline/`.
+
+**Not done in this entry.** No hyperparameter sweep. No embedded-static or
+EA-LSTM training run. No temporal-test or spatial-holdout evaluation. No
+change to the certified Compact Scientific Package or the canonical basin
+splits. No commit performed automatically — see this phase's own §19
+git-status/commit-structure proposal for a human-actionable recommendation
+only.
+
+## 2026-07-27 — Commit-readiness pass for the validation-and-optimization-foundation phase
+
+Conservative pass resolving five small ambiguities flagged in strategic
+review before committing the phase above. **No training run launched, no NH
+inference run, no sealed-data access, no screening-subset redesign, no
+across-epoch-median skill definition introduced, no full-population
+embedded-static profile created, no commit performed.** Evidence:
+`reports/stage1_validation_optimization_foundation_v001/commit_readiness_epoch7_epoch9_sensitivity/`
+(untracked).
+
+**Decision 1 — epoch-7 vs. epoch-9 anchor-epoch sensitivity check: retention
+conditions fail; epoch-9 artifacts neither replaced nor auto-regenerated.**
+Using already-persisted per-basin NSE (no inference rerun), the existing
+`compute_skill_quartile_edges`/`assign_skill_stratum` functions were applied
+to epoch 7 and compared against epoch 9 for all 2,307 development basins:
+75.8% same skill stratum (1,749/2,307; 516 moved by one stratum, 42 by more
+than one) — below the ~90% review heuristic. Regenerating the screening
+subset and hydrograph atlas at epoch 7 (identical policy/seed) gave basin
+overlaps of 82/400 (Jaccard 0.114) and 3/24 (Jaccard 0.067) against the
+epoch-9 candidates — both far below ~90%. The epoch-7 screening-subset
+candidate's subset-vs-full validation tracking is also markedly worse than
+epoch 9's (Spearman 0.482 vs. 0.900, Kendall 0.345 vs. 0.818, top-3-epoch
+overlap 1 vs. 2, max abs. median-NSE diff 0.0175 vs. 0.0053). Per this
+check's own explicit stopping rule, the epoch-9 screening-subset and
+hydrograph-atlas artifacts are **not** regenerated or replaced, and **no**
+across-epoch-median or other new skill definition is introduced. This is
+recorded as an open item for user review, not resolved in this pass.
+
+**Decision 2 — embedded-static pilot profile scope clarified, not
+retuned.** `embedded_static_cudalstm_pilot`'s `hiddens=[128, 64]`,
+`activation=tanh`, `dropout=0.1` are unchanged. Confirmed structurally
+already correct: the manifest always records `run_profile_name` +
+`run_profile_note` (STRUCTURAL-SMOKE-ONLY wording already present), and
+`scripts/generate_stage1_full_population_nh_config.py`'s own
+`_KNOWN_RUN_PROFILES` tuple does not include this profile name, so it cannot
+become the full-population generator's default even silently. Added one
+clarifying paragraph to
+`reports/.../part_i_embedded_static_pilot/part_i_embedded_static_cudalstm_pilot.md`
+stating explicitly that this is a structural-smoke construction choice, not
+the first scientific embedded-static candidate, and that full-population
+embedded-static candidates are later, separately-scoped optimization-phase
+work.
+
+**Decision 3 — early-stopping and W&B documentation wording tightened to
+distinguish "implemented and tested" from "operationally wired into
+training."** No code change (Parts E/F's own evidence docs already used this
+framing); `docs/stage1_validation_optimization_foundation.md` and
+`docs/FLASHNH_CURRENT_STATE.md` now state explicitly, at the phase-index and
+current-state level, that both modules are implemented and tested and that
+real training-orchestration/harness integration remains pending, so neither
+document can be misread as claiming a real run is already auto-stopped or
+auto-logged.
+
+**Decision 4 — screening-subset and hydrograph-atlas wording distinguishes
+"selection design/candidate" from "settled, authoritative artifact."**
+`docs/stage1_validation_optimization_foundation.md`'s Parts table now
+describes Part D's output as a screening-subset *candidate* "to be frozen"
+(not already frozen) and Part C's output as the atlas *selection design*
+plus an epoch-9 candidate basin list, explicitly noting the final
+observed-vs-predicted atlas is not yet generated. This is a wording
+correction only — neither Part's underlying method or epoch-9 candidate
+changed.
+
+**Decision 5 — supersedes Decision 7 (2026-07-26) on the two diagnostic
+scripts: excluded from the proposed foundation commit for now, left
+untracked.** `scripts/aggregate_stage1_seed_checkpoint_report.py` and
+`scripts/dump_per_basin_table.py` remain useful, unmodified, and undeleted,
+but — to keep this commit-readiness pass conservative and because neither
+script has a dedicated CLI test — they are recommended to stay untracked
+provenance/reference scripts for now rather than entering the proposed
+commit. They may be tested and committed later if reused in the real
+optimization harness.
+
+**Not done in this entry.** No training run. No NH inference run. No
+sealed-data (temporal-test/spatial-holdout/California) access. No
+screening-subset or hydrograph-atlas redesign. No replacement of the
+epoch-9 artifacts. No across-epoch-median skill definition. No real
+optimization harness. No W&B/early-stopping training integration. No new
+full-population embedded-static profile. No full or repeated test-suite
+run beyond what Part B's (already doc-only) change required. No commit
+performed automatically.
+
+## 2026-07-27 — Stage 1 validation and optimization foundation — final status resolution and commit closure
+
+Resolves the open item from the commit-readiness pass above and closes out
+the phase for commit. **No further scientific analysis, no additional
+epoch comparison, no across-epoch skill definition, no regeneration of the
+screening subset or atlas selection, no algorithm change, no policy change,
+no full-population embedded-static candidate, no training, no inference, no
+sealed-data access.**
+
+**Decision 6 — 400-basin screening subset accepted as `provisional
+operational screening subset v001`.** The existing epoch-9-based selection
+is deterministic, reproducible, and stratified by geography, physical/
+hydroclimatic attributes, flow variability, and seed skill; it tracks the
+full 2,307-basin population well across the existing 11 checkpoints
+(Spearman ≈0.90, Kendall ≈0.82, max abs. median-NSE diff ≈0.0053); the
+epoch-7 sensitivity candidate performed materially worse on every one of
+those measures. Exact basin membership is sensitive to the anchor checkpoint
+because the design contains many small composite strata and seeded
+within-cell draws — this sensitivity does **not** invalidate the subset's
+operational purpose. **Not yet permanently frozen or scientifically
+authoritative.** The full 2,307-basin development-validation population
+remains authoritative for final checkpoint, run, architecture, and
+hyperparameter selection. **Prospective validation rule:** use the subset
+for frequent feedback and early pruning; over approximately the first 3-5
+materially different future model runs, compare subset-based conclusions
+against full-population validation; reconsider or formally freeze the
+subset only after that prospective evidence exists. No search for a
+supposedly optimal anchor checkpoint was performed or is planned now.
+
+**Decision 7 — 24-basin hydrograph-atlas selection accepted as
+`deterministic provisional hydrograph-atlas selection v001`.** The existing
+epoch-9-based list is reproducible; balanced by validation-skill stratum,
+basin-area class, and east/west geography; and provides useful HUC02/
+macroregion breadth. Its purpose is structured visual inspection and
+trust-building, not statistical estimation or model selection, so basin-
+identity sensitivity to the skill-anchor checkpoint is acceptable for this
+use. **The deterministic selection framework is complete; the final
+observed-vs-predicted hydrograph atlas is not yet generated.** When the
+actual atlas is built, the selected list may be retained or revised using a
+later model or a more stable cross-model skill definition, without
+reopening the selection framework itself.
+
+**Decision 8 — general interpretation, binding on both artifacts.** Exact
+membership stability is not required for either artifact; reproducibility,
+stratification, transparency, and fitness for purpose are the requirements.
+Neither artifact is an independent test set. Neither replaces full
+development validation. Neither may include temporal-test, spatial-holdout,
+or California information at any point.
+
+**Decision 9 — supersedes Decision 5 (2026-07-27, above) only in
+confirming, not changing, its conclusion.** The two diagnostic scripts
+(`scripts/aggregate_stage1_seed_checkpoint_report.py`,
+`scripts/dump_per_basin_table.py`) remain untracked and excluded from the
+foundation commit: under the current state they have no dedicated CLI
+tests. Not deleted; may be tested and committed later if reused in the
+optimization harness.
+
+**Commit closure.** Two commits proposed and created from the accumulated
+phase diff: (1) foundation implementation — percentile diagnostics,
+hydrograph-atlas selection/event foundation, screening-subset selection and
+validation tooling, early-stopping policy engine, W&B tracking wrapper,
+embedded-static structural-smoke config-generation support, associated
+policy YAML files, associated tests, and reusable generation/analysis
+scripts; (2) documentation closure — the five status documents listed at
+the top of this entry's parent phase plus this decision log. Generated
+evidence under `reports/` and the two untested diagnostic scripts remain
+untracked. Exact commit hashes and push status are recorded in the
+session's final report, not duplicated here.
+
+**Not done in this entry.** No training run. No NH inference run. No
+sealed-data access. No further epoch comparison. No across-epoch skill
+definition. No screening-subset or atlas regeneration. No selection-
+algorithm change. No early-stopping or W&B policy change. No full-
+population embedded-static candidate. No repeated full test-suite run
+(relies on the previously reported 1094/1094-effective regression result;
+no production code changed since).
