@@ -50,6 +50,7 @@ __all__ = [
     "RTMA_CONTINUOUS_VARIABLES",
     "check_generated_config_structure",
     "check_flashnh_dataset_construction",
+    "check_flashnh_static_pathway_construction",
     "check_flashnh_external_scaler_test_construction",
     "inspect_dynamic_nan_inventory",
     "run_structural_preflight",
@@ -161,6 +162,7 @@ def check_generated_config_structure(
     require_identical_basin_sets: bool = True,
     require_test_disjoint_from_train_validation: bool = False,
     expect_generated_basins_equal_package_manifest: bool = True,
+    require_validation_subset_of_train: bool = False,
 ) -> dict:
     """File-only checks against a generated config bundle + the package it
     was rendered against. Returns the parsed ``{"config": ..., "manifest":
@@ -179,9 +181,24 @@ def check_generated_config_structure(
     share one identical train/validation/test basin set. Every default here
     reproduces the original single-population (compact-package) checks
     exactly -- passing none of these keeps this function's behavior
-    byte-for-byte unchanged."""
+    byte-for-byte unchanged.
+
+    ``require_validation_subset_of_train`` exists only for the Stage 1
+    lead-6 optimization pilot's screening-validation bundle shape (see
+    ``src.baseline.pilot_lead06_config.build_pilot_bundle``): train == the
+    full development population, validation == a PROPER SUBSET of it (the
+    ~400-basin screening subset), test == train (never the spatial holdout
+    or temporal-test period, so this bundle cannot be misused to touch
+    sealed data). Mutually exclusive with ``require_identical_basin_sets``
+    (which defaults True); a caller wanting this pilot shape must pass
+    ``require_identical_basin_sets=False, require_validation_subset_of_train=True``."""
     generated_dir = Path(generated_dir)
     package_root = Path(package_root)
+
+    if require_identical_basin_sets and require_validation_subset_of_train:
+        raise NHStructuralPreflightError(
+            "require_identical_basin_sets and require_validation_subset_of_train are mutually exclusive"
+        )
 
     if package_root.is_dir():
         report.ok("package_root_exists")
@@ -305,6 +322,29 @@ def check_generated_config_structure(
             report.error(
                 "basin_membership_identical_across_periods",
                 "train/validation/test basin lists are not identical (temporal-only separation requires identical basins)",
+            )
+    elif require_validation_subset_of_train:
+        if val_set and val_set < train_set:
+            report.ok(
+                "basin_membership_validation_proper_subset_of_train",
+                f"{len(val_set)} validation basin(s) are a proper subset of {len(train_set)} train basin(s)",
+            )
+        else:
+            report.error(
+                "basin_membership_validation_proper_subset_of_train",
+                f"validation basin set ({len(val_set)}) must be a non-empty PROPER subset of the train "
+                f"basin set ({len(train_set)})",
+            )
+        if test_set == train_set:
+            report.ok(
+                "basin_membership_test_equals_train_no_sealed_access",
+                "test basin list equals train (spatial-holdout/temporal-test period never referenced)",
+            )
+        else:
+            report.error(
+                "basin_membership_test_equals_train_no_sealed_access",
+                "test basin list must equal train for this pilot bundle shape (a divergent test basin "
+                "list risks accessing sealed spatial-holdout/temporal-test data)",
             )
     else:
         if train_set == val_set:
@@ -577,6 +617,129 @@ def check_flashnh_dataset_construction(report: AuditReport, config_path, *, regi
         report.error("single_target_tensor", f"expected exactly one target in the y tensor, got size {n_targets}")
 
     return datasets
+
+
+# ---------------------------------------------------------------------------
+# Task item 2 (pilot): real embedded-static pathway verification
+# ---------------------------------------------------------------------------
+
+def check_flashnh_static_pathway_construction(
+    report: AuditReport,
+    config_path,
+    *,
+    expected_pathway: str,
+    expected_embedding_hiddens: list | None = None,
+    register: bool = True,
+) -> None:
+    """Construct a real NH model (no dataset, no training) from a generated
+    pilot config and inspect its resolved static-embedding submodule.
+
+    Fails loudly in either silent-fallback direction (Stage 1 lead-6 pilot
+    task item 2): a ``"learned_fc_embedding"`` config whose
+    ``cfg.statics_embedding`` silently resolves to ``nn.Identity()`` (e.g. a
+    missing/misspelled key), or a ``"raw_identity_concatenation"`` config
+    where a learned embedding is unexpectedly active.
+
+    ``expected_pathway`` uses the same vocabulary as
+    ``src.baseline.pilot_lead06_config.PilotRunSpec.static_pathway``:
+    ``"raw_identity_concatenation"`` or ``"learned_fc_embedding"``. For the
+    latter, ``expected_embedding_hiddens`` (e.g. ``[128, 64]``) is required
+    and its exact shape is checked against the constructed ``FC`` module.
+
+    Model construction only requires a ``Config`` -- no dataset, no
+    training. Confirmed directly against the installed NeuralyHydrology 1.13
+    source: ``CudaLSTM.__init__`` sets ``self.embedding_net =
+    InputLayer(cfg)``, and ``InputLayer.__init__`` sets
+    ``self.statics_embedding, self.statics_output_size =
+    self._get_embedding_net(cfg.statics_embedding, ...)``, where
+    ``cfg.statics_embedding is None`` resolves to ``nn.Identity()`` and any
+    dict resolves to an ``neuralhydrology.modelzoo.fc.FC`` instance.
+    """
+    if expected_pathway not in ("raw_identity_concatenation", "learned_fc_embedding"):
+        raise NHStructuralPreflightError(f"unsupported expected_pathway: {expected_pathway!r}")
+    if expected_pathway == "learned_fc_embedding" and not expected_embedding_hiddens:
+        raise NHStructuralPreflightError(
+            "expected_embedding_hiddens is required when expected_pathway == 'learned_fc_embedding'"
+        )
+
+    if register:
+        register_flashnh_dataset()
+    from neuralhydrology.modelzoo import get_model
+    from neuralhydrology.modelzoo.fc import FC
+    from neuralhydrology.utils.config import Config
+    import torch.nn as nn
+
+    cfg = Config(Path(config_path))
+    try:
+        model = get_model(cfg)
+    except Exception as exc:  # noqa: BLE001 -- surfaced as a report failure, not a crash
+        report.error("static_pathway_model_construction", str(exc))
+        return
+    report.ok("static_pathway_model_construction")
+
+    embedding_net = getattr(model, "embedding_net", None)
+    statics_embedding = getattr(embedding_net, "statics_embedding", None) if embedding_net is not None else None
+    if statics_embedding is None:
+        report.error("static_pathway_embedding_module_present", "model.embedding_net.statics_embedding not found")
+        return
+    report.ok("static_pathway_embedding_module_present")
+
+    is_identity = isinstance(statics_embedding, nn.Identity)
+    is_fc = isinstance(statics_embedding, FC)
+
+    if expected_pathway == "raw_identity_concatenation":
+        if is_identity:
+            report.ok("static_pathway_raw_identity_confirmed")
+        else:
+            report.error(
+                "static_pathway_raw_identity_confirmed",
+                f"expected a raw nn.Identity() static pathway, got {type(statics_embedding).__name__} "
+                "(a learned embedding is unexpectedly active for a raw-pathway config)",
+            )
+        return
+
+    # expected_pathway == "learned_fc_embedding"
+    if is_identity:
+        report.error(
+            "static_pathway_learned_embedding_confirmed",
+            "cfg.statics_embedding silently resolved to nn.Identity() -- the learned static "
+            "embedding is not active (check for a missing/misspelled statics_embedding key)",
+        )
+        return
+    if not is_fc:
+        report.error(
+            "static_pathway_learned_embedding_confirmed",
+            f"expected an FC learned static embedding, got {type(statics_embedding).__name__}",
+        )
+        return
+    report.ok("static_pathway_learned_embedding_confirmed")
+
+    expected_output_size = int(expected_embedding_hiddens[-1])
+    actual_output_size = getattr(statics_embedding, "output_size", None)
+    if actual_output_size == expected_output_size:
+        report.ok("static_pathway_embedding_output_size", f"output_size={actual_output_size}")
+    else:
+        report.error(
+            "static_pathway_embedding_output_size",
+            f"expected FC output_size {expected_output_size} (last entry of embedding_hiddens="
+            f"{list(expected_embedding_hiddens)}), got {actual_output_size!r}",
+        )
+
+    # FC does not otherwise expose its hidden_sizes list back to the caller;
+    # the number of nn.Linear layers in its Sequential net equals
+    # len(hidden_sizes) by construction (one Linear per hidden-size entry,
+    # ending at output_size), so this is the clearest available structural
+    # signature of the full embedding shape, not just its final width.
+    linear_layers = [m for m in statics_embedding.net if isinstance(m, nn.Linear)]
+    expected_linear_count = len(expected_embedding_hiddens)
+    if len(linear_layers) == expected_linear_count:
+        report.ok("static_pathway_embedding_layer_count", f"{len(linear_layers)} nn.Linear layer(s)")
+    else:
+        report.error(
+            "static_pathway_embedding_layer_count",
+            f"expected {expected_linear_count} nn.Linear layer(s) for embedding_hiddens="
+            f"{list(expected_embedding_hiddens)}, got {len(linear_layers)}",
+        )
 
 
 def check_flashnh_external_scaler_test_construction(

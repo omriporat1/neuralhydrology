@@ -67,7 +67,15 @@ __all__ = [
     "COMPACT_SMOKE_RUN_PROFILE_NAME",
     "INITIAL_SEED_RUN_PROFILE_NAME",
     "EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME",
+    "PILOT_LEAD06_RAW_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_RAW_SEEDB_PROFILE_NAME",
+    "PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME",
+    "PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME",
     "KNOWN_RUN_PROFILE_NAMES",
+    "get_run_profile_mapping",
     "validate_statics_embedding_spec",
     "HOLDOUT_MARKER_FILENAME",
     "HoldoutBundleTrainingRejected",
@@ -272,6 +280,88 @@ _EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE = {
     },
 }
 
+# Stage 1 lead-6 optimization pilot (config/stage1_lead06_pilot_v001.yaml):
+# exactly 6 named profiles, one per agreed run_id. All 6 share the initial
+# full-population seed profile's scientific hyperparameters (hidden_size 128,
+# output_dropout 0.25, batch_size 256, Adam lr 0.001, NSE loss, num_workers
+# 4) -- none of those are varied by this pilot. Each profile differs only in:
+#   - seed (967139 = "seed A", the historical seed run's own NH-assigned
+#     value, recovered read-only from its frozen run_dir/config.yml; 1729 =
+#     "seed B")
+#   - static pathway: raw_* profiles have no statics_embedding key (NH 1.13
+#     resolves that to nn.Identity(), i.e. raw concatenation); emb* profiles
+#     add a learned FC statics_embedding of the agreed shape, with
+#     activation/dropout held fixed (tanh/0.1) across all three shapes, per
+#     section 2.5.
+#   - epochs=6: the FIRST bounded training chunk only (this pilot's
+#     screening cadence validates every 3 epochs, diagnostic-only at epoch 3,
+#     stopping-eligible from epoch 6 -- see
+#     config/stage1_lead06_pilot_v001.yaml's early_stopping block). The pilot
+#     orchestrator (src/baseline/pilot_orchestration.py) extends training
+#     past epoch 6 via NH's own `continue_run` + a raised `epochs` overlay,
+#     one bounded chunk at a time, up to the pilot's 36-epoch sub-cap -- it
+#     never edits these frozen profiles to "restart" at a larger epoch count.
+#   - validate_n_random_basins=1000: larger than the screening-subset
+#     policy's max allowed count (500, config/stage1_screening_subset_v001.yaml),
+#     so NH validates every basin in the (already deliberately-scoped)
+#     validation basin file each screening epoch rather than subsampling it
+#     further.
+# See docs/stage1_lead06_pilot_v001.md.
+_PILOT_LEAD06_BASE_PROFILE = {
+    "model": "cudalstm",
+    "hidden_size": 128,
+    "output_dropout": 0.25,
+    "batch_size": 256,
+    "optimizer": "Adam",
+    "learning_rate": 0.001,
+    "loss": "NSE",
+    "save_weights_every": 1,
+    "validate_every": 3,
+    "validate_n_random_basins": 1000,
+    "log_interval": 50,
+    "num_workers": 4,
+    "epochs": 6,
+    "device": "cuda:0",
+    "verbose": 1,
+}
+
+_PILOT_LEAD06_EMBEDDING_SHAPES = {
+    "emb128x64": [128, 64],
+    "emb64": [64],
+    "emb128": [128],
+}
+
+
+def _pilot_lead06_profile(*, seed: int, embedding_hiddens: "list | None") -> dict:
+    profile = dict(_PILOT_LEAD06_BASE_PROFILE)
+    profile["seed"] = seed
+    if embedding_hiddens is not None:
+        profile["statics_embedding"] = {
+            "type": "fc",
+            "hiddens": list(embedding_hiddens),
+            "activation": "tanh",
+            "dropout": 0.1,
+        }
+    return profile
+
+
+PILOT_LEAD06_RAW_SEEDA_PROFILE_NAME = "pilot_lead06_raw_seedA_v001"
+PILOT_LEAD06_RAW_SEEDB_PROFILE_NAME = "pilot_lead06_raw_seedB_v001"
+PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME = "pilot_lead06_emb128x64_seedA_v001"
+PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME = "pilot_lead06_emb128x64_seedB_v001"
+PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME = "pilot_lead06_emb64_seedA_v001"
+PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME = "pilot_lead06_emb128_seedA_v001"
+
+_SEED_A = 967139
+_SEED_B = 1729
+
+_PILOT_LEAD06_RAW_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=None)
+_PILOT_LEAD06_RAW_SEEDB_PROFILE = _pilot_lead06_profile(seed=_SEED_B, embedding_hiddens=None)
+_PILOT_LEAD06_EMB128X64_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[128, 64])
+_PILOT_LEAD06_EMB128X64_SEEDB_PROFILE = _pilot_lead06_profile(seed=_SEED_B, embedding_hiddens=[128, 64])
+_PILOT_LEAD06_EMB64_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[64])
+_PILOT_LEAD06_EMB128_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[128])
+
 # Canonical run-profile registry: name -> (hyperparameter mapping, manifest
 # note). New profiles must be added here, never spliced in ad hoc, so every
 # generated manifest can unambiguously record which named profile it used.
@@ -283,10 +373,37 @@ _RUN_PROFILES = {
     COMPACT_SMOKE_RUN_PROFILE_NAME: _COMPACT_SMOKE_RUN_PROFILE,
     INITIAL_SEED_RUN_PROFILE_NAME: _INITIAL_SEED_TRAINING_PROFILE,
     EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME: _EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE,
+    PILOT_LEAD06_RAW_SEEDA_PROFILE_NAME: _PILOT_LEAD06_RAW_SEEDA_PROFILE,
+    PILOT_LEAD06_RAW_SEEDB_PROFILE_NAME: _PILOT_LEAD06_RAW_SEEDB_PROFILE,
+    PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB128X64_SEEDA_PROFILE,
+    PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME: _PILOT_LEAD06_EMB128X64_SEEDB_PROFILE,
+    PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB64_SEEDA_PROFILE,
+    PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB128_SEEDA_PROFILE,
+}
+
+# run_id (config/stage1_lead06_pilot_v001.yaml) -> run_profile_name, so
+# src/baseline/pilot_lead06_config.py never hardcodes this mapping itself.
+PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME = {
+    "raw_seedA": PILOT_LEAD06_RAW_SEEDA_PROFILE_NAME,
+    "raw_seedB": PILOT_LEAD06_RAW_SEEDB_PROFILE_NAME,
+    "emb128x64_seedA": PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME,
+    "emb128x64_seedB": PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME,
+    "emb64_seedA": PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME,
+    "emb128_seedA": PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME,
 }
 
 # Sorted, public list of known run-profile names, for CLI --help/choices use.
 KNOWN_RUN_PROFILE_NAMES = tuple(sorted(_RUN_PROFILES))
+
+
+def get_run_profile_mapping(run_profile_name: str) -> dict:
+    """Public read-only accessor for one named entry of the internal
+    ``_RUN_PROFILES`` registry, so other modules (e.g.
+    ``pilot_lead06_config.py``'s policy/profile semantic cross-check) never
+    need to import the private ``_RUN_PROFILES`` name directly."""
+    if run_profile_name not in _RUN_PROFILES:
+        raise NHConfigGenerationError(f"unknown run_profile_name: {run_profile_name!r}")
+    return dict(_RUN_PROFILES[run_profile_name])
 
 _RUN_PROFILE_NOTES = {
     COMPACT_SMOKE_RUN_PROFILE_NAME: (
@@ -308,6 +425,41 @@ _RUN_PROFILE_NOTES = {
         "technical settings. DESIGN/CONFIG + STRUCTURAL-SMOKE-ONLY -- not "
         "trained in this phase, not a tuned candidate, not a claim that this "
         "embedding shape is optimal."
+    ),
+    PILOT_LEAD06_RAW_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot, config/stage1_lead06_pilot_v001.yaml "
+        "run_id=raw_seedA: raw (nn.Identity()) static concatenation, "
+        "seed=967139 ('seed A', the historical full-population seed run's own "
+        "NH-assigned value). One of 2 raw-pathway controls, not itself a "
+        "learned-embedding candidate."
+    ),
+    PILOT_LEAD06_RAW_SEEDB_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot run_id=raw_seedB: raw static "
+        "concatenation, seed=1729 ('seed B'). Second raw-pathway control, for "
+        "seed-sensitivity comparison against raw_seedA."
+    ),
+    PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot run_id=emb128x64_seedA: learned FC "
+        "statics_embedding hiddens=[128, 64], seed=967139 ('seed A'). This is "
+        "the pilot's workflow-qualification run (config/"
+        "stage1_lead06_pilot_v001.yaml's workflow_qualification_run_id) -- "
+        "prepared, not launched, by this implementation increment."
+    ),
+    PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot run_id=emb128x64_seedB: learned FC "
+        "statics_embedding hiddens=[128, 64], seed=1729 ('seed B'). Matched-"
+        "seed pair with emb128x64_seedA for embedding-vs-seed variance "
+        "comparison."
+    ),
+    PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot run_id=emb64_seedA: learned FC "
+        "statics_embedding hiddens=[64] (single narrower layer), seed=967139 "
+        "('seed A'). Embedding-width ablation against emb128x64_seedA."
+    ),
+    PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 optimization pilot run_id=emb128_seedA: learned FC "
+        "statics_embedding hiddens=[128] (single wider layer), seed=967139 "
+        "('seed A'). Embedding-depth ablation against emb128x64_seedA."
     ),
 }
 

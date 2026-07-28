@@ -4,6 +4,97 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-27 — Stage 1 lead-6 optimization pilot — implementation decisions
+
+**Scope.** Local implementation of the six-run lead-6 optimization pilot
+agreed after the validation-and-optimization foundation phase. Full
+documentation: `docs/stage1_lead06_pilot_v001.md`. **No Moriah connection,
+no Slurm submission, no training, no full-population evaluation, no
+temporal-test or spatial-holdout access occurred in this increment.**
+
+**Decision 1 — pilot epoch sub-cap implemented as a layered override, not
+an edit to the committed early-stopping policy.** The pilot needs a
+36-epoch budget; `config/stage1_early_stopping_policy_v001.yaml` (unmodified,
+still binding for future non-pilot runs) caps at 40.
+`src/baseline/pilot_early_stopping.build_effective_policy()` loads the base
+policy, validates none of its core fields (`metric_name`,
+`higher_is_better`, `min_epoch_before_stop`, `min_delta`,
+`patience_events`) have drifted from what the pilot expects, and layers
+`max_epoch_budget = min(base, 36)` under a renamed `policy_name`. Rejected
+alternative: forking a second early-stopping policy file, which would
+duplicate mechanics already implemented and tested.
+
+**Decision 2 — Seed A recovered read-only, not re-derived or reused
+implicitly.** The historical full-population seed run never set `seed`
+explicitly; NH auto-assigned and wrote it back to the frozen run's
+`run_dir/config.yml`. That value (967139) was recovered by a single
+lightweight `grep` on the Moriah login node against the already-frozen
+config file — no compute, no Python import, no training triggered. Seed B
+fixed at 1729 (confirmed `!= 967139`, so no collision-avoidance fallback
+needed).
+
+**Decision 3 — one shared, non-collected test-fixture helper module, a
+narrow deviation from the repo's per-file test convention.** No
+`tests/conftest.py` exists anywhere in this repo (confirmed by search); the
+established convention is self-contained fixtures per test file. Eight new
+pilot test files all needed the same full-union-package, perfect-NSE
+validation-results, and screening-basin-file fixtures — duplicating that
+setup eight times was judged worse than one small, clearly-scoped,
+non-`test_`-prefixed helper (`tests/_pilot_support.py`, never collected by
+pytest). Every test file still defines its own test logic locally; only
+fixture *construction* is shared.
+
+**Decision 4 — `run_pilot()`'s evidence bundle write is unconditionally
+`force=True` internally, decoupled from the caller's `force` argument.**
+Found and fixed during implementation: an earlier version of
+`pilot_orchestration.run_pilot()` threaded a single `force` flag to both
+"regenerate NH config on resume" and "overwrite the evidence bundle
+directory," which meant a safe, idempotent resume call (`force=False`, the
+correct default — nothing needs regenerating) would also fail to update
+the evidence bundle, or an unsafe `force=True` resume would silently
+redo config generation it shouldn't. The two concerns are now separate:
+`force` (caller-supplied) gates only NH config regeneration; the internal
+evidence-bundle write always uses `force=True`, since the bundle is a
+derived, deterministic summary that must always reflect the latest known
+state on every call. Verified end-to-end by
+`tests/test_pilot_orchestration.py::test_run_pilot_resume_is_idempotent_and_does_not_retrain`
+and directly by
+`tests/test_pilot_evidence_bundle.py::test_write_pilot_evidence_bundle_force_allows_overwrite`.
+
+**Decision 5 — no fundamental incompatibility found; no scope escalation.**
+The task's instruction was to stop and report if a broad redesign were
+required. No such incompatibility was found. The only issues encountered
+were two ordinary test-authoring bugs in newly-written test code itself
+(a dead, non-assertive test stub; a naive substring check that
+false-flagged `--force` appearing inside an explanatory comment in the
+sbatch script) — both fixed in place, neither indicating a defect in the
+implementation modules under test.
+
+**Verification.** Eight new focused test files, 95 tests, all passing.
+Full pre-existing repository suite re-run: 1122 passed; 3 initial failures
+in `tests/test_package_builder.py`/`tests/test_package_audit.py` (files not
+touched by this work) traced to a Windows-specific `PermissionError` during
+atomic package-directory promotion under load, confirmed to pass cleanly
+in isolation — a pre-existing local-environment flake, not a regression; 6
+pre-existing collection errors from `neuralhydrology`/`torch` imports,
+expected in this local Windows environment (those tests require the
+h2o/Moriah environment). Two item-10 checklist phrases ("silent
+identity-fallback rejection", "unexpected-embedding rejection") were
+confirmed already covered — the former by this pilot's own exact-shape
+assertions per run_id (raw runs assert `embedding_hiddens is None`,
+i.e. no `statics_embedding` key, matching the NH 1.13 identity-fallback
+behavior the Part B static-pathway audit first identified), the latter by
+`tests/test_nh_config_generation.py`'s existing structural-validation
+tests for malformed `statics_embedding` specs — no new test was needed for
+either.
+
+**Not done in this entry.** No Moriah job submitted. No training. No full-
+population evaluation. No temporal-test or spatial-holdout access. No
+change to the certified Compact Scientific Package or canonical split
+membership. No screening-subset regeneration. No hydrograph atlas. No
+automated sweep. No EA-LSTM work. Nothing generated by this pilot
+committed.
+
 ## 2026-07-24 Commit-readiness review of the full-population NH config-generation increment — two safeguard fixes
 
 **Scope.** Focused adversarial-validation review (no package transfer, no Moriah/Slurm work, no

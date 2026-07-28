@@ -52,6 +52,7 @@ from .nh_raw_space_evaluation import (
     aggregate_raw_space_metrics,
     derive_basin_area_km2_from_netcdf,
     evaluate_basin_raw_space,
+    pooled_raw_space_metrics,
 )
 from .package_audit import sha256_file
 
@@ -103,6 +104,7 @@ def raw_space_metrics_for_run_period(
     basin_ids: Optional[Sequence[str]] = None,
     min_area_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
+    compute_pooled: bool = False,
 ) -> dict:
     """Reads one completed (period, epoch)'s NH evaluation pickle, self-derives
     each basin's area from the package's own data, converts obs/sim back to
@@ -111,6 +113,12 @@ def raw_space_metrics_for_run_period(
     Basins with an inconsistent or under-sampled area derivation are excluded
     from the metrics but listed under ``"area_derivation_excluded"`` with
     their reason -- never silently dropped without a trace.
+
+    ``compute_pooled``, if set, additionally attaches
+    ``result["pooled"]`` -- a diagnostic-only pooled-sample metric set (see
+    :func:`src.baseline.nh_raw_space_evaluation.pooled_raw_space_metrics`),
+    never the primary median-per-basin metric. Defaults to ``False`` so
+    existing callers are unaffected.
     """
     results = load_period_results(run_dir, period, epoch)
     actual_basin_ids = sorted(results.keys())
@@ -128,6 +136,8 @@ def raw_space_metrics_for_run_period(
 
     per_basin_metrics = []
     area_derivation_excluded = []
+    pooled_obs_arrays = []
+    pooled_sim_arrays = []
     for basin_id in actual_basin_ids:
         freq_results = results[basin_id]
         for freq, freq_result in freq_results.items():
@@ -171,7 +181,11 @@ def raw_space_metrics_for_run_period(
                 obs_mm_per_h=obs_mm_per_h,
                 sim_mm_per_h=sim_mm_per_h,
                 area_km2=area_result.area_km2,
+                return_admitted_arrays=compute_pooled,
             )
+            if compute_pooled:
+                pooled_obs_arrays.append(basin_metrics.pop("_admitted_obs_m3s"))
+                pooled_sim_arrays.append(basin_metrics.pop("_admitted_sim_m3s"))
             basin_metrics["freq"] = freq
             basin_metrics["area_n_samples"] = area_result.n_samples
             basin_metrics["area_relative_mad"] = area_result.relative_mad
@@ -184,7 +198,7 @@ def raw_space_metrics_for_run_period(
         "metrics": {},
     }
 
-    return {
+    result = {
         "run_dir": str(run_dir),
         "period": period,
         "epoch": epoch,
@@ -197,6 +211,9 @@ def raw_space_metrics_for_run_period(
         "per_basin": per_basin_metrics,
         "aggregate": aggregate,
     }
+    if compute_pooled:
+        result["pooled"] = pooled_raw_space_metrics(pooled_obs_arrays, pooled_sim_arrays)
+    return result
 
 
 def require_holdout_bundle(generated_dir) -> None:

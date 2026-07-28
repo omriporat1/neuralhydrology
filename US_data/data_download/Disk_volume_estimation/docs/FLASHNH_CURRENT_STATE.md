@@ -1,6 +1,49 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-26 (Stage 1 validation and optimization foundation — Parts A-K complete)
+Last updated: 2026-07-27 (Stage 1 lead-6 optimization pilot — implementation and tests complete, not launched)
+
+## Stage 1 lead-6 optimization pilot — implementation and tests complete (2026-07-27)
+
+Local implementation-only increment, opened immediately after the
+validation-and-optimization foundation phase below. **No Moriah job has
+been submitted, no training has been run, and no temporal-test or
+spatial-holdout data has been accessed.** Full documentation:
+`docs/stage1_lead06_pilot_v001.md`; machine-readable run matrix:
+`config/stage1_lead06_pilot_v001.yaml`.
+
+Delivered: a closed six-run pilot matrix (raw static concatenation vs. a
+learned FC static embedding in three shapes `[128,64]`/`[64]`/`[128]`,
+crossed with two seeds — historical Seed A 967139 recovered read-only from
+the frozen seed run's own config, and Seed B 1729) built entirely on the
+seed run's frozen hyperparameters, with no seq_length/batch_size/lr/
+scheduler/hidden_size/dropout variation and no EA-LSTM or automated sweep;
+a pilot-specific 36-epoch early-stopping sub-cap layered on top of the
+unmodified, still-binding general early-stopping policy (`max_epoch_budget`
+40) via `src/baseline/pilot_early_stopping.py`, restart-safe with
+idempotent-replay/contradictory-replay handling; a provisional-screening-
+subset evaluation interface with epoch-3-diagnostic / epoch-6-stopping-
+eligible cadence classification and sealed-population rejection; a
+full-population validation readiness interface (not yet exercised against
+a real run); an optional, disabled-by-default W&B tracking wrapper with a
+confirmed-safe failure-downgrade path; a compact, checkpoint-byte-free
+evidence bundle writer; a bounded-chunk restart-safe orchestration driver;
+a CLI wrapper and a Slurm sbatch launcher (both prepared, neither
+submitted/executed — the launcher's correctness was checked only by static
+text inspection and a `bash -n` syntax check). Eight new focused test
+files, 95 tests, all passing; full pre-existing repository suite re-run
+alongside them with zero regressions attributable to this work (3
+Windows file-lock flakes in unrelated, untouched package-builder tests
+confirmed to pass in isolation; 6 pre-existing `neuralhydrology`/`torch`
+import-only collection errors, expected in this local environment).
+
+**Not done in this increment:** no Moriah connection, no Slurm submission,
+no training, no full-population evaluation, no temporal-test or
+spatial-holdout access, no change to the certified Compact Scientific
+Package or canonical split membership, no screening-subset regeneration,
+no hydrograph atlas, no automated sweep, no EA-LSTM work, nothing generated
+by this pilot committed. The first job this pilot will eventually run is
+`emb128x64_seedA` (the workflow-qualification run) — prepared, not
+launched.
 
 ## Stage 1 validation and optimization foundation — Parts A-K complete (2026-07-26)
 

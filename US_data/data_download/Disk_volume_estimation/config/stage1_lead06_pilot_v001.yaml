@@ -1,0 +1,140 @@
+# Flash-NH Stage 1 -- lead-6 optimization pilot run matrix (machine-readable)
+# policy_name: stage1_lead06_pilot_v001
+#
+# Binding scope of THIS file: which of the 6 agreed pilot runs exist, their
+# static pathway / embedding shape / seed, and the pilot's early-stopping
+# epoch sub-cap and screening cadence. It does NOT redefine anything already
+# pinned elsewhere -- it only selects/composes:
+#   - scientific policy:        config/stage1_scientific_baseline_v001.yaml
+#   - early-stopping mechanics: config/stage1_early_stopping_policy_v001.yaml
+#   - screening-subset policy:  config/stage1_screening_subset_v001.yaml
+#   - screening-subset basins:  reports/stage1_validation_optimization_foundation_v001/
+#                                part_d_screening_subset/selection_v001/screening_subset_basin_ids.txt
+#                                (locally reproducible from the policy above +
+#                                scripts/generate_stage1_screening_subset.py;
+#                                reports/** is gitignored by repo convention,
+#                                so this artifact is regenerated locally, not
+#                                itself committed -- see docs/repo_policy.md)
+#   - W&B tracking policy:      config/stage1_wandb_tracking_policy_v001.yaml
+#
+# This is a small, narrow, closed run-spec file -- exactly the 6 agreed runs,
+# not a general sweep-schema framework. Any run_id not listed here is
+# rejected by src/baseline/pilot_lead06_config.py.
+#
+# Portable policy ONLY: no machine paths (h2o/Moriah/local absolute paths),
+# no credentials, no Slurm resources.
+
+policy_name: stage1_lead06_pilot_v001
+policy_version: "1"
+created: "2026-07-27"
+
+lead_hours: 6
+seq_length: 24
+
+# Fixed across all 6 runs (section 2.5 / this pilot's binding hyperparameter
+# freeze). Sourced from the same values as
+# nh_config_generation._INITIAL_SEED_TRAINING_PROFILE, restated here only for
+# human-readable provenance -- src/baseline/pilot_lead06_config.py builds the
+# actual per-run NH config mapping from the named _RUN_PROFILES entries
+# below, not by re-parsing this block.
+fixed_hyperparameters:
+  model: cudalstm
+  hidden_size: 128
+  output_dropout: 0.25
+  batch_size: 256
+  optimizer: Adam
+  learning_rate: 0.001
+  loss: NSE
+  num_workers: 4
+
+# Seed A: the historical full-population seed run's own NH-generated seed
+# (never explicitly configured -- NH assigns and writes it back to
+# run_dir/config.yml when no `seed` key is set). Recovered 2026-07-27 by a
+# single lightweight, read-only `grep '^seed' <run_dir>/config.yml` on the
+# Moriah login node against the frozen seed-run config
+# (run_dir=.../stage1_full_population_nh_config_lead06_seq24_seed_v001/
+# development/runs/stage1_compact_lead06_seq24_v001_2507_154104) -- no
+# compute, no Python, no training triggered by this recovery.
+# Seed B: fixed at 1729 (seed A != 1729, so no fallback-to-1730 needed).
+seeds:
+  seed_a: 967139
+  seed_b: 1729
+
+# Exactly the 6 agreed run specifications (section: agreed pilot design).
+# `run_profile_name` must be a key in
+# src.baseline.nh_config_generation._RUN_PROFILES. No Cartesian expansion --
+# this list IS the full run matrix.
+runs:
+  - run_id: raw_seedA
+    static_pathway: raw_identity_concatenation
+    embedding_hiddens: null
+    seed_name: seed_a
+    run_profile_name: pilot_lead06_raw_seedA_v001
+  - run_id: raw_seedB
+    static_pathway: raw_identity_concatenation
+    embedding_hiddens: null
+    seed_name: seed_b
+    run_profile_name: pilot_lead06_raw_seedB_v001
+  - run_id: emb128x64_seedA
+    static_pathway: learned_fc_embedding
+    embedding_hiddens: [128, 64]
+    seed_name: seed_a
+    run_profile_name: pilot_lead06_emb128x64_seedA_v001
+  - run_id: emb128x64_seedB
+    static_pathway: learned_fc_embedding
+    embedding_hiddens: [128, 64]
+    seed_name: seed_b
+    run_profile_name: pilot_lead06_emb128x64_seedB_v001
+  - run_id: emb64_seedA
+    static_pathway: learned_fc_embedding
+    embedding_hiddens: [64]
+    seed_name: seed_a
+    run_profile_name: pilot_lead06_emb64_seedA_v001
+  - run_id: emb128_seedA
+    static_pathway: learned_fc_embedding
+    embedding_hiddens: [128]
+    seed_name: seed_a
+    run_profile_name: pilot_lead06_emb128_seedA_v001
+
+# Learned-static embedding activation/dropout: untuned, held fixed across all
+# 3 embedding shapes (section 2.5 -- "retain currently-implemented tanh/0.1
+# unless direct inspection shows otherwise"; Part I's
+# embedded_static_cudalstm_pilot profile already used these values and
+# nothing found during this implementation required a change).
+embedding_activation: tanh
+embedding_dropout: 0.1
+
+# First Moriah job in this pilot (workflow-qualification run). Prepared by
+# this implementation increment, NOT launched.
+workflow_qualification_run_id: emb128x64_seedA
+
+# Restart-safe, bounded-chunk training/screening/early-stopping cadence
+# (section: binding evaluation/early-stopping policy). This is a PILOT-LEVEL
+# stricter sub-cap layered on top of the unmodified, still-binding
+# config/stage1_early_stopping_policy_v001.yaml (max_epoch_budget: 40) -- the
+# committed policy file itself is not edited or loosened; this pilot simply
+# never trains past epoch 36. See docs/stage1_lead06_pilot_v001.md.
+early_stopping:
+  base_policy_path: config/stage1_early_stopping_policy_v001.yaml
+  pilot_max_epoch_budget: 36
+  screening_validation_every_n_epochs: 3
+  diagnostic_only_epoch: 3
+  stopping_eligible_from_epoch: 6
+
+screening:
+  policy_path: config/stage1_screening_subset_v001.yaml
+  basin_ids_path: reports/stage1_validation_optimization_foundation_v001/part_d_screening_subset/selection_v001/screening_subset_basin_ids.txt
+  # Exact pin to the accepted provisional 400-basin screening realization
+  # (Part D of the Stage 1 validation/optimization foundation report,
+  # selection_v001/, seed=42) -- not a size range. Both values independently
+  # confirmed against selection_manifest.json's own recorded artifact_sha256.
+  expected_count: 400
+  expected_sha256: d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372
+
+wandb:
+  policy_path: config/stage1_wandb_tracking_policy_v001.yaml
+
+evidence:
+  # Directory name convention under a caller-supplied evidence root
+  # (never a machine path here -- see task item 8).
+  bundle_subdir_template: "stage1_lead06_pilot_{run_id}_v001"

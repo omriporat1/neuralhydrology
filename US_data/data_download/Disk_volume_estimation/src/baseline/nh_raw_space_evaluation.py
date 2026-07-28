@@ -52,6 +52,7 @@ __all__ = [
     "raw_space_metrics",
     "aggregate_raw_space_metrics",
     "evaluate_basin_raw_space",
+    "pooled_raw_space_metrics",
 ]
 
 DEFAULT_MIN_AREA_SAMPLES = 100
@@ -327,16 +328,26 @@ def evaluate_basin_raw_space(
     obs_mm_per_h: np.ndarray,
     sim_mm_per_h: np.ndarray,
     area_km2: float,
+    return_admitted_arrays: bool = False,
 ) -> dict:
     """Convert one basin/period to raw space and compute its metrics in one
     step. Returns a flat dict merging :class:`PeriodConversionResult`
-    accounting fields with :func:`raw_space_metrics`'s output."""
+    accounting fields with :func:`raw_space_metrics`'s output.
+
+    ``return_admitted_arrays``, if set, additionally includes the basin's
+    own admitted (finite-observation) raw m^3/s obs/sim arrays under
+    ``"_admitted_obs_m3s"``/``"_admitted_sim_m3s"`` -- leading underscore to
+    signal these are for an immediate in-process pooling reduction (see
+    :func:`pooled_raw_space_metrics`), not for JSON serialization; callers
+    that persist this dict as evidence must pop them first. Defaults to
+    ``False`` so existing callers/tests are unaffected.
+    """
     conversion = convert_period_to_raw_space(obs_mm_per_h, sim_mm_per_h, area_km2)
     metrics = raw_space_metrics(
         conversion.obs_m3s[conversion.admitted_mask],
         conversion.sim_m3s[conversion.admitted_mask],
     )
-    return {
+    result = {
         "basin_id": basin_id,
         "area_km2": area_km2,
         "n_total": conversion.n_total,
@@ -344,6 +355,30 @@ def evaluate_basin_raw_space(
         "n_sim_nonfinite_at_admitted": conversion.n_sim_nonfinite_at_admitted,
         **metrics,
     }
+    if return_admitted_arrays:
+        result["_admitted_obs_m3s"] = conversion.obs_m3s[conversion.admitted_mask]
+        result["_admitted_sim_m3s"] = conversion.sim_m3s[conversion.admitted_mask]
+    return result
+
+
+def pooled_raw_space_metrics(obs_m3s_list: Sequence[np.ndarray], sim_m3s_list: Sequence[np.ndarray]) -> dict:
+    """Diagnostic-only pooled metric (never the primary median-per-basin
+    metric -- see ``docs/stage1_scientific_baseline_design.md``'s binding
+    metric policy): concatenate every basin's already-admitted raw-space
+    obs/sim samples into one array and compute a single set of metrics on
+    the pooled population via the same :func:`raw_space_metrics` formulas
+    used per-basin (no separate pooled formula)."""
+    obs_all = (
+        np.concatenate([np.asarray(a, dtype=np.float64) for a in obs_m3s_list])
+        if obs_m3s_list else np.array([], dtype=np.float64)
+    )
+    sim_all = (
+        np.concatenate([np.asarray(a, dtype=np.float64) for a in sim_m3s_list])
+        if sim_m3s_list else np.array([], dtype=np.float64)
+    )
+    metrics = raw_space_metrics(obs_all, sim_all)
+    metrics["n_basins_pooled"] = len(obs_m3s_list)
+    return metrics
 
 
 # ---------------------------------------------------------------------------
