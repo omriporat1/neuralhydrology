@@ -100,10 +100,28 @@ def evaluate_screening_checkpoint(
 ) -> dict:
     """Evaluate one training checkpoint's screening-subset raw-space metrics.
 
-    Reads the SAME completed NH "validation"-period evaluation the pilot's
-    generated config already restricts to the screening subset (see
-    :func:`src.baseline.pilot_lead06_config.build_pilot_bundle`) -- never a
-    second, independently triggered evaluation. ``screening_basin_ids``
+    Reads one completed NH "validation"-period evaluation result (via
+    :func:`src.baseline.nh_seed_evaluation.raw_space_metrics_for_run_period`,
+    the same canonical raw-space evaluator every other evaluation interface
+    in this repo reuses -- this module adds no second metric implementation
+    and this call is never itself an authoritative evaluation, see
+    ``docs/stage1_lead06_pilot_v001.md``'s evaluation-policy section).
+
+    This function is purely a metric reader: it does not run NH inference
+    and does not decide whether the underlying
+    ``validation/model_epochNNN/validation_results.p`` pickle already
+    exists. That is
+    :func:`src.baseline.pilot_orchestration.ensure_validation_results`'s
+    job, called by orchestration before this function on every screening
+    checkpoint -- NH's own in-training ``validate_every`` cadence does NOT
+    reliably persist that pickle (confirmed by the first real Moriah
+    qualification run, job 45695059; see
+    ``docs/stage1_lead06_pilot_v001.md``), so orchestration explicitly
+    requests one saved NeuralHydrology validation inference per screening
+    checkpoint whenever the pickle is absent, and reuses an already-saved
+    one unchanged on resume. This is not a second, independently triggered
+    metric implementation -- it is the inference step required to create
+    the canonical input this metric reader consumes. ``screening_basin_ids``
     must be the output of :func:`load_validated_screening_basin_ids` (the
     caller's orchestration is responsible for calling it once per run, not
     per checkpoint, and passing the same list through).

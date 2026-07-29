@@ -59,6 +59,7 @@ from .package_audit import sha256_file
 __all__ = [
     "NHSeedEvaluationError",
     "weight_stem",
+    "period_results_path",
     "load_period_results",
     "basin_netcdf_path",
     "raw_space_metrics_for_run_period",
@@ -76,11 +77,22 @@ def weight_stem(epoch: int) -> str:
     return f"model_epoch{epoch:03d}"
 
 
+def period_results_path(run_dir, period: str, epoch: int) -> Path:
+    """Canonical path to one (period, epoch)'s NH evaluation result pickle --
+    ``run_dir/period/model_epoch{epoch:03d}/{period}_results.p``, the same
+    convention ``nh_evaluation_check.py`` uses. The single source of truth
+    for this path: every caller that needs to check whether a saved NH
+    evaluation already exists (e.g.
+    :mod:`src.baseline.pilot_orchestration`'s restart-safe
+    evaluation-prerequisite check) must call this rather than independently
+    reconstructing it."""
+    return Path(run_dir) / period / weight_stem(epoch) / f"{period}_results.p"
+
+
 def load_period_results(run_dir, period: str, epoch: int) -> dict:
-    """Reads ``run_dir/period/model_epoch{epoch:03d}/{period}_results.p``,
-    the same pickle path convention ``nh_evaluation_check.py`` uses."""
-    run_dir = Path(run_dir)
-    result_pickle = run_dir / period / weight_stem(epoch) / f"{period}_results.p"
+    """Reads ``run_dir/period/model_epoch{epoch:03d}/{period}_results.p``
+    (see :func:`period_results_path`)."""
+    result_pickle = period_results_path(run_dir, period, epoch)
     if not result_pickle.exists():
         raise NHSeedEvaluationError(f"missing {period} results pickle: {result_pickle}")
     with open(result_pickle, "rb") as fh:

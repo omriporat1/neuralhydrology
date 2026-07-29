@@ -50,10 +50,35 @@ training run, or Moriah anywhere in this task -- see
 exists so that a later, explicit Moriah launch (task item 7's sbatch script)
 has a single, already-tested entrypoint to call, rather than ad hoc
 per-run scripting under time pressure.
+
+Explicit-evaluation correction (found during the first real Moriah
+workflow-qualification run, ``emb128x64_seedA``, job 45695059): NH's own
+``validate_every``-driven in-training validation does NOT reliably persist
+the ``validation/model_epochNNN/validation_results.p`` pickle that
+:func:`src.baseline.pilot_screening_eval.evaluate_screening_checkpoint`
+(via :func:`src.baseline.nh_seed_evaluation.raw_space_metrics_for_run_period`)
+requires -- see ``docs/stage1_lead06_pilot_v001.md``'s qualification-run
+section for the confirmed root cause and evidence. This module therefore
+never assumes that pickle already exists at a screening checkpoint.
+:func:`ensure_validation_results` checks
+:func:`src.baseline.nh_seed_evaluation.period_results_path` (the single
+canonical path helper, never independently reconstructed here) before every
+screening-cadence epoch's :func:`~src.baseline.pilot_screening_eval.evaluate_screening_checkpoint`
+call: an already-saved result (from a prior explicit evaluation, or from
+NH's own in-training validation on the epochs where it happens to have
+worked) is reused unchanged; a missing one is produced by one explicit call
+to an injectable ``evaluate_checkpoint_fn`` (mirroring ``train_chunk_fn``'s
+seam -- :func:`default_evaluate_checkpoint` is the real NH call, exactly
+``scripts/run_stage1_nh.py``'s own ``eval`` subcommand), and the pickle is
+then required to exist or the run fails loudly rather than silently
+screening against stale/absent data. This is purely an inference
+prerequisite, never a second metric implementation or an authoritative
+evaluation -- see ``pilot_screening_eval.py``'s corrected module docstring.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -63,6 +88,7 @@ from typing import Callable, Optional
 import yaml
 
 from .nh_config_generation import write_generated_config
+from .nh_seed_evaluation import period_results_path
 from .pilot_early_stopping import (
     build_effective_policy,
     load_or_init_pilot_state,
@@ -94,6 +120,10 @@ __all__ = [
     "PilotOrchestrationError",
     "TrainChunkRequest",
     "default_train_chunk",
+    "EvaluationRequest",
+    "root_logger_has_file_handler",
+    "default_evaluate_checkpoint",
+    "ensure_validation_results",
     "discover_nh_run_dir",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
@@ -147,6 +177,111 @@ def default_train_chunk(request: TrainChunkRequest) -> None:
         overlay_path = Path(request.nh_run_dir) / "pilot_epoch_overlay.yaml"
         overlay_path.write_text(yaml.safe_dump({"epochs": request.target_epoch}), encoding="utf-8")
         continue_run(run_dir=request.nh_run_dir, config_file=overlay_path)
+
+
+@dataclass(frozen=True)
+class EvaluationRequest:
+    """One explicit NH evaluation call this module asks its (injectable)
+    ``evaluate_checkpoint_fn`` to perform, when
+    :func:`ensure_validation_results` finds the expected saved-result pickle
+    absent for a screening-cadence epoch. ``period`` is always
+    ``"validation"`` here -- this pilot's screening path never touches the
+    sealed temporal-test period (see ``pilot_screening_eval.py``)."""
+
+    nh_run_dir: Path
+    epoch: int
+    period: str = "validation"
+
+
+def root_logger_has_file_handler(log_path: "Path | str") -> bool:
+    """True if the root logger already has a ``logging.FileHandler`` writing
+    to ``log_path``.
+
+    ``neuralhydrology.utils.logging_utils.setup_logging`` unconditionally
+    opens a brand-new ``FileHandler`` (eagerly, holding open a real file
+    descriptor) and ``StreamHandler`` on every call, then attaches both via
+    ``logging.basicConfig(handlers=...)`` -- which is a documented no-op once
+    the root logger already has any handlers. So a first call attaches NH's
+    handlers as expected, but every subsequent call in the same process (this
+    pilot's :func:`default_evaluate_checkpoint` may be called once per
+    screening epoch, many times per process) still opens and leaks an extra,
+    never-attached file descriptor pointed at the same ``output.log``, even
+    though no duplicate log lines are produced. Checking for an
+    already-attached handler on the same path first (rather than suppressing
+    NH's logging outright) lets repeated evaluation calls skip only the
+    redundant handler creation."""
+    target = Path(log_path).resolve()
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename).resolve() == target:
+            return True
+    return False
+
+
+def default_evaluate_checkpoint(request: EvaluationRequest) -> None:
+    """Real NH evaluation call -- lazy-imports neuralhydrology/torch exactly
+    like :func:`default_train_chunk`, so this module stays importable
+    without either installed. Mirrors ``scripts/run_stage1_nh.py``'s own
+    ``eval`` subcommand precisely (load ``run_dir/config.yml``, append to
+    ``run_dir/output.log`` via the same ``setup_logging`` call, then
+    ``start_evaluation``) rather than duplicating that behavior, except that
+    ``setup_logging`` is skipped when :func:`root_logger_has_file_handler`
+    shows this process already has it wired up (see that function's
+    docstring) -- this pilot may call this function once per screening
+    epoch within a single process, unlike the single-shot CLI it mirrors.
+    NEVER invoked by this task's own tests; only a real Moriah resume calls
+    it, and only when :func:`ensure_validation_results` finds the expected
+    result pickle missing."""
+    from .nh_register import register_flashnh_dataset
+
+    register_flashnh_dataset()
+    from neuralhydrology.evaluation.evaluate import start_evaluation
+    from neuralhydrology.utils.config import Config
+    from neuralhydrology.utils.logging_utils import setup_logging
+
+    nh_run_dir = Path(request.nh_run_dir)
+    config = Config(nh_run_dir / "config.yml")
+    log_path = nh_run_dir / "output.log"
+    if not root_logger_has_file_handler(log_path):
+        setup_logging(str(log_path))
+    start_evaluation(cfg=config, run_dir=nh_run_dir, epoch=request.epoch, period=request.period)
+
+
+def ensure_validation_results(
+    *,
+    nh_run_dir,
+    epoch: int,
+    evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+) -> Path:
+    """Restart-safe prerequisite check for one screening-cadence epoch's
+    saved NH ``"validation"``-period result pickle (see module docstring's
+    "Explicit-evaluation correction" note).
+
+    Uses :func:`src.baseline.nh_seed_evaluation.period_results_path` as the
+    single source of truth for the expected path -- never reconstructed
+    independently here. If the pickle already exists (whether from NH's own
+    in-training validation or a prior explicit evaluation call on an earlier
+    invocation of this function), it is reused as-is and
+    ``evaluate_checkpoint_fn`` is never called -- this is what makes resume
+    avoid re-evaluating already-processed epochs. If absent,
+    ``evaluate_checkpoint_fn`` is invoked exactly once; any exception it
+    raises propagates unchanged (fails loudly, leaves no partial screening
+    or early-stopping state behind, and is safely retryable on the next
+    resume). After that call, the pickle is required to exist -- if it still
+    doesn't, raises :class:`PilotOrchestrationError` rather than letting a
+    silently-failed evaluation fall through to the metric reader.
+    """
+    result_path = period_results_path(nh_run_dir, "validation", epoch)
+    if result_path.is_file():
+        return result_path
+
+    evaluate_checkpoint_fn(EvaluationRequest(nh_run_dir=Path(nh_run_dir), epoch=epoch))
+
+    if not result_path.is_file():
+        raise PilotOrchestrationError(
+            f"explicit NH evaluation for epoch {epoch} did not produce the expected "
+            f"validation result pickle: {result_path}"
+        )
+    return result_path
 
 
 def discover_nh_run_dir(config_out_dir, experiment_name: str) -> Path:
@@ -304,6 +439,7 @@ def run_pilot_chunk(
     is_first_chunk: bool,
     tracking_run=None,
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
+    evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
 ) -> dict:
     """Run exactly one bounded training chunk (``previous_target_epoch`` ->
     ``chunk_target_epoch``) and process every screening-cadence epoch newly
@@ -311,11 +447,13 @@ def run_pilot_chunk(
     ``{"nh_run_dir", "stopped", "stop_reason", "state", "screening_results"}``.
 
     Idempotent on resume: an already-trained epoch is not retrained (checked
-    against NH's own checkpoint files), and an already-logged screening
-    epoch (per this run's advisory ``pilot_orchestration_state.json``) is
-    not re-logged to the tracking backend -- but IS still re-evaluated and
-    re-fed through :func:`src.baseline.pilot_early_stopping.record_screening_event`,
-    whose own idempotent-replay semantics make that safe, so the returned
+    against NH's own checkpoint files); an already-saved validation result
+    pickle is not re-evaluated (checked via :func:`ensure_validation_results`,
+    see module docstring); an already-logged screening epoch (per this run's
+    advisory ``pilot_orchestration_state.json``) is not re-logged to the
+    tracking backend -- but the metric IS still re-read and re-fed through
+    :func:`src.baseline.pilot_early_stopping.record_screening_event`, whose
+    own idempotent-replay semantics make that safe, so the returned
     ``screening_results`` always reflects this chunk's full cadence history.
     """
     config_dir = Path(config_dir)
@@ -349,6 +487,9 @@ def run_pilot_chunk(
     screening_results = []
     for epoch in screening_epochs_in_chunk(previous_target_epoch, chunk_target_epoch, pilot_policy):
         role = classify_screening_epoch_role(epoch, pilot_policy)
+        ensure_validation_results(
+            nh_run_dir=nh_run_dir, epoch=epoch, evaluate_checkpoint_fn=evaluate_checkpoint_fn
+        )
         result = evaluate_screening_checkpoint(
             run_dir=nh_run_dir,
             epoch=epoch,
@@ -404,11 +545,14 @@ def run_pilot(
     commands_used: "list[str] | None" = None,
     force: bool = False,
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
+    evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
 ) -> dict:
     """Top-level pilot orchestration for one ``run_id``: prepare the config,
     train in bounded chunks via NH's own ``start_run``/``continue_run``
-    (through ``train_chunk_fn``), screen at every cadence epoch, apply
-    restart-safe early stopping, log to W&B if enabled, and write the
+    (through ``train_chunk_fn``), ensure each screening-cadence epoch's
+    saved validation result exists (through ``evaluate_checkpoint_fn`` --
+    see :func:`ensure_validation_results`), screen at every cadence epoch,
+    apply restart-safe early stopping, log to W&B if enabled, and write the
     compact evidence bundle. Safe to call repeatedly on the same
     ``config_out_dir``/``evidence_out_dir`` -- the evidence bundle is always
     (re)written regardless of ``force``, since it is this function's own
@@ -483,6 +627,7 @@ def run_pilot(
             is_first_chunk=is_first_chunk,
             tracking_run=tracking_run,
             train_chunk_fn=train_chunk_fn,
+            evaluate_checkpoint_fn=evaluate_checkpoint_fn,
         )
         have_started = True
         all_screening_results.extend(last_chunk_result["screening_results"])

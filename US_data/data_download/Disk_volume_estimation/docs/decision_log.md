@@ -4,6 +4,145 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-29 — Stage 1 lead-6 pilot — qualification-run integration correction (explicit evaluation prerequisite)
+
+**Scope.** Local-only correction to `pilot_orchestration.py`, discovered by
+the pilot's first real Moriah workflow-qualification run (`emb128x64_seedA`,
+Slurm job 45695059). Not a scientific-baseline change: no hyperparameter,
+split, screening-membership, or early-stopping policy value changed.
+
+**What happened on Moriah.** Training succeeded through epoch 6
+(checkpoints + optimizer states 1-6 intact, peak RSS ~96.4GB). Orchestration
+then raised `NHSeedEvaluationError: missing validation results pickle` at
+`validation/model_epoch003/validation_results.p`. A separate evaluation-only
+job (45698612) confirmed NH's `start_evaluation` can produce this pickle on
+demand (epochs 3 and 6, 400 basins each, ~84.6MB each, 11:34 elapsed,
+~1.96GB peak RSS on an L40S — a single data point, not a validated general
+requirement).
+
+**Decision — add an explicit evaluation-prerequisite step to orchestration,
+rather than assuming NH's in-training `validate_every` cadence always
+persists results.** `pilot_orchestration.py` gained
+`ensure_validation_results(nh_run_dir, epoch, evaluate_checkpoint_fn=...)`,
+called before every screening checkpoint's `evaluate_screening_checkpoint()`.
+It checks the canonical result-pickle path
+(`nh_seed_evaluation.period_results_path()`, extracted as the single helper
+every caller must use — never independently reconstructed), reuses an
+existing result unchanged, or explicitly invokes NH evaluation through a new
+injectable `evaluate_checkpoint_fn` seam (production default
+`default_evaluate_checkpoint`, mirroring `scripts/run_stage1_nh.py`'s own
+`eval` subcommand rather than duplicating it), then fails loudly
+(`PilotOrchestrationError`, no partial state persisted) if the pickle still
+doesn't exist afterward. Rejected alternative: triggering evaluation inside
+`pilot_screening_eval.py` itself — kept out of scope so that module remains
+a pure metric reader, per its own docstring (corrected in this same change
+to stop claiming evaluation is "never...independently triggered").
+
+**Decision — resume must not retrain or re-evaluate what's already on
+disk.** Verified directly against the real failure shape: a run with
+checkpoints and saved result pickles through epoch 6 resumes training at
+epoch 9 without retraining epochs 1-6 or re-invoking evaluation for epochs
+whose pickle already exists.
+
+**Verification.** `tests/test_pilot_orchestration.py`'s fake training
+callback no longer also fabricates validation-result pickles (it now writes
+checkpoint bytes only) so tests exercise the real missing-prerequisite path;
+a new, separate fake evaluation callback was added. Eight pilot test files
+now carried 124 tests (was 95; see the 2026-07-29 adversarial-review entry
+below for a further correction bringing this to 125), all passing, including
+six new scenarios:
+missing-result triggers explicit evaluation; existing result is reused
+without re-invoking the evaluator; resume from the exact real
+qualification-run failure shape retrains/re-evaluates nothing already
+present; a future screening checkpoint (epoch 9) triggers explicit
+evaluation before screening; evaluator failure is safe (no false
+screening/stopping event, checkpoints untouched); epoch-3 diagnostic-only
+behavior and existing orchestration idempotency are both unaffected. Full
+suite re-run: 1152 passed excluding 6 pre-existing
+`neuralhydrology`/`torch` import-only collection errors (expected in this
+local environment); 2 tests in `test_package_builder.py`/`test_package_audit.py`
+(untouched by this work) failed only under full-suite load with a Windows
+file-lock `PermissionError` during atomic promotion, confirmed to pass
+cleanly in isolation both with and without this change (via `git stash`) —
+pre-existing flakiness, not a regression.
+
+**Current status: not complete.** `emb128x64_seedA` remains paused after
+epoch 6. No resume has been submitted to Moriah. Full detail:
+`docs/stage1_lead06_pilot_v001.md`'s "Moriah workflow-qualification run and
+orchestration correction" section.
+
+## 2026-07-29 — Adversarial review of the evaluation-prerequisite correction
+
+**Scope.** Review-only pass over the above correction, before commit. No
+Moriah access, no scope broadening, no scientific-baseline change.
+
+**Finding — repeated-call logging-handler leak (fixed).** NH's
+`neuralhydrology.utils.logging_utils.setup_logging` unconditionally opens a
+new `FileHandler`/`StreamHandler` on every call and attaches them via
+`logging.basicConfig`, which is a documented no-op once the root logger
+already has handlers. `default_evaluate_checkpoint` may be called once per
+screening epoch within a single long-lived orchestration process (unlike
+the single-shot `scripts/run_stage1_nh.py eval` CLI this pattern was copied
+from), so every call after the first leaked an open, never-attached file
+descriptor against the same `output.log`. No duplicate log output resulted
+(the leaked handlers are never attached), but the descriptor leak itself
+was real. Fix: a new `root_logger_has_file_handler()` guard in
+`pilot_orchestration.py` checks the root logger for an already-attached
+`FileHandler` on the same resolved path before calling `setup_logging`;
+`default_evaluate_checkpoint` now skips the redundant call when one is
+already present. One new stdlib-only test added
+(`test_root_logger_has_file_handler_detects_only_a_matching_filehandler`),
+bringing the pilot test-file total to 125 (was 124).
+
+**Findings — no correction needed.** (1) Production evaluation callback:
+directly confirmed against the vendored NH source (`tester.py`,
+`evaluate.py`, `logging_utils.py`, `nh_run.py`, `config.py`) that dataset
+registration happens before `get_tester()`/`get_dataset()` are ever reached,
+the callback loads the frozen `run_dir/config.yml` and never calls
+`Config.dump_config` (the only on-disk-config write path in NH, called only
+from config-generation helpers and the training-time `Logger`, never from
+the evaluation path), evaluates exactly the requested epoch and
+`period="validation"`, and never touches the `test` period or a spatial
+holdout (`Tester.evaluate()`'s only period-conditional branch is
+validation-only basin subsampling; the period itself is fixed by
+`EvaluationRequest.period`'s `"validation"` default, never overridden).
+(2) Real resume mechanics: `continue_run`'s merge/`is_continue_training`
+behavior and the epoch-overlay file confirm the intended epochs 7-9
+continuation; this is code-inspection-confirmed and fake-trainer-test
+approximated, but NH's real resume-epoch selection (reading its own latest
+checkpoint) is not exercised by any local test and needs Moriah
+verification. (3) Failure atomicity: `ensure_validation_results` checks
+`.is_file()` (correctly excludes a bare directory); a zero-byte or corrupt
+pickle is not specially detected there, but `load_period_results`'s
+`pickle.load` call raises a standard, clear exception (`EOFError` for
+zero-byte, `UnpicklingError`/similar for corrupt) before any screening or
+early-stopping state is touched (`evaluate_screening_checkpoint` is called,
+and can raise, strictly before `record_screening_event` in
+`run_pilot_chunk`'s loop) — this already satisfies "reject clearly, not
+treated as success" without a code change. (4) Canonical path helper:
+`period_results_path()` matches NH's real `_get_weight_file`/`_save_results`
+convention exactly; no circular import (`nh_seed_evaluation.py` does not
+import from `pilot_orchestration.py`). (5) Tests: all six existing
+evaluation-prerequisite/resume tests were re-traced against the actual test
+file content; each checklist item is satisfied by an existing assertion.
+
+**Verification.** `tests/test_pilot_orchestration.py` re-run in isolation:
+16 passed. Full repository suite re-run after this review's change: 1155
+passed, 0 failed, the same 6 pre-existing `neuralhydrology`/`torch`
+import-only collection errors as before (expected in this local
+environment). This is consistent with the prior correction's documented
+1152-passed baseline (1152 + the 2 tests that were flaky under full-suite
+load in that run, which did not fail this time + 1 new test added here =
+1155) -- no regression attributable to this review's change; the Windows
+file-lock flakiness noted in the prior entry simply did not reproduce on
+this run, which is expected of a load-dependent race and is not evidence
+it was fixed.
+
+**Correction to a prior report.** The previous final report's git-status
+description was imprecise: `git status --short` entries beginning with
+` M` (space-then-M) denote **unstaged** modifications, not staged ones.
+Nothing was staged or committed at any point in this work.
+
 ## 2026-07-27 — Stage 1 lead-6 optimization pilot — implementation decisions
 
 **Scope.** Local implementation of the six-run lead-6 optimization pilot

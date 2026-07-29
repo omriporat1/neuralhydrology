@@ -1,10 +1,12 @@
 # Stage 1 lead-6 optimization pilot (`stage1_lead06_pilot_v001`)
 
-Status: **implementation and tests complete, documentation ready for review.
-No Moriah job has been submitted, no training has been run, and no
-temporal-test or spatial-holdout data has been accessed.** This document
-describes what was built and verified locally; it makes no claim about any
-run having occurred.
+Status: **first Moriah workflow-qualification run attempted and paused after
+an orchestration bug; orchestration since corrected locally and re-verified
+by tests, but not yet re-run on Moriah.** No temporal-test or spatial-holdout
+data has been accessed. See "Moriah workflow-qualification run and
+orchestration correction" below for the current, authoritative status; the
+rest of this document describes the pilot design as originally implemented
+and verified locally before that run.
 
 ## Purpose
 
@@ -172,9 +174,68 @@ directories default under `${FLASHNH_BASE}/runs/` and
 `${FLASHNH_BASE}/evidence/`, both structurally outside the tracked
 `${REPO_CLONE_DIR}`/`${REPO_WORKDIR}` clone. Never passes `--force` to the
 CLI wrapper on an executable line (discussed only in an explanatory
-comment). **Not submitted by this implementation.** The first job this
-pilot will eventually run is `emb128x64_seedA` (the workflow-qualification
-run) — prepared, not launched.
+comment). `emb128x64_seedA` has since been submitted once as the
+workflow-qualification run — see the next section for the result.
+
+## Moriah workflow-qualification run and orchestration correction
+
+The first real Moriah job for this pilot, `emb128x64_seedA` (Slurm job
+`45695059`), was submitted to qualify the orchestration end-to-end before
+committing to all six runs. Training itself succeeded: NH trained through
+epoch 6, writing checkpoints and optimizer states 1-6 intact, peak RSS
+~96.4GB. Orchestration then failed post-training with
+`NHSeedEvaluationError: missing validation results pickle` at
+`validation/model_epoch003/validation_results.p`.
+
+**Root cause.** The original implementation assumed NH's in-training
+`validate_every: 3` validation always persists
+`validation/model_epochNNN/validation_results.p` to disk. It does not
+reliably do so. This was confirmed with a separate, explicit
+evaluation-only job (`45698612`) that ran NH's own `start_evaluation` for
+epochs 3 and 6 against the same checkpoints and successfully produced both
+result pickles (400 basins each, ~84.6MB each; job completed in 11:34
+elapsed with ~1.96GB peak RSS on an L40S). This resource observation is
+from one evaluation-only job on one checkpoint pair — it is not a
+validated general resource requirement for evaluation and should not be
+extrapolated to, e.g., the full 2,307-basin validation or other lead
+times/seeds.
+
+**Correction (this implementation).** `pilot_orchestration.py` no longer
+assumes the pickle exists. Before every screening checkpoint's evaluation,
+it now calls `ensure_validation_results(nh_run_dir, epoch,
+evaluate_checkpoint_fn=...)`:
+
+1. Checks the canonical path (`nh_seed_evaluation.period_results_path`,
+   the single helper every caller uses — never independently
+   reconstructed) for an existing `validation_results.p`.
+2. If present, reuses it unchanged — no re-evaluation.
+3. If absent, invokes an explicit NH evaluation for that exact
+   `(nh_run_dir, epoch, period="validation")` via an injectable
+   `evaluate_checkpoint_fn` (production default `default_evaluate_checkpoint`,
+   which mirrors `scripts/run_stage1_nh.py`'s own `eval` subcommand:
+   load `config.yml`, `setup_logging`, `start_evaluation`).
+4. Re-checks the path afterward; if still absent, raises
+   `PilotOrchestrationError` with no partial state persisted, so a retry is
+   always safe.
+5. Only then does `evaluate_screening_checkpoint()` run (unchanged — it
+   remains a pure metric reader, never itself triggering evaluation; see
+   its docstring) and early-stopping state update.
+
+Resume semantics are preserved: on a re-run of `run_pilot()`/`run_pilot_chunk()`
+against a run directory with checkpoints and saved result pickles already on
+disk through epoch 6, orchestration does not retrain those epochs and does
+not re-invoke evaluation for epochs whose pickle already exists; it resumes
+training at the next chunk target (epoch 9 in this failure shape) and only
+evaluates newly-reached screening epochs going forward. Epoch 3's
+diagnostic-only classification and epoch 6's stopping-eligibility are
+unaffected — this was purely a missing-prerequisite bug, not a change to
+scheduling or stopping policy.
+
+**Current status.** The pilot run is **not complete**. It remains paused
+after epoch 6 pending a resumed Moriah job with the corrected orchestration.
+No resume has been submitted yet. No scientific hyperparameter, split,
+screening-membership, or early-stopping policy value changed as part of this
+correction.
 
 ## Implementation modules
 
@@ -194,9 +255,11 @@ run) — prepared, not launched.
 
 ## Tests
 
-Eight new focused pytest files (`tests/test_pilot_*.py`, plus a shared,
-non-collected fixture helper `tests/_pilot_support.py`), 95 tests, all
-passing. Coverage includes: exact six-run matrix acceptance and rejection
+Eight focused pytest files (`tests/test_pilot_*.py`, plus a shared,
+non-collected fixture helper `tests/_pilot_support.py`), 125 tests, all
+passing (was 95 before the evaluation-prerequisite correction below, 124
+after it, 125 after this correction's added logging-handler-guard test).
+Coverage includes: exact six-run matrix acceptance and rejection
 of any deviation (missing run, extra run, wrong profile mapping, duplicate
 run_id, equal seeds); Seed A/B resolution per run; embedding shape per run
 including exact-`None` (raw, identity-pathway) vs. exact-shape (embedded)
@@ -214,18 +277,39 @@ and config paths outside the tracked repo clone; the full-validation
 readiness interface's distinct population role and lack of screening-style
 cadence restriction; no test/holdout access anywhere in the fixtures or
 logged keys; deterministic, idempotent evidence-bundle regeneration on
-resume with no retraining. Full pre-existing repository test suite
-re-run alongside these: 1122 passed, 3 initially-failed-but-flaky (Windows
-file-lock `PermissionError` during atomic package promotion under load;
-confirmed to pass in isolation, unrelated to any file touched by this
-pilot), 6 pre-existing collection errors in files that import
-`neuralhydrology`/`torch` (not installed in this local environment by
-design — those tests only run on h2o/Moriah). Zero regressions
-attributable to this work.
+resume with no retraining.
+
+Added for the evaluation-prerequisite correction (`tests/test_pilot_orchestration.py`):
+missing result triggers an explicit evaluation call; an existing result is
+reused with zero evaluator calls; a resume reproducing the exact real
+qualification-run failure shape (checkpoints + pickles through epoch 6
+pre-existing) retrains nothing, re-evaluates nothing already saved, and
+proceeds training to epoch 9; a future screening checkpoint triggers
+explicit evaluation before screening runs; an evaluator that fails to
+produce the expected pickle raises loudly with no false screening/stopping
+event and checkpoints untouched; epoch-3 diagnostic-only behavior is
+unaffected; existing orchestration idempotency is unaffected. The fake
+training callback used in tests writes checkpoint bytes only — it no
+longer also fabricates validation-result pickles — so these tests exercise
+the real missing-prerequisite path rather than one where a result is
+always already present.
+
+Full pre-existing repository test suite re-run alongside these: 1152
+passed (excluding 6 pre-existing collection errors in files that import
+`neuralhydrology`/`torch`, not installed in this local environment by
+design — those tests only run on h2o/Moriah); 2 tests
+(`test_package_audit.py::test_full_mode_requires_imputed_value_mask`,
+`test_package_builder.py::test_package_promotion_failure_with_existing_evidence_tree_restores_both`)
+failed only in the full-suite run with a Windows file-lock
+`PermissionError` during atomic promotion under load, and passed cleanly
+in isolation both with and without this work's changes (confirmed via
+`git stash`) — pre-existing flakiness unrelated to any file touched here.
+Zero regressions attributable to this work.
 
 ## What has not been done
 
-No Moriah job submitted or started. No training run. No full-population
+`emb128x64_seedA` is paused after epoch 6, not complete or resumed. The
+other five runs have not been submitted or started. No full-population
 evaluation. No temporal-test or spatial-holdout access. No change to the
 certified Compact Scientific Package or canonical split membership. No
 regeneration of the screening subset. No hydrograph atlas generation. No

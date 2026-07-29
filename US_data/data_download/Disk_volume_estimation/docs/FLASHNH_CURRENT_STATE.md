@@ -1,6 +1,47 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-27 (Stage 1 lead-6 optimization pilot — implementation and tests complete, not launched)
+Last updated: 2026-07-29 (Stage 1 lead-6 pilot — Moriah qualification run paused after epoch 6, evaluation-prerequisite orchestration bug fixed locally)
+
+## Stage 1 lead-6 optimization pilot — qualification run paused, orchestration corrected (2026-07-29)
+
+The pilot's first real Moriah job, `emb128x64_seedA` (Slurm job 45695059),
+trained successfully through epoch 6 (checkpoints + optimizer states 1-6
+intact, peak RSS ~96.4GB) but then failed post-training with
+`NHSeedEvaluationError: missing validation results pickle`. Root cause:
+NH's in-training `validate_every: 3` validation does not reliably persist
+`validation/model_epochNNN/validation_results.p`, but
+`pilot_orchestration.py` assumed it always did. Confirmed by a separate
+evaluation-only job (45698612) that explicitly produced both epoch-3 and
+epoch-6 result pickles (400 basins each, ~84.6MB each; 11:34 elapsed,
+~1.96GB peak RSS on an L40S — a single observation, not a general resource
+requirement).
+
+Fix (local only, not yet re-run on Moriah): `pilot_orchestration.py` now
+calls a new `ensure_validation_results()` before every screening
+checkpoint, which reuses an existing result pickle unchanged or explicitly
+invokes NH evaluation (`default_evaluate_checkpoint`, mirroring
+`scripts/run_stage1_nh.py`'s `eval` subcommand) via an injectable
+`evaluate_checkpoint_fn` seam, then fails loudly if the pickle still isn't
+produced. `nh_seed_evaluation.period_results_path()` is now the single
+canonical helper for the result-pickle path. No scientific hyperparameter,
+split, screening-membership, or early-stopping policy changed. Eight pilot
+test files now carry 125 tests (was 95, then 124, then 125 after a
+pre-commit adversarial review added one more focused test for a
+repeated-call logging-handler leak found and fixed during that review),
+all passing; full suite re-run after the adversarial review: 1155 passed,
+0 failed, same 6 pre-existing `neuralhydrology`/`torch` import-only
+collection errors as before (expected in this local environment) -- zero
+regressions attributable to this work; the 2 Windows file-lock flakes in
+unrelated, untouched package-builder tests seen in the prior run did not
+reproduce this time (load-dependent race, not evidence of a fix). Full
+detail:
+`docs/stage1_lead06_pilot_v001.md`'s "Moriah workflow-qualification run and
+orchestration correction" section and `docs/decision_log.md`'s adversarial-
+review entry.
+
+**Current status: not complete.** `emb128x64_seedA` remains paused after
+epoch 6 pending a resumed Moriah job with the corrected orchestration; no
+resume has been submitted. The other five pilot runs have not started.
 
 ## Stage 1 lead-6 optimization pilot — implementation and tests complete (2026-07-27)
 
