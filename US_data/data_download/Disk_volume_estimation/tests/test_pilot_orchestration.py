@@ -933,6 +933,68 @@ def test_run_pilot_chunk_real_qualification_run_evidence_with_overshoot_checkpoi
     assert status["safe_to_continue_automatically"] is False
 
 
+def test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict(run_pilot_fixture):
+    """Real Moriah recovery job 45718473's exact shape: checkpoints 1-6
+    flat, continue_training_from_epoch006/ containing checkpoints 7-15 (the
+    additive-epochs bug's byproduct). run_pilot() must reuse the trusted
+    epoch-9 checkpoint (no training), then refuse to advance into the 9->12
+    chunk (blocked by the 10-15 overshoot) -- and this blocked chunk result
+    must reach run_pilot()'s own top-level return with a non-null
+    final_status/blocked_reason, not be lost or silently downgraded to a
+    completed status (the launcher status-propagation defect job 45718473
+    exposed -- see docs/decision_log.md)."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+    write_perfect_validation_results(nh_run_dir, 6, fx["basins"], fx["package_root"])
+
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    for epoch in range(7, 16):
+        (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+
+    train_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        commands_used=["test_pilot_orchestration.py"],
+        train_chunk_fn=counting_train,
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+    )
+
+    assert train_calls == [], "epoch 9 already trusted -- must never train into the 10-15 overshoot range"
+    assert result["final_status"] == "blocked_continuation_overshoot_conflict"
+    assert result["blocked_reason"] is not None
+    assert "12" in result["blocked_reason"]
+    assert result["best_checkpoint_epoch"] == 6
+    assert result["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
+    assert result["safe_to_continue_automatically"] is False
+    assert result["highest_screened_epoch"] == 9
+
+    evidence_dir = Path(result["evidence_bundle_path"])
+    record = json.loads((evidence_dir / "pilot_run_evidence.json").read_text())
+    assert record["run_status"] == "blocked_continuation_overshoot_conflict"
+
+
 def test_run_pilot_chunk_rejects_partial_first_chunk_before_any_state_change(run_pilot_fixture):
     """Only two first-chunk shapes are supported: no checkpoints at all, or
     the complete epoch 1-6 range already flat in the base run directory

@@ -4,6 +4,98 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-30 — Stage 1 lead-6 pilot — real Moriah recovery (job 45718473): scientific recovery correct, launcher status-propagation defect found and fixed
+
+**Scope.** Local-only correction to the two files that surface
+`run_pilot()`'s result — `scripts/run_stage1_lead06_pilot.py` (CLI exit
+code) and `scripts/run_stage1_lead06_pilot_moriah.sbatch` (status-fallback
+classification). No change to `src/baseline/pilot_orchestration.py`: direct
+code reading plus a new end-to-end test confirmed `run_pilot()` already
+propagates a blocked chunk's `final_status`/`blocked_reason` correctly
+through its own return value. Not a scientific-baseline change.
+
+**What happened on Moriah.** Recovery job `45718473` (partition `catfish`,
+one L4 GPU, elapsed 00:08:12, Slurm `COMPLETED`, exit `0:0`) ran the
+continuation-nesting/additive-epoch fix from the entry below against the
+real `emb128x64_seedA` artifact. The scientific recovery was correct: no
+training occurred; the existing
+`continue_training_from_epoch006/model_epoch009.pt` checkpoint was reused;
+epoch 9 was screened and logged exactly once (median per-basin raw-space
+NSE `0.18124855313577198`); epoch 6 remains best
+(`0.20454161610527344`); early-stopping history contains eligible epochs 6
+and 9 with `events_since_best_improvement: 1`, `stopped: false`; overshoot
+checkpoints 10-15 remain preserved and scientifically unused. However the
+launcher reported an internally inconsistent result: `status: COMPLETED`,
+`pilot_exit_code: 0`, `pilot_final_status: null`, `blocked_reason: null`,
+alongside a correctly computed `safe_to_continue_automatically: false` and
+`overshoot_epochs: [10, 11, 12, 13, 14, 15]`.
+
+**Root cause.** The pilot CLI's primary stdout JSON
+(`pilot_stdout.json.log`) was unavailable when the launcher read it after
+the job finished, so the launcher's own documented fallback path (computing
+status fields directly from on-disk state via `compute_pilot_status_fields`)
+engaged. That fallback correctly recomputes `overshoot_epochs` and
+`safe_to_continue_automatically` from disk — which is exactly why those two
+fields were populated correctly in the reported result — but it never
+derived `pilot_final_status`/`blocked_reason`, leaving both `None`. The
+launcher's classification block only branched on `pilot_final_status`
+(`if pilot_final_status == 'blocked_continuation_overshoot_conflict':
+BLOCKED_MANUAL_REVIEW_REQUIRED elif pilot_status == 0: COMPLETED`), so a
+run the fallback had already determined was unsafe to continue
+automatically fell through to `COMPLETED` anyway. The blocked
+`run_pilot_chunk()` result was never lost inside `run_pilot()` itself — it
+was lost only in the launcher's fallback-status derivation, one step removed
+from where the return dict is actually built and printed.
+
+**Fix.** Two narrow, additive changes, no checkpoint/overshoot/training
+logic touched:
+1. `scripts/run_stage1_lead06_pilot_moriah.sbatch`: after the existing
+   on-disk fallback populates `overshoot_epochs`/`safe_to_continue_automatically`,
+   a new check derives `pilot_final_status = 'blocked_continuation_overshoot_conflict'`
+   and a non-null `blocked_reason` whenever `safe_to_continue_automatically
+   is False` with a non-empty `overshoot_epochs` — reusing the exact status
+   string `pilot_orchestration.run_pilot()` already uses for this condition
+   (the "already-established convention"), not inventing a new one. Verified
+   by extracting the launcher's status-classification `python -c` block and
+   executing it standalone (no Slurm) against both job 45718473's exact
+   on-disk shape (now classifies `BLOCKED_MANUAL_REVIEW_REQUIRED`) and an
+   ordinary completed/stopped run (still classifies `COMPLETED`,
+   unaffected).
+2. `scripts/run_stage1_lead06_pilot.py`: now exits `1` — the launcher's own
+   existing "needs a human, do not resume automatically" convention (shared
+   with `FAILED_NO_CHECKPOINT`) — when `result["final_status"] ==
+   "blocked_continuation_overshoot_conflict"`, instead of always exiting 0
+   regardless of `final_status`. Defense-in-depth only: the launcher's
+   primary classification already reads `pilot_final_status` from the JSON
+   before consulting the exit code, so this does not by itself change the
+   primary (non-fallback) classification path, but makes the CLI's own exit
+   code meaningful for any caller (direct invocation, other tooling) that
+   relies on it.
+
+**Verification.** New end-to-end test in `tests/test_pilot_orchestration.py`,
+`test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict`,
+reproduces job 45718473's exact on-disk shape (checkpoints 1-6 flat, 7-15 in
+`continue_training_from_epoch006/`) and calls `run_pilot()` end-to-end
+(not `run_pilot_chunk()` directly, unlike the existing coverage below),
+confirming `final_status`/`blocked_reason`/`overshoot_epochs`/
+`safe_to_continue_automatically` are all correctly non-null/populated at
+the top-level return — proving the Python-level propagation was already
+correct before this fix. Two new tests in
+`tests/test_pilot_sbatch_launcher.py` behaviorally exercise the launcher's
+status-classification snippet (extracted and run standalone, never via
+Slurm/sbatch) for the blocked-fallback case and the ordinary-completed
+regression case. Ran only the two directly affected focused test files:
+`pytest tests/test_pilot_orchestration.py tests/test_pilot_sbatch_launcher.py`
+— 52 passed (was 49 before this correction's 3 new tests: 32+1=33 in
+`test_pilot_orchestration.py`, 17+2=19 in `test_pilot_sbatch_launcher.py`,
+i.e. 49 = 32 + 17 before, 52 = 33 + 19 after).
+Full repository suite not run (binding resource constraint for this narrow
+correction).
+
+**No further Moriah job should run until this local status-propagation fix
+is committed.** A resubmission before that would repeat the same misleading
+`COMPLETED` report the next time a chunk is correctly blocked.
+
 ## 2026-07-30 — Stage 1 lead-6 pilot — second qualification-run correction (continuation-nesting/additive-epoch semantics)
 
 **Scope.** Local-only correction to `pilot_orchestration.py`, discovered by

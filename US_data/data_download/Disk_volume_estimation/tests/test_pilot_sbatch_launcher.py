@@ -2,15 +2,26 @@
 item 7's launcher, task item 10's "generated paths outside tracked dirs"
 checklist item).
 
-This script is never submitted or executed by any test (per the task's
-binding remote-access constraints) -- these are purely static/structural
-checks on the committed script text, plus a `bash -n` syntax check (skipped
-if bash is unavailable in the test environment).
+This script's #SBATCH job is never submitted or executed by any test (per
+the task's binding remote-access constraints) -- most checks here are
+purely static/structural checks on the committed script text, plus a
+`bash -n` syntax check (skipped if bash is unavailable in the test
+environment). The status-classification tests below are the one exception:
+they extract the second embedded ``python -c "..."`` block (the pure
+on-disk/stdout status-derivation snippet, no Slurm/GPU/NH involved) and run
+it standalone against constructed env vars -- this never touches Slurm and
+is the only way to behaviorally prove the launcher's own status
+classification (see job 45718473, docs/decision_log.md), not just that
+certain substrings are present in the script text.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +34,44 @@ ALL_RUN_IDS = ("raw_seedA", "raw_seedB", "emb128x64_seedA", "emb128x64_seedB", "
 
 def _text() -> str:
     return SBATCH_PATH.read_text(encoding="utf-8")
+
+
+def _extract_status_classification_block() -> str:
+    """Pull out the second ``python -c "..."`` block in the sbatch script
+    (the status-derivation/classification snippet run after the pilot CLI
+    exits -- the first ``python -c "..."`` block is the earlier, unrelated
+    NH_RUN_DIR discovery snippet)."""
+    text = _text()
+    marker = 'python -c "'
+    first = text.find(marker)
+    second = text.find(marker, first + 1)
+    assert second != -1, "expected two python -c blocks in the sbatch script"
+    start = second + len(marker)
+    end = text.find('\n" | tee', start)
+    assert end != -1, "could not find the end of the status-classification python -c block"
+    return text[start:end]
+
+
+def _run_status_classification_block(tmp_path: Path, env_overrides: dict) -> dict:
+    """Execute the extracted status-classification snippet as a standalone
+    script with the given environment, returning the parsed
+    ``pilot_result.json``-equivalent dict it prints. Never invokes bash,
+    sbatch, or Slurm -- only the pure-Python fragment."""
+    import os
+
+    block_path = tmp_path / "status_block.py"
+    block_path.write_text(_extract_status_classification_block(), encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.update(env_overrides)
+
+    proc = subprocess.run(
+        [sys.executable, str(block_path)], env=env, capture_output=True, text=True, cwd=str(REPO_ROOT)
+    )
+    assert proc.returncode == 0, proc.stderr
+    json_text = proc.stdout.split("\nRUN_STATUS_FOR_SHELL")[0]
+    return json.loads(json_text)
 
 
 def test_sbatch_script_exists():
@@ -170,3 +219,118 @@ def test_sbatch_script_status_json_fields_passed_via_environment_not_string_inte
     # new free-text field).
     assert "env['blocked_reason']" not in text
     assert "os.environ" in text
+
+
+# --- status-classification behavior (job 45718473) --------------------------
+#
+# Real Moriah recovery job 45718473 (commit fbf7eea): the pilot correctly
+# reused the trusted epoch-9 checkpoint and refused to advance into the
+# untrusted 10-15 overshoot range (pilot_orchestration.run_pilot() itself
+# returns "final_status": "blocked_continuation_overshoot_conflict" and a
+# non-null "blocked_reason" for this exact scenario -- see
+# test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict
+# in tests/test_pilot_orchestration.py). But the launcher's own primary
+# pilot_stdout.json.log was empty when read, so its status-derivation
+# fallback (computed directly from on-disk state) restored
+# overshoot_epochs/safe_to_continue_automatically but left
+# pilot_final_status/blocked_reason as None -- and the classification below
+# only checked pilot_final_status, so a blocked run was reported as
+# COMPLETED. The tests below exercise the actual extracted classification
+# snippet (see _run_status_classification_block above), not just its text.
+
+def _base_env(tmp_path: Path, *, nh_run_dir: Path, stdout_json_path: Path, latest_ckpt: str, latest_epoch: str):
+    return {
+        "RUN_ID": "raw_seedA",
+        "NH_RUN_DIR": str(nh_run_dir),
+        "STDOUT_JSON_PATH": str(stdout_json_path),
+        "PILOT_STATUS": "0",
+        "PACKAGE_ROOT": "/fake/package",
+        "CONFIG_OUT_DIR": "/fake/config_out",
+        "EVIDENCE_OUT_DIR": "/fake/evidence_out",
+        "LATEST_CKPT_AFTER": latest_ckpt,
+        "LATEST_EPOCH_AFTER": latest_epoch,
+        "TERM_REQUESTED": "0",
+        "SLURM_JOB_ID": "45718473",
+        "SLURM_JOB_PARTITION": "catfish",
+        "SOURCE_COMMIT": "fbf7eea",
+        "RESULT_JSON_PATH": str(tmp_path / "pilot_result.json"),
+    }
+
+
+def test_sbatch_status_block_reports_blocked_not_completed_when_stdout_empty_but_overshoot_on_disk(tmp_path):
+    """Job 45718473's exact shape: primary stdout JSON empty, but on-disk
+    state (checkpoints 1-6 flat, 7-15 in a continue_training_from_epoch006/
+    continuation directory, only epochs 6 and 9 actually screened) shows an
+    untrusted overshoot. The launcher must classify this as
+    BLOCKED_MANUAL_REVIEW_REQUIRED with a non-null pilot_final_status and
+    blocked_reason -- never COMPLETED."""
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    for epoch in range(7, 16):
+        (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+    (nh_run_dir / "pilot_early_stopping_state.json").write_text(
+        json.dumps({"history": [{"epoch": 6, "median": 0.2}, {"epoch": 9, "median": 0.18}], "stopped": False})
+    )
+
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text("")  # primary stdout unavailable, exactly as observed
+
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path,
+            nh_run_dir=nh_run_dir,
+            stdout_json_path=stdout_json_path,
+            latest_ckpt=str(cont_dir / "model_epoch015.pt"),
+            latest_epoch="15",
+        ),
+    )
+
+    assert result["status"] == "BLOCKED_MANUAL_REVIEW_REQUIRED"
+    assert result["status"] != "COMPLETED"
+    assert result["pilot_final_status"] == "blocked_continuation_overshoot_conflict"
+    assert result["blocked_reason"] is not None
+    assert result["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
+    assert result["safe_to_continue_automatically"] is False
+
+
+def test_sbatch_status_block_ordinary_completed_run_remains_completed(tmp_path):
+    """Regression: a genuinely completed/stopped run (primary stdout JSON
+    present and populated, no overshoot) must remain classified COMPLETED --
+    the new fallback-derived blocked classification must not fire when the
+    primary status is already known."""
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps(
+            {
+                "run_id": "raw_seedA",
+                "final_status": "stopped_patience_exhausted",
+                "best_checkpoint_epoch": 6,
+                "nh_run_dir": str(nh_run_dir),
+                "evidence_bundle_path": str(tmp_path / "evidence"),
+                "highest_physical_checkpoint_epoch": 15,
+                "highest_screened_epoch": 15,
+                "next_intended_screening_epoch": None,
+                "overshoot_epochs": [],
+                "safe_to_continue_automatically": True,
+                "blocked_reason": None,
+            }
+        )
+    )
+
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        ),
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["pilot_final_status"] == "stopped_patience_exhausted"

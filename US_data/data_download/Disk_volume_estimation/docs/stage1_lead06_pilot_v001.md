@@ -334,11 +334,46 @@ continuation layout: those are preserved, untouched, scientifically-unused
 artifacts, and `overshoot_epochs`/`safe_to_continue_automatically=False`
 cause any attempt at a further 9→12 chunk to block rather than retrain
 over or past them — a later decision is required before that continuation
-is attempted. This epoch-9 recovery has not been executed on Moriah; it is
-expected behavior of the locally tested repair only, and no resume has
-been submitted since this second correction. No scientific
+is attempted. This epoch-9 recovery HAS since been executed on Moriah
+(job 45718473) and confirmed scientifically correct — see the next section
+for the result and a follow-on launcher defect it exposed. No scientific
 hyperparameter, split, screening-membership, or early-stopping policy value
 changed as part of either correction.
+
+## Third Moriah result: real epoch-9 recovery confirmed, launcher status-propagation defect fixed
+
+Recovery job `45718473` (partition `catfish`, one L4 GPU, elapsed 00:08:12,
+Slurm `COMPLETED`, exit `0:0`) ran the continuation-nesting/additive-epoch
+fix above against the real `emb128x64_seedA` artifact. The scientific
+recovery was correct exactly as predicted above: no training occurred, the
+existing `continue_training_from_epoch006/model_epoch009.pt` checkpoint was
+reused, epoch 9 was screened and logged exactly once (median per-basin
+raw-space NSE `0.18124855313577198`), epoch 6 remains best
+(`0.20454161610527344`), and overshoot checkpoints 10-15 remain preserved
+and unused.
+
+However the launcher reported an internally inconsistent result:
+`status: COMPLETED`, `pilot_final_status: null`, `blocked_reason: null`,
+alongside a correctly computed `safe_to_continue_automatically: false` and
+`overshoot_epochs: [10, 11, 12, 13, 14, 15]`. Root cause: the pilot CLI's
+primary stdout JSON was unavailable when the launcher read it, so the
+launcher's documented on-disk fallback (`compute_pilot_status_fields`)
+engaged and correctly restored `overshoot_epochs`/
+`safe_to_continue_automatically`, but never derived
+`pilot_final_status`/`blocked_reason` — so the launcher's classification,
+which only branched on `pilot_final_status`, fell through to `COMPLETED`.
+`pilot_orchestration.run_pilot()` itself was confirmed (by direct reading
+and a new end-to-end test) to already propagate a blocked chunk's
+`final_status`/`blocked_reason` correctly; the loss was isolated to the
+launcher's fallback classification. Fixed locally: the launcher's fallback
+now also derives `pilot_final_status`/`blocked_reason` from
+`safe_to_continue_automatically`/`overshoot_epochs` when the primary status
+is unavailable, and the CLI now exits `1` (reusing the launcher's own
+existing "needs a human" convention) for a blocked `final_status` instead of
+always exiting 0. No training, evaluation, metric, stopping, checkpoint, or
+overshoot logic changed. **No further Moriah job should run until this
+local status-propagation fix is committed.** Full detail:
+`docs/decision_log.md`'s 2026-07-30 status-propagation entry.
 
 ## Implementation modules
 

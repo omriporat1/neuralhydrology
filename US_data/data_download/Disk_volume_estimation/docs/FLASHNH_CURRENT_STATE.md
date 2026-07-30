@@ -1,6 +1,57 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-30 (Stage 1 lead-6 pilot — Moriah qualification run resume exposed a second orchestration bug, continuation-nesting/additive-epoch semantics fixed locally)
+Last updated: 2026-07-30 (Stage 1 lead-6 pilot — real Moriah recovery job 45718473 confirmed the continuation-nesting fix scientifically, but exposed a narrow launcher status-propagation defect, now fixed locally — NO further Moriah job until this fix is committed)
+
+## Stage 1 lead-6 optimization pilot — real Moriah recovery (job 45718473): correct scientific recovery, launcher status-propagation defect found and fixed (2026-07-30)
+
+Recovery job `45718473` (partition `catfish`, one L4 GPU, elapsed 00:08:12,
+`COMPLETED`/exit 0:0) ran the continuation-nesting/additive-epoch fix
+described below against the real `emb128x64_seedA` artifact. Scientifically
+correct: no training occurred, the existing
+`continue_training_from_epoch006/model_epoch009.pt` checkpoint was reused,
+epoch 9 was screened and logged exactly once (median per-basin raw-space
+NSE `0.18124855313577198`), epoch 6 remains best (`0.20454161610527344`),
+`events_since_best_improvement: 1`, `stopped: false`, and overshoot
+checkpoints 10-15 remain preserved and untouched.
+
+However the launcher (`scripts/run_stage1_lead06_pilot_moriah.sbatch`)
+reported an internally inconsistent result: `status: COMPLETED`,
+`pilot_final_status: null`, `blocked_reason: null`, alongside a correctly
+computed `safe_to_continue_automatically: false` and
+`overshoot_epochs: [10, 11, 12, 13, 14, 15]`. Root cause: the pilot CLI's
+primary stdout JSON was unavailable when the launcher read it, so the
+launcher's own documented fallback path (computing status fields directly
+from on-disk state via `compute_pilot_status_fields`) correctly restored
+`overshoot_epochs`/`safe_to_continue_automatically`, but left
+`pilot_final_status`/`blocked_reason` as `None` — and the launcher's
+classification only branched on `pilot_final_status`, so it fell through to
+`elif pilot_status == 0: COMPLETED`. Confirmed by direct code reading that
+`pilot_orchestration.run_pilot()` itself already propagates a blocked
+chunk's `final_status`/`blocked_reason` correctly through its own return
+value (new end-to-end test,
+`test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict`
+in `tests/test_pilot_orchestration.py`) — the loss was isolated to the
+launcher's fallback classification, not to `run_pilot()`.
+
+Fix (local only, not yet re-run on Moriah): the launcher's fallback now also
+derives `pilot_final_status = 'blocked_continuation_overshoot_conflict'` and
+a non-null `blocked_reason` whenever the fallback-computed
+`safe_to_continue_automatically` is `False` with a non-empty
+`overshoot_epochs`, reusing the exact status string
+`pilot_orchestration.run_pilot()` already uses for this condition; the pilot
+CLI (`scripts/run_stage1_lead06_pilot.py`) now also exits `1` (the
+launcher's own existing "needs a human" convention) when `final_status`
+is `blocked_continuation_overshoot_conflict`, rather than always exiting 0.
+No training, evaluation, metric, stopping, checkpoint, or overshoot logic
+changed. Two new behavioral tests in `tests/test_pilot_sbatch_launcher.py`
+extract and execute the launcher's status-classification snippet standalone
+(no Slurm) against job 45718473's exact on-disk shape, confirming it now
+reports `BLOCKED_MANUAL_REVIEW_REQUIRED` (not `COMPLETED`), and that an
+ordinary completed/stopped run is unaffected. **No further Moriah job
+should run until this local status-propagation fix is committed** — a
+resubmission before that would repeat the same misleading `COMPLETED`
+report on the next blocked chunk. Full detail: `docs/decision_log.md`'s
+2026-07-30 status-propagation entry.
 
 ## Stage 1 lead-6 optimization pilot — second qualification-run failure, continuation-nesting/epoch-semantics corrected (2026-07-30)
 

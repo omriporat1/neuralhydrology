@@ -124,6 +124,17 @@ def main() -> None:
     printable["evidence_bundle_path"] = str(printable["evidence_bundle_path"])
     print(json.dumps(printable, indent=2))
 
+    # Job 45718473: a blocked run (untrusted continuation overshoot -- see
+    # pilot_orchestration.py's module docstring) is a deliberate, non-crashing
+    # determination, but it is NOT an unqualified success either -- a human
+    # must resolve the overshoot before this run_id can proceed. Reuse the
+    # paired .sbatch launcher's own existing exit-code convention
+    # (BLOCKED_MANUAL_REVIEW_REQUIRED -> 1, same as FAILED_NO_CHECKPOINT)
+    # rather than always exiting 0 regardless of final_status, so a blocked
+    # result is distinguishable by exit code alone even outside that launcher.
+    if result["final_status"] == "blocked_continuation_overshoot_conflict":
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

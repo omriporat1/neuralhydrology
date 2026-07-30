@@ -316,6 +316,30 @@ if not stdout_result and nh_run_dir and os.path.isdir(nh_run_dir):
     except Exception as exc:
         status_fields['status_fallback_error'] = str(exc)
 
+# Job 45718473: the primary pilot_stdout.json.log path can be empty/
+# unavailable for reasons unrelated to a genuine crash (see the fallback
+# comment above), and when that happens the fallback just above already
+# recomputes safe_to_continue_automatically/overshoot_epochs directly from
+# on-disk state -- but pilot_final_status/blocked_reason stayed None, so a
+# run correctly blocked by an untrusted continuation overshoot was
+# misclassified as COMPLETED below (exit 0, status: COMPLETED) even though
+# safe_to_continue_automatically was already False. Reuse the exact same
+# 'blocked_continuation_overshoot_conflict' status string
+# pilot_orchestration.run_pilot() itself uses for this condition, rather
+# than inventing a second convention.
+if (
+    pilot_final_status is None
+    and status_fields.get('safe_to_continue_automatically') is False
+    and status_fields.get('overshoot_epochs')
+):
+    pilot_final_status = 'blocked_continuation_overshoot_conflict'
+    status_fields['blocked_reason'] = (
+        'derived from on-disk state (primary pilot stdout status was unavailable): '
+        'untrusted physical checkpoint(s) at epoch(s) ' + str(status_fields['overshoot_epochs']) + ' '
+        'sit beyond the highest screened epoch -- manual review is required before this '
+        'pilot can safely continue automatically'
+    )
+
 # Non-zero process exit with a checkpoint already on disk (e.g. wall-time
 # SIGTERM mid-chunk) is a resumable partial run, not an unqualified failure
 # -- resubmitting this exact script resumes automatically (see
