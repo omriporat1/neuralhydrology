@@ -37,19 +37,25 @@ from src.baseline.pilot_orchestration import (
     EvaluationRequest,
     PilotOrchestrationError,
     TrainChunkRequest,
+    _continuation_overlay,
     chunk_epoch_targets,
+    compute_pilot_status_fields,
     discover_nh_run_dir,
+    discover_physical_checkpoints,
     ensure_validation_results,
     prepare_pilot_run,
+    resolve_trusted_chunk_checkpoint,
     root_logger_has_file_handler,
     run_pilot,
     run_pilot_chunk,
     screening_epochs_in_chunk,
+    untrusted_overshoot_epochs,
 )
 from src.baseline.pilot_early_stopping import build_effective_policy
 from src.baseline.pilot_lead06_config import load_pilot_policy
 from src.baseline.nh_seed_evaluation import weight_stem
 from src.baseline.splits import sha256_of
+from src.baseline.wandb_tracking import init_tracking_run
 
 from tests._pilot_support import (
     BASELINE_POLICY_PATH,
@@ -59,6 +65,7 @@ from tests._pilot_support import (
     SPLITS_DIR,
     build_full_union_package,
     pick_development_basins,
+    short_tmp_path,
     write_perfect_validation_results,
     write_screening_basin_ids_file,
 )
@@ -120,19 +127,39 @@ def _make_fake_train_chunk_fn(package_root, basins, experiment_name):
     qualification run's failure, docs/stage1_lead06_pilot_v001.md); a fake
     trainer that also fabricates validation results would falsely pass tests
     that must instead exercise ``ensure_validation_results``'s explicit
-    ``evaluate_checkpoint_fn`` call."""
+    ``evaluate_checkpoint_fn`` call.
+
+    Reproduces NH's REAL physical continuation layout (confirmed by reading
+    ``neuralhydrology.nh_run.continue_run`` and
+    ``neuralhydrology.training.basetrainer.BaseTrainer._create_folder_structure``
+    directly): ``start_run`` (``is_first_chunk=True``) writes checkpoints
+    flat into a freshly created run directory; ``continue_run`` sets
+    ``is_continue_training=True`` UNCONDITIONALLY, so every continuation --
+    including a partial-first-chunk resume -- nests its new checkpoints into
+    a fresh ``continue_training_from_epoch{start_epoch:03d}/`` directory
+    under whatever ``request.nh_run_dir`` was passed as the continuation's
+    starting directory (never flat), regardless of how deep prior
+    continuations already nested it."""
 
     def _train(request: TrainChunkRequest) -> None:
         if request.is_first_chunk:
             runs_root = request.config_path.parent / "runs"
             nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
             nh_run_dir.mkdir(parents=True)
+            target_dir = nh_run_dir
+            start_epoch = 0
         else:
-            nh_run_dir = request.nh_run_dir
-        existing = list(nh_run_dir.glob("model_epoch*.pt"))
-        last = max((int(p.stem.replace("model_epoch", "")) for p in existing), default=0)
-        for epoch in range(last + 1, request.target_epoch + 1):
-            (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+            base_dir = Path(request.nh_run_dir)
+            if request.current_epoch is None:
+                existing = list(base_dir.glob("model_epoch*.pt"))
+                start_epoch = max((int(p.stem.replace("model_epoch", "")) for p in existing), default=0)
+            else:
+                start_epoch = request.current_epoch
+            target_dir = base_dir / f"continue_training_from_epoch{start_epoch:03d}"
+            target_dir.mkdir(parents=True)
+        target_epoch = start_epoch + request.additional_epochs
+        for epoch in range(start_epoch + 1, target_epoch + 1):
+            (target_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
 
     return _train
 
@@ -151,13 +178,13 @@ def _make_fake_evaluate_checkpoint_fn(package_root, basins):
 
 
 @pytest.fixture
-def run_pilot_fixture(tmp_path, pilot_policy):
+def run_pilot_fixture(short_tmp_path, pilot_policy):
     basins = pick_development_basins(5)
     experiment_name = "stage1_lead06_pilot_raw_seedA_v001"
 
-    package_root = tmp_path / "package"
-    config_out_dir = tmp_path / "config_out"
-    evidence_out_dir = tmp_path / "evidence"
+    package_root = short_tmp_path / "package"
+    config_out_dir = short_tmp_path / "config_out"
+    evidence_out_dir = short_tmp_path / "evidence"
     build_full_union_package(package_root, ts_basin_ids=basins)
 
     fake_train = _make_fake_train_chunk_fn(package_root, basins, experiment_name)
@@ -260,20 +287,10 @@ def test_run_pilot_resume_is_idempotent_and_does_not_retrain(run_pilot_fixture):
     assert (evidence_dir / "pilot_run_evidence.json").is_file()
 
 
-# --- one realistic interrupted-resume test (task item 7) -------------------
+# --- realistic resume/continuation tests (task item 7) ---------------------
 
-def test_run_pilot_chunk_resumes_from_partial_interruption_without_retraining(run_pilot_fixture):
-    """Checkpoints exist through epoch 8 (a wall-time SIGTERM partway through
-    the chunk targeting epoch 9, after the chunk-8 checkpoint was written but
-    before epoch 9's screening cadence boundary was reached) -- no epoch-9
-    checkpoint, screening result, or stopping-state history entry exists yet.
-    Resuming must call the trainer only to continue on to epoch 9 (not
-    retrain 1-8), evaluate epoch 9 exactly once, and update the stopping
-    state exactly once; a second resume must be fully idempotent (no further
-    trainer call, no duplicate history entry)."""
-    fx = run_pilot_fixture
+def _prepare_common_kwargs(fx):
     effective_policy = build_effective_policy(fx["pilot_policy"])
-
     run_spec, bundle, config_dir, experiment_name = prepare_pilot_run(
         pilot_policy=fx["pilot_policy"],
         run_id="raw_seedA",
@@ -282,7 +299,6 @@ def test_run_pilot_chunk_resumes_from_partial_interruption_without_retraining(ru
         splits_dir=SPLITS_DIR,
         config_out_dir=fx["config_out_dir"],
     )
-
     common_kwargs = dict(
         pilot_policy=fx["pilot_policy"],
         config_dir=config_dir,
@@ -293,84 +309,329 @@ def test_run_pilot_chunk_resumes_from_partial_interruption_without_retraining(ru
         screening_basin_ids=fx["basins"],
         effective_policy=effective_policy,
     )
+    return common_kwargs
 
-    # First bounded chunk (0 -> 6): trains + screens normally, exactly like
-    # run_pilot()'s own first iteration. Explicit evaluation is required for
-    # epochs 3 and 6 since the fake trainer no longer fabricates
-    # validation_results.p itself (training and evaluation are separate NH
-    # operations -- see the real qualification-run failure).
+
+def test_run_pilot_chunk_resume_after_successful_epoch9_is_idempotent(run_pilot_fixture):
+    """A cleanly-completed continuation to epoch 9 (the trusted, correctly
+    nested case) must be fully idempotent on a second resume call: no
+    further trainer call, no re-evaluation (epoch 9's result already saved),
+    no duplicate stopping-history entry -- covers "reuse of existing epoch-9
+    result" and "idempotent repeated-resume-after-epoch-9"."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+    second = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+    assert second["blocked"] is False
+    expected_dir = first["nh_run_dir"] / "continue_training_from_epoch006"
+    assert second["checkpoint_dir_for_target"] == expected_dir
+    assert [r["epoch"] for r in second["screening_results"]] == [9]
+
+    train_calls = []
+    eval_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        eval_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    third = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
+    )
+    assert train_calls == [], "epoch 9 already trusted on disk -- must not retrain"
+    assert eval_calls == [], "epoch 9's result already saved -- must not re-evaluate"
+    assert third["blocked"] is False
+    assert third["checkpoint_dir_for_target"] == expected_dir
+    assert [r["epoch"] for r in third["screening_results"]] == [9]
+    assert len(third["state"]["history"]) == len(second["state"]["history"])
+
+
+def test_run_pilot_chunk_blocks_on_untrusted_checkpoints_in_expected_continuation_directory(run_pilot_fixture):
+    """A continuation attempt that was interrupted after NH already created
+    its nested continue_training_from_epoch006/ directory and wrote
+    checkpoints 7-8, but before reaching epoch 9, cannot be safely retried
+    automatically -- a fresh train_chunk_fn call would collide with the
+    already-written epoch 7/8 checkpoint files. This must surface as a
+    blocked status with a clear reason -- never a raised exception, never a
+    silent/unsafe resume -- and must leave the pre-existing checkpoints and
+    all prior logical state completely untouched. Replaces a now-factually-
+    wrong earlier version of this test that assumed (incorrectly)
+    checkpoints from an interrupted continuation would land flat in the base
+    run directory and that resuming into them would silently succeed."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
     first = run_pilot_chunk(
         chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
         train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
     )
     nh_run_dir = first["nh_run_dir"]
-    epoch1_bytes_before = (nh_run_dir / "model_epoch001.pt").read_bytes()
-    epoch6_bytes_before = (nh_run_dir / "model_epoch006.pt").read_bytes()
 
-    # Simulate an interruption partway through the NEXT chunk: epochs 7 and 8
-    # already checkpointed on disk, but no epoch-9 checkpoint, screening
-    # output, or stopping-state history entry exists yet.
-    (nh_run_dir / "model_epoch007.pt").write_bytes(b"ckpt7")
-    (nh_run_dir / "model_epoch008.pt").write_bytes(b"ckpt8")
-    assert not (nh_run_dir / "model_epoch009.pt").exists()
+    # Realistic interrupted-continuation shape: the nested continuation
+    # directory already exists with checkpoints 7-8, killed before epoch 9.
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    (cont_dir / "model_epoch007.pt").write_bytes(b"ckpt7")
+    (cont_dir / "model_epoch008.pt").write_bytes(b"ckpt8")
 
     train_calls = []
-
-    def counting_train(request):
-        train_calls.append(request.target_epoch)
-        fx["fake_train"](request)
-
     eval_calls = []
 
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
     def counting_evaluate(request):
-        eval_calls.append(request.epoch)
+        eval_calls.append(request)
         fx["fake_evaluate"](request)
 
     resumed = run_pilot_chunk(
         chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=nh_run_dir,
         train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
     )
 
-    # trainer invoked exactly once, targeting epoch 9 -- not re-invoked for
-    # the already-checkpointed epochs 1-8.
-    assert train_calls == [9]
-    assert (nh_run_dir / "model_epoch001.pt").read_bytes() == epoch1_bytes_before
-    assert (nh_run_dir / "model_epoch006.pt").read_bytes() == epoch6_bytes_before
-    assert (nh_run_dir / "model_epoch007.pt").read_bytes() == b"ckpt7"
-    assert (nh_run_dir / "model_epoch008.pt").read_bytes() == b"ckpt8"
-    assert (nh_run_dir / "model_epoch009.pt").is_file()
+    assert resumed["blocked"] is True
+    assert "occupy epoch" in resumed["blocked_reason"]
+    assert resumed["checkpoint_dir_for_target"] is None
+    assert resumed["screening_results"] == []
+    assert train_calls == [], "must never attempt a train_chunk_fn call that would collide with epochs 7/8"
+    assert eval_calls == []
+    assert (cont_dir / "model_epoch007.pt").read_bytes() == b"ckpt7"
+    assert (cont_dir / "model_epoch008.pt").read_bytes() == b"ckpt8"
+    assert not (cont_dir / "model_epoch009.pt").exists()
 
-    # epoch 9 explicitly evaluated exactly once this chunk (item 4: future
-    # screening checkpoint requires explicit evaluation); stopping state
-    # updated once.
-    assert eval_calls == [9]
-    assert [r["epoch"] for r in resumed["screening_results"]] == [9]
-    assert len(resumed["state"]["history"]) == len(first["state"]["history"]) + 1
-    assert resumed["state"]["history"][-1]["epoch"] == 9
-
-    # second resume: fully idempotent -- trainer not called again, no
-    # re-evaluation (epoch 9's result pickle already saved), no duplicate
-    # screening/stopping-history entry.
-    train_calls_2 = []
-
-    def counting_train_2(request):
-        train_calls_2.append(request.target_epoch)
-        fx["fake_train"](request)
-
-    eval_calls_2 = []
-
-    def counting_evaluate_2(request):
-        eval_calls_2.append(request.epoch)
-        fx["fake_evaluate"](request)
-
+    # calling again is idempotent: still blocked, never crashes, never
+    # retries training.
     resumed_again = run_pilot_chunk(
         chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
-        train_chunk_fn=counting_train_2, evaluate_checkpoint_fn=counting_evaluate_2, **common_kwargs,
+        previous_checkpoint_dir=nh_run_dir,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
     )
-    assert train_calls_2 == [], "second resume must not retrigger training -- epoch 9 already on disk"
-    assert eval_calls_2 == [], "second resume must not re-evaluate -- epoch 9's result already saved"
-    assert [r["epoch"] for r in resumed_again["screening_results"]] == [9]
-    assert len(resumed_again["state"]["history"]) == len(resumed["state"]["history"])
+    assert resumed_again["blocked"] is True
+    assert train_calls == []
+
+
+def test_run_pilot_chunk_blocks_on_empty_pre_existing_continuation_directory(run_pilot_fixture):
+    """A continuation attempt killed before writing even its first new
+    checkpoint still leaves an empty (but already-created)
+    continue_training_from_epoch006/ directory behind.
+    NeuralHydrology's own continue_run refuses to create an already-existing
+    run directory (BaseTrainer._create_folder_structure raises RuntimeError
+    rather than resuming into or recreating it), so a fresh train_chunk_fn
+    call here would crash inside real NH. untrusted_overshoot_epochs alone
+    would not catch this (no checkpoint occupies the target range at all) --
+    this is the specific case the expected_dir.is_dir() guard in
+    _advance_chunk_via_continuation exists for."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+    nh_run_dir = first["nh_run_dir"]
+
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()  # empty -- killed before its first checkpoint
+
+    train_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    resumed = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=nh_run_dir,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+
+    assert resumed["blocked"] is True
+    assert "already exists" in resumed["blocked_reason"]
+    assert resumed["checkpoint_dir_for_target"] is None
+    assert train_calls == [], "must never attempt a train_chunk_fn call that would crash inside real NH"
+    assert list(cont_dir.iterdir()) == []
+
+
+def test_continuation_overlay_writes_additive_epochs_and_explicit_continue_from_epoch():
+    """Direct unit test of _continuation_overlay -- the exact dict
+    default_train_chunk hands NH as the ``pilot_epoch_overlay.yaml`` content.
+    Neither original bug (absolute-vs-additive ``epochs``, and treating a
+    continuation's ``nh_run_dir`` as the base directory) was caught by any
+    test exercising this real function, because every other test in this
+    file injects a fake train_chunk_fn that only approximates its contract.
+    This test is NH/torch-free (pure dict construction) so it can run
+    locally without either installed, unlike default_train_chunk itself."""
+    request = TrainChunkRequest(
+        is_first_chunk=False,
+        config_path=Path("unused_config.yml"),
+        nh_run_dir=Path("unused_run_dir"),
+        current_epoch=6,
+        logical_target_epoch=9,
+        additional_epochs=3,
+    )
+
+    overlay = _continuation_overlay(request)
+
+    assert overlay == {"epochs": 3, "continue_from_epoch": 6}
+
+
+def test_continuation_overlay_omits_continue_from_epoch_when_current_epoch_is_none():
+    """The one legitimate case for a missing continue_from_epoch: the
+    fully-degenerate zero-checkpoint corner (TrainChunkRequest.current_epoch
+    docstring). additional_epochs still carries the real (absolute, since
+    there is no prior epoch to add to) target epoch count."""
+    request = TrainChunkRequest(
+        is_first_chunk=False,
+        config_path=Path("unused_config.yml"),
+        nh_run_dir=Path("unused_run_dir"),
+        current_epoch=None,
+        logical_target_epoch=6,
+        additional_epochs=6,
+    )
+
+    overlay = _continuation_overlay(request)
+
+    assert overlay == {"epochs": 6}
+    assert "continue_from_epoch" not in overlay
+
+
+def test_run_pilot_chunk_computes_additive_not_absolute_epochs_across_two_chunk_transitions(run_pilot_fixture):
+    """Covers the additive-epoch-semantics correction across TWO successive
+    chunk transitions (6 -> 9, then 9 -> 12): current_epoch/additional_epochs
+    must reflect each chunk's own bounded span, never an absolute target,
+    and each chunk's checkpoint must land in a freshly, correctly nested
+    continuation directory under the PREVIOUS chunk's own directory."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    train_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+    second = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+    third = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=second["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+
+    continuation_calls = [r for r in train_calls if not r.is_first_chunk]
+    assert [r.current_epoch for r in continuation_calls] == [6, 9]
+    assert [r.additional_epochs for r in continuation_calls] == [3, 3]
+    assert [r.logical_target_epoch for r in continuation_calls] == [9, 12]
+
+    expected_second_dir = first["nh_run_dir"] / "continue_training_from_epoch006"
+    expected_third_dir = expected_second_dir / "continue_training_from_epoch009"
+    assert second["checkpoint_dir_for_target"] == expected_second_dir
+    assert third["checkpoint_dir_for_target"] == expected_third_dir
+    assert (expected_third_dir / "model_epoch012.pt").is_file()
+
+
+def test_run_pilot_chunk_never_requests_a_non_validation_evaluation_period(run_pilot_fixture):
+    """Confirms goal "no test/spatial-holdout path introduced": every
+    evaluation request this orchestration issues is for the "validation"
+    period only, across a first chunk and a continuation chunk."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    periods = []
+
+    def recording_evaluate(request):
+        periods.append(request.period)
+        fx["fake_evaluate"](request)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=recording_evaluate, **common_kwargs,
+    )
+    run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=recording_evaluate, **common_kwargs,
+    )
+    assert periods, "expected at least one explicit evaluation call"
+    assert set(periods) == {"validation"}
+
+
+def test_run_pilot_chunk_evaluator_failure_leaves_prior_logical_state_unchanged(run_pilot_fixture):
+    """An evaluator failure on a LATER chunk (after a prior chunk already
+    succeeded) must propagate loudly and must not mutate the already-recorded
+    epoch-6 stopping-history entry or add a partial epoch-9 entry."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"], **common_kwargs,
+    )
+
+    def broken_evaluate(request):
+        pass
+
+    with pytest.raises(PilotOrchestrationError):
+        run_pilot_chunk(
+            chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+            previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+            train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=broken_evaluate, **common_kwargs,
+        )
+
+    es_path = first["nh_run_dir"] / "pilot_early_stopping_state.json"
+    state = json.loads(es_path.read_text())
+    assert [h["epoch"] for h in state["history"]] == [6]
+
+
+def test_run_pilot_chunk_logs_checkpoint_reference_at_resolved_physical_path(run_pilot_fixture):
+    """Goal 8: tracking/checksum references must use the resolved PHYSICAL
+    checkpoint path (inside the nested continuation directory), never the
+    base run directory a naive ``nh_run_dir / f"model_epoch{epoch:03d}.pt"``
+    guess would produce."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    tracking_run = init_tracking_run(
+        {"enabled": False, "mode": "disabled", "max_artifact_reference_bytes": 10_000_000}, {}
+    )
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"],
+        tracking_run=tracking_run, **common_kwargs,
+    )
+    second = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"],
+        tracking_run=tracking_run, **common_kwargs,
+    )
+
+    expected_dir = first["nh_run_dir"] / "continue_training_from_epoch006"
+    assert second["checkpoint_dir_for_target"] == expected_dir
+    ref = next(r for r in tracking_run.artifact_references if r["name"] == "checkpoint_epoch_009")
+    assert ref["path"] == str(expected_dir / "model_epoch009.pt")
 
 
 # --- ensure_validation_results: explicit-evaluation prerequisite check -----
@@ -585,7 +846,242 @@ def test_run_pilot_chunk_resumes_from_real_qualification_run_failure_shape(run_p
         chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
         train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
     )
-    assert [r.target_epoch for r in train_calls] == [9]
+    assert [r.logical_target_epoch for r in train_calls] == [9]
     assert train_calls[0].is_first_chunk is False
+    assert train_calls[0].nh_run_dir == nh_run_dir
+    assert train_calls[0].current_epoch == 6
+    assert train_calls[0].additional_epochs == 3
     assert [r.epoch for r in eval_calls] == [9]
+    expected_dir = nh_run_dir / "continue_training_from_epoch006"
+    assert eval_calls[0].nh_run_dir == expected_dir
+    assert resumed["checkpoint_dir_for_target"] == expected_dir
     assert [r["epoch"] for r in resumed["screening_results"]] == [9]
+
+
+def test_run_pilot_chunk_real_qualification_run_evidence_with_overshoot_checkpoints_present(run_pilot_fixture):
+    """Exact current real Moriah artifact state (job 45705457): checkpoints
+    1-6 flat, then a continue_training_from_epoch006/ directory containing
+    checkpoints 7-15 (the additive-``epochs`` bug's byproduct -- a clean
+    chunk(6->9) continuation should only have produced 7-9). Chunk (6->9)
+    must trust exactly epoch 9 and never screen/train/evaluate epochs
+    10-15 merely because their files exist. The FOLLOWING chunk (9->12)
+    must then be BLOCKED (never silently resumed from epoch 15), since
+    epoch 12 in that same directory was never produced by a continuation
+    that actually started at epoch 9 -- see module docstring's worked
+    example distinguishing epoch 9 (trusted) from epoch 12 (untrusted
+    overshoot in the same physical directory)."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+    write_perfect_validation_results(nh_run_dir, 6, fx["basins"], fx["package_root"])
+
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    for epoch in range(7, 16):
+        (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+
+    train_calls = []
+    eval_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        eval_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=False,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
+    )
+    assert [r["epoch"] for r in first["screening_results"]] == [3, 6]
+
+    resumed = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
+    )
+    assert train_calls == [], "epoch 9 already trusted (owned by the exact expected continuation dir) -- no retrain"
+    assert resumed["blocked"] is False
+    assert resumed["checkpoint_dir_for_target"] == cont_dir
+    assert [r["epoch"] for r in resumed["screening_results"]] == [9]
+    assert [r.epoch for r in eval_calls] == [9], "epochs 10-15 must never be screened merely because they exist"
+
+    next_chunk = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
+    )
+    assert next_chunk["blocked"] is True
+    assert "12" in next_chunk["blocked_reason"]
+    assert train_calls == [], "must never train into epoch 12's range while an untrusted checkpoint occupies it"
+    assert next_chunk["checkpoint_dir_for_target"] is None
+
+    status = compute_pilot_status_fields(nh_run_dir, pilot_policy=fx["pilot_policy"])
+    assert status["highest_physical_checkpoint_epoch"] == 15
+    assert status["highest_screened_epoch"] == 9
+    assert status["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
+    assert status["safe_to_continue_automatically"] is False
+
+
+def test_run_pilot_chunk_rejects_partial_first_chunk_before_any_state_change(run_pilot_fixture):
+    """Only two first-chunk shapes are supported: no checkpoints at all, or
+    the complete epoch 1-6 range already flat in the base run directory
+    (both covered by the tests above). A PARTIAL first chunk -- e.g.
+    epochs 1-4 present, target 6 -- is intentionally unsupported: epoch 3
+    would resolve against the base run directory while epoch 6 would land
+    in a newly nested continuation directory, so this module refuses
+    rather than guessing. Must fail clearly (blocked, not a crash) before
+    any train/evaluate call or state/tracking-file write."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 5):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+
+    train_calls = []
+    eval_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        eval_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    result = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=False,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate, **common_kwargs,
+    )
+
+    assert result["blocked"] is True
+    assert "partial" in result["blocked_reason"]
+    assert "unsupported" in result["blocked_reason"]
+    assert result["checkpoint_dir_for_target"] is None
+    assert result["screening_results"] == []
+    assert train_calls == [], "must never attempt a train_chunk_fn call for an unsupported partial first chunk"
+    assert eval_calls == []
+    assert [p.name for p in nh_run_dir.glob("model_epoch*.pt")] == [
+        "model_epoch001.pt", "model_epoch002.pt", "model_epoch003.pt", "model_epoch004.pt",
+    ], "no new checkpoint/continuation directory may be created while rejecting this state"
+    assert not (nh_run_dir / "pilot_early_stopping_state.json").exists(), \
+        "must fail before any pilot state file is written"
+    assert not (nh_run_dir / "pilot_orchestration_state.json").exists()
+
+
+# --- low-level checkpoint-discovery unit tests -------------------------------
+
+def test_discover_physical_checkpoints_across_base_and_one_continuation_dir(tmp_path):
+    base = tmp_path / "run"
+    base.mkdir()
+    for epoch in range(1, 7):
+        (base / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+    cont = base / "continue_training_from_epoch006"
+    cont.mkdir()
+    for epoch in range(7, 10):
+        (cont / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+
+    inventory = discover_physical_checkpoints(base)
+    assert set(inventory) == set(range(1, 10))
+    for epoch in range(1, 7):
+        assert inventory[epoch].owning_run_dir == base
+    for epoch in range(7, 10):
+        assert inventory[epoch].owning_run_dir == cont
+
+
+def test_discover_physical_checkpoints_finds_doubly_nested_continuation_dir(tmp_path):
+    base = tmp_path / "run"
+    base.mkdir()
+    (base / "model_epoch006.pt").write_bytes(b"x")
+    cont1 = base / "continue_training_from_epoch006"
+    cont1.mkdir()
+    (cont1 / "model_epoch009.pt").write_bytes(b"x")
+    cont2 = cont1 / "continue_training_from_epoch009"
+    cont2.mkdir()
+    (cont2 / "model_epoch012.pt").write_bytes(b"x")
+
+    inventory = discover_physical_checkpoints(base)
+    assert set(inventory) == {6, 9, 12}
+    assert inventory[12].owning_run_dir == cont2
+
+
+def test_discover_physical_checkpoints_raises_loudly_on_duplicate_epoch_claim(tmp_path):
+    base = tmp_path / "run"
+    base.mkdir()
+    (base / "model_epoch009.pt").write_bytes(b"x")
+    cont = base / "continue_training_from_epoch006"
+    cont.mkdir()
+    (cont / "model_epoch009.pt").write_bytes(b"y")
+
+    with pytest.raises(PilotOrchestrationError, match="ambiguous physical checkpoint inventory"):
+        discover_physical_checkpoints(base)
+
+
+def test_discover_physical_checkpoints_ignores_malformed_names(tmp_path):
+    base = tmp_path / "run"
+    base.mkdir()
+    (base / "model_epoch006.pt").write_bytes(b"x")
+    (base / "model_epoch6.pt").write_bytes(b"x")  # not zero-padded
+    (base / "model_epochabc.pt").write_bytes(b"x")  # non-numeric
+    (base / "model_epoch007.pt.bak").write_bytes(b"x")  # wrong extension
+    malformed_cont = base / "continue_training_from_epochABC"
+    malformed_cont.mkdir()
+    (malformed_cont / "model_epoch099.pt").write_bytes(b"x")  # inside a malformed dir name -- must not be recursed into
+
+    inventory = discover_physical_checkpoints(base)
+    assert set(inventory) == {6}
+
+
+def test_resolve_trusted_chunk_checkpoint_and_untrusted_overshoot_epochs_distinguish_by_owning_dir(tmp_path):
+    base = tmp_path / "run"
+    base.mkdir()
+    (base / "model_epoch006.pt").write_bytes(b"x")
+    cont = base / "continue_training_from_epoch006"
+    cont.mkdir()
+    for epoch in (9, 12):
+        (cont / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+
+    inventory = discover_physical_checkpoints(base)
+    trusted_9 = resolve_trusted_chunk_checkpoint(inventory, base, 6, 9)
+    assert trusted_9 is not None and trusted_9.owning_run_dir == cont
+
+    # epoch 12 physically sits in the SAME directory, but that directory was
+    # never continued from epoch 9 -- must not be trusted for chunk (9->12).
+    trusted_12_from_9 = resolve_trusted_chunk_checkpoint(inventory, cont, 9, 12)
+    assert trusted_12_from_9 is None
+    assert untrusted_overshoot_epochs(inventory, 9, 12) == [12]
+
+
+def test_compute_pilot_status_fields_distinguishes_physical_from_screened_and_flags_overshoot(tmp_path, pilot_policy):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+    cont = nh_run_dir / "continue_training_from_epoch006"
+    cont.mkdir()
+    for epoch in range(7, 16):
+        (cont / f"model_epoch{epoch:03d}.pt").write_bytes(b"x")
+    es_state = {"stopped": False, "history": [{"epoch": 3}, {"epoch": 6}]}
+    (nh_run_dir / "pilot_early_stopping_state.json").write_text(json.dumps(es_state))
+
+    fields = compute_pilot_status_fields(nh_run_dir, pilot_policy)
+    assert fields["highest_physical_checkpoint_epoch"] == 15
+    assert fields["highest_screened_epoch"] == 6
+    assert fields["overshoot_epochs"] == [7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert fields["safe_to_continue_automatically"] is False
+    assert fields["next_intended_screening_epoch"] == 9

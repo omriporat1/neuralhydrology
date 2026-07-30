@@ -236,50 +236,137 @@ fi
 LATEST_CKPT_AFTER=""
 LATEST_EPOCH_AFTER=""
 if [ -n "${NH_RUN_DIR}" ] && [ -d "${NH_RUN_DIR}" ]; then
-    LATEST_CKPT_AFTER=$(find "${NH_RUN_DIR}" -maxdepth 1 -name 'model_epoch*.pt' | sort | tail -1)
+    # No -maxdepth: physical checkpoints may live in a nested
+    # continue_training_from_epoch###/ continuation directory, not only
+    # flat in NH_RUN_DIR itself (see pilot_orchestration.py's
+    # continuation-epoch-semantics note). Sort numerically by the epoch
+    # number extracted from each match's basename -- plain path-string
+    # sorting is not reliable across differently-nested directories.
+    LATEST_CKPT_AFTER=$(find "${NH_RUN_DIR}" -name 'model_epoch*.pt' 2>/dev/null | \
+        sed -E 's#^(.*model_epoch0*([0-9]+)\.pt)$#\2 \1#' | sort -n | tail -1 | cut -d' ' -f2-)
     if [ -n "${LATEST_CKPT_AFTER}" ]; then
         LATEST_EPOCH_AFTER=$(basename "${LATEST_CKPT_AFTER}" | sed -E 's/model_epoch0*([0-9]+)\.pt/\1/')
     fi
 fi
 
-# Non-zero exit with a checkpoint already on disk (e.g. wall-time SIGTERM
-# mid-chunk) is a resumable partial run, not an unqualified failure --
-# resubmitting this exact script resumes automatically (see restart-safety
-# note above).
-if [ "${PILOT_STATUS}" -eq 0 ]; then
-    RUN_STATUS="COMPLETED"
-elif [ -n "${LATEST_CKPT_AFTER}" ]; then
-    RUN_STATUS="INTERRUPTED_RESUMABLE"
-else
-    RUN_STATUS="FAILED_NO_CHECKPOINT"
-fi
-
+# Distinct status fields (task item 7): "a checkpoint physically exists at
+# epoch N" must never be read as "screening/stopping-eligibility progressed
+# to epoch N" -- see pilot_orchestration.py's continuation-epoch-semantics
+# note (the second real qualification-run failure this was written to fix:
+# checkpoints 10-15 existed as accidental overshoot while screening had only
+# actually reached epoch 9). Primary source is run_stage1_lead06_pilot.py's
+# own stdout JSON (already carries these fields from run_pilot()'s return
+# dict); if that's missing or incomplete (e.g. wall-time SIGTERM before it
+# could print), fall back to computing them directly from on-disk state via
+# pilot_orchestration.compute_pilot_status_fields (no next-intended-epoch in
+# this fallback path -- it needs the full pilot policy object, not
+# conveniently available here). Passed via environment, never interpolated
+# into the Python source string, so a free-text blocked_reason containing
+# quotes/newlines can never break this script.
+STDOUT_JSON_PATH="${RESULT_DIR}/pilot_stdout.json.log"
+RUN_ID="${RUN_ID}" NH_RUN_DIR="${NH_RUN_DIR}" STDOUT_JSON_PATH="${STDOUT_JSON_PATH}" \
+PILOT_STATUS="${PILOT_STATUS}" PACKAGE_ROOT="${PACKAGE_ROOT}" \
+CONFIG_OUT_DIR="${CONFIG_OUT_DIR}" EVIDENCE_OUT_DIR="${EVIDENCE_OUT_DIR}" \
+LATEST_CKPT_AFTER="${LATEST_CKPT_AFTER}" LATEST_EPOCH_AFTER="${LATEST_EPOCH_AFTER}" \
+TERM_REQUESTED="${TERM_REQUESTED}" SLURM_JOB_ID="${SLURM_JOB_ID:-}" \
+SLURM_JOB_PARTITION="${SLURM_JOB_PARTITION:-unknown}" SOURCE_COMMIT="${SOURCE_COMMIT}" \
+RESULT_JSON_PATH="${RESULT_DIR}/pilot_result.json" \
 python -c "
 import json
-out = {
-    'status': '${RUN_STATUS}',
-    'run_id': '${RUN_ID}',
-    'pilot_exit_code': ${PILOT_STATUS},
-    'package_root': '${PACKAGE_ROOT}',
-    'config_out_dir': '${CONFIG_OUT_DIR}',
-    'evidence_out_dir': '${EVIDENCE_OUT_DIR}',
-    'nh_run_dir': '${NH_RUN_DIR}',
-    'latest_checkpoint': '${LATEST_CKPT_AFTER}',
-    'latest_epoch': '${LATEST_EPOCH_AFTER}' or None,
-    'term_requested': bool(${TERM_REQUESTED}),
-    'slurm_job_id': '${SLURM_JOB_ID:-}',
-    'slurm_job_partition': '${SLURM_JOB_PARTITION:-unknown}',
-    'source_commit': '${SOURCE_COMMIT}',
-    'hostname': __import__('socket').gethostname(),
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.getcwd())
+
+env = os.environ
+pilot_status = int(env['PILOT_STATUS'])
+nh_run_dir = env['NH_RUN_DIR']
+
+stdout_result = {}
+stdout_json_path = env['STDOUT_JSON_PATH']
+if os.path.getsize(stdout_json_path) > 0 if os.path.exists(stdout_json_path) else False:
+    try:
+        with open(stdout_json_path) as fh:
+            stdout_result = json.load(fh)
+    except Exception:
+        stdout_result = {}
+
+status_fields = {
+    'highest_physical_checkpoint_epoch': stdout_result.get('highest_physical_checkpoint_epoch'),
+    'highest_screened_epoch': stdout_result.get('highest_screened_epoch'),
+    'next_intended_screening_epoch': stdout_result.get('next_intended_screening_epoch'),
+    'overshoot_epochs': stdout_result.get('overshoot_epochs'),
+    'safe_to_continue_automatically': stdout_result.get('safe_to_continue_automatically'),
+    'blocked_reason': stdout_result.get('blocked_reason'),
 }
-json.dump(out, open('${RESULT_DIR}/pilot_result.json', 'w'), indent=2)
+pilot_final_status = stdout_result.get('final_status')
+
+if not stdout_result and nh_run_dir and os.path.isdir(nh_run_dir):
+    try:
+        from src.baseline.pilot_orchestration import compute_pilot_status_fields
+        fallback = compute_pilot_status_fields(nh_run_dir)
+        status_fields.update({
+            'highest_physical_checkpoint_epoch': fallback['highest_physical_checkpoint_epoch'],
+            'highest_screened_epoch': fallback['highest_screened_epoch'],
+            'next_intended_screening_epoch': fallback['next_intended_screening_epoch'],
+            'overshoot_epochs': fallback['overshoot_epochs'],
+            'safe_to_continue_automatically': fallback['safe_to_continue_automatically'],
+        })
+    except Exception as exc:
+        status_fields['status_fallback_error'] = str(exc)
+
+# Non-zero process exit with a checkpoint already on disk (e.g. wall-time
+# SIGTERM mid-chunk) is a resumable partial run, not an unqualified failure
+# -- resubmitting this exact script resumes automatically (see
+# restart-safety note above). A blocked pilot (untrusted continuation
+# overshoot, never trained into automatically -- see
+# pilot_orchestration.py) is its own distinct status: the process exits 0
+# (it made a deliberate, non-crashing determination) but is NOT an
+# unqualified COMPLETED, since a human must resolve the overshoot before
+# this run_id can proceed.
+if pilot_final_status == 'blocked_continuation_overshoot_conflict':
+    run_status = 'BLOCKED_MANUAL_REVIEW_REQUIRED'
+elif pilot_status == 0:
+    run_status = 'COMPLETED'
+elif env['LATEST_CKPT_AFTER']:
+    run_status = 'INTERRUPTED_RESUMABLE'
+else:
+    run_status = 'FAILED_NO_CHECKPOINT'
+
+out = {
+    'status': run_status,
+    'run_id': env['RUN_ID'],
+    'pilot_exit_code': pilot_status,
+    'pilot_final_status': pilot_final_status,
+    'package_root': env['PACKAGE_ROOT'],
+    'config_out_dir': env['CONFIG_OUT_DIR'],
+    'evidence_out_dir': env['EVIDENCE_OUT_DIR'],
+    'nh_run_dir': nh_run_dir,
+    'latest_checkpoint': env['LATEST_CKPT_AFTER'],
+    'latest_epoch': int(env['LATEST_EPOCH_AFTER']) if env['LATEST_EPOCH_AFTER'] else None,
+    **status_fields,
+    'term_requested': env['TERM_REQUESTED'] == '1',
+    'slurm_job_id': env['SLURM_JOB_ID'],
+    'slurm_job_partition': env['SLURM_JOB_PARTITION'],
+    'source_commit': env['SOURCE_COMMIT'],
+    'hostname': socket.gethostname(),
+}
+with open(env['RESULT_JSON_PATH'], 'w') as fh:
+    json.dump(out, fh, indent=2)
 print(json.dumps(out, indent=2))
-"
+print('RUN_STATUS_FOR_SHELL=' + run_status)
+" | tee "${RESULT_DIR}/pilot_result_stdout.log"
+
+RUN_STATUS=$(grep '^RUN_STATUS_FOR_SHELL=' "${RESULT_DIR}/pilot_result_stdout.log" | tail -1 | cut -d= -f2-)
 
 echo "=== done (run_status ${RUN_STATUS}, exit ${PILOT_STATUS}) ==="
 # COMPLETED -> 0; INTERRUPTED_RESUMABLE -> 2 (nonzero but distinct from an
 # unqualified failure -- resubmitting this exact script resumes
-# automatically, see restart-safety note above); FAILED_NO_CHECKPOINT -> 1.
+# automatically, see restart-safety note above); BLOCKED_MANUAL_REVIEW_REQUIRED
+# and FAILED_NO_CHECKPOINT -> 1 (both require a human before this run_id can
+# proceed further, though for different reasons -- see pilot_result.json's
+# distinct 'status'/'blocked_reason' fields for which one actually occurred).
 case "${RUN_STATUS}" in
     COMPLETED) exit 0 ;;
     INTERRUPTED_RESUMABLE) exit 2 ;;

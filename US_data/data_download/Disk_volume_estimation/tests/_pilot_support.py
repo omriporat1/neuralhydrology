@@ -16,10 +16,14 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import xarray as xr
 
 from src.baseline.nh_seed_evaluation import weight_stem
@@ -38,6 +42,39 @@ STATIC_COUNT = BASELINE_POLICY["static_attributes"]["expected_model_input_column
 REAL_DEVELOPMENT = sorted(load_eligible_basins(SPLITS_DIR / "development_train.txt"))
 REAL_SPATIAL_HOLDOUT = sorted(load_eligible_basins(SPLITS_DIR / "spatial_holdout_nonca.txt"))
 REAL_FULL_UNION = REAL_DEVELOPMENT + REAL_SPATIAL_HOLDOUT
+
+
+def _make_short_root_dir() -> Path:
+    """A short-rooted temporary directory.
+
+    This pilot's real NH continuation-directory nesting
+    (``continue_training_from_epoch###/``, potentially several levels deep
+    across successive chunks -- see ``pilot_orchestration.py``'s
+    continuation-epoch-semantics note) combined with pytest's own long
+    default ``tmp_path`` prefix
+    (``AppData/Local/Temp/pytest-of-<user>/pytest-NNN/<test-name>/...``) can
+    exceed Windows' default 260-character MAX_PATH -- a Windows-only local
+    test-environment limitation (Linux, where real Moriah/h2o runs happen,
+    has no such limit; see ``docs/stage1_lead06_pilot_v001.md``). Callers own
+    cleanup of the returned directory."""
+    if sys.platform != "win32":
+        return Path(tempfile.mkdtemp())
+    root = Path(Path(tempfile.gettempdir()).anchor) / "fnh_pytest_tmp"
+    root.mkdir(exist_ok=True)
+    return Path(tempfile.mkdtemp(dir=str(root)))
+
+
+@pytest.fixture
+def short_tmp_path():
+    """Like the built-in ``tmp_path`` fixture, but rooted at a short path on
+    Windows (see :func:`_make_short_root_dir`) -- use for any pilot test
+    whose NH run directory may nest multiple nested continuation
+    directories deep."""
+    path = _make_short_root_dir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def pick_development_basins(n: int = 5) -> list:

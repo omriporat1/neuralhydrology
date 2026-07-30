@@ -74,12 +74,103 @@ then required to exist or the run fails loudly rather than silently
 screening against stale/absent data. This is purely an inference
 prerequisite, never a second metric implementation or an authoritative
 evaluation -- see ``pilot_screening_eval.py``'s corrected module docstring.
+
+Continuation-epoch-semantics correction (found during the second real Moriah
+qualification-run failure, ``emb128x64_seedA``, job 45705457, following the
+first repair above): NH's own ``epochs`` config key is an ADDITIVE
+epoch count on top of whatever epoch a continuation resumes from
+(``neuralhydrology.training.basetrainer.BaseTrainer.train_and_validate``'s
+``range(self._epoch + 1, self._epoch + self.cfg.epochs + 1)``), never an
+absolute target -- so a continuation overlay that (incorrectly) wrote the
+chunk's absolute target epoch into ``epochs`` trained far past the intended
+chunk boundary (continuing from epoch 6 with ``epochs: 9`` produced
+checkpoints 7-15, not 7-9). :class:`TrainChunkRequest` therefore carries an
+explicit ``additional_epochs`` (always exactly ``logical_target_epoch -
+current_epoch``, what ``default_train_chunk`` writes into the overlay's
+``epochs`` key) and an explicit ``current_epoch`` (written into the overlay's
+``continue_from_epoch`` key, a real, recognized NH ``Config`` property that
+selects an EXACT continuation start epoch, overriding NH's default "highest
+checkpoint in this directory" selection -- see
+``neuralhydrology/training/basetrainer.py``'s ``_get_start_epoch_number`` /
+``_restore_training_state``) -- never an ambiguous absolute ``target_epoch``
+overlay value again.
+
+NH also nests a fresh ``continue_training_from_epoch{start:03d}/``
+subdirectory under whatever ``run_dir`` a ``continue_run`` call is pointed at
+(``_create_folder_structure`` in the same module; nesting recurses
+arbitrarily -- continuing again from an already-continued run_dir creates a
+further-nested subdirectory), so a checkpoint's PHYSICAL owning directory is
+not always ``nh_run_dir``/the base run directory. :func:`discover_physical_checkpoints`
+walks base + every nested continuation directory to build a canonical
+epoch -> physical-checkpoint inventory, failing loudly (never heuristically)
+if more than one physical file ever claims the same logical epoch anywhere in
+the tree. Because the real qualification run's own continuation directory
+(``continue_training_from_epoch006``) still physically contains accidental
+overshoot checkpoints 10-15 alongside the legitimate epoch-9 checkpoint (a
+byproduct of the additive-``epochs`` bug above, now fixed prospectively but
+not retroactively undone -- these files are never deleted/renamed/rewritten,
+see module docstring's "never invent an unsafe workaround" note),
+:func:`resolve_trusted_chunk_checkpoint` never treats "a checkpoint file with
+this epoch number exists somewhere" as sufficient justification to reuse or
+screen it: a chunk's target epoch is only trusted when its physical owning
+directory is EXACTLY the continuation directory that a clean, chunk-sized
+``continue_run`` call starting at this chunk's own ``previous_target_epoch``
+would itself create (or the base run directory itself, only when that
+directory's own ``start_run`` -- never ``continue_run`` -- already produced
+the target epoch's checkpoint directly, e.g. the first chunk's target
+already fully satisfied by a prior process's completed ``start_run`` call)
+-- e.g. epoch 9 is trusted for chunk (6 -> 9) because its owning
+directory is exactly ``continue_training_from_epoch006``, but epoch 12
+sitting in that SAME directory is NOT trusted for chunk (9 -> 12), because
+that directory was never continued from epoch 9. :func:`run_pilot_chunk`
+never trains into an epoch range that a physical, untrusted checkpoint
+already occupies (:func:`untrusted_overshoot_epochs`) -- doing so would
+create a second, differently-nested physical file claiming the same logical
+epoch. It also never re-attempts a ``train_chunk_fn`` call whose expected
+continuation directory already exists but is untrusted/incomplete (verified
+against ``neuralhydrology.training.basetrainer.BaseTrainer._create_folder_structure``,
+which raises ``RuntimeError`` rather than resuming into or recreating an
+already-existing run directory) -- this covers an interrupted continuation
+attempt that was killed before producing even its first new checkpoint,
+which :func:`untrusted_overshoot_epochs` alone would not catch. When either
+condition occurs, the chunk is reported as ``blocked`` with a clear reason (never a raised exception that would look like an ordinary crash,
+and never a silent resume from the highest physical checkpoint) --
+:func:`run_pilot` stops advancing further chunks in that case, still writes
+the evidence bundle reflecting the last successfully-processed epoch, and
+:func:`compute_pilot_status_fields` reports ``safe_to_continue_automatically
+= False`` with the specific overshoot epochs listed, requiring a human to
+resolve the pre-existing overshoot artifacts before this pilot run can
+safely proceed past its current logical frontier. See
+``docs/stage1_lead06_pilot_v001.md``'s second-qualification-run-failure
+section for the confirmed evidence this fix models.
+
+Unconditional-nesting correction (found by inspecting
+``neuralhydrology.nh_run.continue_run`` directly, not merely inferred from
+the qualification run's evidence): ``continue_run`` sets
+``base_config.is_continue_training = True`` unconditionally, on EVERY call,
+regardless of whether ``continue_from_epoch`` is also set -- so
+``_create_folder_structure``'s nesting behavior above is not specific to
+"later" chunks. A genuinely PARTIAL first chunk (e.g. the base run's own
+frozen ``epochs: 6`` profile was interrupted after only epochs 1-4) is, once
+resumed via ``continue_run``, physically indistinguishable from any other
+bounded continuation -- it nests a
+``continue_training_from_epoch004/`` directory under the base run directory
+just the same. :func:`run_pilot_chunk`'s ``previous_target_epoch == 0``
+branch therefore only ever treats the base run directory itself as the
+checkpoint's owning directory when the base profile's own target is ALREADY
+fully satisfied on disk (``start_run`` produced it directly, no
+``continue_run`` involved at all); any partial-first-chunk resumption is
+routed through the exact same :func:`_advance_chunk_via_continuation` trust
+logic as every later chunk, just with ``start_dir`` pinned to the base run
+directory and ``resume_from_epoch`` set to the highest checkpoint already
+found there (never the literal ``0``).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +216,11 @@ __all__ = [
     "default_evaluate_checkpoint",
     "ensure_validation_results",
     "discover_nh_run_dir",
+    "PhysicalCheckpoint",
+    "discover_physical_checkpoints",
+    "resolve_trusted_chunk_checkpoint",
+    "untrusted_overshoot_epochs",
+    "compute_pilot_status_fields",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -134,6 +230,8 @@ __all__ = [
 
 _CHECKPOINT_GLOB = "model_epoch*.pt"
 _ORCHESTRATION_STATE_FILENAME = "pilot_orchestration_state.json"
+_CONTINUATION_DIR_RE = re.compile(r"^continue_training_from_epoch(\d{3})$")
+_CHECKPOINT_FILE_RE = re.compile(r"^model_epoch(\d{3})\.pt$")
 
 
 class PilotOrchestrationError(Exception):
@@ -150,12 +248,43 @@ class TrainChunkRequest:
     otherwise to ``neuralhydrology.nh_run.continue_run(run_dir=nh_run_dir,
     config_file=<small epochs-overlay file>)`` -- exactly
     ``scripts/run_stage1_nh.py``'s own train/continue behavior, never
-    duplicated NH training logic."""
+    duplicated NH training logic.
+
+    ``nh_run_dir`` for a continuation is the PHYSICAL checkpoint-owning
+    directory training should resume from (never assumed to be the base run
+    directory -- see module docstring's continuation-epoch-semantics note).
+    ``current_epoch`` is the exact epoch to continue from -- written into
+    the overlay's ``continue_from_epoch`` key when not ``None``, overriding
+    NH's default "highest checkpoint in this directory" selection; ``None``
+    only for the fully-degenerate corner where the base run directory has no
+    checkpoint at all yet (see ``run_pilot_chunk``'s ``previous_target_epoch
+    == 0`` branch and ``_advance_chunk_via_continuation``'s docstring) --
+    every other continuation, including a partial first chunk, passes an
+    explicit ``current_epoch``. ``additional_epochs`` is the exact (always additive,
+    never absolute) count written into the overlay's ``epochs`` key.
+    ``logical_target_epoch`` is retained only for logging/test clarity and
+    is never itself written into any NH config."""
 
     is_first_chunk: bool
     config_path: Path
     nh_run_dir: "Path | None"
-    target_epoch: int
+    current_epoch: "int | None"
+    logical_target_epoch: int
+    additional_epochs: int
+
+
+def _continuation_overlay(request: TrainChunkRequest) -> dict:
+    """The exact ``epochs``/``continue_from_epoch`` overlay dict a
+    continuation chunk writes for NH -- pure and NH/torch-free so it can be
+    unit-tested directly, independent of :func:`default_train_chunk`'s
+    otherwise-untestable-locally NH call (this is the precise piece of logic
+    responsible for both the additive-vs-absolute-epoch bug and the
+    continuation-nesting bug documented in the module docstring -- it must
+    never again change without a direct test catching it)."""
+    overlay = {"epochs": request.additional_epochs}
+    if request.current_epoch is not None:
+        overlay["continue_from_epoch"] = request.current_epoch
+    return overlay
 
 
 def default_train_chunk(request: TrainChunkRequest) -> None:
@@ -174,8 +303,9 @@ def default_train_chunk(request: TrainChunkRequest) -> None:
     else:
         from neuralhydrology.nh_run import continue_run
 
+        overlay = _continuation_overlay(request)
         overlay_path = Path(request.nh_run_dir) / "pilot_epoch_overlay.yaml"
-        overlay_path.write_text(yaml.safe_dump({"epochs": request.target_epoch}), encoding="utf-8")
+        overlay_path.write_text(yaml.safe_dump(overlay), encoding="utf-8")
         continue_run(run_dir=request.nh_run_dir, config_file=overlay_path)
 
 
@@ -327,6 +457,185 @@ def _last_completed_epoch(nh_run_dir) -> int:
     return max(int(p.stem.replace("model_epoch", "")) for p in checkpoints)
 
 
+@dataclass(frozen=True)
+class PhysicalCheckpoint:
+    """One physical NH checkpoint file discovered anywhere under a base run
+    directory (base dir itself, or a nested ``continue_training_from_epoch###``
+    continuation directory at any depth). ``owning_run_dir`` is the exact
+    directory the file lives in -- never inferred from the epoch number."""
+
+    epoch: int
+    path: Path
+    owning_run_dir: Path
+
+
+def discover_physical_checkpoints(base_run_dir) -> "dict[int, PhysicalCheckpoint]":
+    """Recursively inventories every NH checkpoint file physically present
+    under ``base_run_dir``: directly (the base/original run), and inside any
+    nested ``continue_training_from_epoch###`` continuation directory NH's
+    own ``continue_run`` creates (nesting recurses arbitrarily -- continuing
+    again from an already-continued run_dir creates a further-nested
+    directory; see module docstring).
+
+    Only files matching NH's own exact ``model_epoch###.pt`` naming
+    convention are collected, and only directories matching NH's own exact
+    ``continue_training_from_epoch###`` naming convention are recursed into
+    -- any other file or directory name is ignored, never guessed at.
+
+    Raises :class:`PilotOrchestrationError` immediately if more than one
+    physical file anywhere in the tree claims the same logical epoch number
+    -- this is never resolved heuristically (by mtime, path depth, or
+    directory name), since doing so could silently pick an untrustworthy
+    checkpoint (see module docstring's overshoot note)."""
+    base_run_dir = Path(base_run_dir)
+    found: "dict[int, list[PhysicalCheckpoint]]" = {}
+
+    def _scan(directory: Path) -> None:
+        if not directory.is_dir():
+            return
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file():
+                m = _CHECKPOINT_FILE_RE.match(entry.name)
+                if m:
+                    epoch = int(m.group(1))
+                    found.setdefault(epoch, []).append(
+                        PhysicalCheckpoint(epoch=epoch, path=entry, owning_run_dir=directory)
+                    )
+            elif entry.is_dir() and _CONTINUATION_DIR_RE.match(entry.name):
+                _scan(entry)
+
+    _scan(base_run_dir)
+
+    duplicates = {epoch: cands for epoch, cands in found.items() if len(cands) > 1}
+    if duplicates:
+        details = "; ".join(
+            f"epoch {epoch}: {[str(c.path) for c in cands]}" for epoch, cands in sorted(duplicates.items())
+        )
+        raise PilotOrchestrationError(
+            f"ambiguous physical checkpoint inventory under {base_run_dir}: more than one file claims "
+            f"the same logical epoch, refusing to guess which is authoritative -- {details}"
+        )
+    return {epoch: cands[0] for epoch, cands in found.items()}
+
+
+def _expected_continuation_dir(previous_checkpoint_dir: Path, previous_target_epoch: int) -> Path:
+    """The exact physical directory a clean, chunk-sized ``continue_run``
+    call -- continuing from ``previous_target_epoch``'s checkpoint, which
+    physically lives in ``previous_checkpoint_dir`` -- would itself create
+    (or, for ``previous_target_epoch == 0``, the base run directory itself,
+    since the first bounded chunk's checkpoints live there directly)."""
+    if previous_target_epoch == 0:
+        return Path(previous_checkpoint_dir)
+    return Path(previous_checkpoint_dir) / f"continue_training_from_epoch{previous_target_epoch:03d}"
+
+
+def resolve_trusted_chunk_checkpoint(
+    inventory: "dict[int, PhysicalCheckpoint]",
+    previous_checkpoint_dir: Path,
+    previous_target_epoch: int,
+    epoch: int,
+) -> "PhysicalCheckpoint | None":
+    """Returns ``epoch``'s physical checkpoint IFF it is trusted -- i.e. its
+    owning directory is EXACTLY the directory a clean continuation started
+    at ``previous_target_epoch`` (from ``previous_checkpoint_dir``) would
+    itself create. Returns ``None`` otherwise, whether ``epoch`` is truly
+    absent from the inventory or merely present as untrusted overshoot in
+    some OTHER (already-existing, differently-started) directory -- see
+    module docstring's worked example distinguishing epoch 9 (trusted) from
+    epoch 12 (untrusted overshoot in the same physical directory)."""
+    ckpt = inventory.get(epoch)
+    if ckpt is None:
+        return None
+    expected_dir = _expected_continuation_dir(previous_checkpoint_dir, previous_target_epoch)
+    if ckpt.owning_run_dir != expected_dir:
+        return None
+    return ckpt
+
+
+def untrusted_overshoot_epochs(
+    inventory: "dict[int, PhysicalCheckpoint]", previous_target_epoch: int, chunk_target_epoch: int
+) -> "list[int]":
+    """Physical checkpoint epochs strictly within
+    ``(previous_target_epoch, chunk_target_epoch]`` that already exist on
+    disk. Only meaningful to call once :func:`resolve_trusted_chunk_checkpoint`
+    has already found ``chunk_target_epoch`` untrusted (or absent): if the
+    target itself isn't the trusted product of a continuation cleanly
+    started at ``previous_target_epoch``, then by construction NO checkpoint
+    in this range can be either (a legitimate continuation from
+    ``previous_target_epoch`` would have produced ALL of them together, in
+    the one new directory that check just found missing/mismatched) -- so
+    any physically-present epoch here is untrusted overshoot that a fresh
+    training attempt would collide with."""
+    return sorted(e for e in inventory if previous_target_epoch < e <= chunk_target_epoch)
+
+
+def compute_pilot_status_fields(nh_run_dir, pilot_policy: "PilotPolicy | None" = None) -> dict:
+    """Human/launcher-facing status snapshot (task item 7) distinguishing
+    the highest PHYSICAL checkpoint epoch on disk from the highest
+    logically-screened (stopping-eligible-recorded) epoch, from the next
+    epoch this pilot's schedule intends to screen next, and from any
+    untrusted overshoot epochs sitting beyond the logical frontier.
+
+    Computed directly from disk state (physical checkpoint inventory +
+    this pilot's own restart-safe early-stopping state file), independent
+    of any particular :func:`run_pilot` call's in-memory result -- safe to
+    call at any time, including after a wall-time SIGTERM killed the pilot
+    process before it could print its own JSON result (see
+    ``scripts/run_stage1_lead06_pilot_moriah.sbatch``'s fallback status
+    path). ``pilot_policy`` is optional: when given,
+    ``next_intended_screening_epoch`` is also computed from this pilot's own
+    chunk schedule; when omitted (the sbatch fallback path does not have
+    convenient access to the full policy object), it is reported as
+    ``None``.
+
+    Never asserts ``safe_to_continue_automatically`` unless the run is
+    neither already stopped nor blocked by untrusted overshoot -- "a
+    checkpoint exists past the logical frontier" must never be read as
+    "screening progressed that far" (see module docstring)."""
+    nh_run_dir = Path(nh_run_dir)
+    inventory = discover_physical_checkpoints(nh_run_dir)
+    highest_physical_checkpoint_epoch = max(inventory) if inventory else None
+
+    es_path = nh_run_dir / "pilot_early_stopping_state.json"
+    highest_screened_epoch = None
+    stopped = False
+    if es_path.is_file():
+        with open(es_path, "r", encoding="utf-8") as fh:
+            es_state = json.load(fh)
+        history = es_state.get("history", [])
+        if history:
+            highest_screened_epoch = max(entry["epoch"] for entry in history)
+        stopped = bool(es_state.get("stopped"))
+
+    if highest_screened_epoch is not None:
+        overshoot_epochs = sorted(e for e in inventory if e > highest_screened_epoch)
+    else:
+        overshoot_epochs = []
+
+    next_intended_screening_epoch = None
+    if pilot_policy is not None and highest_screened_epoch is not None and not stopped:
+        effective_policy = build_effective_policy(pilot_policy)
+        targets = chunk_epoch_targets(pilot_policy, effective_policy["max_epoch_budget"])
+        remaining = [t for t in targets if t > highest_screened_epoch]
+        next_intended_screening_epoch = remaining[0] if remaining else None
+
+    safe_to_continue_automatically = (
+        not stopped
+        and not overshoot_epochs
+        and highest_screened_epoch is not None
+        and (pilot_policy is None or next_intended_screening_epoch is not None)
+    )
+
+    return {
+        "highest_physical_checkpoint_epoch": highest_physical_checkpoint_epoch,
+        "highest_screened_epoch": highest_screened_epoch,
+        "next_intended_screening_epoch": next_intended_screening_epoch,
+        "overshoot_epochs": overshoot_epochs,
+        "stopped": stopped,
+        "safe_to_continue_automatically": safe_to_continue_automatically,
+    }
+
+
 def _load_orchestration_state(nh_run_dir) -> dict:
     path = Path(nh_run_dir) / _ORCHESTRATION_STATE_FILENAME
     if not path.is_file():
@@ -424,6 +733,98 @@ def prepare_pilot_run(
     return run_spec, bundle, config_out_dir, experiment_name
 
 
+def _advance_chunk_via_continuation(
+    *,
+    nh_base_run_dir: Path,
+    config_dir: Path,
+    start_dir: Path,
+    resume_from_epoch: int,
+    chunk_target_epoch: int,
+    train_chunk_fn,
+) -> "tuple[Path | None, str | None]":
+    """Resolve ``chunk_target_epoch``'s trusted physical checkpoint,
+    producing it via one bounded ``train_chunk_fn`` continuation call from
+    ``resume_from_epoch``'s checkpoint (physically owned by ``start_dir``)
+    if it does not already exist. Returns
+    ``(checkpoint_dir_for_target, blocked_reason)`` -- exactly one is
+    ``None``.
+
+    Shared by both branches of :func:`run_pilot_chunk` that continue an
+    existing checkpoint (mid-first-chunk resumption with
+    ``resume_from_epoch > 0``, and any later bounded chunk): NH's own
+    ``continue_run`` sets ``is_continue_training = True`` unconditionally
+    (``neuralhydrology.nh_run.continue_run``), so
+    ``BaseTrainer._create_folder_structure`` always nests a fresh
+    ``continue_training_from_epoch{resume_from_epoch:03d}/`` directory
+    under ``start_dir`` -- there is no "flat" continuation case, regardless
+    of which logical chunk this is (see module docstring).
+    """
+    inventory = discover_physical_checkpoints(nh_base_run_dir)
+    expected_dir = _expected_continuation_dir(start_dir, resume_from_epoch)
+    trusted = resolve_trusted_chunk_checkpoint(inventory, start_dir, resume_from_epoch, chunk_target_epoch)
+    if trusted is not None:
+        return expected_dir, None
+
+    conflicts = untrusted_overshoot_epochs(inventory, resume_from_epoch, chunk_target_epoch)
+    if conflicts:
+        return None, (
+            f"cannot safely continue training from epoch {resume_from_epoch} to "
+            f"{chunk_target_epoch}: untrusted physical checkpoint(s) already occupy epoch(s) "
+            f"{conflicts}, but not in the directory a clean continuation from epoch "
+            f"{resume_from_epoch} would produce ({expected_dir}) -- refusing to train "
+            "into a range that would create a duplicate physical claim on an existing "
+            "epoch number; manual review of the pre-existing checkpoint(s) is required "
+            "before this pilot can safely continue automatically"
+        )
+    if resume_from_epoch != 0 and expected_dir.is_dir():
+        # NeuralHydrology's own continue_run refuses to create an
+        # already-existing run directory
+        # (basetrainer.BaseTrainer._create_folder_structure raises
+        # RuntimeError rather than resuming into or overwriting it), so a
+        # fresh train_chunk_fn call here would crash inside NH itself
+        # rather than failing through this module's own clear status --
+        # even though no checkpoint in this chunk's target range happens
+        # to be present yet (e.g. the directory was created but killed
+        # before its first epoch finished). Halting here with an explicit
+        # blocked status, never letting that NH crash surface as an
+        # undifferentiated exception. (Guarded on resume_from_epoch != 0:
+        # when resume_from_epoch is 0, _expected_continuation_dir returns
+        # start_dir itself -- which trivially already exists since it is
+        # the directory this call is already operating within -- so that
+        # case is not a meaningful "pre-existing partial continuation"
+        # signal at all.)
+        return None, (
+            f"cannot safely continue training from epoch {resume_from_epoch} to "
+            f"{chunk_target_epoch}: the directory a fresh continuation would create "
+            f"already exists ({expected_dir}) but does not yet contain a trusted "
+            f"checkpoint at epoch {chunk_target_epoch} -- NeuralHydrology's own "
+            "continue_run refuses to create an already-existing run directory, so this "
+            "looks like a previously interrupted continuation attempt that cannot be "
+            "safely retried automatically; manual review is required (verify whether the "
+            "partial directory's contents are trustworthy, then either complete training "
+            "manually or remove the partial directory before resuming this pilot)"
+        )
+
+    train_chunk_fn(
+        TrainChunkRequest(
+            is_first_chunk=False,
+            config_path=Path(config_dir) / "config.yaml",
+            nh_run_dir=start_dir,
+            current_epoch=resume_from_epoch if resume_from_epoch != 0 else None,
+            logical_target_epoch=chunk_target_epoch,
+            additional_epochs=chunk_target_epoch - resume_from_epoch,
+        )
+    )
+    inventory = discover_physical_checkpoints(nh_base_run_dir)
+    trusted = resolve_trusted_chunk_checkpoint(inventory, start_dir, resume_from_epoch, chunk_target_epoch)
+    if trusted is None:
+        raise PilotOrchestrationError(
+            f"training chunk to epoch {chunk_target_epoch} did not produce the expected "
+            f"checkpoint at {expected_dir}"
+        )
+    return expected_dir, None
+
+
 def run_pilot_chunk(
     *,
     pilot_policy: PilotPolicy,
@@ -437,24 +838,52 @@ def run_pilot_chunk(
     chunk_target_epoch: int,
     previous_target_epoch: int,
     is_first_chunk: bool,
+    previous_checkpoint_dir: "Path | None" = None,
     tracking_run=None,
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
 ) -> dict:
     """Run exactly one bounded training chunk (``previous_target_epoch`` ->
     ``chunk_target_epoch``) and process every screening-cadence epoch newly
-    reached within it. Returns
-    ``{"nh_run_dir", "stopped", "stop_reason", "state", "screening_results"}``.
+    reached within it. Returns ``{"nh_run_dir", "blocked", "blocked_reason",
+    "stopped", "stop_reason", "state", "screening_results",
+    "checkpoint_dir_for_target"}``.
+
+    ``previous_checkpoint_dir`` is the physical directory that owns
+    ``previous_target_epoch``'s checkpoint (``None``/ignored when
+    ``previous_target_epoch == 0``, meaning "the base run directory" --
+    see module docstring). The caller (:func:`run_pilot`) is responsible for
+    threading each chunk's returned ``checkpoint_dir_for_target`` into the
+    NEXT chunk's ``previous_checkpoint_dir`` -- this module never
+    re-derives it via any multi-level trust chain, only ever compares
+    directly against what the caller asserts is the current trusted frontier.
+
+    If the target epoch's checkpoint is not yet a TRUSTED physical product
+    of a continuation cleanly started at ``previous_target_epoch`` (see
+    :func:`resolve_trusted_chunk_checkpoint`), and physical checkpoints
+    already occupy the epoch range this chunk would need to produce (see
+    :func:`untrusted_overshoot_epochs`), this chunk is refused rather than
+    attempted: no training call is made, no screening is performed, and the
+    returned dict has ``blocked=True`` with a human-readable
+    ``blocked_reason`` -- never a raised exception (which would look like an
+    ordinary crash) and never a silent resume from whatever the highest
+    physical checkpoint happens to be.
 
     Idempotent on resume: an already-trained epoch is not retrained (checked
-    against NH's own checkpoint files); an already-saved validation result
-    pickle is not re-evaluated (checked via :func:`ensure_validation_results`,
-    see module docstring); an already-logged screening epoch (per this run's
-    advisory ``pilot_orchestration_state.json``) is not re-logged to the
-    tracking backend -- but the metric IS still re-read and re-fed through
+    against the physical checkpoint inventory); an already-saved validation
+    result pickle is not re-evaluated (checked via
+    :func:`ensure_validation_results`, see module docstring); an
+    already-logged screening epoch (per this run's advisory
+    ``pilot_orchestration_state.json``) is not re-logged to the tracking
+    backend -- but the metric IS still re-read and re-fed through
     :func:`src.baseline.pilot_early_stopping.record_screening_event`, whose
     own idempotent-replay semantics make that safe, so the returned
     ``screening_results`` always reflects this chunk's full cadence history.
+    Canonical pilot state (early-stopping + orchestration state) is always
+    kept in the BASE run directory, never per-continuation-directory -- one
+    logical pilot history regardless of how many physical continuation
+    directories exist (see module docstring's "one logical pilot history"
+    note).
     """
     config_dir = Path(config_dir)
 
@@ -464,34 +893,101 @@ def run_pilot_chunk(
                 is_first_chunk=True,
                 config_path=config_dir / "config.yaml",
                 nh_run_dir=None,
-                target_epoch=chunk_target_epoch,
+                current_epoch=None,
+                logical_target_epoch=chunk_target_epoch,
+                additional_epochs=chunk_target_epoch,
             )
         )
-        nh_run_dir = discover_nh_run_dir(config_dir, experiment_name)
+        nh_base_run_dir = discover_nh_run_dir(config_dir, experiment_name)
+        checkpoint_dir_for_target = nh_base_run_dir
+        blocked_reason = None
     else:
-        nh_run_dir = discover_nh_run_dir(config_dir, experiment_name)
-        if _last_completed_epoch(nh_run_dir) < chunk_target_epoch:
-            train_chunk_fn(
-                TrainChunkRequest(
-                    is_first_chunk=False,
-                    config_path=config_dir / "config.yaml",
-                    nh_run_dir=nh_run_dir,
-                    target_epoch=chunk_target_epoch,
+        nh_base_run_dir = discover_nh_run_dir(config_dir, experiment_name)
+        blocked_reason = None
+
+        if previous_target_epoch == 0:
+            # Base-run resumption (this orchestration process never itself
+            # ran the first chunk to completion -- e.g. the real second
+            # Moriah failure's shape, where checkpoints 1-6 already exist
+            # from a prior process's start_run call). Only two shapes are
+            # supported here: no checkpoints at all yet (handled by
+            # _advance_chunk_via_continuation's resume_from_epoch=0 corner),
+            # or the frozen base profile's own target already fully
+            # satisfied, with its checkpoints living FLAT in nh_base_run_dir
+            # (start_run, unlike continue_run, never sets
+            # is_continue_training and so never nests) -- nothing to
+            # continue. A genuinely PARTIAL first chunk (e.g. epochs 1-4
+            # exist, target is 6) is intentionally unsupported and rejected
+            # below: this module resolves exactly ONE physical checkpoint
+            # directory per chunk for every screening epoch in that chunk
+            # (see this function's docstring), but a partial-first-chunk
+            # continuation would place epoch 3 flat in nh_base_run_dir and
+            # epoch 6 in a newly nested continue_training_from_epoch{highest:03d}/
+            # directory -- two different physical directories for the same
+            # chunk's screening epochs, which this module does not attempt
+            # to reconcile automatically.
+            highest = _last_completed_epoch(nh_base_run_dir)
+            if 0 < highest < chunk_target_epoch:
+                blocked_reason = (
+                    f"cannot safely process the first chunk (epoch 0 to {chunk_target_epoch}): "
+                    f"the base run directory already has checkpoint(s) through epoch {highest}, "
+                    f"a partial first chunk -- continuing it would require a training call "
+                    f"from epoch {highest}, nesting the remaining checkpoints into a new "
+                    f"continue_training_from_epoch{highest:03d}/ directory while the earlier "
+                    f"checkpoints stay flat in the base run directory, so screening epochs "
+                    f"{screening_epochs_in_chunk(0, chunk_target_epoch, pilot_policy)} would span "
+                    "two different physical run directories; partial continuation within the "
+                    "initial chunk is intentionally unsupported -- manual review is required "
+                    "(either complete the first chunk to its full target outside this pilot "
+                    "module, or start it over from no checkpoints at all)"
                 )
+                checkpoint_dir_for_target = None
+            elif highest >= chunk_target_epoch:
+                checkpoint_dir_for_target = nh_base_run_dir
+            else:
+                checkpoint_dir_for_target, blocked_reason = _advance_chunk_via_continuation(
+                    nh_base_run_dir=nh_base_run_dir,
+                    config_dir=config_dir,
+                    start_dir=nh_base_run_dir,
+                    resume_from_epoch=highest,
+                    chunk_target_epoch=chunk_target_epoch,
+                    train_chunk_fn=train_chunk_fn,
+                )
+        else:
+            start_dir = Path(previous_checkpoint_dir) if previous_checkpoint_dir is not None else nh_base_run_dir
+            checkpoint_dir_for_target, blocked_reason = _advance_chunk_via_continuation(
+                nh_base_run_dir=nh_base_run_dir,
+                config_dir=config_dir,
+                start_dir=start_dir,
+                resume_from_epoch=previous_target_epoch,
+                chunk_target_epoch=chunk_target_epoch,
+                train_chunk_fn=train_chunk_fn,
             )
 
-    orchestration_state = _load_orchestration_state(nh_run_dir)
+    if blocked_reason is not None:
+        return {
+            "nh_run_dir": nh_base_run_dir,
+            "blocked": True,
+            "blocked_reason": blocked_reason,
+            "stopped": False,
+            "stop_reason": None,
+            "state": load_or_init_pilot_state(nh_base_run_dir, effective_policy),
+            "screening_results": [],
+            "checkpoint_dir_for_target": None,
+        }
+
+    orchestration_state = _load_orchestration_state(nh_base_run_dir)
     logged_epochs = set(orchestration_state["logged_screening_epochs"])
 
-    es_state = load_or_init_pilot_state(nh_run_dir, effective_policy)
+    es_state = load_or_init_pilot_state(nh_base_run_dir, effective_policy)
     screening_results = []
     for epoch in screening_epochs_in_chunk(previous_target_epoch, chunk_target_epoch, pilot_policy):
         role = classify_screening_epoch_role(epoch, pilot_policy)
         ensure_validation_results(
-            nh_run_dir=nh_run_dir, epoch=epoch, evaluate_checkpoint_fn=evaluate_checkpoint_fn
+            nh_run_dir=checkpoint_dir_for_target, epoch=epoch, evaluate_checkpoint_fn=evaluate_checkpoint_fn
         )
         result = evaluate_screening_checkpoint(
-            run_dir=nh_run_dir,
+            run_dir=checkpoint_dir_for_target,
             epoch=epoch,
             package_root=package_root,
             target_variable=target_variable,
@@ -501,7 +997,7 @@ def run_pilot_chunk(
         )
         screening_results.append(result)
         es_state = record_screening_event(
-            run_dir=nh_run_dir,
+            run_dir=nh_base_run_dir,
             epoch=epoch,
             epoch_role=role,
             primary_metric_median=result["primary_metric_median"],
@@ -510,7 +1006,7 @@ def run_pilot_chunk(
 
         if tracking_run is not None and epoch not in logged_epochs:
             log_pilot_screening_event(tracking_run, epoch=epoch, screening_result=result, early_stopping_state=es_state)
-            ckpt_path = nh_run_dir / f"model_epoch{epoch:03d}.pt"
+            ckpt_path = Path(checkpoint_dir_for_target) / f"model_epoch{epoch:03d}.pt"
             if ckpt_path.is_file():
                 log_pilot_checkpoint_reference(tracking_run, epoch=epoch, path=ckpt_path, checksum=sha256_of(ckpt_path))
             logged_epochs.add(epoch)
@@ -519,14 +1015,17 @@ def run_pilot_chunk(
             break
 
     orchestration_state["logged_screening_epochs"] = sorted(logged_epochs)
-    _save_orchestration_state(nh_run_dir, orchestration_state)
+    _save_orchestration_state(nh_base_run_dir, orchestration_state)
 
     return {
-        "nh_run_dir": nh_run_dir,
+        "nh_run_dir": nh_base_run_dir,
+        "blocked": False,
+        "blocked_reason": None,
         "stopped": bool(es_state.get("stopped")),
         "stop_reason": es_state.get("stop_reason"),
         "state": es_state,
         "screening_results": screening_results,
+        "checkpoint_dir_for_target": checkpoint_dir_for_target,
     }
 
 
@@ -608,12 +1107,14 @@ def run_pilot(
     have_started = existing_nh_run_dir is not None
 
     previous_target = 0
+    previous_checkpoint_dir = None
     all_screening_results: "list[dict]" = []
     last_chunk_result = None
     final_status = "not_started"
+    blocked_reason = None
     for idx, target in enumerate(targets):
         is_first_chunk = (not have_started) and idx == 0
-        last_chunk_result = run_pilot_chunk(
+        chunk_result = run_pilot_chunk(
             pilot_policy=pilot_policy,
             config_dir=config_dir,
             experiment_name=experiment_name,
@@ -625,21 +1126,39 @@ def run_pilot(
             chunk_target_epoch=target,
             previous_target_epoch=previous_target,
             is_first_chunk=is_first_chunk,
+            previous_checkpoint_dir=previous_checkpoint_dir,
             tracking_run=tracking_run,
             train_chunk_fn=train_chunk_fn,
             evaluate_checkpoint_fn=evaluate_checkpoint_fn,
         )
         have_started = True
-        all_screening_results.extend(last_chunk_result["screening_results"])
+        if chunk_result["blocked"]:
+            # Never overwrite last_chunk_result with a blocked attempt: the
+            # evidence bundle/state below must still reflect the last
+            # successfully-processed chunk, not this refused one (see module
+            # docstring's overshoot-safety note). If this is the very first
+            # chunk ever processed, there is no prior good state to keep --
+            # fall back to this blocked result so downstream code has
+            # something safe to read.
+            if last_chunk_result is None:
+                last_chunk_result = chunk_result
+            blocked_reason = chunk_result["blocked_reason"]
+            final_status = "blocked_continuation_overshoot_conflict"
+            break
+        last_chunk_result = chunk_result
+        all_screening_results.extend(chunk_result["screening_results"])
         previous_target = target
-        if last_chunk_result["stopped"]:
-            final_status = f"stopped_{last_chunk_result['stop_reason']}"
+        previous_checkpoint_dir = chunk_result["checkpoint_dir_for_target"]
+        if chunk_result["stopped"]:
+            final_status = f"stopped_{chunk_result['stop_reason']}"
             break
     else:
         final_status = "budget_exhausted_not_stopped"
 
     best_epoch = pilot_best_checkpoint_epoch(last_chunk_result["state"])
     finish_pilot_run(tracking_run, final_status=final_status, best_epoch=best_epoch)
+
+    status_fields = compute_pilot_status_fields(last_chunk_result["nh_run_dir"], pilot_policy=pilot_policy)
 
     evidence_path = write_pilot_evidence_bundle(
         out_dir=evidence_out_dir,
@@ -653,6 +1172,7 @@ def run_pilot(
         run_status=final_status,
         commands_used=list(commands_used) if commands_used else [],
         slurm_identity=slurm_identity,
+        continuation_status=status_fields,
         # Always overwrite: the evidence bundle is run_pilot's own output,
         # meant to reflect the latest cumulative state on every call
         # (including resumes where evidence_out_dir already exists from a
@@ -670,4 +1190,10 @@ def run_pilot(
         "best_checkpoint_epoch": best_epoch,
         "nh_run_dir": last_chunk_result["nh_run_dir"],
         "evidence_bundle_path": evidence_path,
+        "highest_physical_checkpoint_epoch": status_fields["highest_physical_checkpoint_epoch"],
+        "highest_screened_epoch": status_fields["highest_screened_epoch"],
+        "next_intended_screening_epoch": status_fields["next_intended_screening_epoch"],
+        "overshoot_epochs": status_fields["overshoot_epochs"],
+        "safe_to_continue_automatically": status_fields["safe_to_continue_automatically"],
+        "blocked_reason": blocked_reason,
     }

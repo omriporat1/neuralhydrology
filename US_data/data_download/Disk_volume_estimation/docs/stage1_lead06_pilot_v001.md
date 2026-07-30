@@ -1,12 +1,14 @@
 # Stage 1 lead-6 optimization pilot (`stage1_lead06_pilot_v001`)
 
 Status: **first Moriah workflow-qualification run attempted and paused after
-an orchestration bug; orchestration since corrected locally and re-verified
-by tests, but not yet re-run on Moriah.** No temporal-test or spatial-holdout
-data has been accessed. See "Moriah workflow-qualification run and
-orchestration correction" below for the current, authoritative status; the
-rest of this document describes the pilot design as originally implemented
-and verified locally before that run.
+two independent orchestration bugs (a missing-validation-results bug, then a
+continuation-nesting/additive-epoch bug found on resume); both corrected
+locally and re-verified by tests, but not yet re-run on Moriah.** No
+temporal-test or spatial-holdout data has been accessed. See "Moriah
+workflow-qualification run and orchestration correction" and "Second Moriah
+failure and continuation-nesting/epoch-semantics correction" below for the
+current, authoritative status; the rest of this document describes the
+pilot design as originally implemented and verified locally before that run.
 
 ## Purpose
 
@@ -231,11 +233,112 @@ diagnostic-only classification and epoch 6's stopping-eligibility are
 unaffected — this was purely a missing-prerequisite bug, not a change to
 scheduling or stopping policy.
 
-**Current status.** The pilot run is **not complete**. It remains paused
-after epoch 6 pending a resumed Moriah job with the corrected orchestration.
-No resume has been submitted yet. No scientific hyperparameter, split,
-screening-membership, or early-stopping policy value changed as part of this
-correction.
+**Current status (superseded by the second correction below).** The pilot
+run remained paused after epoch 6 pending a resumed Moriah job with this
+first correction. That resume was submitted and exposed a second,
+independent orchestration bug — see the next section for the current,
+authoritative status.
+
+## Second Moriah failure and continuation-nesting/epoch-semantics correction
+
+The resumed job (`45705457`), continuing `emb128x64_seedA` from epoch 6
+toward the epoch 9 chunk boundary, exposed a second, independent
+orchestration bug.
+
+**Root cause.** `continue_run` is not a bare "train N more epochs from a
+checkpoint" call: NeuralHydrology sets `is_continue_training=True`
+unconditionally on every call, and `BaseTrainer._create_folder_structure`
+therefore *always* nests output into a new
+`continue_training_from_epoch{start_epoch:03d}/` subdirectory under the run
+directory it is given (raising if that exact directory already exists). The
+original chunk-continuation code treated the overlay's `epochs:` key as an
+absolute target epoch rather than an additive epoch count relative to the
+checkpoint being resumed from. For the epoch 6→9 chunk this meant NH was
+told `epochs: 9` while resuming from checkpoint 6, so it trained 9 *more*
+epochs past epoch 6 (an additive 6+9=15) rather than 3 — producing
+`base_run/continue_training_from_epoch006/model_epoch007.pt` through
+`model_epoch015.pt`, with no epoch-9 screening validation ever run (epoch 9
+was never a chunk boundary NH actually stopped at). Compounding this, no
+code path resolved which physical directory owned a given checkpoint epoch
+across the base directory and nested continuation directories, so
+evaluation/tracking calls had no reliable way to locate epoch 9 even had it
+existed correctly.
+
+**Correction (this implementation), entirely within
+`src/baseline/pilot_orchestration.py`:**
+
+1. `TrainChunkRequest` now carries three separate, non-overloaded fields:
+   `current_epoch` (the checkpoint epoch training resumes from — `None`
+   only in the fully-degenerate zero-checkpoint corner),
+   `additional_epochs` (the additive epoch count for this chunk, e.g. `3`
+   for the 6→9 chunk), and `logical_target_epoch`
+   (`current_epoch + additional_epochs`). `default_train_chunk` writes
+   `epochs: additional_epochs` (plus `continue_from_epoch` when resuming) to
+   the per-chunk overlay, matching NH's real additive semantics.
+2. `discover_physical_checkpoints(base_run_dir)` recursively inventories
+   every `model_epoch###.pt` across the base run directory and
+   arbitrarily-nested `continue_training_from_epoch###/` subdirectories,
+   raising `PilotOrchestrationError` ("ambiguous physical checkpoint
+   inventory") if the same epoch is ever claimed by two different physical
+   directories, and ignoring malformed filenames/directory names rather
+   than guessing.
+3. `resolve_trusted_chunk_checkpoint` / `untrusted_overshoot_epochs`
+   distinguish a checkpoint this pilot's own chunk sequence produced
+   (physical directory exactly matches the continuation directory NH would
+   create for this exact `(previous_target_epoch, checkpoint_epoch)` pair)
+   from a checkpoint that merely happens to exist on disk at the right
+   epoch number but was produced under different, untrusted circumstances
+   (e.g. the real `continue_training_from_epoch006/model_epoch010.pt`-
+   `model_epoch015.pt` overshoot from job 45705457's bug). The pilot never
+   silently trusts the latter.
+4. `_advance_chunk_via_continuation` is the single shared helper for every
+   non-first chunk: it resolves a trusted checkpoint if one already exists
+   (idempotent no-retrain resume); else checks for untrusted checkpoints
+   already occupying the target epoch range and blocks with a "manual
+   review... required" reason rather than retraining over them; else checks
+   whether NH's target continuation directory already exists but is
+   empty/incomplete and blocks with an "already exists" reason (since
+   `continue_run` would otherwise crash inside real NH trying to recreate
+   it) — only then does it invoke `train_chunk_fn`.
+5. `compute_pilot_status_fields(nh_run_dir, pilot_policy)` reports four
+   distinct fields rather than a single conflated "current epoch":
+   `highest_physical_checkpoint_epoch` (every checkpoint that exists
+   anywhere on disk, trusted or not — 15 for the real job-45705457
+   evidence), `highest_screened_epoch` (the highest epoch with a valid,
+   trusted screening/stopping event — 6), `next_intended_screening_epoch`
+   (9, per the fixed cadence — never simply "highest + 3"), and
+   `overshoot_epochs` (`[10, 11, ..., 15]`), plus
+   `safe_to_continue_automatically` (`False` whenever untrusted overshoot
+   checkpoints exist). The Slurm launcher and evidence bundle both
+   report/consume these same four fields rather than re-deriving their own
+   notion of "current epoch".
+6. Applied to the exact real evidence from job 45705457 (checkpoints 1-6
+   flat, `continue_training_from_epoch006/model_epoch007.pt`-
+   `model_epoch015.pt`, no valid epoch-9 screening result): the corrected
+   orchestration trusts and screens exactly epoch 9 (never touching 10-15),
+   and any further chunk attempting to continue past epoch 9 halts with a
+   blocked status and manual-review reason rather than resuming from the
+   wrong checkpoint or silently discarding the untrusted 10-15 checkpoints.
+
+**Current status.** The pilot run is **not complete**. `emb128x64_seedA`
+remains paused after epoch 6, now with both orchestration bugs corrected
+locally. The current run is **safe for one controlled recovery
+invocation**: `continue_training_from_epoch006/model_epoch009.pt` sits in
+exactly the directory this pilot's own chunk sequence would produce, so it
+is trusted — the corrected orchestration reuses it, runs validation
+screening for epoch 9, and records that screening event without
+retraining and without requiring any manual movement, archiving, or
+deletion of checkpoints first. The run is **not safe to continue training
+beyond epoch 9** while checkpoints 10-15 remain in the existing
+continuation layout: those are preserved, untouched, scientifically-unused
+artifacts, and `overshoot_epochs`/`safe_to_continue_automatically=False`
+cause any attempt at a further 9→12 chunk to block rather than retrain
+over or past them — a later decision is required before that continuation
+is attempted. This epoch-9 recovery has not been executed on Moriah; it is
+expected behavior of the locally tested repair only, and no resume has
+been submitted since this second correction. No scientific
+hyperparameter, split, screening-membership, or early-stopping policy value
+changed as part of either correction.
 
 ## Implementation modules
 
@@ -294,25 +397,88 @@ longer also fabricates validation-result pickles — so these tests exercise
 the real missing-prerequisite path rather than one where a result is
 always already present.
 
-Full pre-existing repository test suite re-run alongside these: 1152
+Added for the continuation-nesting/additive-epoch correction
+(`tests/test_pilot_orchestration.py`, plus 6 new low-level unit tests): the
+fake training callback was rewritten to reproduce NH's real nested
+`continue_training_from_epoch###/` layout instead of writing checkpoints
+flat, so these tests exercise the real directory-nesting behavior rather
+than a simplified one. Coverage now includes: additive- (not absolute-)
+epoch computation verified across two successive chunk transitions
+(6→9→12); checkpoint discovery across the base directory plus one, and
+then a doubly-nested, continuation directory; a loud
+`PilotOrchestrationError` ("ambiguous physical checkpoint inventory") on a
+duplicate physical epoch claim; malformed checkpoint filenames and
+continuation-directory names are ignored rather than guessed at; a resumed
+chunk that already has a trusted epoch-9 checkpoint is idempotent (zero
+train/evaluate calls, correct nested `checkpoint_dir_for_target`); a chunk
+blocked by untrusted checkpoints already occupying the target range
+reports a "manual review... required" reason and leaves those checkpoints
+and all prior logical state untouched, including across a repeated call; a
+chunk blocked by an empty pre-existing (but NH-incompatible) continuation
+directory reports an "already exists" reason; screening/tracking never
+touches epochs 10-15 merely because they physically exist; an evaluator
+failure leaves the prior logical (early-stopping) state completely
+unchanged; a checkpoint reference is logged at its resolved physical path,
+never a copied/base-relative one; and the exact real job-45705457 evidence
+shape (checkpoints 1-6 flat, 7-15 in one nested continuation directory,
+no valid epoch-9 result) is reproduced end-to-end, confirming the
+corrected orchestration trusts and screens exactly epoch 9, a further
+6→9→12 chunk attempt blocks rather than resuming from the wrong checkpoint,
+and `compute_pilot_status_fields` reports
+`highest_physical_checkpoint_epoch=15`, `highest_screened_epoch=9`,
+`overshoot_epochs=[10..15]`, `safe_to_continue_automatically=False`.
+`tests/_pilot_support.py` gained a `short_tmp_path` fixture (Windows-only
+short-rooted temp directory) so these now-realistically-deep nested paths
+do not exceed Windows' 260-character `MAX_PATH` in the local test
+environment — a Windows-only local-testing accommodation, not a behavior
+change; Linux (where real Moriah/h2o runs happen) has no such limit.
+
+An adversarial self-review of this correction (cross-checked directly
+against the real job-45705457 evidence file rather than relying on
+paraphrase) additionally found that `default_train_chunk` — the exact
+function that writes `pilot_epoch_overlay.yaml`, and therefore the function
+directly responsible for both bugs in this document — had no direct test
+coverage of its own, since every test here injects a fake `train_chunk_fn`.
+Its overlay-dict construction was extracted into a pure,
+NH/torch-free helper, `_continuation_overlay(request) -> dict` (a
+same-behavior refactor), and given two direct unit tests covering the
+explicit-`continue_from_epoch` case and the `current_epoch=None`
+degenerate-corner case.
+
+Current focused-suite total: 146 tests across the same eight
+`tests/test_pilot_*.py` files (was 125 before this correction), all
+passing.
+
+Full pre-existing repository test suite re-run alongside these: 1173
 passed (excluding 6 pre-existing collection errors in files that import
 `neuralhydrology`/`torch`, not installed in this local environment by
-design — those tests only run on h2o/Moriah); 2 tests
-(`test_package_audit.py::test_full_mode_requires_imputed_value_mask`,
-`test_package_builder.py::test_package_promotion_failure_with_existing_evidence_tree_restores_both`)
+design — those tests only run on h2o/Moriah); 1 test
+(`test_package_builder.py::test_evidence_promotion_failure_after_package_success_rolls_back_both`)
 failed only in the full-suite run with a Windows file-lock
-`PermissionError` during atomic promotion under load, and passed cleanly
-in isolation both with and without this work's changes (confirmed via
-`git stash`) — pre-existing flakiness unrelated to any file touched here.
-Zero regressions attributable to this work.
+`PermissionError` during atomic promotion under load, and passed cleanly in
+isolation (file untouched by this work) — pre-existing flakiness unrelated
+to any file touched here. Zero regressions attributable to this work.
 
 ## What has not been done
 
-`emb128x64_seedA` is paused after epoch 6, not complete or resumed. The
-other five runs have not been submitted or started. No full-population
+`emb128x64_seedA` is paused after epoch 6, not complete or resumed. Per the
+second correction above, one controlled recovery invocation (reusing the
+existing epoch-9 checkpoint and screening it, no retraining, no manual
+checkpoint movement/deletion required) is safe; continuing training past
+epoch 9 is not, while checkpoints 10-15 remain in the existing continuation
+layout — that requires a later decision. Neither the recovery nor any
+further continuation has been executed on Moriah yet. The other five runs
+have not been submitted or started. No full-population
 evaluation. No temporal-test or spatial-holdout access. No change to the
 certified Compact Scientific Package or canonical split membership. No
 regeneration of the screening subset. No hydrograph atlas generation. No
-automated sweep. No EA-LSTM work. Nothing generated by this pilot (configs,
-runtime outputs, logs, checkpoints, W&B files, evidence directories) has
-been committed.
+automated sweep. No EA-LSTM work. Neither correction in this document has
+been re-verified against a real Moriah run. One residual risk remains
+open and unresolved locally: the module docstring's claim that
+`continue_from_epoch` is a real, recognized NH `Config` property is not
+independently verified in this codebase and cannot be checked here since
+`neuralhydrology` is not installed locally — see `docs/decision_log.md`'s
+2026-07-30 entry for the full analysis and why it is judged low-severity
+in the pilot's own exercised code path. Nothing generated by this pilot
+(configs, runtime outputs, logs, checkpoints, W&B files, evidence
+directories) has been committed.

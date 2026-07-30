@@ -64,17 +64,28 @@ class PilotEvidenceBundleError(Exception):
 
 
 def _checkpoint_inventory(nh_run_dir) -> list:
-    """List checkpoint files under ``nh_run_dir`` by name/size/checksum only
-    -- never copies or reads their contents beyond hashing. Matches NH's own
-    ``model_epoch###.pt`` naming convention."""
+    """List every physical checkpoint file under ``nh_run_dir`` -- base
+    directory AND any nested ``continue_training_from_epoch###`` continuation
+    directory (see :mod:`src.baseline.pilot_orchestration`'s
+    continuation-epoch-semantics note) -- by name/relative path/size/checksum
+    only, never copying or reading their contents beyond hashing. Uses
+    :func:`src.baseline.pilot_orchestration.discover_physical_checkpoints` as
+    the single canonical cross-directory resolver (imported locally to avoid
+    a module-level import cycle -- ``pilot_orchestration`` itself imports
+    :func:`write_pilot_evidence_bundle` from this module)."""
+    from .pilot_orchestration import discover_physical_checkpoints
+
     nh_run_dir = Path(nh_run_dir)
     inventory = []
-    for ckpt_path in sorted(nh_run_dir.glob("model_epoch*.pt")):
+    for epoch, ckpt in sorted(discover_physical_checkpoints(nh_run_dir).items()):
         inventory.append(
             {
-                "filename": ckpt_path.name,
-                "size_bytes": ckpt_path.stat().st_size,
-                "sha256": sha256_of(ckpt_path),
+                "epoch": epoch,
+                "filename": ckpt.path.name,
+                "relative_path": str(ckpt.path.relative_to(nh_run_dir)),
+                "owning_run_dir": str(ckpt.owning_run_dir),
+                "size_bytes": ckpt.path.stat().st_size,
+                "sha256": sha256_of(ckpt.path),
             }
         )
     return inventory
@@ -109,6 +120,7 @@ def write_pilot_evidence_bundle(
     run_status: str,
     commands_used: "list[str]",
     slurm_identity: "dict | None" = None,
+    continuation_status: "dict | None" = None,
     force: bool = False,
 ) -> Path:
     """Write this run's compact evidence bundle to ``out_dir`` and return it.
@@ -119,6 +131,15 @@ def write_pilot_evidence_bundle(
     checked here and must equal ``SCREENING_METRIC_SCOPE`` -- an
     authoritative full-validation result belongs in a separate, later
     artifact, never mixed into this pilot-screening bundle).
+
+    ``continuation_status``, when given, is
+    :func:`src.baseline.pilot_orchestration.compute_pilot_status_fields`'s
+    return dict, recorded verbatim so this bundle separately and explicitly
+    distinguishes the highest PHYSICAL checkpoint epoch from the highest
+    logically-screened epoch and any untrusted overshoot epochs -- never
+    letting ``checkpoint_inventory`` containing epoch 15 be misread as
+    "screening reached epoch 15" (see ``pilot_orchestration.py``'s
+    continuation-epoch-semantics note).
     """
     out_dir = Path(out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not force:
@@ -170,6 +191,7 @@ def write_pilot_evidence_bundle(
         "early_stopping_state": early_stopping_state,
         "best_checkpoint_epoch": best_epoch,
         "checkpoint_inventory": checkpoint_inventory,
+        "continuation_status": continuation_status,
         "artifact_references": tracking_run.artifact_references,
         "commands_used": list(commands_used),
         "sealed_set_non_access_statement": SEALED_SET_NON_ACCESS_STATEMENT,

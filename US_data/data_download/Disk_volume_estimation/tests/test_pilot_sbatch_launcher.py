@@ -113,3 +113,60 @@ def test_sbatch_script_resource_defaults_match_starting_policy_not_corrected_see
 def test_sbatch_script_uses_the_only_confirmed_working_gpu_class():
     text = _text()
     assert "--gres=gpu:l4:1" in text
+
+
+def test_sbatch_script_finds_checkpoints_recursively_not_just_maxdepth_1():
+    # second real Moriah failure (job 45705457): a -maxdepth 1 find missed
+    # checkpoints written into a nested continue_training_from_epoch###/
+    # continuation directory and so reported a stale "latest epoch". The
+    # unrelated -mindepth 1 -maxdepth 1 find just above (locating the NH
+    # run directory itself among sibling run directories, never a
+    # checkpoint file search) is untouched and deliberately excluded here.
+    text = _text()
+    assert "find \"${NH_RUN_DIR}\" -name 'model_epoch*.pt'" in text
+    assert "find \"${NH_RUN_DIR}\" -maxdepth 1 -name 'model_epoch*.pt'" not in text
+
+
+def test_sbatch_script_sorts_latest_checkpoint_numerically_not_alphabetically():
+    text = _text()
+    # extracts the numeric epoch as an explicit sort key (sort -n) rather
+    # than relying on path-string ordering, which is not epoch-numeric
+    # across differently-nested continuation directories.
+    assert "sort -n" in text
+
+
+def test_sbatch_script_reports_distinct_physical_vs_screened_vs_next_intended_fields():
+    text = _text()
+    for field in (
+        "highest_physical_checkpoint_epoch",
+        "highest_screened_epoch",
+        "next_intended_screening_epoch",
+        "overshoot_epochs",
+        "safe_to_continue_automatically",
+        "blocked_reason",
+    ):
+        assert field in text, f"{field} not reported by the sbatch script"
+
+
+def test_sbatch_script_has_a_distinct_blocked_status_not_folded_into_completed():
+    text = _text()
+    assert "BLOCKED_MANUAL_REVIEW_REQUIRED" in text
+    assert "blocked_continuation_overshoot_conflict" in text
+
+
+def test_sbatch_script_status_fallback_uses_compute_pilot_status_fields_not_a_reimplementation():
+    text = _text()
+    # falls back to the single canonical resolver rather than re-deriving
+    # highest-screened/overshoot logic a second time in shell/python here.
+    assert "from src.baseline.pilot_orchestration import compute_pilot_status_fields" in text
+
+
+def test_sbatch_script_status_json_fields_passed_via_environment_not_string_interpolation():
+    text = _text()
+    # a free-text blocked_reason could contain quotes/newlines; must never
+    # be spliced directly into the embedded Python source as a string
+    # literal (the earlier fields like run_id/nh_run_dir were interpolated
+    # this way, which is what this new block deliberately avoids for the
+    # new free-text field).
+    assert "env['blocked_reason']" not in text
+    assert "os.environ" in text

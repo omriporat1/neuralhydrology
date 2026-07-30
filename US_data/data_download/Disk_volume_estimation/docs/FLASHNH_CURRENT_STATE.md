@@ -1,6 +1,79 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-29 (Stage 1 lead-6 pilot — Moriah qualification run paused after epoch 6, evaluation-prerequisite orchestration bug fixed locally)
+Last updated: 2026-07-30 (Stage 1 lead-6 pilot — Moriah qualification run resume exposed a second orchestration bug, continuation-nesting/additive-epoch semantics fixed locally)
+
+## Stage 1 lead-6 optimization pilot — second qualification-run failure, continuation-nesting/epoch-semantics corrected (2026-07-30)
+
+The resumed Moriah job (`45705457`), continuing `emb128x64_seedA` from
+epoch 6 toward the epoch 9 chunk boundary, exposed a second, independent
+orchestration bug on top of the one below. Root cause: NH's `continue_run`
+unconditionally nests output into a new
+`continue_training_from_epoch{start:03d}/` subdirectory on every call, but
+the original chunk-continuation code treated the overlay's `epochs:` key as
+an absolute target epoch rather than additive relative to the resumed
+checkpoint. Told `epochs: 9` while resuming from checkpoint 6, NH trained 9
+*more* epochs (additive 6+9=15), leaving
+`continue_training_from_epoch006/model_epoch007.pt`-`model_epoch015.pt` on
+disk with no valid epoch-9 screening result.
+
+Fix (local only, not yet re-run on Moriah), entirely within
+`src/baseline/pilot_orchestration.py`: `TrainChunkRequest` now separates
+`current_epoch` (checkpoint resumed from), `additional_epochs` (additive
+count for this chunk), and `logical_target_epoch`
+(`current_epoch + additional_epochs`); a new
+`discover_physical_checkpoints()` recursively inventories checkpoints
+across the base run directory and arbitrarily-nested continuation
+directories, failing loudly on any duplicate epoch claim;
+`resolve_trusted_chunk_checkpoint()`/`untrusted_overshoot_epochs()`
+distinguish a checkpoint this pilot's own chunk sequence produced from one
+that merely exists on disk at the right epoch under untrusted
+circumstances; the shared `_advance_chunk_via_continuation()` helper
+resumes from a trusted checkpoint idempotently, blocks with a
+manual-review reason if untrusted checkpoints already occupy the target
+range, or blocks with an already-exists reason if NH's target continuation
+directory exists but is empty/incomplete — never silently retraining over
+existing files or guessing which checkpoint is authoritative;
+`compute_pilot_status_fields()` now reports four distinct fields
+(`highest_physical_checkpoint_epoch`, `highest_screened_epoch`,
+`next_intended_screening_epoch`, `overshoot_epochs`,
+`safe_to_continue_automatically`) consumed identically by the Slurm
+launcher and evidence bundle. Applied to the exact real job-45705457
+evidence, the corrected orchestration safely recovers and screens exactly
+epoch 9 (no retraining, no manual checkpoint movement required) and halts
+any further automatic continuation past epoch 9 with a blocked status
+rather than resuming from the wrong checkpoint or retraining over the
+preserved 10-15 checkpoints. No scientific
+hyperparameter, split, screening-membership, or early-stopping policy
+changed. Eight pilot test files now carry 146 tests (was 125), all passing
+— including 6 new low-level checkpoint-discovery/trust unit tests, 2 new
+direct unit tests of `_continuation_overlay` (the overlay-dict helper
+extracted from `default_train_chunk` during self-review, since that
+function had no direct test coverage of its own before), and a full
+end-to-end reproduction of the real job-45705457 evidence shape; full
+suite re-run: 1173 passed, same 6 pre-existing `neuralhydrology`/`torch`
+import-only collection errors as before (expected in this local
+environment), 1 Windows file-lock flake in an unrelated, untouched
+package-builder test confirmed to pass in isolation — zero regressions
+attributable to this work. One residual risk flagged but not resolved (the
+`continue_from_epoch` NH-Config-property claim is unverified locally; see
+`docs/decision_log.md`'s 2026-07-30 entry). Full detail: `docs/stage1_lead06_pilot_v001.md`'s
+"Second Moriah failure and continuation-nesting/epoch-semantics correction"
+section and `docs/decision_log.md`.
+
+**Current status: epoch-9 recovery is safe; further training is not.**
+`emb128x64_seedA` remains paused after epoch 6.
+`continue_training_from_epoch006/model_epoch009.pt` sits in exactly the
+directory this pilot's own chunk sequence would produce, so it is trusted:
+one controlled recovery invocation of the corrected orchestration reuses
+that checkpoint, screens epoch 9, and records the event — no retraining,
+no manual checkpoint movement/deletion required first. Continuing training
+past epoch 9 is not yet safe while checkpoints 10-15 remain in the
+existing continuation layout — those stay preserved, untouched,
+scientifically-unused artifacts, and `safe_to_continue_automatically=False`
+blocks any further 9→12 chunk attempt pending a later decision. This
+epoch-9 recovery has not been executed on Moriah; it is expected behavior
+of the locally tested repair only, and no resume has been submitted since
+this correction. The other five pilot runs have not started.
 
 ## Stage 1 lead-6 optimization pilot — qualification run paused, orchestration corrected (2026-07-29)
 
