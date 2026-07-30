@@ -1,6 +1,27 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-30 (Stage 1 lead-6 pilot — real Moriah verification job 45718742 confirmed the launcher status-propagation fix, but exposed a narrow rerun-idempotency defect, now fixed locally — NO further Moriah job until this fix is committed)
+Last updated: 2026-07-30 (Stage 1 lead-6 pilot — `emb128x64_seedA` epoch 6→15 continuation reviewed and judged conditionally safe to adopt; explicit per-run adoption manifest mechanism implemented and tested locally — real hashes and a Moriah adoption run are still outstanding)
+
+## Stage 1 lead-6 optimization pilot — `emb128x64_seedA` epoch 6→15 continuation: provenance review + explicit adoption mechanism (2026-07-30)
+
+Direct inspection of the real job-45705457 continuation evidence
+(`flashnh_emb128x64_seedA_continuation_evidence_2026-07-29.txt`) confirmed
+epochs 7-15 come from one single, uninterrupted `Continue training from
+epoch 6` invocation at the frozen pilot config — **conditionally safe to
+adopt**. A narrow, run-specific adoption mechanism was then implemented in
+`src/baseline/pilot_orchestration.py`: a strictly opt-in
+`pilot_accepted_continuation.json` manifest (base run directory, never
+committed, no general CLI override) pins one epoch's model+optimizer
+checkpoint by SHA-256; `_advance_chunk_via_continuation` consults an entry
+only when that epoch is the exact chunk currently being resolved, so an
+accepted epoch 15 is never consulted while epoch 12 is still due, and stays
+unused if early stopping fires at epoch 12. 10 new focused tests added
+(`tests/test_pilot_orchestration.py`, 44 passed total). See
+`docs/decision_log.md`'s 2026-07-30 entry for the full provenance verdict and
+manifest contract, and `docs/stage1_lead06_pilot_v001.md` for the schema.
+**Not yet done:** the real epoch-12/epoch-15 SHA-256 hashes (no Moriah access
+in this task) and any actual Moriah adoption/screening run — `emb128x64_seedA`
+remains paused after epoch 9.
 
 ## Stage 1 lead-6 optimization pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed (2026-07-30)
 

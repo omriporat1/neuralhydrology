@@ -526,6 +526,79 @@ failed only in the full-suite run with a Windows file-lock
 isolation (file untouched by this work) — pre-existing flakiness unrelated
 to any file touched here. Zero regressions attributable to this work.
 
+## Explicit continuation adoption: `pilot_accepted_continuation.json` (2026-07-30)
+
+A human review of the real `emb128x64_seedA` continuation evidence (job
+45705457, confirmed by recovery/verification jobs 45718473/45718742/45721557)
+judged epochs 7-15 **conditionally safe to adopt** as one valid, uninterrupted
+continuation of the trusted epoch-6 checkpoint (full provenance reasoning:
+`docs/decision_log.md`'s 2026-07-30 entry). The untrusted-overshoot guard
+above (`resolve_trusted_chunk_checkpoint` / `untrusted_overshoot_epochs`) is
+permanent and unconditional for every run — it never reinterprets a
+checkpoint as trustworthy on its own. Adopting a specific pre-existing
+overshoot checkpoint is only ever possible through an explicit, per-run
+manifest:
+
+- **File**: `pilot_accepted_continuation.json`, in the base NH run directory
+  next to `pilot_early_stopping_state.json` — **never committed to git, never
+  a general CLI override flag.** Strictly opt-in: a run without this file
+  behaves exactly as documented above, with no change.
+- **Schema** (`schema_version: 1`):
+  ```json
+  {
+    "schema_version": 1,
+    "run_id": "raw_seedA",
+    "decision": "conditional_sequential_adoption_epoch6_to_15",
+    "accepted_directory": "continue_training_from_epoch006",
+    "accepted_checkpoints": {
+      "12": {
+        "model_path": "continue_training_from_epoch006/model_epoch012.pt",
+        "model_sha256": "<sha256>",
+        "optimizer_path": "continue_training_from_epoch006/optimizer_state_epoch012.pt",
+        "optimizer_sha256": "<sha256>"
+      },
+      "15": { "...": "same shape, epoch 15" }
+    },
+    "provenance_basis": "job 45705457 continuation evidence, reviewed 2026-07-30"
+  }
+  ```
+- **Validation** (`load_accepted_continuation_manifest`): `run_id` must
+  exactly match the current run (else `PilotOrchestrationError`); every
+  entry's `model_path`/`optimizer_path` must resolve strictly inside the run
+  directory and inside the manifest's own `accepted_directory` (else raises —
+  no absolute paths, no `..` escapes). SHA-256 hashes are **not** verified
+  eagerly at load time — only lazily, per epoch, the moment
+  `_advance_chunk_via_continuation` actually consults that epoch's entry
+  (`_resolve_accepted_checkpoint`), so a bad/premature epoch-15 entry can
+  never block a correctly-hashed epoch-12 adoption.
+- **Sequencing**: an entry is consulted only when its epoch is the exact
+  `chunk_target_epoch` a chunk call is already resolving. Epoch 12 must
+  resolve before epoch 15 is ever looked at — enforced by `run_pilot()`'s
+  existing chunk-by-chunk loop (no new dedicated sequencing code), which also
+  already breaks out once a chunk reports `stopped`. If early stopping fires
+  at epoch 12, epoch 15 stays physically present but is never scientifically
+  consulted again.
+- **Effect when consulted**: adopts the existing physical checkpoint
+  directory as the trusted checkpoint for that epoch (no training call); the
+  epoch is still evaluated/screened through the normal pipeline. Idempotent
+  on rerun via the existing `logged_screening_epochs` mechanism.
+
+**Real hashes not yet filled in.** No Moriah access was available in this
+task, and no SHA-256 for the real epoch-12/epoch-15 checkpoints exists
+locally (the evidence file records only sizes/timestamps). The production
+manifest for `emb128x64_seedA` has therefore not been authored — computing
+`sha256sum` on the four real files inside
+`continue_training_from_epoch006/` on Moriah, and writing this file into the
+base run directory, is a lightweight prerequisite step before the next
+screening run. 10 new focused tests
+(`test_no_manifest_preserves_block`, `test_correct_manifest_trusts_epoch_12`,
+`test_epoch_12_evaluated_without_training`,
+`test_epoch_15_untouched_during_epoch_12_step`,
+`test_incorrect_model_hash_rejected`, `test_incorrect_optimizer_hash_rejected`,
+`test_wrong_run_id_or_path_rejected`, `test_epoch_15_used_only_if_still_required`,
+`test_stopping_at_12_leaves_15_unused`, `test_rerun_idempotency_with_accepted_manifest`)
+cover this mechanism in `tests/test_pilot_orchestration.py` (44 passed total).
+
 ## What has not been done
 
 `emb128x64_seedA` is paused after epoch 6, not complete or resumed. Per the

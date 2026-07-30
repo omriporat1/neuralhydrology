@@ -164,6 +164,30 @@ routed through the exact same :func:`_advance_chunk_via_continuation` trust
 logic as every later chunk, just with ``start_dir`` pinned to the base run
 directory and ``resume_from_epoch`` set to the highest checkpoint already
 found there (never the literal ``0``).
+
+Explicit, run-specific overshoot adoption (added after a human review of the
+real ``emb128x64_seedA`` overshoot artifacts from job 45705457, confirmed by
+recovery/verification jobs 45718473/45718742/45721557): the untrusted-
+overshoot guard above is, by design, permanent and unconditional for every
+run -- it never reinterprets a checkpoint as trustworthy on its own. Adopting
+a specific pre-existing overshoot checkpoint is therefore only ever possible
+through an explicit, human-authored, per-run
+:func:`load_accepted_continuation_manifest` file (``pilot_accepted_continuation.json``,
+stored in the base run directory next to ``pilot_early_stopping_state.json``
+-- never committed to git, never a general CLI override flag). Each entry
+pins one epoch's model+optimizer checkpoint by exact relative path and
+SHA-256; :func:`_advance_chunk_via_continuation` consults it only as a
+fallback, and only for the exact ``chunk_target_epoch`` a given chunk call is
+already trying to resolve -- so an accepted epoch 15 entry is never consulted
+while epoch 12 is the chunk still being resolved, preserving strict epoch-12-
+before-epoch-15 sequencing without any dedicated sequencing code (the
+existing chunk-by-chunk loop in :func:`run_pilot` already provides it). A
+manifest for the wrong ``run_id``, or any entry path resolving outside the
+run directory, is rejected loudly at load time; a hash mismatch is rejected
+loudly only when that specific epoch is actually consulted. This never
+triggers training -- it only ever adopts a checkpoint that already exists on
+disk -- and never changes the default strict behavior for any run without
+such a manifest.
 """
 from __future__ import annotations
 
@@ -220,6 +244,9 @@ __all__ = [
     "discover_physical_checkpoints",
     "resolve_trusted_chunk_checkpoint",
     "untrusted_overshoot_epochs",
+    "ACCEPTED_CONTINUATION_FILENAME",
+    "AcceptedContinuationEntry",
+    "load_accepted_continuation_manifest",
     "compute_pilot_status_fields",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
@@ -232,6 +259,8 @@ _CHECKPOINT_GLOB = "model_epoch*.pt"
 _ORCHESTRATION_STATE_FILENAME = "pilot_orchestration_state.json"
 _CONTINUATION_DIR_RE = re.compile(r"^continue_training_from_epoch(\d{3})$")
 _CHECKPOINT_FILE_RE = re.compile(r"^model_epoch(\d{3})\.pt$")
+
+ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
 
 class PilotOrchestrationError(Exception):
@@ -569,6 +598,153 @@ def untrusted_overshoot_epochs(
     return sorted(e for e in inventory if previous_target_epoch < e <= chunk_target_epoch)
 
 
+@dataclass(frozen=True)
+class AcceptedContinuationEntry:
+    """One human-reviewed, run-specific accepted-checkpoint entry from an
+    ``ACCEPTED_CONTINUATION_FILENAME`` manifest (see module docstring's
+    "Explicit, run-specific overshoot adoption" note). Paths are already
+    resolved to absolute, containment-checked locations; hashes are the
+    manifest's claimed SHA-256 values, not yet verified against the real
+    files (verification happens lazily, only when this entry's epoch is
+    actually consulted -- see :func:`_resolve_accepted_checkpoint`)."""
+
+    model_path: Path
+    model_sha256: str
+    optimizer_path: Path
+    optimizer_sha256: str
+
+
+def load_accepted_continuation_manifest(
+    nh_run_dir, run_id: str
+) -> "dict[int, AcceptedContinuationEntry]":
+    """Load this run's explicit continuation-adoption manifest, if present.
+
+    Returns ``{}`` when no ``ACCEPTED_CONTINUATION_FILENAME`` file exists in
+    ``nh_run_dir`` -- adoption is opt-in per run, and the default
+    :func:`resolve_trusted_chunk_checkpoint` / :func:`untrusted_overshoot_epochs`
+    guard is completely unaffected for every run without one.
+
+    This is deliberately not a general override mechanism: the manifest's own
+    ``run_id`` must exactly match ``run_id`` (a manifest left in, or copied
+    to, the wrong run directory raises rather than silently being honored),
+    every entry's ``model_path``/``optimizer_path`` must resolve strictly
+    inside ``nh_run_dir`` (never an absolute path elsewhere on disk, never a
+    ``..`` escape), and both paths must share the manifest's declared
+    ``accepted_directory`` as their parent (catches an internally
+    inconsistent manifest rather than trusting one entry's directory over
+    another's), and must be named exactly ``model_epoch{E:03d}.pt`` /
+    ``optimizer_state_epoch{E:03d}.pt`` for its own key epoch ``E`` (an entry
+    keyed epoch 12 pointing at correctly-hashed epoch 15 files is rejected --
+    a hash alone does not bind an entry to the epoch it is meant to
+    authenticate). SHA-256 hashes are recorded here but not yet compared
+    against the real files -- see :func:`_resolve_accepted_checkpoint`,
+    called only for the one epoch a chunk is actually trying to resolve.
+    """
+    manifest_path = Path(nh_run_dir) / ACCEPTED_CONTINUATION_FILENAME
+    if not manifest_path.is_file():
+        return {}
+
+    with open(manifest_path, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    if manifest.get("schema_version") != 1:
+        raise PilotOrchestrationError(
+            f"accepted-continuation manifest {manifest_path} has unsupported "
+            f"schema_version={manifest.get('schema_version')!r}"
+        )
+    if manifest.get("run_id") != run_id:
+        raise PilotOrchestrationError(
+            f"accepted-continuation manifest {manifest_path} is for "
+            f"run_id={manifest.get('run_id')!r}, but this run is {run_id!r} -- "
+            "refusing to use a manifest reviewed for a different run"
+        )
+
+    run_dir_resolved = Path(nh_run_dir).resolve()
+    accepted_directory = manifest.get("accepted_directory")
+    if not accepted_directory:
+        raise PilotOrchestrationError(
+            f"accepted-continuation manifest {manifest_path} is missing 'accepted_directory'"
+        )
+    expected_parent = (run_dir_resolved / accepted_directory).resolve()
+    if not expected_parent.is_relative_to(run_dir_resolved):
+        raise PilotOrchestrationError(
+            f"accepted-continuation manifest {manifest_path} 'accepted_directory' "
+            f"resolves outside the run directory: {expected_parent}"
+        )
+
+    entries: "dict[int, AcceptedContinuationEntry]" = {}
+    for epoch_str, raw_entry in manifest.get("accepted_checkpoints", {}).items():
+        try:
+            epoch = int(epoch_str)
+            model_path = (run_dir_resolved / raw_entry["model_path"]).resolve()
+            optimizer_path = (run_dir_resolved / raw_entry["optimizer_path"]).resolve()
+            model_sha256 = raw_entry["model_sha256"]
+            optimizer_sha256 = raw_entry["optimizer_sha256"]
+        except (KeyError, ValueError) as exc:
+            raise PilotOrchestrationError(
+                f"accepted-continuation manifest {manifest_path} has a malformed entry "
+                f"for epoch {epoch_str!r}: {exc}"
+            ) from exc
+
+        for candidate in (model_path, optimizer_path):
+            if not candidate.is_relative_to(run_dir_resolved):
+                raise PilotOrchestrationError(
+                    f"accepted-continuation manifest {manifest_path} entry for epoch "
+                    f"{epoch} points outside the run directory: {candidate}"
+                )
+            if candidate.parent != expected_parent:
+                raise PilotOrchestrationError(
+                    f"accepted-continuation manifest {manifest_path} entry for epoch "
+                    f"{epoch} is not inside its own declared accepted_directory "
+                    f"({expected_parent}): {candidate}"
+                )
+
+        expected_model_name = f"model_epoch{epoch:03d}.pt"
+        expected_optimizer_name = f"optimizer_state_epoch{epoch:03d}.pt"
+        if model_path.name != expected_model_name or optimizer_path.name != expected_optimizer_name:
+            raise PilotOrchestrationError(
+                f"accepted-continuation manifest {manifest_path} entry keyed for epoch "
+                f"{epoch} must point to {expected_model_name!r}/{expected_optimizer_name!r}, "
+                f"not {model_path.name!r}/{optimizer_path.name!r} -- an entry's key epoch "
+                "must match the epoch of the files it authenticates, otherwise a correctly "
+                "hashed file for a DIFFERENT epoch could be silently substituted"
+            )
+
+        entries[epoch] = AcceptedContinuationEntry(
+            model_path=model_path,
+            model_sha256=model_sha256,
+            optimizer_path=optimizer_path,
+            optimizer_sha256=optimizer_sha256,
+        )
+    return entries
+
+
+def _resolve_accepted_checkpoint(entry: AcceptedContinuationEntry, epoch: int) -> Path:
+    """Verify one manifest entry's model+optimizer SHA-256 hashes against the
+    real files on disk before trusting it -- both artifacts are required, and
+    a missing file or hash mismatch raises rather than silently falling back
+    to the default blocked status, since that would mask exactly the
+    discrepancy this manifest was reviewed to rule out. Returns the shared
+    owning directory (the manifest's ``accepted_directory``, already
+    verified to be both paths' parent) on success."""
+    for path, expected_hash, label in (
+        (entry.model_path, entry.model_sha256, "model"),
+        (entry.optimizer_path, entry.optimizer_sha256, "optimizer"),
+    ):
+        if not path.is_file():
+            raise PilotOrchestrationError(
+                f"accepted-continuation manifest entry for epoch {epoch} references a "
+                f"missing {label} file: {path}"
+            )
+        actual_hash = sha256_of(path)
+        if actual_hash != expected_hash:
+            raise PilotOrchestrationError(
+                f"accepted-continuation manifest entry for epoch {epoch} {label} hash "
+                f"mismatch: expected {expected_hash}, got {actual_hash} for {path}"
+            )
+    return entry.model_path.parent
+
+
 def compute_pilot_status_fields(nh_run_dir, pilot_policy: "PilotPolicy | None" = None) -> dict:
     """Human/launcher-facing status snapshot (task item 7) distinguishing
     the highest PHYSICAL checkpoint epoch on disk from the highest
@@ -741,6 +917,7 @@ def _advance_chunk_via_continuation(
     resume_from_epoch: int,
     chunk_target_epoch: int,
     train_chunk_fn,
+    accepted_checkpoints: "dict[int, AcceptedContinuationEntry] | None" = None,
 ) -> "tuple[Path | None, str | None]":
     """Resolve ``chunk_target_epoch``'s trusted physical checkpoint,
     producing it via one bounded ``train_chunk_fn`` continuation call from
@@ -758,6 +935,13 @@ def _advance_chunk_via_continuation(
     ``continue_training_from_epoch{resume_from_epoch:03d}/`` directory
     under ``start_dir`` -- there is no "flat" continuation case, regardless
     of which logical chunk this is (see module docstring).
+
+    ``accepted_checkpoints``, when given, is only ever consulted for the one
+    epoch this call is already trying to resolve (``chunk_target_epoch``) --
+    never for any other epoch present in the same manifest -- which is what
+    keeps a later chunk's accepted entry (e.g. epoch 15) from ever being
+    consulted while an earlier chunk (e.g. epoch 12) is still the one being
+    resolved.
     """
     inventory = discover_physical_checkpoints(nh_base_run_dir)
     expected_dir = _expected_continuation_dir(start_dir, resume_from_epoch)
@@ -767,6 +951,10 @@ def _advance_chunk_via_continuation(
 
     conflicts = untrusted_overshoot_epochs(inventory, resume_from_epoch, chunk_target_epoch)
     if conflicts:
+        accepted_entry = (accepted_checkpoints or {}).get(chunk_target_epoch)
+        if accepted_entry is not None:
+            accepted_dir = _resolve_accepted_checkpoint(accepted_entry, chunk_target_epoch)
+            return accepted_dir, None
         return None, (
             f"cannot safely continue training from epoch {resume_from_epoch} to "
             f"{chunk_target_epoch}: untrusted physical checkpoint(s) already occupy epoch(s) "
@@ -842,6 +1030,7 @@ def run_pilot_chunk(
     tracking_run=None,
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+    run_id: str = "",
 ) -> dict:
     """Run exactly one bounded training chunk (``previous_target_epoch`` ->
     ``chunk_target_epoch``) and process every screening-cadence epoch newly
@@ -909,6 +1098,7 @@ def run_pilot_chunk(
     else:
         nh_base_run_dir = discover_nh_run_dir(config_dir, experiment_name)
         blocked_reason = None
+        accepted_checkpoints = load_accepted_continuation_manifest(nh_base_run_dir, run_id)
 
         if previous_target_epoch == 0:
             # Base-run resumption (this orchestration process never itself
@@ -957,6 +1147,7 @@ def run_pilot_chunk(
                     resume_from_epoch=highest,
                     chunk_target_epoch=chunk_target_epoch,
                     train_chunk_fn=train_chunk_fn,
+                    accepted_checkpoints=accepted_checkpoints,
                 )
         else:
             start_dir = Path(previous_checkpoint_dir) if previous_checkpoint_dir is not None else nh_base_run_dir
@@ -967,6 +1158,7 @@ def run_pilot_chunk(
                 resume_from_epoch=previous_target_epoch,
                 chunk_target_epoch=chunk_target_epoch,
                 train_chunk_fn=train_chunk_fn,
+                accepted_checkpoints=accepted_checkpoints,
             )
 
     if blocked_reason is not None:
@@ -1162,6 +1354,7 @@ def run_pilot(
             tracking_run=tracking_run,
             train_chunk_fn=train_chunk_fn,
             evaluate_checkpoint_fn=evaluate_checkpoint_fn,
+            run_id=run_id,
         )
         have_started = True
         if chunk_result["blocked"]:

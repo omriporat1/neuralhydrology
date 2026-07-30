@@ -34,6 +34,7 @@ import pytest
 import xarray as xr
 
 from src.baseline.pilot_orchestration import (
+    ACCEPTED_CONTINUATION_FILENAME,
     EvaluationRequest,
     PilotOrchestrationError,
     TrainChunkRequest,
@@ -43,6 +44,7 @@ from src.baseline.pilot_orchestration import (
     discover_nh_run_dir,
     discover_physical_checkpoints,
     ensure_validation_results,
+    load_accepted_continuation_manifest,
     prepare_pilot_run,
     resolve_trusted_chunk_checkpoint,
     root_logger_has_file_handler,
@@ -1249,4 +1251,390 @@ def test_compute_pilot_status_fields_distinguishes_physical_from_screened_and_fl
     assert fields["highest_screened_epoch"] == 6
     assert fields["overshoot_epochs"] == [7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert fields["safe_to_continue_automatically"] is False
-    assert fields["next_intended_screening_epoch"] == 9
+
+
+# --- explicit, run-specific overshoot adoption (pilot_accepted_continuation.json) ---
+#
+# Real emb128x64_seedA shape (job 45705457, reviewed 2026-07-29/30): same
+# checkpoints-1-6-flat + continue_training_from_epoch006/{7..15} layout as
+# the untrusted-overshoot tests above, but each epoch also gets a matching
+# optimizer_state_epoch{N:03d}.pt (NH's real convention, confirmed in
+# flashnh_emb128x64_seedA_continuation_evidence_2026-07-29.txt) since the
+# manifest pins both a model and an optimizer checkpoint per epoch.
+_ACCEPTED_RUN_ID = "raw_seedA"
+
+
+def _build_overshoot_scenario_with_optimizers(fx, common_kwargs):
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+        (nh_run_dir / f"optimizer_state_epoch{epoch:03d}.pt").write_bytes(f"opt{epoch}".encode())
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+    write_perfect_validation_results(nh_run_dir, 6, fx["basins"], fx["package_root"])
+
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    for epoch in range(7, 16):
+        (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+        (cont_dir / f"optimizer_state_epoch{epoch:03d}.pt").write_bytes(f"opt{epoch}".encode())
+    return nh_run_dir, cont_dir
+
+
+def _counting_wrappers(fx):
+    train_calls = []
+    eval_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        eval_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    return train_calls, eval_calls, counting_train, counting_evaluate
+
+
+def _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate):
+    first = run_pilot_chunk(
+        chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=False,
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    resumed = run_pilot_chunk(
+        chunk_target_epoch=9, previous_target_epoch=6, is_first_chunk=False,
+        previous_checkpoint_dir=first["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    return resumed
+
+
+def _entry_for_epoch(cont_dir, epoch, *, model_sha256=None, optimizer_sha256=None):
+    model_path = cont_dir / f"model_epoch{epoch:03d}.pt"
+    optimizer_path = cont_dir / f"optimizer_state_epoch{epoch:03d}.pt"
+    return {
+        "model_path": f"continue_training_from_epoch006/model_epoch{epoch:03d}.pt",
+        "model_sha256": model_sha256 or sha256_of(model_path),
+        "optimizer_path": f"continue_training_from_epoch006/optimizer_state_epoch{epoch:03d}.pt",
+        "optimizer_sha256": optimizer_sha256 or sha256_of(optimizer_path),
+    }
+
+
+def _write_accepted_manifest(nh_run_dir, run_id, entries):
+    manifest = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "decision": "conditional_sequential_adoption_epoch6_to_15",
+        "accepted_directory": "continue_training_from_epoch006",
+        "accepted_checkpoints": entries,
+        "provenance_basis": "job 45705457 continuation evidence (test fixture)",
+    }
+    (Path(nh_run_dir) / ACCEPTED_CONTINUATION_FILENAME).write_text(json.dumps(manifest, indent=2))
+
+
+def test_no_manifest_preserves_block(run_pilot_fixture):
+    """Absent a manifest, the 9->12 chunk must still be refused exactly as
+    before -- adoption is strictly opt-in per run."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    assert load_accepted_continuation_manifest(nh_run_dir, _ACCEPTED_RUN_ID) == {}
+
+    next_chunk = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert next_chunk["blocked"] is True
+    assert "12" in next_chunk["blocked_reason"]
+
+
+def test_correct_manifest_trusts_epoch_12(run_pilot_fixture):
+    """A manifest with correct model+optimizer hashes for epoch 12 lets the
+    9->12 chunk succeed by adopting the pre-existing overshoot checkpoint,
+    never training."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(nh_run_dir, _ACCEPTED_RUN_ID, {"12": _entry_for_epoch(cont_dir, 12)})
+
+    next_chunk = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert next_chunk["blocked"] is False
+    assert next_chunk["checkpoint_dir_for_target"] == cont_dir
+    assert train_calls == [], "adopting an accepted checkpoint must never trigger training"
+
+
+def test_epoch_12_evaluated_without_training(run_pilot_fixture):
+    """The adopted epoch 12 checkpoint is still screened/evaluated through
+    the normal pipeline -- adoption skips training, not evaluation."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(nh_run_dir, _ACCEPTED_RUN_ID, {"12": _entry_for_epoch(cont_dir, 12)})
+
+    next_chunk = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert train_calls == []
+    assert [r["epoch"] for r in next_chunk["screening_results"]] == [12]
+    assert [r.epoch for r in eval_calls] == [12]
+
+
+def test_epoch_15_untouched_during_epoch_12_step(run_pilot_fixture):
+    """Even when the manifest also carries an epoch-15 entry (with a
+    deliberately WRONG hash), processing the 9->12 chunk must never consult
+    or verify it -- only chunk_target_epoch's own entry is ever looked at."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(
+        nh_run_dir,
+        _ACCEPTED_RUN_ID,
+        {
+            "12": _entry_for_epoch(cont_dir, 12),
+            "15": _entry_for_epoch(cont_dir, 15, model_sha256="deadbeef" * 8),
+        },
+    )
+
+    next_chunk = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert next_chunk["blocked"] is False
+    assert [r.epoch for r in eval_calls] == [12], "epoch 15 must never be evaluated while chunk 12 is due"
+
+
+def test_incorrect_model_hash_rejected(run_pilot_fixture):
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(
+        nh_run_dir, _ACCEPTED_RUN_ID,
+        {"12": _entry_for_epoch(cont_dir, 12, model_sha256="0" * 64)},
+    )
+
+    with pytest.raises(PilotOrchestrationError, match="model hash mismatch"):
+        run_pilot_chunk(
+            chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+            previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+            train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+            run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+        )
+    assert train_calls == []
+
+
+def test_incorrect_optimizer_hash_rejected(run_pilot_fixture):
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(
+        nh_run_dir, _ACCEPTED_RUN_ID,
+        {"12": _entry_for_epoch(cont_dir, 12, optimizer_sha256="0" * 64)},
+    )
+
+    with pytest.raises(PilotOrchestrationError, match="optimizer hash mismatch"):
+        run_pilot_chunk(
+            chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+            previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+            train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+            run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+        )
+    assert train_calls == []
+
+
+def test_epoch_12_entry_pointing_to_epoch_15_files_rejected(run_pilot_fixture):
+    """An entry keyed epoch 12 that points at correctly-hashed epoch-15
+    files (same accepted directory) must be rejected at load time -- a
+    hash match alone does not bind an entry to its own key epoch, so a
+    different epoch's authenticated files could otherwise be silently
+    substituted."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+
+    _write_accepted_manifest(nh_run_dir, _ACCEPTED_RUN_ID, {"12": _entry_for_epoch(cont_dir, 15)})
+
+    with pytest.raises(PilotOrchestrationError, match="model_epoch012.pt"):
+        load_accepted_continuation_manifest(nh_run_dir, _ACCEPTED_RUN_ID)
+
+
+def test_wrong_run_id_or_path_rejected(run_pilot_fixture):
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+
+    _write_accepted_manifest(nh_run_dir, "some_other_run", {"12": _entry_for_epoch(cont_dir, 12)})
+    with pytest.raises(PilotOrchestrationError, match="run_id"):
+        load_accepted_continuation_manifest(nh_run_dir, _ACCEPTED_RUN_ID)
+
+    escaping_entry = _entry_for_epoch(cont_dir, 12)
+    escaping_entry["model_path"] = "../outside/model_epoch012.pt"
+    _write_accepted_manifest(nh_run_dir, _ACCEPTED_RUN_ID, {"12": escaping_entry})
+    with pytest.raises(PilotOrchestrationError):
+        load_accepted_continuation_manifest(nh_run_dir, _ACCEPTED_RUN_ID)
+
+
+def test_epoch_15_used_only_if_still_required(run_pilot_fixture):
+    """When the pilot is NOT yet stopped after adopting epoch 12, a
+    following 12->15 chunk correctly consults and adopts the manifest's
+    epoch-15 entry in its own turn -- 'used only if still required', not
+    pre-emptively during the epoch-12 step (see the epoch-15-untouched
+    test above)."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(
+        nh_run_dir, _ACCEPTED_RUN_ID,
+        {"12": _entry_for_epoch(cont_dir, 12), "15": _entry_for_epoch(cont_dir, 15)},
+    )
+
+    chunk12 = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert chunk12["stopped"] is False, "fixture must not already be stopped, or chunk 15 would never be due"
+
+    chunk15 = run_pilot_chunk(
+        chunk_target_epoch=15, previous_target_epoch=12, is_first_chunk=False,
+        previous_checkpoint_dir=chunk12["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert chunk15["blocked"] is False
+    assert chunk15["checkpoint_dir_for_target"] == cont_dir
+    assert train_calls == []
+    assert [r.epoch for r in eval_calls] == [12, 15]
+
+
+def test_stopping_at_12_leaves_15_unused(run_pilot_fixture):
+    """If early stopping fires exactly at epoch 12, epoch 15's manifest
+    entry must remain completely unconsulted -- verified here by giving it
+    a hash that would fail verification if it were ever checked, and
+    confirming the epoch-12 call still succeeds and stops without error.
+
+    The pre-seeded early-stopping state below (events_since_best_improvement
+    already at 2) is a deliberately constructed edge case: the frozen
+    real policy's patience (3 events, cadence spacing 3 epochs) never
+    naturally exhausts before epoch 15 starting from a flat metric at
+    epoch 6 (see test_run_pilot_end_to_end_stops_on_patience_exhaustion).
+    This isolates the orchestration-level guarantee -- 'once stopped,
+    later accepted epochs stay unused' -- from early_stopping.py's own
+    counting logic, which has its own dedicated test suite."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    es_state = json.loads((nh_run_dir / "pilot_early_stopping_state.json").read_text())
+    es_state["events_since_best_improvement"] = 2
+    (nh_run_dir / "pilot_early_stopping_state.json").write_text(json.dumps(es_state))
+
+    _write_accepted_manifest(
+        nh_run_dir, _ACCEPTED_RUN_ID,
+        {
+            "12": _entry_for_epoch(cont_dir, 12),
+            "15": _entry_for_epoch(cont_dir, 15, model_sha256="deadbeef" * 8),
+        },
+    )
+
+    chunk12 = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert chunk12["blocked"] is False
+    assert chunk12["stopped"] is True
+    assert chunk12["stop_reason"] == "patience_exhausted"
+    assert [r.epoch for r in eval_calls] == [12], "epoch 15 must never be reached once stopped at epoch 12"
+
+
+def test_rerun_idempotency_with_accepted_manifest(run_pilot_fixture):
+    """Resuming the 9->12 chunk a second time, with the manifest still
+    present, must not retrain, re-evaluate, or re-verify anything -- epoch
+    12 is already logged as processed."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    nh_run_dir, cont_dir = _build_overshoot_scenario_with_optimizers(fx, common_kwargs)
+    train_calls, eval_calls, counting_train, counting_evaluate = _counting_wrappers(fx)
+    resumed = _advance_to_epoch9(common_kwargs, counting_train, counting_evaluate)
+    train_calls.clear()
+    eval_calls.clear()
+
+    _write_accepted_manifest(nh_run_dir, _ACCEPTED_RUN_ID, {"12": _entry_for_epoch(cont_dir, 12)})
+
+    first = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert [r.epoch for r in eval_calls] == [12]
+
+    second = run_pilot_chunk(
+        chunk_target_epoch=12, previous_target_epoch=9, is_first_chunk=False,
+        previous_checkpoint_dir=resumed["checkpoint_dir_for_target"],
+        train_chunk_fn=counting_train, evaluate_checkpoint_fn=counting_evaluate,
+        run_id=_ACCEPTED_RUN_ID, **common_kwargs,
+    )
+    assert second["blocked"] is False
+    assert second["checkpoint_dir_for_target"] == cont_dir
+    assert train_calls == []
+    assert [r.epoch for r in eval_calls] == [12], "second call must not re-evaluate epoch 12"

@@ -4,6 +4,74 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-30 — Stage 1 lead-6 pilot — `emb128x64_seedA` epoch 6→15 continuation: provenance review and explicit adoption mechanism
+
+**Scope.** Two-part decision. Part 1 (inspection-only, no code changes): whether
+the real `emb128x64_seedA` checkpoints epoch 7-15 — produced by the additive-
+epoch overshoot bug during job `45705457`'s continuation (see the two entries
+below) — form one valid, uninterrupted, configuration-consistent continuation
+from the trusted epoch-6 checkpoint. Part 2 (implementation): a narrow,
+run-specific mechanism to explicitly adopt that trajectory, gated by strict
+epoch-12-before-epoch-15 sequencing. Neither part reopened checkpoint-discovery,
+continuation, or early-stopping design, or built a general checkpoint-
+governance framework.
+
+**Provenance verdict (Part 1).** Direct inspection of
+`flashnh_emb128x64_seedA_continuation_evidence_2026-07-29.txt` (job 45705457's
+full `output.log` tail, git/Slurm identity, and both persisted state files)
+confirms a single, unbroken `Continue training from epoch 6` invocation
+producing epochs 7 through 15 with no intervening crash, config change, or
+process restart, at the frozen `stage1_lead06_pilot_v001` config (source
+commit `eefd9aa`). Verdict: **conditionally safe to adopt**, subject to the
+sequencing constraint below — this is a provenance judgment about one existing
+physical artifact, not a re-endorsement of the additive-epoch bug itself
+(already fixed; see the continuation-nesting entry below).
+
+**Adoption mechanism (Part 2).** Implemented in
+`src/baseline/pilot_orchestration.py`: a new, strictly opt-in, per-run JSON
+manifest, `pilot_accepted_continuation.json`, read only from the base NH run
+directory (never committed, never a general CLI override — see
+`docs/stage1_lead06_pilot_v001.md` for the full contract). Each entry pins one
+epoch's model **and** optimizer checkpoint by relative path and SHA-256; both
+hashes are verified against the real files at the moment that epoch is
+consulted, and any mismatch, wrong `run_id`, or out-of-directory path raises
+loudly. The manifest may list both epoch 12 and epoch 15, but
+`_advance_chunk_via_continuation` only ever consults the entry for the exact
+`chunk_target_epoch` a given chunk call is already resolving — epoch 15's
+entry is never looked at while epoch 12 is still due, and if early stopping
+fires at epoch 12, epoch 15 stays physically present but is never consulted
+again. This falls out of the existing per-chunk loop structure in
+`run_pilot()` (which already breaks out once a chunk reports `stopped`)
+without any new dedicated sequencing code. 10 new focused tests added to
+`tests/test_pilot_orchestration.py`; only `pytest tests/test_pilot_orchestration.py -q`
+was run (44 passed), per this task's scope.
+
+**Real hashes not yet available.** No Moriah access was permitted in this
+task, and no SHA-256 checksums for the real epoch-12/epoch-15 checkpoints
+exist anywhere in the local repository or evidence file (which records only
+file sizes/timestamps). The production `pilot_accepted_continuation.json` for
+`emb128x64_seedA` therefore has **not** been authored yet — this decision
+records the mechanism and the provenance verdict, not a completed adoption.
+Authoring it requires one lightweight Moriah-side step: compute
+`sha256sum model_epoch012.pt optimizer_state_epoch012.pt model_epoch015.pt
+optimizer_state_epoch015.pt` inside
+`continue_training_from_epoch006/`, and write the manifest (schema in
+`docs/stage1_lead06_pilot_v001.md`) into the base run directory before the
+next screening run.
+
+**Generated, not committed.** The manifest lives alongside
+`pilot_early_stopping_state.json`/`pilot_orchestration_state.json` — both of
+which are documented, run-directory-local, machine-specific artifacts that
+are never committed to git. The manifest follows the same convention (it
+would otherwise need machine-specific absolute paths or a path meaningless
+outside one specific run directory). The scientific decision itself (this
+entry) is the committed, reviewable record; the manifest is the mechanical,
+regenerable trigger.
+
+**Status.** No Moriah adoption or screening run using this mechanism has
+occurred yet. `emb128x64_seedA` remains paused after epoch 9 (the last
+trusted, screened checkpoint) exactly as before this task.
+
 ## 2026-07-30 — Stage 1 lead-6 pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed
 
 **Scope.** Local-only correction to `src/baseline/pilot_orchestration.py`
