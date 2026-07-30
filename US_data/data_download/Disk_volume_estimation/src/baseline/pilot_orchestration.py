@@ -872,14 +872,19 @@ def run_pilot_chunk(
     Idempotent on resume: an already-trained epoch is not retrained (checked
     against the physical checkpoint inventory); an already-saved validation
     result pickle is not re-evaluated (checked via
-    :func:`ensure_validation_results`, see module docstring); an
-    already-logged screening epoch (per this run's advisory
-    ``pilot_orchestration_state.json``) is not re-logged to the tracking
-    backend -- but the metric IS still re-read and re-fed through
-    :func:`src.baseline.pilot_early_stopping.record_screening_event`, whose
-    own idempotent-replay semantics make that safe, so the returned
-    ``screening_results`` always reflects this chunk's full cadence history.
-    Canonical pilot state (early-stopping + orchestration state) is always
+    :func:`ensure_validation_results`, see module docstring); a screening
+    epoch already present in this run's advisory
+    ``pilot_orchestration_state.json`` (``logged_screening_epochs``) is
+    skipped entirely -- neither re-evaluated nor re-fed through
+    :func:`src.baseline.pilot_early_stopping.record_screening_event`, since
+    that function's own idempotent-replay semantics only cover replaying
+    the exact last-recorded history entry, not an earlier one that a later
+    chunk's screening has since superseded (real Moriah job 45718742:
+    replaying epoch 6 once epoch 9 was already the last recorded entry
+    raised ``PilotEarlyStoppingError`` -- "out of order"). So
+    ``screening_results`` reflects only the newly-processed epochs of this
+    particular call, not this chunk's full cadence history when resuming
+    past already-logged epochs. Canonical pilot state (early-stopping + orchestration state) is always
     kept in the BASE run directory, never per-continuation-directory -- one
     logical pilot history regardless of how many physical continuation
     directories exist (see module docstring's "one logical pilot history"
@@ -983,6 +988,33 @@ def run_pilot_chunk(
     screening_results = []
     for epoch in screening_epochs_in_chunk(previous_target_epoch, chunk_target_epoch, pilot_policy):
         role = classify_screening_epoch_role(epoch, pilot_policy)
+
+        if epoch in logged_epochs:
+            # Already fully processed on a prior invocation of this pilot
+            # (this run's persisted pilot_orchestration_state.json already
+            # lists it). Re-evaluating and re-recording it here would, for a
+            # stopping-eligible epoch, replay it into
+            # early_stopping.record_official_validation_event once a LATER
+            # epoch is already the last recorded history entry -- real
+            # Moriah job 45718742: history already ended at epoch 9, so
+            # re-recording epoch 6 raised PilotEarlyStoppingError "epoch 6
+            # is not after the last recorded epoch 9 -- out of order".
+            # Trust the persisted logged_screening_epochs contract instead
+            # of re-deriving anything. Light consistency check only (not
+            # broad reconciliation): a stopping-eligible epoch marked
+            # logged must actually be present in the already-reloaded
+            # early-stopping history, or state is genuinely inconsistent
+            # and must not be silently skipped.
+            if role == "stopping_eligible" and not any(
+                entry["epoch"] == epoch for entry in es_state.get("history", [])
+            ):
+                raise PilotOrchestrationError(
+                    f"epoch {epoch} is marked logged in this run's orchestration state but is "
+                    "absent from its early-stopping history -- refusing to silently skip "
+                    "genuinely inconsistent persisted state"
+                )
+            continue
+
         ensure_validation_results(
             nh_run_dir=checkpoint_dir_for_target, epoch=epoch, evaluate_checkpoint_fn=evaluate_checkpoint_fn
         )

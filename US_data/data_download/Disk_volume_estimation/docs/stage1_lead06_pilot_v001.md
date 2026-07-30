@@ -375,6 +375,38 @@ overshoot logic changed. **No further Moriah job should run until this
 local status-propagation fix is committed.** Full detail:
 `docs/decision_log.md`'s 2026-07-30 status-propagation entry.
 
+## Fourth Moriah result: launcher classification confirmed, rerun-idempotency defect found and fixed
+
+Verification job `45718742` (partition `catfish`, source commit
+`7c6b02a599b885682a97081a3f166d97097bd4ec`, elapsed `00:03:17`, no stderr)
+confirmed the launcher status-propagation fix above: the launcher
+correctly classified the final on-disk state as
+`BLOCKED_MANUAL_REVIEW_REQUIRED` (`pilot_final_status:
+blocked_continuation_overshoot_conflict`,
+`safe_to_continue_automatically: false`, overshoot epochs 10-15, exit
+code 1). **No training occurred and scientific state was not modified.**
+
+But before reaching that clean overshoot block, the Python pilot process
+crashed: `PilotEarlyStoppingError: epoch 6 is not after the last recorded
+epoch 9 -- out of order`, from `run_pilot() -> run_pilot_chunk() ->
+record_screening_event(epoch=6)`. Root cause: `run_pilot()` always
+restarts its chunk walk from epoch 6 on every call, and
+`run_pilot_chunk()`'s screening loop had no check for a screening epoch
+already present in this run's persisted `pilot_orchestration_state.json`
+(`logged_screening_epochs: [3, 6, 9]`), so it re-fed already-screened
+epoch 6 into the early-stopping state machine after the persisted
+`pilot_early_stopping_state.json` history's last entry had already
+advanced to epoch 9. Fixed locally in `src/baseline/pilot_orchestration.py`:
+a screening epoch already present in `logged_screening_epochs` is now
+skipped outright (no re-evaluation, no re-record) instead of always
+being re-processed, with a light consistency check (not broad
+reconciliation) against the reloaded early-stopping history so genuinely
+inconsistent state is never silently skipped. No checkpoint-discovery,
+continuation, evaluation, early-stopping-policy, or launcher-
+classification logic changed. **No further Moriah job should run until
+this local rerun-idempotency fix is committed.** Full detail:
+`docs/decision_log.md`'s 2026-07-30 rerun-idempotency entry.
+
 ## Implementation modules
 
 | Module | Task |

@@ -995,6 +995,109 @@ def test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict
     assert record["run_status"] == "blocked_continuation_overshoot_conflict"
 
 
+def test_run_pilot_end_to_end_rerun_of_fully_screened_earlier_chunks_is_idempotent(run_pilot_fixture):
+    """Real Moriah verification job 45718742's exact shape: checkpoints 1-6
+    flat, continue_training_from_epoch006/ containing 7-15 (untrusted
+    overshoot beyond the already-screened frontier), and -- unlike the
+    blocked-conflict test above -- this run's OWN persisted state already
+    shows epochs 3/6/9 fully screened and logged (not just the disk
+    checkpoints/validation results). run_pilot() always restarts its
+    chunk walk from target=6 on every call (see chunk_epoch_targets), so a
+    rerun must recognize epochs 3/6/9 as already-logged
+    (pilot_orchestration_state.json's logged_screening_epochs) and skip
+    them outright -- previously it re-fed epoch 6 into
+    record_official_validation_event after the persisted early-stopping
+    history's last entry had already advanced to epoch 9, raising
+    PilotEarlyStoppingError("epoch 6 is not after the last recorded epoch
+    9 -- out of order"). Must instead proceed straight through to
+    detecting the 10-15 overshoot ahead of the next intended screening
+    epoch (12) and return the same blocked_continuation_overshoot_conflict
+    result as a fresh run would, without touching persisted state."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+    effective_policy = common_kwargs["effective_policy"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+
+    cont_dir = nh_run_dir / "continue_training_from_epoch006"
+    cont_dir.mkdir()
+    for epoch in range(7, 16):
+        (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+
+    # No validation_results.p pickles are written for epochs 3/6/9 here --
+    # deliberately, to prove the rerun never re-evaluates them (it must
+    # skip straight past on the persisted logged_screening_epochs contract
+    # alone; if it tried to evaluate, ensure_validation_results would call
+    # the fake evaluate callback below and the counter would be nonzero).
+    orchestration_state_path = nh_run_dir / "pilot_orchestration_state.json"
+    orchestration_state_path.write_text(json.dumps({"logged_screening_epochs": [3, 6, 9]}))
+
+    early_stopping_state = {
+        "schema_version": 1,
+        "policy_name": effective_policy["policy_name"],
+        "metric_name": effective_policy["metric_name"],
+        "higher_is_better": bool(effective_policy["higher_is_better"]),
+        "history": [
+            {"epoch": 6, "metric_value": 0.20454161610527344, "is_new_best": True},
+            {"epoch": 9, "metric_value": 0.18124855313577198, "is_new_best": False},
+        ],
+        "best_epoch": 6,
+        "best_metric_value": 0.20454161610527344,
+        "events_since_best_improvement": 1,
+        "stopped": False,
+        "stop_reason": None,
+        "stop_epoch": None,
+    }
+    (nh_run_dir / "pilot_early_stopping_state.json").write_text(json.dumps(early_stopping_state))
+
+    train_calls = []
+    evaluate_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        evaluate_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        commands_used=["test_pilot_orchestration.py"],
+        train_chunk_fn=counting_train,
+        evaluate_checkpoint_fn=counting_evaluate,
+    )
+
+    assert train_calls == [], "no epoch in range 1-15 is new -- rerun must never train"
+    assert evaluate_calls == [], "epochs 3/6/9 already logged -- rerun must never re-evaluate them"
+
+    assert result["final_status"] == "blocked_continuation_overshoot_conflict"
+    assert result["blocked_reason"] is not None
+    assert "12" in result["blocked_reason"]
+    assert result["best_checkpoint_epoch"] == 6
+    assert result["highest_physical_checkpoint_epoch"] == 15
+    assert result["highest_screened_epoch"] == 9
+    assert result["next_intended_screening_epoch"] == 12
+    assert result["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
+    assert result["safe_to_continue_automatically"] is False
+
+    assert json.loads(orchestration_state_path.read_text()) == {"logged_screening_epochs": [3, 6, 9]}
+    assert json.loads((nh_run_dir / "pilot_early_stopping_state.json").read_text()) == early_stopping_state
+
+
 def test_run_pilot_chunk_rejects_partial_first_chunk_before_any_state_change(run_pilot_fixture):
     """Only two first-chunk shapes are supported: no checkpoints at all, or
     the complete epoch 1-6 range already flat in the base run directory

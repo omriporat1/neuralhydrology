@@ -4,6 +4,72 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-30 — Stage 1 lead-6 pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed
+
+**Scope.** Local-only correction to `src/baseline/pilot_orchestration.py`
+(commit `7c6b02a`'s companion fix), discovered by a real Moriah verification
+job. No checkpoint-discovery, continuation, evaluation, early-stopping,
+launcher-classification, or scientific-policy design was reopened.
+
+**What happened.** Slurm job `45718742` (partition `catfish`, source commit
+`7c6b02a599b885682a97081a3f166d97097bd4ec`, elapsed `00:03:17`, no stderr)
+confirmed the previous launcher-status fix works: the launcher correctly
+classified the final on-disk state as `BLOCKED_MANUAL_REVIEW_REQUIRED`
+(`pilot_final_status: blocked_continuation_overshoot_conflict`,
+`safe_to_continue_automatically: false`, overshoot epochs 10-15, exit code
+1). **No training occurred and scientific state was not modified.** But
+before reaching that clean overshoot block, the Python pilot process
+crashed with `PilotEarlyStoppingError: epoch 6 is not after the last
+recorded epoch 9 -- out of order`, raised from `run_pilot() ->
+run_pilot_chunk() -> record_screening_event(epoch=6)`.
+
+**Root cause.** `run_pilot()` always restarts its chunk walk from
+`target=6` on every call (`chunk_epoch_targets`), relying on each chunk's
+own idempotency checks (existing checkpoint -> no retrain; existing
+validation pickle -> no re-evaluation) to make a rerun a no-op. The
+screening loop inside `run_pilot_chunk()` had no equivalent check: it
+re-fed every cadence epoch in the chunk's range through
+`record_screening_event()` regardless of whether
+`pilot_orchestration_state.json`'s `logged_screening_epochs` already
+recorded it. `record_official_validation_event`'s own idempotent-replay
+only covers replaying the exact LAST recorded history entry, not an
+earlier one a later chunk's screening has since superseded -- so once the
+persisted early-stopping history's last entry was epoch 9, replaying
+epoch 6 (already screened and logged) raised "out of order" instead of
+being recognized as already-done.
+
+**Fix.** In `run_pilot_chunk()`'s screening loop, an epoch already present
+in `logged_screening_epochs` is now skipped outright (no re-evaluation,
+no re-record) rather than always re-processed. A light consistency check
+(not broad reconciliation) still guards against silently skipping
+genuinely inconsistent state: a stopping-eligible epoch marked logged
+must actually be present in the reloaded early-stopping history, or a
+`PilotOrchestrationError` is raised. No change to checkpoint discovery,
+continuation, evaluation math, early-stopping policy, or launcher
+classification.
+
+**Verification.** New end-to-end test in `tests/test_pilot_orchestration.py`,
+`test_run_pilot_end_to_end_rerun_of_fully_screened_earlier_chunks_is_idempotent`,
+reproduces job 45718742's exact shape (checkpoints 1-6 flat, 7-15 in
+`continue_training_from_epoch006/`, `pilot_orchestration_state.json`
+already listing `logged_screening_epochs: [3, 6, 9]`, early-stopping
+history already ending at epoch 9 with `stopped: false`). Confirmed:
+first verified to fail with the exact real-job error before the fix, then
+passes after it; no train/evaluate callback invoked; both persisted state
+files byte-identical before and after; `run_pilot()` proceeds straight to
+`final_status: blocked_continuation_overshoot_conflict` with
+`highest_screened_epoch=9`, `next_intended_screening_epoch=12`,
+`overshoot_epochs=[10, 11, 12, 13, 14, 15]`,
+`safe_to_continue_automatically=False`. Ran only
+`pytest tests/test_pilot_orchestration.py` -- 34 passed (was 33 before this
+correction's 1 new test). Full repository suite not run (binding resource
+constraint for this narrow correction).
+
+**No further Moriah run should occur until this narrow local
+rerun-idempotency fix is committed.** A resubmission before that would
+repeat the same crash the next time this pilot is rerun after a chunk
+sequence has already been screened past its earliest chunks.
+
 ## 2026-07-30 — Stage 1 lead-6 pilot — real Moriah recovery (job 45718473): scientific recovery correct, launcher status-propagation defect found and fixed
 
 **Scope.** Local-only correction to the two files that surface

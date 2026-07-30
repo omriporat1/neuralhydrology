@@ -1,6 +1,35 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-30 (Stage 1 lead-6 pilot — real Moriah recovery job 45718473 confirmed the continuation-nesting fix scientifically, but exposed a narrow launcher status-propagation defect, now fixed locally — NO further Moriah job until this fix is committed)
+Last updated: 2026-07-30 (Stage 1 lead-6 pilot — real Moriah verification job 45718742 confirmed the launcher status-propagation fix, but exposed a narrow rerun-idempotency defect, now fixed locally — NO further Moriah job until this fix is committed)
+
+## Stage 1 lead-6 optimization pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed (2026-07-30)
+
+Slurm job `45718742` (partition `catfish`, source commit
+`7c6b02a599b885682a97081a3f166d97097bd4ec`, elapsed `00:03:17`, no stderr)
+confirmed the previous launcher-status fix works: the launcher correctly
+classified the run as `BLOCKED_MANUAL_REVIEW_REQUIRED`
+(`pilot_final_status: blocked_continuation_overshoot_conflict`,
+`safe_to_continue_automatically: false`, overshoot epochs 10-15, exit code
+1). **No training occurred; scientific state was not modified.** But
+before reaching that clean overshoot block, the Python pilot process
+crashed: `PilotEarlyStoppingError: epoch 6 is not after the last recorded
+epoch 9 -- out of order`, from `run_pilot() -> run_pilot_chunk() ->
+record_screening_event(epoch=6)`. Root cause: `run_pilot()` always
+restarts its chunk walk from epoch 6 on every call, and the screening
+loop had no check for an epoch already present in this run's persisted
+`pilot_orchestration_state.json` (`logged_screening_epochs: [3, 6, 9]`),
+so it re-fed already-screened epoch 6 into the early-stopping state
+machine after the persisted history's last entry had already advanced to
+epoch 9. Fixed narrowly in `src/baseline/pilot_orchestration.py`: an
+already-logged screening epoch is now skipped outright (no
+re-evaluation, no re-record), with a light consistency check against the
+reloaded early-stopping history so genuinely inconsistent state is never
+silently skipped. New focused test
+`test_run_pilot_end_to_end_rerun_of_fully_screened_earlier_chunks_is_idempotent`
+reproduces job 45718742's exact shape; verified to fail with the real
+job's exact error before the fix and pass after it, with both persisted
+state files unchanged. **No further Moriah run should occur until this
+narrow local rerun-idempotency fix is committed.**
 
 ## Stage 1 lead-6 optimization pilot — real Moriah recovery (job 45718473): correct scientific recovery, launcher status-propagation defect found and fixed (2026-07-30)
 
