@@ -4,6 +4,56 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-07-30 — Stage 1 lead-6 pilot — `emb128x64_seedA` candidate complete: continuation adopted, epochs 12 and 15 screened (job 45722908)
+
+**Scope.** Documentation-only closure of the continuation-repair/adoption
+sequence recorded in the entries below. No code, tests, configs,
+launchers, checkpoints, manifests, or state files changed in this task.
+
+**Adoption.** The production `pilot_accepted_continuation.json` manifest
+for `emb128x64_seedA` was authored with real SHA-256 hashes for the
+epoch-12 and epoch-15 model+optimizer checkpoints (each filename-bound to
+its own key epoch per the trust-binding correction — see the entry
+below), and used successfully on Moriah in job `45722908` (partition
+`catfish`, source commit `af8945d04451d7699ab54b13082eaf870f04f28e`,
+elapsed `00:10:34`, Slurm state `COMPLETED`, exit code `0:0`). **No
+training occurred.** The existing accepted checkpoints at epoch 12 and
+epoch 15 were adopted and evaluated sequentially.
+
+**Final screening history.** Epoch 3 (diagnostic only); epoch 6 (median
+per-basin raw-space NSE `0.20454161610527344`, new best); epoch 9
+(`0.18124855313577198`, no improvement); epoch 12 (`0.1993193615763258`,
+no improvement under the minimum-improvement threshold); epoch 15
+(`0.17125263282608943`, no improvement).
+
+**Final early-stopping state.** Best epoch `6`; best metric
+`0.20454161610527344`; `events_since_best_improvement = 3`; `stopped =
+true`; stop reason `patience_exhausted`; stop epoch `15`.
+
+**Final orchestration state.** `logged_screening_epochs = [3, 6, 9, 12,
+15]`; highest physical checkpoint epoch 15; highest screened epoch 15; no
+overshoot epochs remain unresolved; no further screening epoch is
+intended for this run. No further training is authorized or required for
+`emb128x64_seedA`.
+
+**Epoch 6 is the selected checkpoint for this one candidate configuration
+only.** It is not the final Stage 1 production model — that
+determination requires comparing results across all six run
+specifications in the wider optimization campaign.
+
+**Sealed populations untouched.** Screening used only the
+development/screening-subset population, exactly as in every prior
+screening event for this pilot. No temporal-test or spatial-holdout data
+was accessed.
+
+**Closure.** This closes the continuation-repair/adoption sequence:
+provenance review of the real epoch 7-15 checkpoints, the explicit
+run-specific adoption manifest, the manifest's trust-binding correction,
+and now real Moriah adoption and screening — all without ever retraining
+past the original, uninterrupted epoch 6→15 continuation. The next phase
+is the wider optimization campaign: the other five run specifications,
+screened and stopped under this same frozen protocol.
+
 ## 2026-07-30 — Stage 1 lead-6 pilot — `emb128x64_seedA` epoch 6→15 continuation: provenance review and explicit adoption mechanism
 
 **Scope.** Two-part decision. Part 1 (inspection-only, no code changes): whether
@@ -46,18 +96,20 @@ without any new dedicated sequencing code. 10 new focused tests added to
 `tests/test_pilot_orchestration.py`; only `pytest tests/test_pilot_orchestration.py -q`
 was run (44 passed), per this task's scope.
 
-**Real hashes not yet available.** No Moriah access was permitted in this
-task, and no SHA-256 checksums for the real epoch-12/epoch-15 checkpoints
-exist anywhere in the local repository or evidence file (which records only
-file sizes/timestamps). The production `pilot_accepted_continuation.json` for
-`emb128x64_seedA` therefore has **not** been authored yet — this decision
-records the mechanism and the provenance verdict, not a completed adoption.
-Authoring it requires one lightweight Moriah-side step: compute
+**Real hashes not yet available (superseded).** No Moriah access was
+permitted in this task, and no SHA-256 checksums for the real
+epoch-12/epoch-15 checkpoints exist anywhere in the local repository or
+evidence file (which records only file sizes/timestamps). The production
+`pilot_accepted_continuation.json` for `emb128x64_seedA` therefore has
+**not** been authored yet — this decision records the mechanism and the
+provenance verdict, not a completed adoption. Authoring it requires one
+lightweight Moriah-side step: compute
 `sha256sum model_epoch012.pt optimizer_state_epoch012.pt model_epoch015.pt
 optimizer_state_epoch015.pt` inside
 `continue_training_from_epoch006/`, and write the manifest (schema in
 `docs/stage1_lead06_pilot_v001.md`) into the base run directory before the
-next screening run.
+next screening run. **This was subsequently completed — see the closure
+entry above (job `45722908`).**
 
 **Generated, not committed.** The manifest lives alongside
 `pilot_early_stopping_state.json`/`pilot_orchestration_state.json` — both of
@@ -68,9 +120,11 @@ outside one specific run directory). The scientific decision itself (this
 entry) is the committed, reviewable record; the manifest is the mechanical,
 regenerable trigger.
 
-**Status.** No Moriah adoption or screening run using this mechanism has
-occurred yet. `emb128x64_seedA` remains paused after epoch 9 (the last
-trusted, screened checkpoint) exactly as before this task.
+**Status (superseded).** No Moriah adoption or screening run using this
+mechanism has occurred yet. `emb128x64_seedA` remains paused after epoch 9
+(the last trusted, screened checkpoint) exactly as before this task. **See
+the closure entry above: job `45722908` completed the adoption and
+screening, and `emb128x64_seedA` is now complete.**
 
 ## 2026-07-30 — Stage 1 lead-6 pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed
 

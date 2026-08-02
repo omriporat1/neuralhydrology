@@ -1,6 +1,26 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-30 (Stage 1 lead-6 pilot — `emb128x64_seedA` epoch 6→15 continuation reviewed and judged conditionally safe to adopt; explicit per-run adoption manifest mechanism implemented and tested locally — real hashes and a Moriah adoption run are still outstanding)
+Last updated: 2026-07-30 (Stage 1 lead-6 pilot — `emb128x64_seedA` candidate complete: epoch 6→15 continuation adopted via the real-hash manifest and screened to completion in Moriah job 45722908; early stopping fired at epoch 15; epoch 6 is the selected checkpoint for this one candidate, not the final Stage 1 production model)
+
+## Stage 1 lead-6 optimization pilot — `emb128x64_seedA` candidate complete: continuation adopted, epochs 12 and 15 screened (job 45722908) (2026-07-30)
+
+The production `pilot_accepted_continuation.json` manifest (real SHA-256
+hashes, filename-bound to each entry's own key epoch per the trust-binding
+correction) was used in job `45722908` (partition `catfish`, source commit
+`af8945d04451d7699ab54b13082eaf870f04f28e`, elapsed `00:10:34`, `COMPLETED`,
+exit `0:0`) to adopt the existing epoch 6→15 continuation with **no
+retraining**; epochs 12 and 15 were evaluated sequentially. Final screening:
+epoch 6 median NSE `0.20454161610527344` (best), epoch 9
+`0.18124855313577198`, epoch 12 `0.1993193615763258`, epoch 15
+`0.17125263282608943` — no improvement after epoch 6, so early stopping
+fired at epoch 15 (`patience_exhausted`). **Epoch 6 is the selected
+checkpoint for the `emb128x64_seedA` candidate only**, not the final Stage 1
+production model — that requires comparing all six run specifications in
+the wider optimization campaign, which is the next phase. Sealed
+temporal-test and spatial-holdout populations were not accessed. This
+closes the continuation-repair/adoption sequence described in the entry
+below. Full detail: `docs/decision_log.md`'s 2026-07-30 closure entry;
+`docs/stage1_lead06_pilot_v001.md`'s "Fifth Moriah result" section.
 
 ## Stage 1 lead-6 optimization pilot — `emb128x64_seedA` epoch 6→15 continuation: provenance review + explicit adoption mechanism (2026-07-30)
 
@@ -19,9 +39,9 @@ unused if early stopping fires at epoch 12. 10 new focused tests added
 (`tests/test_pilot_orchestration.py`, 44 passed total). See
 `docs/decision_log.md`'s 2026-07-30 entry for the full provenance verdict and
 manifest contract, and `docs/stage1_lead06_pilot_v001.md` for the schema.
-**Not yet done:** the real epoch-12/epoch-15 SHA-256 hashes (no Moriah access
-in this task) and any actual Moriah adoption/screening run — `emb128x64_seedA`
-remains paused after epoch 9.
+**Superseded:** the real epoch-12/epoch-15 SHA-256 hashes were subsequently
+filled in and the manifest used in a real Moriah adoption/screening run —
+see the closure entry above, "`emb128x64_seedA` candidate complete."
 
 ## Stage 1 lead-6 optimization pilot — real Moriah verification (job 45718742): launcher classification fix confirmed, rerun-idempotency defect found and fixed (2026-07-30)
 

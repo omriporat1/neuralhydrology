@@ -1,14 +1,16 @@
 # Stage 1 lead-6 optimization pilot (`stage1_lead06_pilot_v001`)
 
-Status: **first Moriah workflow-qualification run attempted and paused after
-two independent orchestration bugs (a missing-validation-results bug, then a
-continuation-nesting/additive-epoch bug found on resume); both corrected
-locally and re-verified by tests, but not yet re-run on Moriah.** No
-temporal-test or spatial-holdout data has been accessed. See "Moriah
-workflow-qualification run and orchestration correction" and "Second Moriah
-failure and continuation-nesting/epoch-semantics correction" below for the
-current, authoritative status; the rest of this document describes the
-pilot design as originally implemented and verified locally before that run.
+Status: **`emb128x64_seedA` candidate complete.** The epoch 6→15
+continuation trajectory was explicitly adopted via the run-specific
+SHA-256 manifest and screened to completion in job `45722908`; early
+stopping fired at epoch 15, and epoch 6 is the selected checkpoint for
+this one candidate configuration (not a claim about the final Stage 1
+production model — see "Fifth Moriah result" below). No temporal-test or
+spatial-holdout data has been accessed. See "Fifth Moriah result:
+`emb128x64_seedA` candidate complete" below for the current, authoritative
+status; the rest of this document describes the pilot design as
+originally implemented and verified locally, plus the sequence of
+orchestration corrections that preceded this result.
 
 ## Purpose
 
@@ -407,6 +409,55 @@ classification logic changed. **No further Moriah job should run until
 this local rerun-idempotency fix is committed.** Full detail:
 `docs/decision_log.md`'s 2026-07-30 rerun-idempotency entry.
 
+## Fifth Moriah result: `emb128x64_seedA` candidate complete — continuation adopted, epochs 12 and 15 screened, early stopping fired
+
+Job `45722908` (partition `catfish`, source commit
+`af8945d04451d7699ab54b13082eaf870f04f28e`, elapsed `00:10:34`, Slurm state
+`COMPLETED`, exit code `0:0`) used the production
+`pilot_accepted_continuation.json` manifest (real SHA-256 hashes for the
+epoch-12 and epoch-15 model+optimizer checkpoints, filename-bound to their
+own key epoch per the trust-binding correction above) to adopt the existing
+epoch 6→15 continuation trajectory without any retraining. **No training
+occurred**; epochs 12 and 15 were evaluated sequentially from the
+already-existing checkpoints.
+
+Final screening history: epoch 3 (diagnostic only, before
+`min_epoch_before_stop`); epoch 6 (median per-basin raw-space NSE
+`0.20454161610527344`, new best); epoch 9 (`0.18124855313577198`, no
+improvement); epoch 12 (`0.1993193615763258`, no improvement under the
+`min_delta` threshold); epoch 15 (`0.17125263282608943`, no improvement).
+
+Final early-stopping state: best epoch `6`, best metric
+`0.20454161610527344`, `events_since_best_improvement = 3`, `stopped =
+true`, stop reason `patience_exhausted`, stop epoch `15`.
+
+Final orchestration state: `logged_screening_epochs = [3, 6, 9, 12, 15]`;
+highest physical checkpoint epoch 15; highest screened epoch 15; no
+overshoot epochs remain unresolved; no further screening epoch is intended
+for this run. No further training is authorized or required for
+`emb128x64_seedA`.
+
+**Epoch 6 is the selected checkpoint for this one candidate configuration.**
+It is not a claim about the final Stage 1 production model — that
+determination requires comparing results across all six run specifications
+in the wider optimization campaign (see "The six run specifications" above
+and "What has not been done" below).
+
+**Sealed populations untouched.** This screening run used only the
+development/screening-subset population, exactly as in every prior
+screening event for this pilot. No temporal-test or spatial-holdout data
+was accessed.
+
+**This closes the continuation-repair/adoption sequence** that began with
+the additive-epoch overshoot bug (see "Second Moriah failure..." above):
+provenance review of the real epoch 7-15 checkpoints, the explicit
+run-specific adoption manifest, the manifest's trust-binding correction,
+and now real Moriah adoption and screening, all without ever retraining
+past the original, uninterrupted epoch 6→15 continuation. The next phase
+is the wider optimization campaign: the other five run specifications,
+screened and stopped under this same frozen protocol. Full detail:
+`docs/decision_log.md`'s 2026-07-30 closure entry.
+
 ## Implementation modules
 
 | Module | Task |
@@ -583,38 +634,38 @@ manifest:
   epoch is still evaluated/screened through the normal pipeline. Idempotent
   on rerun via the existing `logged_screening_epochs` mechanism.
 
-**Real hashes not yet filled in.** No Moriah access was available in this
-task, and no SHA-256 for the real epoch-12/epoch-15 checkpoints exists
-locally (the evidence file records only sizes/timestamps). The production
-manifest for `emb128x64_seedA` has therefore not been authored — computing
-`sha256sum` on the four real files inside
-`continue_training_from_epoch006/` on Moriah, and writing this file into the
-base run directory, is a lightweight prerequisite step before the next
-screening run. 10 new focused tests
+**Real hashes filled in and used (superseded — see "Fifth Moriah result"
+below).** The production manifest for `emb128x64_seedA` was authored with
+real SHA-256 hashes for the epoch-12 and epoch-15 model+optimizer
+checkpoints and successfully used, without retraining, in job `45722908` to
+adopt and screen both epochs. 10 focused tests
 (`test_no_manifest_preserves_block`, `test_correct_manifest_trusts_epoch_12`,
 `test_epoch_12_evaluated_without_training`,
 `test_epoch_15_untouched_during_epoch_12_step`,
 `test_incorrect_model_hash_rejected`, `test_incorrect_optimizer_hash_rejected`,
 `test_wrong_run_id_or_path_rejected`, `test_epoch_15_used_only_if_still_required`,
-`test_stopping_at_12_leaves_15_unused`, `test_rerun_idempotency_with_accepted_manifest`)
-cover this mechanism in `tests/test_pilot_orchestration.py` (44 passed total).
+`test_stopping_at_12_leaves_15_unused`, `test_rerun_idempotency_with_accepted_manifest`),
+plus one further trust-binding test
+(`test_epoch_12_entry_pointing_to_epoch_15_files_rejected`), cover this
+mechanism in `tests/test_pilot_orchestration.py` (45 passed total).
 
 ## What has not been done
 
-`emb128x64_seedA` is paused after epoch 6, not complete or resumed. Per the
-second correction above, one controlled recovery invocation (reusing the
-existing epoch-9 checkpoint and screening it, no retraining, no manual
-checkpoint movement/deletion required) is safe; continuing training past
-epoch 9 is not, while checkpoints 10-15 remain in the existing continuation
-layout — that requires a later decision. Neither the recovery nor any
-further continuation has been executed on Moriah yet. The other five runs
-have not been submitted or started. No full-population
-evaluation. No temporal-test or spatial-holdout access. No change to the
-certified Compact Scientific Package or canonical split membership. No
-regeneration of the screening subset. No hydrograph atlas generation. No
-automated sweep. No EA-LSTM work. Neither correction in this document has
-been re-verified against a real Moriah run. One residual risk remains
-open and unresolved locally: the module docstring's claim that
+`emb128x64_seedA` **is complete**: epoch 6→15 was adopted via the manifest
+and screened in job `45722908`, early stopping fired at epoch 15, and epoch
+6 is the selected checkpoint for this one candidate configuration (see
+"Fifth Moriah result" above) — it is not a claim about the final Stage 1
+production model. The other five run specifications have not been
+submitted or started; screening and stopping them, under this same frozen
+protocol, is the next phase (the wider optimization campaign). No
+full-population evaluation. No temporal-test or spatial-holdout access. No
+change to the certified Compact Scientific Package or canonical split
+membership. No regeneration of the screening subset. No hydrograph atlas
+generation. No automated sweep. No EA-LSTM work. The continuation-nesting
+and launcher-classification corrections in this document have now been
+verified against real Moriah runs (jobs `45718473`, `45718742`, and
+`45722908`); one residual risk remains open and unresolved locally: the
+module docstring's claim that
 `continue_from_epoch` is a real, recognized NH `Config` property is not
 independently verified in this codebase and cannot be checked here since
 `neuralhydrology` is not installed locally — see `docs/decision_log.md`'s
