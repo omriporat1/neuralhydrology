@@ -223,7 +223,8 @@ cannot influence event selection by construction).
   24 atlas basins, per `docs/repo_policy.md`'s remote-evidence policy, which
   this task explicitly did not perform. **The full certified package root
   must not be transferred locally by default** — see the real-execution
-  workflow note below.
+  workflow note below. **Superseded (2026-08-02): the real atlas has since
+  been generated and visually reviewed — see L.3c below.**
 
 Example command (placeholders, not machine-specific paths):
 
@@ -252,6 +253,76 @@ fallback if local rendering is required. Neither has been performed by this
 addendum, and **the full 2,557-basin package must not be transferred to a
 local machine for this purpose.** This choice remains a later operational
 decision, not implemented here.
+
+**L.3c — real execution completed (2026-08-02): atlas24 evaluation-only
+derivative + rendering PASS, visual review adopted.** The workflow described
+in L.3b's Moriah-Slurm path was carried out for real, against the completed
+`emb128x64_seedA` run's selected epoch-6 checkpoint (not the epoch-15 stop
+point — see the "Checkpoint identity" note in the evidence write-up below).
+
+- **Build/evaluate/integrity** (`scripts/build_stage1_atlas24_eval_run_dir.py`,
+  `scripts/run_stage1_atlas24_eval_moriah.sbatch`, job `45729427`, `PASS`):
+  built a disposable, evaluation-only NH run directory pointed at exactly the
+  24 fixed atlas basins for the validation period, reusing the original
+  checkpoint and scaler byte-for-byte (never refit) and reusing the original
+  frozen config except for the approved basin-file/run-dir/experiment-name
+  fields (config-diff-checked, zero unexpected differences). Confirms:
+  original checkpoint, scaler, config, and the original ~400-basin screening
+  validation results pickle are sha256-identical before and after; the
+  derivative's own results pickle contains exactly the 24 atlas basin IDs;
+  an `EVALUATION_ONLY_DO_NOT_TRAIN.txt` marker is written into the derivative
+  directory.
+- **Rendering** (`scripts/render_stage1_hydrographs.py`, via
+  `scripts/render_stage1_hydrographs_moriah.sbatch`, job `45729449`,
+  `PASS`): reused the existing rendering tooling (L.3a) unchanged, CPU-only
+  (`glacier`, no GPU), against the derivative's results pickle — 24
+  individual atlas panels, one deterministic 8-basin compact panel, per-basin
+  metrics, 96 event windows (observed-discharge-only selection, unchanged),
+  and a checksummed rendering manifest/summary.
+- **Commit-readiness review (this pass).** Reviewing the code written to
+  support this operation found two concrete gaps in the shared
+  evaluation-only-derivative helpers (`src/baseline/nh_seed_evaluation.py`,
+  used by both `prepare_external_scaler_eval_run_dir` and
+  `prepare_development_population_eval_run_dir`), now fixed and covered by
+  new focused tests:
+  1. Neither helper checked that its `out_run_dir` differs from (or is
+     nested with) the protected `development_run_dir` before its
+     `force`-gated directory removal. Fixed by an unconditional
+     `_raise_if_out_run_dir_collides_with_development_run_dir` check that
+     cannot be bypassed by `force=True`, checked before any deletion.
+  2. `scripts/run_stage1_nh.py`'s ordinary `train`/`continue` commands had no
+     check against pointing the trainer at an evaluation-only derivative
+     directory (whose checkpoint must never be refit). Fixed by a new
+     `raise_if_evaluation_only_bundle` guard (mirroring the existing
+     `raise_if_holdout_bundle` spatial-holdout guard), wired into both
+     commands before NeuralHydrology's own `start_run`/`continue_run` are
+     invoked.
+  All other reviewed properties (exactly-24-basin enforcement,
+  development-only/spatial-holdout basin-membership validation, explicit
+  required `--epoch`, Slurm-only Python execution, no credentials in either
+  launcher, generated outputs written outside any tracked directory,
+  explicit rerun/force semantics, aggregate PASS/FAIL status that cannot
+  mask a sub-check failure, and full command-line reproducibility from the
+  evidence bundle) were already satisfied by the existing design and did not
+  require new tests.
+- **Adopted visual interpretation.** Recorded in full in
+  `docs/decision_log.md`'s 2026-08-02 entry for this operation (same
+  wording); summarized here: genuine hydrologic signal with many predicted
+  events in approximately the correct temporal neighborhood, no obvious
+  universal six-hour displacement or global raw-space conversion failure
+  (a visual diagnostic observation, not a formal proof) — but performance
+  remains weak and hydrologically inconsistent, with commonly attenuated
+  large peaks, some false/exaggerated predicted peaks, often poor
+  recession/baseflow behavior, and strongly basin-varying bias. Supports
+  continuing structural optimization; does not establish model adequacy,
+  architecture superiority, full development-validation performance, or
+  final Stage 1 readiness. The atlas's aggregate median NSE (≈0.14) is not a
+  representative substitute for the provisional ~400-basin screening metric.
+- **Full technical write-up and checksums** (untracked, per
+  `docs/repo_policy.md`): `reports/stage1_validation_optimization_foundation_v001/part_l_atlas24_eval_emb128x64_seedA_v001/part_l_atlas24_eval_emb128x64_seedA_v001.md`.
+- **Not changed by this pass:** no model-selection decision; no full
+  development/population evaluation; no sealed-set access; no `raw_seedA`
+  launch; no W&B activity.
 
 **L.4 — W&B adoption sequencing (adopted direction; not yet qualified or
 enabled).** Order: (1) ordinary tracking qualification, (2) an offline-mode

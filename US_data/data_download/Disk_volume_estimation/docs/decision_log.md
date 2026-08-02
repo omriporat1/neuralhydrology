@@ -4,6 +4,69 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-08-02 — Stage 1 lead-6 pilot — `emb128x64_seedA` real 24-basin hydrograph-atlas evaluation + rendering (jobs 45729427, 45729449): visual review adopted
+
+**Scope.** Real Moriah execution (not documentation-only), following directly
+from the roadmap entry below. Built and evaluated a disposable,
+evaluation-only derivative of the completed `emb128x64_seedA` run's frozen
+epoch-6 checkpoint (same weights, same fitted scaler, same config) against
+the fixed 24-basin hydrograph atlas for the validation period only (job
+`45729427`, PASS — build + config-diff + evaluate + integrity checks all
+exit 0), then rendered the full 24-basin atlas plus a deterministic 8-basin
+compact panel from the derivative's own results pickle, reusing the existing
+rendering tooling unchanged (job `45729449`, PASS). No training, no scaler
+refit, no sealed-set access (temporal-test, spatial-holdout, California), no
+`raw_seedA` launch, no W&B activity, and no repository commit occurred. The
+original run directory, checkpoint (`model_epoch006.pt`), scaler
+(`train_data_scaler.yml`), config (`config.yml`), and ~400-basin screening
+validation results pickle are verified byte-identical before and after
+(sha256, pre/post). This derivative is diagnostic/visualization-only and is
+not authoritative for checkpoint, architecture, or hyperparameter selection;
+it does not replace or resample the provisional ~400-basin screening result.
+This entry also records two focused safety-hardening fixes applied to the
+shared evaluation-only-derivative machinery while reviewing this operation
+for commit-readiness (an out-run-dir/development-run-dir path-collision
+guard, and a training-entrypoint guard against the `EVALUATION_ONLY_DO_NOT_TRAIN.txt`
+marker) — see `docs/stage1_validation_optimization_foundation.md` Part L.3c
+for full detail.
+
+**Evidence.** 24 individual atlas panels, one deterministic 8-basin compact
+panel, per-basin metrics (`per_basin_metrics.csv`), 96 event windows
+(`event_window_table.csv`), rendering manifest/summary, all reusing the
+existing, unmodified raw-space conversion and metric code
+(`src/baseline/nh_raw_space_evaluation.py` / `nh_seed_evaluation.py`).
+Event-window selection is observed-discharge-only (unchanged from the
+existing rendering tooling). Full technical/operational detail and
+checksums: `docs/stage1_validation_optimization_foundation.md` Part L.3c;
+full evidence write-up (untracked): `reports/stage1_validation_optimization_foundation_v001/part_l_atlas24_eval_emb128x64_seedA_v001/`.
+
+**Adopted scientific interpretation (visual diagnostic observation, not a
+formal proof; not every individual timing relationship was manually
+validated).** The 24-basin atlas and compact panel show genuine hydrologic
+signal — many predicted events occur in approximately the correct temporal
+neighborhood of the corresponding observed event, with no obvious universal
+six-hour displacement and no evidence of a global raw-space conversion
+failure. Performance nonetheless remains weak and hydrologically
+inconsistent: large observed peaks are commonly attenuated; some basins show
+false or exaggerated predicted peaks; recession and baseflow behavior are
+often poor; bias varies strongly by basin. The 24-basin atlas's aggregate
+median validation-period NSE (≈0.14) is a deliberately stratified diagnostic
+sample, not a representative substitute for the provisional ~400-basin
+screening metric, and **must not** be presented as one. This result
+supports continuing structural optimization; it does **not** establish
+model adequacy, architecture superiority, full development-validation
+performance, or final Stage 1 readiness, and it does not change the
+selected epoch-6 checkpoint or any other model-selection decision.
+
+**Decisions carried forward, unchanged by this entry.** `raw_seedA` remains
+the preferred next Stage A structural candidate (Part L.2). W&B offline-mode
+qualification remains the immediate next operational preparation before
+that launch, per the existing W&B adoption sequencing (Part L.4).
+
+**Not done by this entry.** No training, no test-set/spatial-holdout access,
+no W&B operation, no `raw_seedA` launch, and no repository staging or commit
+occurred.
+
 ## 2026-08-02 — Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap: Stage A/Stage B framing, hydrograph timing, W&B sequencing, multi-fidelity direction (documentation only)
 
 **Scope.** Documentation-only roadmap patch, written after the local,

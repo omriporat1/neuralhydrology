@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .nh_config_generation import HOLDOUT_MARKER_FILENAME
+from .nh_config_generation import HOLDOUT_MARKER_FILENAME, raise_if_holdout_bundle
 from .nh_raw_space_evaluation import (
     DEFAULT_MAX_RELATIVE_MAD,
     DEFAULT_MIN_AREA_SAMPLES,
@@ -58,14 +58,19 @@ from .package_audit import sha256_file
 
 __all__ = [
     "NHSeedEvaluationError",
+    "EVALUATION_ONLY_MARKER_FILENAME",
     "weight_stem",
     "period_results_path",
     "load_period_results",
     "basin_netcdf_path",
     "raw_space_metrics_for_run_period",
     "require_holdout_bundle",
+    "raise_if_evaluation_only_bundle",
     "prepare_external_scaler_eval_run_dir",
+    "prepare_development_population_eval_run_dir",
 ]
+
+EVALUATION_ONLY_MARKER_FILENAME = "EVALUATION_ONLY_DO_NOT_TRAIN.txt"
 
 
 class NHSeedEvaluationError(Exception):
@@ -243,6 +248,46 @@ def require_holdout_bundle(generated_dir) -> None:
         )
 
 
+def raise_if_evaluation_only_bundle(run_dir) -> None:
+    """Guard for the ordinary training entrypoints (``scripts/run_stage1_nh.py
+    train``/``continue``): refuses to proceed if ``run_dir`` is an
+    evaluation-only derivative run directory produced by
+    :func:`prepare_development_population_eval_run_dir` or
+    :func:`prepare_external_scaler_eval_run_dir`, identified by the presence
+    of :data:`EVALUATION_ONLY_MARKER_FILENAME`. Its checkpoint is copied
+    byte-for-byte from an already-completed training run; training against
+    it would silently discard that training and produce a misleading run."""
+    marker_path = Path(run_dir) / EVALUATION_ONLY_MARKER_FILENAME
+    if marker_path.is_file():
+        raise NHSeedEvaluationError(
+            f"refusing to train: {run_dir} is an EVALUATION-ONLY derivative run directory "
+            f"(found {marker_path}). Point the training launcher at the original development "
+            "run directory instead."
+        )
+
+
+def _raise_if_out_run_dir_collides_with_development_run_dir(out_run_dir: Path, development_run_dir: Path) -> None:
+    """Shared safety check for both eval-run-dir builders below: refuses to
+    proceed if ``out_run_dir`` is the same path as (or nested inside/around)
+    ``development_run_dir``. Runs unconditionally, before the ``force``-gated
+    ``shutil.rmtree(out_run_dir)`` below, so it cannot be bypassed by
+    ``force=True`` -- a path-collision here would otherwise silently delete
+    the original, already-trained run directory."""
+    out_resolved = out_run_dir.resolve()
+    dev_resolved = development_run_dir.resolve()
+    if out_resolved == dev_resolved:
+        raise NHSeedEvaluationError(
+            f"out_run_dir must not be the same path as development_run_dir (would destroy the "
+            f"original training run): {out_run_dir}"
+        )
+    if dev_resolved in out_resolved.parents or out_resolved in dev_resolved.parents:
+        raise NHSeedEvaluationError(
+            "out_run_dir and development_run_dir must not be nested inside one another (would risk "
+            f"destroying the original training run): out_run_dir={out_run_dir}, "
+            f"development_run_dir={development_run_dir}"
+        )
+
+
 def prepare_external_scaler_eval_run_dir(
     *,
     development_run_dir,
@@ -265,6 +310,7 @@ def prepare_external_scaler_eval_run_dir(
     holdout_generated_dir = Path(holdout_generated_dir)
     out_run_dir = Path(out_run_dir)
 
+    _raise_if_out_run_dir_collides_with_development_run_dir(out_run_dir, development_run_dir)
     require_holdout_bundle(holdout_generated_dir)
 
     holdout_config_src = holdout_generated_dir / "config.yaml"
@@ -320,6 +366,124 @@ def prepare_external_scaler_eval_run_dir(
         "config_yaml_sha256": sha256_file(config_dst),
     }
     manifest_path = out_run_dir / "EXTERNAL_SCALER_EVAL_MANIFEST.json"
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    return manifest
+
+
+def prepare_development_population_eval_run_dir(
+    *,
+    development_run_dir,
+    epoch: int,
+    eval_generated_dir,
+    out_run_dir,
+    force: bool = False,
+) -> dict:
+    """Builds a minimal NH-Tester-compatible run directory for re-evaluating
+    an already-trained development-population checkpoint against a NARROWER
+    validation-basin subset than the one it was screened on (e.g. the fixed
+    24-basin hydrograph atlas), reusing the development run's checkpoint and
+    scaler byte-for-byte (never refit). Sibling to
+    :func:`prepare_external_scaler_eval_run_dir`, but for a
+    development-population/validation-period bundle instead of a
+    spatial-holdout/test-period one, so it does not require
+    :data:`HOLDOUT_MARKER_FILENAME` -- ``eval_generated_dir`` is expected to
+    come from :func:`src.baseline.pilot_lead06_config.build_pilot_bundle_with_validation_scope`
+    + ``write_generated_config`` with a non-holdout ``population_role``.
+
+    Returns a manifest dict (also written to
+    ``out_run_dir/DEVELOPMENT_POPULATION_EVAL_MANIFEST.json``) recording exact
+    provenance and sha256 of every copied artifact. Also writes
+    ``out_run_dir/EVALUATION_ONLY_DO_NOT_TRAIN.txt`` -- this run directory's
+    ``config.yml`` must never be passed to a trainer (its checkpoint is
+    already-trained; refitting from here would silently discard that
+    training and produce a misleading run).
+
+    Pure file I/O -- imports no NH/torch code, so this is fully testable
+    locally with a fabricated development_run_dir/eval_generated_dir.
+    """
+    development_run_dir = Path(development_run_dir)
+    eval_generated_dir = Path(eval_generated_dir)
+    out_run_dir = Path(out_run_dir)
+
+    _raise_if_out_run_dir_collides_with_development_run_dir(out_run_dir, development_run_dir)
+    raise_if_holdout_bundle(eval_generated_dir)
+
+    eval_config_src = eval_generated_dir / "config.yaml"
+    checkpoint_src = development_run_dir / f"{weight_stem(epoch)}.pt"
+    scaler_src = development_run_dir / "train_data" / "train_data_scaler.yml"
+    for label, p in (
+        ("eval bundle config.yaml", eval_config_src),
+        ("development checkpoint", checkpoint_src),
+        ("development scaler", scaler_src),
+    ):
+        if not p.is_file():
+            raise NHSeedEvaluationError(f"missing required {label}: {p}")
+
+    if out_run_dir.exists():
+        if not force:
+            raise NHSeedEvaluationError(f"out_run_dir already exists (pass force=True to overwrite): {out_run_dir}")
+        shutil.rmtree(out_run_dir)
+    out_run_dir.mkdir(parents=True)
+    (out_run_dir / "train_data").mkdir()
+
+    config_dst = out_run_dir / "config.yml"
+    checkpoint_dst = out_run_dir / f"{weight_stem(epoch)}.pt"
+    scaler_dst = out_run_dir / "train_data" / "train_data_scaler.yml"
+
+    shutil.copy2(eval_config_src, config_dst)
+    shutil.copy2(checkpoint_src, checkpoint_dst)
+    shutil.copy2(scaler_src, scaler_dst)
+
+    scaler_src_sha256 = sha256_file(scaler_src)
+    scaler_dst_sha256 = sha256_file(scaler_dst)
+    if scaler_src_sha256 != scaler_dst_sha256:
+        raise NHSeedEvaluationError(
+            f"scaler copy corrupted: source sha256 {scaler_src_sha256} != dest sha256 {scaler_dst_sha256}"
+        )
+    checkpoint_src_sha256 = sha256_file(checkpoint_src)
+    checkpoint_dst_sha256 = sha256_file(checkpoint_dst)
+    if checkpoint_src_sha256 != checkpoint_dst_sha256:
+        raise NHSeedEvaluationError(
+            f"checkpoint copy corrupted: source sha256 {checkpoint_src_sha256} != dest sha256 {checkpoint_dst_sha256}"
+        )
+
+    marker_path = out_run_dir / EVALUATION_ONLY_MARKER_FILENAME
+    with open(marker_path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "This run directory is EVALUATION-ONLY / VALIDATION-ONLY machinery.\n"
+            "It re-evaluates an already-trained development-population checkpoint\n"
+            "against a narrower validation-basin subset than the one it was\n"
+            "screened on (e.g. a fixed hydrograph-atlas subset), for\n"
+            "visualization/diagnostic purposes only.\n"
+            "\n"
+            "Do NOT run a trainer against this config.yml. Its checkpoint\n"
+            f"({checkpoint_dst.name}) and scaler are copied byte-for-byte from an\n"
+            "already-completed training run; refitting from here would silently\n"
+            "discard that training and produce a misleading run.\n"
+            "\n"
+            "These results are NOT authoritative for full-population validation,\n"
+            "NOT usable for checkpoint or architecture selection, NOT a\n"
+            "replacement for the original screening-subset validation result, and\n"
+            "NOT temporal-test or spatial-holdout evidence.\n"
+        )
+
+    manifest = {
+        "schema_name": "stage1_development_population_eval_run_dir_manifest",
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "development_run_dir": str(development_run_dir),
+        "epoch": epoch,
+        "eval_generated_dir": str(eval_generated_dir),
+        "out_run_dir": str(out_run_dir),
+        "scaler_reused_unchanged": True,
+        "scaler_sha256": scaler_dst_sha256,
+        "checkpoint_sha256": checkpoint_dst_sha256,
+        "config_yaml_sha256": sha256_file(config_dst),
+        "evaluation_only_marker": EVALUATION_ONLY_MARKER_FILENAME,
+    }
+    manifest_path = out_run_dir / "DEVELOPMENT_POPULATION_EVAL_MANIFEST.json"
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 

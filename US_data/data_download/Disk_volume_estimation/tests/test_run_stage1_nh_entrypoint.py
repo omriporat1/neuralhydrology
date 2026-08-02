@@ -21,6 +21,8 @@ from neuralhydrology.utils.config import Config
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _nh_synthetic import build_synthetic_package  # noqa: E402
 
+from src.baseline.nh_seed_evaluation import EVALUATION_ONLY_MARKER_FILENAME, NHSeedEvaluationError
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "run_stage1_nh.py"
 
@@ -145,6 +147,43 @@ def test_eval_logs_which_checkpoint_file_was_used(tmp_path, caplog):
 
     assert "Using the model weights from" in caplog.text
     assert "model_epoch001.pt" in caplog.text
+
+
+def test_train_refuses_evaluation_only_marked_directory(tmp_path):
+    # Guards against pointing the ordinary training entrypoint at a Part-L-style
+    # evaluation-only derivative directory (e.g. the atlas24 out_run_dir),
+    # whose checkpoint is already-trained and must never be refit. Must raise
+    # before neuralhydrology.nh_run.start_run is ever invoked, so no real
+    # config.yaml is needed for this bundle_dir.
+    bundle_dir = tmp_path / "atlas24_eval_run"
+    bundle_dir.mkdir()
+    (bundle_dir / EVALUATION_ONLY_MARKER_FILENAME).write_text("EVAL ONLY\n", encoding="utf-8")
+
+    module = _load_entrypoint_module()
+    argv = ["run_stage1_nh.py", "train", str(bundle_dir / "config.yml")]
+    module_argv_backup = sys.argv
+    sys.argv = argv
+    try:
+        with pytest.raises(NHSeedEvaluationError):
+            module.main()
+    finally:
+        sys.argv = module_argv_backup
+
+
+def test_continue_refuses_evaluation_only_marked_directory(tmp_path):
+    bundle_dir = tmp_path / "atlas24_eval_run"
+    bundle_dir.mkdir()
+    (bundle_dir / EVALUATION_ONLY_MARKER_FILENAME).write_text("EVAL ONLY\n", encoding="utf-8")
+
+    module = _load_entrypoint_module()
+    argv = ["run_stage1_nh.py", "continue", str(bundle_dir)]
+    module_argv_backup = sys.argv
+    sys.argv = argv
+    try:
+        with pytest.raises(NHSeedEvaluationError):
+            module.main()
+    finally:
+        sys.argv = module_argv_backup
 
 
 def test_eval_unsupported_metric_name_raises(tmp_path):

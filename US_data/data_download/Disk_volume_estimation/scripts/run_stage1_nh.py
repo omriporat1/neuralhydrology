@@ -83,10 +83,16 @@ def main() -> None:
     if args.command == "train":
         from neuralhydrology.nh_run import start_run
 
+        from src.baseline.nh_seed_evaluation import raise_if_evaluation_only_bundle
+
+        raise_if_evaluation_only_bundle(args.config_file.parent)
         start_run(config_file=args.config_file)
     elif args.command == "continue":
         from neuralhydrology.nh_run import continue_run
 
+        from src.baseline.nh_seed_evaluation import raise_if_evaluation_only_bundle
+
+        raise_if_evaluation_only_bundle(args.run_dir)
         continue_run(run_dir=args.run_dir, config_file=args.config_file)
     elif args.command == "eval":
         # Built directly (instead of neuralhydrology.nh_run.eval_run) only so

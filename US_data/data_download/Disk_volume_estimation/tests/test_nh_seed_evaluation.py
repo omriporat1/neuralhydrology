@@ -10,10 +10,13 @@ from src.baseline.nh_config_generation import (
     raise_if_holdout_bundle,
 )
 from src.baseline.nh_seed_evaluation import (
+    EVALUATION_ONLY_MARKER_FILENAME,
     NHSeedEvaluationError,
     basin_netcdf_path,
     load_period_results,
+    prepare_development_population_eval_run_dir,
     prepare_external_scaler_eval_run_dir,
+    raise_if_evaluation_only_bundle,
     raw_space_metrics_for_run_period,
     require_holdout_bundle,
     weight_stem,
@@ -92,6 +95,20 @@ def test_raise_if_holdout_bundle_blocks_training_launcher_on_holdout_bundle(tmp_
     (tmp_path / HOLDOUT_MARKER_FILENAME).write_text("TEST ONLY\n", encoding="utf-8")
     with pytest.raises(HoldoutBundleTrainingRejected):
         raise_if_holdout_bundle(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# raise_if_evaluation_only_bundle (guard for train/continue entrypoints)
+# ---------------------------------------------------------------------------
+
+def test_raise_if_evaluation_only_bundle_passes_for_ordinary_directory(tmp_path):
+    raise_if_evaluation_only_bundle(tmp_path)  # no marker -> must not raise
+
+
+def test_raise_if_evaluation_only_bundle_blocks_training_launcher_on_eval_only_dir(tmp_path):
+    (tmp_path / EVALUATION_ONLY_MARKER_FILENAME).write_text("EVAL ONLY\n", encoding="utf-8")
+    with pytest.raises(NHSeedEvaluationError):
+        raise_if_evaluation_only_bundle(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +195,35 @@ def test_prepare_external_scaler_eval_run_dir_rejects_non_holdout_source(tmp_pat
         )
 
 
+def test_prepare_external_scaler_eval_run_dir_rejects_out_dir_equal_to_development_dir(tmp_path):
+    holdout_dir = tmp_path / "spatial_holdout"
+    dev_dir = tmp_path / "development_run"
+    _make_holdout_bundle(holdout_dir)
+    _make_development_run_dir(dev_dir, epoch=5)
+
+    # force=True must NOT bypass this check -- a collision here would rmtree
+    # the original, already-trained development run directory.
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_external_scaler_eval_run_dir(
+            development_run_dir=dev_dir, epoch=5, holdout_generated_dir=holdout_dir,
+            out_run_dir=dev_dir, force=True,
+        )
+    assert (dev_dir / f"{weight_stem(5)}.pt").is_file()  # original untouched
+
+
+def test_prepare_external_scaler_eval_run_dir_rejects_out_dir_nested_in_development_dir(tmp_path):
+    holdout_dir = tmp_path / "spatial_holdout"
+    dev_dir = tmp_path / "development_run"
+    _make_holdout_bundle(holdout_dir)
+    _make_development_run_dir(dev_dir, epoch=5)
+
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_external_scaler_eval_run_dir(
+            development_run_dir=dev_dir, epoch=5, holdout_generated_dir=holdout_dir,
+            out_run_dir=dev_dir / "nested_out", force=True,
+        )
+
+
 def test_prepare_external_scaler_eval_run_dir_refuses_existing_dir_without_force(tmp_path):
     holdout_dir = tmp_path / "spatial_holdout"
     dev_dir = tmp_path / "development_run"
@@ -195,6 +241,133 @@ def test_prepare_external_scaler_eval_run_dir_refuses_existing_dir_without_force
     # force=True overwrites cleanly instead of erroring.
     manifest = prepare_external_scaler_eval_run_dir(
         development_run_dir=dev_dir, epoch=5, holdout_generated_dir=holdout_dir, out_run_dir=out_dir, force=True
+    )
+    assert manifest["scaler_reused_unchanged"] is True
+    assert not (out_dir / "stale_marker.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# prepare_development_population_eval_run_dir
+# ---------------------------------------------------------------------------
+
+def _make_eval_bundle(path, *, holdout=False):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.yaml").write_text("atlas24_eval: true\n", encoding="utf-8")
+    if holdout:
+        (path / HOLDOUT_MARKER_FILENAME).write_text("TEST ONLY\n", encoding="utf-8")
+
+
+def test_prepare_development_population_eval_run_dir_reuses_scaler_byte_identical(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    out_dir = tmp_path / "atlas24_eval_run"
+    _make_eval_bundle(eval_dir)
+    _make_development_run_dir(dev_dir, epoch=6)
+
+    manifest = prepare_development_population_eval_run_dir(
+        development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=out_dir
+    )
+
+    assert manifest["scaler_reused_unchanged"] is True
+    scaler_dst = out_dir / "train_data" / "train_data_scaler.yml"
+    checkpoint_dst = out_dir / f"{weight_stem(6)}.pt"
+    config_dst = out_dir / "config.yml"
+    assert scaler_dst.read_bytes() == (dev_dir / "train_data" / "train_data_scaler.yml").read_bytes()
+    assert checkpoint_dst.read_bytes() == (dev_dir / f"{weight_stem(6)}.pt").read_bytes()
+    assert config_dst.read_bytes() == (eval_dir / "config.yaml").read_bytes()
+    assert (out_dir / "DEVELOPMENT_POPULATION_EVAL_MANIFEST.json").is_file()
+    marker_text = (out_dir / EVALUATION_ONLY_MARKER_FILENAME).read_text(encoding="utf-8")
+    assert "Do NOT run a trainer" in marker_text
+
+
+def test_prepare_development_population_eval_run_dir_rejects_holdout_bundle(tmp_path):
+    eval_dir = tmp_path / "holdout_generated"
+    dev_dir = tmp_path / "development_run"
+    _make_eval_bundle(eval_dir, holdout=True)
+    _make_development_run_dir(dev_dir, epoch=6)
+
+    with pytest.raises(HoldoutBundleTrainingRejected):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=tmp_path / "out"
+        )
+
+
+def test_prepare_development_population_eval_run_dir_requires_source_scaler(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    _make_eval_bundle(eval_dir)
+    dev_dir.mkdir(parents=True)
+    (dev_dir / f"{weight_stem(6)}.pt").write_bytes(b"checkpoint-only-no-scaler")
+    # deliberately no train_data/train_data_scaler.yml
+
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=tmp_path / "out"
+        )
+
+
+def test_prepare_development_population_eval_run_dir_requires_source_checkpoint(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    _make_eval_bundle(eval_dir)
+    dev_dir.mkdir(parents=True)
+    (dev_dir / "train_data").mkdir()
+    (dev_dir / "train_data" / "train_data_scaler.yml").write_bytes(b"scaler-only-no-checkpoint")
+    # deliberately no model_epoch006.pt
+
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=tmp_path / "out"
+        )
+
+
+def test_prepare_development_population_eval_run_dir_rejects_out_dir_equal_to_development_dir(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    _make_eval_bundle(eval_dir)
+    _make_development_run_dir(dev_dir, epoch=6)
+
+    # force=True must NOT bypass this check -- a collision here would rmtree
+    # the original, already-trained development run directory (Part L's
+    # atlas24 derivative always passes force=True for idempotent reruns).
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir,
+            out_run_dir=dev_dir, force=True,
+        )
+    assert (dev_dir / f"{weight_stem(6)}.pt").is_file()  # original untouched
+
+
+def test_prepare_development_population_eval_run_dir_rejects_out_dir_nested_in_development_dir(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    _make_eval_bundle(eval_dir)
+    _make_development_run_dir(dev_dir, epoch=6)
+
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir,
+            out_run_dir=dev_dir / "nested_out", force=True,
+        )
+
+
+def test_prepare_development_population_eval_run_dir_refuses_existing_dir_without_force(tmp_path):
+    eval_dir = tmp_path / "atlas24_eval_generated"
+    dev_dir = tmp_path / "development_run"
+    out_dir = tmp_path / "out"
+    _make_eval_bundle(eval_dir)
+    _make_development_run_dir(dev_dir, epoch=6)
+    out_dir.mkdir()
+    (out_dir / "stale_marker.txt").write_text("stale\n", encoding="utf-8")
+
+    with pytest.raises(NHSeedEvaluationError):
+        prepare_development_population_eval_run_dir(
+            development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=out_dir
+        )
+
+    # force=True overwrites cleanly instead of erroring.
+    manifest = prepare_development_population_eval_run_dir(
+        development_run_dir=dev_dir, epoch=6, eval_generated_dir=eval_dir, out_run_dir=out_dir, force=True
     )
     assert manifest["scaler_reused_unchanged"] is True
     assert not (out_dir / "stale_marker.txt").exists()

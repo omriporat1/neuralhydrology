@@ -1,6 +1,45 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-02 (Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap recorded: Stage A structural contrasts vs. Stage B proper HPO, hydrograph-diagnostic timing, W&B adoption sequencing, and the `max_updates_per_epoch` multi-fidelity direction with provisional, non-binding fidelity fractions. **Documentation only** — no run launched, no hydrograph generated, no W&B tracking enabled, no capped-update cap adopted. `emb128x64_seedA` itself remains complete as of 2026-07-30, unchanged by this update: epoch 6→15 continuation adopted via the real-hash manifest and screened to completion in Moriah job 45722908; early stopping fired at epoch 15; epoch 6 is the selected checkpoint for this one candidate, not the final Stage 1 production model.)
+Last updated: 2026-08-02 (Stage 1 lead-6 pilot — real `emb128x64_seedA` 24-basin hydrograph-atlas evaluation + rendering completed and visually reviewed, jobs 45729427/45729449, both PASS; diagnostic-only, no model-selection change. See the section immediately below for detail; see further below for the preceding post-`emb128x64_seedA` roadmap entry it builds on.)
+
+## Stage 1 lead-6 pilot — `emb128x64_seedA` real 24-basin hydrograph-atlas evaluation + rendering complete, visual review adopted (2026-08-02)
+
+Real Moriah execution (not documentation-only): a disposable, evaluation-only
+derivative of `emb128x64_seedA`'s selected epoch-6 checkpoint (same weights,
+same fitted scaler, same config, never retrained) was built and evaluated
+against the fixed 24-basin hydrograph atlas for the validation period only
+(job `45729427`, `PASS`), then rendered into 24 individual atlas panels plus
+a deterministic 8-basin compact panel (job `45729449`, `PASS`), reusing the
+existing rendering tooling and raw-space conversion/metric code unchanged.
+Original run directory, checkpoint, scaler, config, and the ~400-basin
+screening validation results pickle are verified byte-identical before and
+after. **Diagnostic/visualization only** — not authoritative for checkpoint,
+architecture, or hyperparameter selection, and not a replacement for the
+provisional ~400-basin screening result.
+
+**Adopted visual interpretation (diagnostic observation, not formal proof).**
+Genuine hydrologic signal, with many predicted events in approximately the
+correct temporal neighborhood and no obvious universal six-hour displacement
+or global raw-space conversion failure — but performance remains weak and
+hydrologically inconsistent: large observed peaks are commonly attenuated,
+some basins show false/exaggerated predicted peaks, recession/baseflow
+behavior is often poor, and bias varies strongly by basin. Supports
+continuing structural optimization; does **not** establish model adequacy,
+architecture superiority, full development-validation performance, or final
+Stage 1 readiness. The atlas's aggregate median NSE (≈0.14) is not
+representative of the ~400-basin screening metric.
+
+**No sealed-set access, no full-population evaluation, and no
+model-selection change resulted from this update.** `raw_seedA` remains the
+preferred next Stage A structural candidate; W&B offline-mode qualification
+remains the immediate next operational preparation before that launch.
+Full technical/operational detail: `docs/stage1_validation_optimization_foundation.md`
+Part L.3c; full decision text: `docs/decision_log.md`'s 2026-08-02 entry
+(same date, above the roadmap entry below); full evidence write-up
+(untracked): `reports/stage1_validation_optimization_foundation_v001/part_l_atlas24_eval_emb128x64_seedA_v001/`.
+
+**Next step:** none launched by this update. `raw_seedA` remains the
+preferred next Stage A candidate, pending separate review/launch decision.
 
 ## Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap: Stage A/Stage B, hydrograph timing, W&B sequencing, multi-fidelity direction (2026-08-02)
 
