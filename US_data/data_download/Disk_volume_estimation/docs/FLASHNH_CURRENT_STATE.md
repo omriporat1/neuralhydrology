@@ -1,6 +1,48 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-02 (Stage 1 lead-6 pilot — real `emb128x64_seedA` 24-basin hydrograph-atlas evaluation + rendering completed and visually reviewed, jobs 45729427/45729449, both PASS; diagnostic-only, no model-selection change. See the section immediately below for detail; see further below for the preceding post-`emb128x64_seedA` roadmap entry it builds on.)
+Last updated: 2026-08-02 (W&B real-package offline qualification (Path A) +
+`tracking_generation` identity fix — documentation, tests, and a local
+no-network smoke script only, no `raw_seedA` launch. See the section
+immediately below for detail; see further below for the preceding
+`emb128x64_seedA` hydrograph-atlas evaluation and post-`emb128x64_seedA`
+roadmap entries it builds on.)
+
+## Stage 1 — W&B tracking qualification status (documentation + tests + local no-network smoke only) (2026-08-02)
+
+W&B tracking (`src/baseline/wandb_tracking.py`,
+`src/baseline/pilot_tracking.py`) ahead of possible live use on
+`raw_seedA`, per the adoption sequencing in
+`docs/stage1_validation_optimization_foundation.md` Part L.4. No training,
+evaluation, Moriah/h2o access, Slurm submission, online W&B use, sweep,
+`raw_seedA` launch, or repository staging/commit occurred.
+
+**Status, precisely.** Stage (1) wrapper contract — fake-backend pytest
+only (`tests/test_wandb_offline_qualification.py` + integration coverage
+in the tracking/orchestration test files) — **qualified**. Stage (2) real
+package, offline mode — real, installed **wandb 0.28.1**, two independent
+OS processes, no network, no API key
+(`scripts/wandb_real_offline_qualification_smoke.py`) — **qualified**.
+Stage (3) online mode — **not qualified**. Stage (4) sweeps — **not
+implemented**. Two failure-mode gaps (backend-call failure isolation;
+stable run identity across bounded Slurm continuations, including a
+`tracking_generation` fix for a deliberate restart-from-scratch) were
+found and fixed in both wrapper modules. One prior assumption was
+corrected by the real-package evidence: offline `resume="allow"` does not
+locally continue a prior run directory; each invocation gets a fresh local
+directory, and reconciliation happens only server-side at `wandb sync`
+time. Wrapper default is unchanged: `enabled: false` / `mode: disabled`.
+`raw_seedA` remains the next scientific candidate; this update does not
+launch it and does not itself decide to enable tracking for it.
+
+Full technical detail and scope limits:
+`docs/stage1_validation_optimization_foundation.md` Part L.4. Concise
+decision/rationale: `docs/decision_log.md`'s two 2026-08-02 W&B entries
+(top of file). User-facing guide: `docs/stage1_wandb_user_guide.md`.
+Candidate-specific integration status: `docs/stage1_lead06_pilot_v001.md`'s
+"W&B tracking" section.
+
+**Next step:** none launched by this update. `raw_seedA` remains the
+preferred next Stage A candidate, pending separate review/launch decision.
 
 ## Stage 1 lead-6 pilot — `emb128x64_seedA` real 24-basin hydrograph-atlas evaluation + rendering complete, visual review adopted (2026-08-02)
 

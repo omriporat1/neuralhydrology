@@ -23,6 +23,31 @@ Design points, all directly from section 10:
     file above `policy["max_artifact_reference_bytes"]`, so large prediction
     pickles, checkpoints, NetCDF, or Parquet files can never be logged by
     this module, structurally, not just by convention.
+  * Best-effort after init: every call that touches a real wandb backend
+    (`log_hyperparameters`/`log_scientific_metrics`/`log_resource_metrics`/
+    `log_artifact_reference`/`finish_tracking_run`) always updates this
+    run's local in-memory mirror first, unconditionally, then attempts the
+    matching wandb call through `_guard_backend_call`, which catches any
+    exception, warns once per distinct failing operation (not once per
+    call, so a metric log that fails every epoch cannot flood stderr), and
+    records the degradation on `TrackingRun.degraded`/
+    `TrackingRun.degraded_operations` -- never lets a backend failure
+    propagate into the caller (training/screening/stopping/checkpoint code
+    never sees or handles a wandb exception). `TrackingRun.backend` keeps
+    its original "null"/"wandb" value even once degraded -- degradation is
+    a separate, explicit flag, never silently reinterpreted as "tracking
+    was never attempted" or "tracking completed cleanly".
+  * Stable run identity across restarts: `init_tracking_run` accepts an
+    optional `run_id` (the real wandb `id=`) and `resume` (defaults to
+    `"allow"` whenever `run_id` is given). Passing the same `run_id` on
+    every call -- across as many separate Slurm jobs/processes as a single
+    Flash-NH candidate needs -- reconnects to the same logical wandb run
+    instead of starting a new one each time. This module does not itself
+    decide what `run_id` to use; see `pilot_tracking.py`'s
+    `derive_pilot_wandb_run_id`/`resolve_pilot_wandb_run_id` for the
+    Flash-NH-specific, deterministic-from-repository-identity derivation.
+    This id is never authoritative for checkpoint or scientific identity --
+    it only labels the wandb side of an already-decided Flash-NH run.
 
 Every `TrackingRun` -- whether backed by real wandb or the null sink --
 keeps a full local, in-memory mirror of everything logged
@@ -33,6 +58,7 @@ real wandb backend, and doubles as a natural per-run provenance record.
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -122,31 +148,93 @@ class TrackingRun:
     sink, depending on policy. Always keeps a full local mirror of every
     call made against it, independent of backend."""
 
-    def __init__(self, backend: str, max_artifact_reference_bytes: int, run_identity: dict, wandb_run: Any = None):
+    def __init__(
+        self,
+        backend: str,
+        max_artifact_reference_bytes: int,
+        run_identity: dict,
+        wandb_run: Any = None,
+        mode: str = "disabled",
+        wandb_run_id: str | None = None,
+    ):
         self.backend = backend  # "null" or "wandb"
+        self.mode = mode  # "disabled" / "offline" / "online" -- explicit backend-mode record
         self.max_artifact_reference_bytes = max_artifact_reference_bytes
         self.run_identity = dict(run_identity)
+        self.wandb_run_id = wandb_run_id
         self._wandb_run = wandb_run
         self.hyperparameters: dict | None = None
         self.scientific_metrics: list[tuple[int, dict]] = []
         self.resource_metrics: list[tuple[int, dict]] = []
         self.artifact_references: list[dict] = []
         self.finished = False
+        # Best-effort telemetry bookkeeping: a failure here NEVER propagates
+        # to the caller and NEVER changes `finished`/scientific state -- it
+        # only ever downgrades tracking completeness, which is recorded here
+        # so callers/evidence bundles can report it honestly instead of
+        # silently claiming tracking succeeded.
+        self.degraded = False
+        self.degraded_operations: set[str] = set()
+
+
+def _guard_backend_call(run: "TrackingRun", operation: str, fn) -> None:
+    """Best-effort wrapper around a single real-wandb backend call.
+
+    Any exception raised by ``fn`` is caught here, never re-raised: this is
+    the failure-isolation boundary that keeps W&B telemetry from ever being
+    able to stop training/screening/early-stopping/checkpoint selection.
+    Warns once per distinct ``operation`` per run (not once per call) so a
+    metric log failing every epoch cannot flood stderr, and records the
+    degradation on ``run.degraded``/``run.degraded_operations`` so it is
+    never silently mistaken for tracking having completed cleanly.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- deliberate, documented catch-all
+        run.degraded = True
+        first_for_operation = operation not in run.degraded_operations
+        run.degraded_operations.add(operation)
+        if first_for_operation:
+            warnings.warn(
+                f"W&B tracking operation {operation!r} failed and has been downgraded to "
+                f"best-effort ({exc!r}); the underlying scientific operation was NOT affected. "
+                "Further failures of this same operation on this run will not be re-warned.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def init_tracking_run(policy: dict, run_identity: dict) -> TrackingRun:
+def init_tracking_run(
+    policy: dict,
+    run_identity: dict,
+    run_id: str | None = None,
+    resume: str | None = None,
+) -> TrackingRun:
     """Start a tracked run. Never launches, configures, or is part of a
     training run or a hyperparameter sweep -- ``run_identity`` is metadata
-    describing a run the caller is already conducting."""
+    describing a run the caller is already conducting.
+
+    ``run_id``, if given, is passed through as wandb's own ``id=`` so that
+    calling this again later (e.g. from a later Slurm job continuing the
+    same Flash-NH candidate) with the SAME ``run_id`` reconnects to the same
+    logical wandb run instead of starting a new one. ``resume`` defaults to
+    ``"allow"`` whenever ``run_id`` is given (wandb resumes the run if it
+    exists, creates it if this is the first call) and is otherwise unused.
+    This function does not decide what ``run_id`` should be -- that is the
+    caller's responsibility (see ``pilot_tracking.py``).
+    """
     _reject_credential_like_keys(run_identity, "run_identity")
 
     max_bytes = policy["max_artifact_reference_bytes"]
-    if not policy.get("enabled", False) or policy["mode"] == "disabled":
-        return TrackingRun(backend="null", max_artifact_reference_bytes=max_bytes, run_identity=run_identity)
+    mode = policy["mode"]
+    if not policy.get("enabled", False) or mode == "disabled":
+        return TrackingRun(
+            backend="null", max_artifact_reference_bytes=max_bytes, run_identity=run_identity, mode="disabled"
+        )
 
     try:
         import wandb
@@ -158,21 +246,33 @@ def init_tracking_run(policy: dict, run_identity: dict) -> TrackingRun:
         ) from exc
 
     os.environ.setdefault("WANDB_MODE", policy["mode"])
+    effective_resume = resume if resume is not None else ("allow" if run_id is not None else None)
     wandb_run = wandb.init(
         project=policy["project"],
         entity=policy.get("entity"),
         tags=list(policy.get("tags", [])),
         config=dict(run_identity),
         mode=policy["mode"],
+        id=run_id,
+        resume=effective_resume,
     )
-    return TrackingRun(backend="wandb", max_artifact_reference_bytes=max_bytes, run_identity=run_identity, wandb_run=wandb_run)
+    return TrackingRun(
+        backend="wandb",
+        max_artifact_reference_bytes=max_bytes,
+        run_identity=run_identity,
+        wandb_run=wandb_run,
+        mode=mode,
+        wandb_run_id=run_id,
+    )
 
 
 def log_hyperparameters(run: TrackingRun, hyperparameters: dict) -> None:
     _reject_credential_like_keys(hyperparameters, "hyperparameters")
     run.hyperparameters = dict(hyperparameters)
     if run.backend == "wandb":
-        run._wandb_run.config.update(hyperparameters, allow_val_change=True)
+        _guard_backend_call(
+            run, "log_hyperparameters", lambda: run._wandb_run.config.update(hyperparameters, allow_val_change=True)
+        )
 
 
 def log_scientific_metrics(run: TrackingRun, epoch: int, metrics: dict) -> None:
@@ -184,7 +284,7 @@ def log_scientific_metrics(run: TrackingRun, epoch: int, metrics: dict) -> None:
     _reject_disallowed_metric_keys(metrics, "scientific metrics")
     run.scientific_metrics.append((epoch, dict(metrics)))
     if run.backend == "wandb":
-        run._wandb_run.log(dict(metrics), step=epoch)
+        _guard_backend_call(run, "log_scientific_metrics", lambda: run._wandb_run.log(dict(metrics), step=epoch))
 
 
 def log_resource_metrics(run: TrackingRun, epoch: int, metrics: dict) -> None:
@@ -199,7 +299,7 @@ def log_resource_metrics(run: TrackingRun, epoch: int, metrics: dict) -> None:
     _reject_credential_like_keys(metrics, "resource metrics")
     run.resource_metrics.append((epoch, dict(metrics)))
     if run.backend == "wandb":
-        run._wandb_run.log(dict(metrics), step=epoch)
+        _guard_backend_call(run, "log_resource_metrics", lambda: run._wandb_run.log(dict(metrics), step=epoch))
 
 
 def log_artifact_reference(run: TrackingRun, name: str, path, checksum: str) -> None:
@@ -222,10 +322,12 @@ def log_artifact_reference(run: TrackingRun, name: str, path, checksum: str) -> 
     record = {"name": name, "path": str(p), "checksum": checksum, "size_bytes": size_bytes}
     run.artifact_references.append(record)
     if run.backend == "wandb":
-        run._wandb_run.summary[f"artifact_ref/{name}"] = record
+        _guard_backend_call(
+            run, "log_artifact_reference", lambda: run._wandb_run.summary.__setitem__(f"artifact_ref/{name}", record)
+        )
 
 
 def finish_tracking_run(run: TrackingRun) -> None:
     run.finished = True
     if run.backend == "wandb":
-        run._wandb_run.finish()
+        _guard_backend_call(run, "finish_tracking_run", lambda: run._wandb_run.finish())

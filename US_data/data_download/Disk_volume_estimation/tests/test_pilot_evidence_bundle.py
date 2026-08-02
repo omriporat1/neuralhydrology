@@ -13,19 +13,24 @@ without force, and rejection of a non-screening-scope event.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pickle
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
 
 from src.baseline.pilot_lead06_config import PilotPolicy, PilotRunSpec
 from src.baseline.pilot_screening_eval import evaluate_screening_checkpoint
 from src.baseline.pilot_early_stopping import build_effective_policy, record_screening_event
 from src.baseline.nh_seed_evaluation import weight_stem
 from src.baseline.pilot_tracking import (
+    finish_pilot_run,
     init_pilot_tracking_run,
     log_pilot_epoch_training_metrics,
     log_pilot_screening_event,
@@ -219,3 +224,73 @@ def test_write_pilot_evidence_bundle_rejects_non_screening_scope_event(tmp_path,
             early_stopping_state=fx["early_stopping_state"], screening_events=[bad_event],
             run_status="x", commands_used=[],
         )
+
+
+# --- wandb degradation state (adversarial review: must survive a finish() ---
+# --- failure and still be visible in the written evidence record) ---------
+
+class _FinishFailingWandbRun:
+    def __init__(self):
+        self.config = type("C", (), {"update": lambda self, *a, **k: None})()
+        self.summary = {}
+
+    def log(self, data, step=None):
+        pass
+
+    def finish(self):
+        raise RuntimeError("simulated backend finish failure")
+
+
+class _FinishFailingWandbModule(types.ModuleType):
+    def __init__(self):
+        super().__init__("wandb")
+
+    def init(self, **kwargs):
+        return _FinishFailingWandbRun()
+
+
+def test_write_pilot_evidence_bundle_wandb_block_reflects_degraded_state_after_finish_failure(
+    tmp_path, monkeypatch, policy, run_spec
+):
+    """Adversarial review requirement: a real-backend finish() failure must
+    still be caught by _guard_backend_call (never propagate and abort the
+    run), and the resulting degraded/degraded_operations state must survive
+    into the written evidence bundle -- not just live on the in-memory
+    TrackingRun object that nothing else reads."""
+    monkeypatch.setitem(sys.modules, "wandb", _FinishFailingWandbModule())
+    enabled_offline_raw = {
+        "policy_name": "test_finish_failure_policy",
+        "enabled": True,
+        "mode": "offline",
+        "project": "flashnh-stage1-test",
+        "entity": None,
+        "tags": ["test"],
+        "max_artifact_reference_bytes": 1048576,
+    }
+    policy_path = tmp_path / "finish_failure_policy.yaml"
+    policy_path.write_text(yaml.safe_dump(enabled_offline_raw), encoding="utf-8")
+    policy_with_wandb = dataclasses.replace(policy, wandb_policy_path=str(policy_path))
+
+    fx = _build_evidence_inputs(tmp_path, policy_with_wandb)
+    tr = fx["tracking_run"]
+    assert tr.backend == "wandb"
+    assert tr.degraded is False  # nothing failed yet -- log calls above all no-op cleanly
+
+    with pytest.warns(RuntimeWarning, match="finish_tracking_run"):
+        finish_pilot_run(tr, final_status="stopped_patience_exhausted", best_epoch=6)
+    assert tr.finished is True  # local completion is unaffected by the backend failure
+    assert tr.degraded is True
+    assert "finish_tracking_run" in tr.degraded_operations
+
+    bundle_path = write_pilot_evidence_bundle(
+        out_dir=fx["evidence_dir"], config_dir=fx["config_dir"], nh_run_dir=fx["run_dir"],
+        pilot_policy=policy_with_wandb, run_spec=run_spec, tracking_run=tr,
+        early_stopping_state=fx["early_stopping_state"], screening_events=[fx["screening_result"]],
+        run_status="stopped_patience_exhausted",
+        commands_used=["python scripts/run_stage1_lead06_pilot.py --run-id emb128x64_seedA"],
+    )
+    record = json.loads((bundle_path / "pilot_run_evidence.json").read_text())
+    assert record["wandb"]["backend"] == "wandb"
+    assert record["wandb"]["finished"] is True
+    assert record["wandb"]["degraded"] is True
+    assert record["wandb"]["degraded_operations"] == ["finish_tracking_run"]

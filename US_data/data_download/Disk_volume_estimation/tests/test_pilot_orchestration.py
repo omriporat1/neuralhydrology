@@ -27,6 +27,8 @@ import dataclasses
 import json
 import logging
 import pickle
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -634,6 +636,69 @@ def test_run_pilot_chunk_logs_checkpoint_reference_at_resolved_physical_path(run
     assert second["checkpoint_dir_for_target"] == expected_dir
     ref = next(r for r in tracking_run.artifact_references if r["name"] == "checkpoint_epoch_009")
     assert ref["path"] == str(expected_dir / "model_epoch009.pt")
+
+
+class _AlwaysFailingWandbRun:
+    """Fake real-backend wandb run whose log()/summary/finish() always raise
+    -- proves a W&B logging failure during a real pilot chunk never breaks
+    screening/early-stopping/orchestration-state persistence (the
+    failure-isolation boundary in wandb_tracking._guard_backend_call)."""
+
+    def __init__(self):
+        self.config = {}
+
+    def log(self, data, step=None):
+        raise RuntimeError("simulated wandb.log failure")
+
+    @property
+    def summary(self):
+        raise RuntimeError("simulated wandb.summary failure")
+
+    def finish(self):
+        raise RuntimeError("simulated wandb.finish failure")
+
+
+class _AlwaysFailingWandbModule(types.ModuleType):
+    def __init__(self):
+        super().__init__("wandb")
+
+    def init(self, **kwargs):
+        return _AlwaysFailingWandbRun()
+
+
+def test_run_pilot_chunk_screening_log_failure_does_not_break_orchestration_state(monkeypatch, run_pilot_fixture):
+    """A real (fake, always-failing) W&B backend must never stop screening/
+    early-stopping/orchestration-state persistence -- only degrade tracking,
+    best-effort, per wandb_tracking.py's failure-isolation design."""
+    monkeypatch.setitem(sys.modules, "wandb", _AlwaysFailingWandbModule())
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    tracking_run = init_tracking_run(
+        {"enabled": True, "mode": "offline", "project": "test", "max_artifact_reference_bytes": 10_000_000}, {}
+    )
+    assert tracking_run.backend == "wandb"
+
+    import warnings
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        result = run_pilot_chunk(
+            chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+            train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"],
+            tracking_run=tracking_run, **common_kwargs,
+        )
+
+    # Scientific/orchestration state is fully intact despite every W&B call failing.
+    es_path = Path(result["nh_run_dir"]) / "pilot_early_stopping_state.json"
+    state = json.loads(es_path.read_text())
+    assert [h["epoch"] for h in state["history"]] == [6]
+    orchestration_state = json.loads((Path(result["nh_run_dir"]) / "pilot_orchestration_state.json").read_text())
+    assert orchestration_state["logged_screening_epochs"] == [3, 6]
+
+    # Tracking itself is honestly reported as degraded, never silently "fine".
+    assert tracking_run.degraded is True
+    assert "log_scientific_metrics" in tracking_run.degraded_operations
 
 
 # --- ensure_validation_results: explicit-evaluation prerequisite check -----

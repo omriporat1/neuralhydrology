@@ -4,6 +4,148 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-08-02 — Stage 1 — W&B offline tracking qualification + Flash-NH W&B user guide (documentation + tests only)
+
+**Scope.** Documentation-and-test-only pass qualifying ordinary W&B
+tracking (`src/baseline/wandb_tracking.py`, `src/baseline/pilot_tracking.py`)
+before any live use on the next real structural candidate (`raw_seedA`),
+per the roadmap set in the entry below (Part L.4). No training, no
+evaluation, no Moriah/h2o access, no Slurm submission, no online W&B, no
+sweep, no `raw_seedA` launch, and no repository staging/commit occurred.
+
+**Two known gaps confirmed and fixed.** (1) Failure isolation after
+`wandb.init` — every backend call (metric logging, checkpoint-reference
+logging, finish) is now wrapped in a guard (`_guard_backend_call`) that
+catches any backend exception, warns once per distinct failing operation,
+and records `degraded`/`degraded_operations` on the `TrackingRun`, so a
+tracking failure can never stop training, evaluation, checkpoint
+selection, or early stopping. (2) Stable W&B run identity across bounded
+Slurm continuations — `derive_pilot_wandb_run_id`/
+`resolve_pilot_wandb_run_id` compute a deterministic id from
+`(pilot_policy_name, run_id)` alone (correct on the very first call, before
+any NH run directory exists), passed to `wandb.init(id=..., resume=
+"allow")`; a small persisted record in the NH run directory cross-checks
+this on later continuations and raises a `TrackingError` on contradiction
+rather than silently merging two candidates' run histories.
+
+**Metadata contract extended.** `build_pilot_run_identity` now also
+carries `max_updates_per_epoch: None` (honest null, not an implemented
+feature), `baseline_policy_sha256`, `splits_dir`, and `wandb_run_id`; the
+evidence bundle's `"wandb"` block now also carries `mode`, `wandb_run_id`,
+`degraded`, and `degraded_operations`.
+
+**Offline qualification.** Exercised entirely through pytest against an
+in-process fake `wandb` module (`sys.modules` monkeypatching) — never the
+real `wandb` package (confirmed not installed in this environment), never
+network access, nothing written outside `tmp_path`. Covers 15 numbered
+scenarios (policy parsing; real init; config/hyperparameter logging;
+epoch/resource metrics; screening+early-stopping logging; checkpoint-
+reference logging; clean finish; continuation/same-run-id reuse;
+replay-guard idempotency under simulated tracking failure; simulated log
+failure; simulated finish failure; disabled-mode never imports `wandb`;
+absent-package handling at both the wrapper and pilot layers; credential-
+key rejection; disallowed sealed-scope-metric-key rejection) via a new
+`tests/test_wandb_offline_qualification.py`, plus deeper integration
+coverage added to `tests/test_wandb_tracking.py`,
+`tests/test_pilot_tracking.py`, and `tests/test_pilot_orchestration.py`.
+Combined four-file suite: 102 passed, 0 failed.
+
+**Documentation.** New `docs/stage1_wandb_user_guide.md` — a concise,
+Flash-NH-specific guide to reading W&B tracking once enabled (project/run/
+candidate concepts, where provenance appears, comparing candidates,
+reading curves, what a sweep is, run-state semantics, what to check before
+approving a campaign, what W&B does and does not control, offline vs.
+online mode, Slurm-continuation behavior, recognizing degraded tracking,
+and how a future backfilled run would be labeled). It does not claim any
+live online tracking run or sweep has occurred, because none has.
+`docs/stage1_validation_optimization_foundation.md` Part L.4 and
+`docs/stage1_lead06_pilot_v001.md`'s W&B section were updated to record
+this qualification status.
+
+**Status after this entry.** W&B adoption sequencing stage (1) ordinary
+qualification is complete, exercised entirely against a fake `wandb`
+module (see "Offline qualification" above) — despite this entry's original
+title, that is a fake-backend contract test, not a real-package offline-mode
+test; stage (2) real-package offline-mode testing was **not yet done** as
+of this entry and is corrected by the 2026-08-02 "real-package offline
+qualification" entry below. Stage (3) controlled live tracking on one
+structural candidate and stage (4) sweeps remain not started. The
+wrapper's shipped default is unchanged — `enabled: false` / `mode:
+disabled`. `raw_seedA` remains the next scientific candidate to launch;
+this entry does not authorize or perform that launch.
+
+## 2026-08-02 — Stage 1 — W&B real-package offline qualification (Path A) + `tracking_generation` identity fix (documentation + tests + local no-network smoke only)
+
+**Scope.** Commit-readiness review of the entry above found its "offline
+qualification" claim rested entirely on an in-process fake `wandb` module,
+which proves the wrapper's contract but not real W&B offline I/O,
+persistence, or continuation semantics. This entry corrects that: real
+package **wandb 0.28.1** was installed in an isolated `.venv` (never the
+scientific NeuralHydrology environment) and exercised offline, no API key,
+no network, no NH training, then uninstalled again afterward. No
+`raw_seedA` launch, no Moriah/h2o access, no Slurm submission, no online
+W&B, no sweep, no repository staging/commit occurred.
+
+**Real-package smoke.** `scripts/wandb_real_offline_qualification_smoke.py`
+drives this repo's actual tracking code (never a reimplementation) as two
+genuinely separate OS processes reusing one stable run id, standing in for
+two bounded Slurm continuations. Confirmed: real `wandb.init(mode=
+"offline", id=..., resume="allow")`; config/hyperparameter and scientific-
+metric logging; a checkpoint-reference record (path/checksum/size only,
+never checkpoint bytes); clean finish; degradation against a real backend
+exception (`wandb.errors.UsageError` on logging to a finished run — caught,
+recorded `degraded`, never propagated); no network attempt. Qualification
+record: `reports/wandb_real_offline_qualification_v001/qualification_record.json`
+(untracked, per repo convention).
+
+**One assumption corrected by real evidence.** Offline `resume="allow"`
+does **not** make a second invocation locally continue the first's run
+directory — wandb prints `` `resume` will be ignored since W&B syncing is
+set to `offline`. Starting a new run with run id <id>. `` and each
+invocation gets its own fresh timestamped local directory. Reconciling
+same-id invocations into one logical run is server-side, at `wandb sync`
+time, matched by run id + project — never a local merge. No code change
+was required (the wrapper only ever passed `id=`/`resume=` through
+unmodified); `docs/stage1_wandb_user_guide.md` §12 and
+`docs/stage1_validation_optimization_foundation.md` Part L.4 were both
+corrected to state this rather than the previously-assumed local-resume
+behavior.
+
+**Non-blocking caveat found.** An artificially long run id in an early
+smoke trial silently truncated wandb-core's binary transaction-log path
+past Windows' 260-char `MAX_PATH`, with no error or warning anywhere. Real
+production ids (e.g. `flashnh-stage1_lead06_pilot_v001-raw_seedA-g1`, ~46
+chars) are far short of this threshold — documented as a caveat, not fixed
+in code.
+
+**`tracking_generation` identity fix.** The same review found a genuine,
+if narrow, identity-collision gap: NH run directories are
+timestamped/prefix-matched rather than one fixed path per `run_id`, so a
+deliberate operator restart-from-scratch under the same `run_id` was
+indistinguishable at call time from a genuine first attempt. Fixed with
+the smallest durable resolution: an explicit, manually-set
+`tracking_generation` parameter (default `"g1"`, left at default for every
+ordinary continuation) threaded through
+`derive_pilot_wandb_run_id`/`resolve_pilot_wandb_run_id`/
+`build_pilot_run_identity`/`init_pilot_tracking_run`, included in the
+persisted-record contradiction check. `src/baseline/pilot_tracking.py`;
+4 new tests in `tests/test_pilot_tracking.py`.
+
+**Tests.** `tests/test_wandb_tracking.py` + `tests/test_pilot_tracking.py`
++ `tests/test_pilot_evidence_bundle.py` + `tests/test_wandb_offline_qualification.py`:
+140 passed. `tests/test_pilot_orchestration.py`: 46 passed. No production
+code changed other than `src/baseline/pilot_tracking.py`'s
+`tracking_generation` threading.
+
+**Status after this entry.** Stage (2) real-package offline-mode testing
+is now genuinely complete, within the scope stated above (single machine,
+Windows, short local runs, no GPU/NH training, no real multi-node Slurm
+continuation). Stage (3) online tracking and stage (4) sweeps remain not
+started/not qualified. The wrapper's shipped default is unchanged —
+`enabled: false` / `mode: disabled`. `raw_seedA` remains the next
+scientific candidate to launch; this entry does not authorize or perform
+that launch, and does not itself decide to enable tracking for it.
+
 ## 2026-08-02 — Stage 1 lead-6 pilot — `emb128x64_seedA` real 24-basin hydrograph-atlas evaluation + rendering (jobs 45729427, 45729449): visual review adopted
 
 **Scope.** Real Moriah execution (not documentation-only), following directly

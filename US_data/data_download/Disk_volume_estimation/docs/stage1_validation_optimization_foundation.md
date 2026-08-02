@@ -324,19 +324,109 @@ point — see the "Checkpoint identity" note in the evidence write-up below).
   development/population evaluation; no sealed-set access; no `raw_seedA`
   launch; no W&B activity.
 
-**L.4 — W&B adoption sequencing (adopted direction; not yet qualified or
-enabled).** Order: (1) ordinary tracking qualification, (2) an offline-mode
+**L.4 — W&B adoption sequencing (Stage (1) and (2) complete; (3)/(4) not yet
+started).** Order: (1) ordinary tracking qualification, (2) an offline-mode
 real-path test preferred before relying on online tracking, (3) controlled
 live tracking for one structural candidate, (4) sweeps only after Stage B's
 search space/objective/fidelity/promotion rules are frozen. Repository code
 remains authoritative for basin membership, sealed-set protection, metric
 computation, early stopping, checkpoint provenance, and package identity;
 W&B is telemetry/comparison infrastructure, never the scientific source of
-truth (Part F). No W&B tracking has been qualified or enabled by this
-addendum — the wrapper remains `enabled: false` / `mode: disabled`
-(`config/stage1_wandb_tracking_policy_v001.yaml`, unchanged). A
-project-specific W&B learning guide remains a required, not-yet-written
-next documentation artifact — not authored in this addendum.
+truth (Part F).
+
+Stage (1) — **wrapper contract, fake backend.** Implemented and fixed in
+`src/baseline/wandb_tracking.py`/`src/baseline/pilot_tracking.py`: (a)
+failure isolation after `wandb.init` (any backend call that raises is
+caught, warned once per operation, recorded as
+`degraded`/`degraded_operations` on the `TrackingRun`, never propagated
+into training/screening/early-stopping/checkpoint-selection code); (b) a
+stable W&B run identity across bounded Slurm continuations,
+`derive_pilot_wandb_run_id`/`resolve_pilot_wandb_run_id` — a deterministic
+id from `(pilot_policy_name, run_id, tracking_generation)` passed as
+`wandb.init(id=..., resume="allow")`, cross-checked against a small
+persisted record in the NH run directory. `tracking_generation` (default
+`"g1"`) was added during the review that produced this addendum to close a
+real collision gap: NH run directories are timestamped/prefix-matched, not
+one fixed path per `run_id`, so a deliberate operator restart-from-scratch
+under the same `run_id` (after abandoning its prior NH run directory) was
+indistinguishable at call time from a genuine first attempt — both present
+`existing_nh_run_dir = None`. An explicit, manually-bumped generation
+string is the smallest durable fix; it stays at its default for every
+ordinary continuation. The tracking metadata contract was also extended
+(`max_updates_per_epoch: None`, `baseline_policy_sha256`, `splits_dir`,
+`tracking_generation`, `wandb_run_id` in `build_pilot_run_identity`;
+`mode`, `wandb_run_id`, `degraded`, `degraded_operations` in the evidence
+bundle's `"wandb"` block). This stage was exercised entirely through
+pytest against an in-process fake `wandb` module (`sys.modules`
+monkeypatching) — never the real package, never network access, nothing
+run outside `tmp_path` — across `tests/test_wandb_tracking.py`,
+`tests/test_pilot_tracking.py`, `tests/test_pilot_orchestration.py`, and
+`tests/test_wandb_offline_qualification.py` (15 numbered scenarios); the
+combined suite passes (140 tests across the four files as of this
+addendum). **This proves the wrapper's contract only — it does not by
+itself prove real W&B offline I/O, serialization, or resume semantics**;
+that distinction is the entire reason Stage (2) below is a separate,
+later exercise, not a restatement of Stage (1).
+
+Stage (2) — **real package, offline mode: qualified.**
+`scripts/wandb_real_offline_qualification_smoke.py` drives this repo's
+actual tracking code (never a reimplementation) against the real,
+locally-installed **wandb 0.28.1** package, `mode="offline"`, no API key,
+no network call, as two genuinely separate OS processes reusing one stable
+run id (standing in for two bounded Slurm jobs continuing one candidate).
+Confirmed: installed version; `wandb.init(mode="offline", id=<stable_id>,
+resume="allow")`; config/hyperparameter serialization (embedded in
+wandb-core's binary `run-<id>.wandb` transaction log — this wandb version
+does **not** additionally emit a separate `files/config.yaml` in offline
+mode, unlike older wandb releases' documented layout); scientific/resource
+metric logging; a compact checkpoint-reference artifact record (path +
+checksum + size only, never the checkpoint's bytes); a clean finish;
+degradation handling against a *real* backend exception
+(`wandb.errors.UsageError` raised by logging to an already-finished real
+run — caught by `_guard_backend_call`, recorded as `degraded`, never
+propagated); and no network attempt anywhere. **One assumption this smoke
+run corrected**: the wrapper/Stage-(1) description above (and the prior
+draft of this addendum) assumed same-id + `resume="allow"` makes a second
+invocation append to the first's local run directory. It does not, in
+offline mode — wandb prints `` WARNING `resume` will be ignored since W&B
+syncing is set to `offline`. Starting a new run with run id <id>. `` and
+each invocation gets its own fresh, timestamped local `offline-run-
+<timestamp>-<id>/` directory. Reconciling same-id invocations into one
+logical run is a **server-side, sync-time** operation (`wandb sync`,
+matched by run id + project), never a local merge; no such sync has been
+performed against a real server by this project. `resume="allow"` behaves
+as originally described only in `online` mode (unqualified, see below).
+The implementation itself required no change for this — it already only
+passes `id=`/`resume=` through to `wandb.init` and never assumed a merged
+local directory — only the documentation's description of the resulting
+behavior was corrected (here and in `docs/stage1_wandb_user_guide.md`
+§12). A secondary, non-blocking observation: an artificially long run id
+in an earlier trial run of this smoke script silently truncated
+wandb-core's binary transaction log path past Windows' `MAX_PATH`, with no
+error or warning surfaced anywhere; real production ids
+(`flashnh-{policy_name}-{run_id}-{generation}`, e.g. `flashnh-
+stage1_lead06_pilot_v001-raw_seedA-g1`, ~46 chars) are well clear of that
+threshold, so this is recorded as a caveat, not a defect requiring a code
+change. The qualification record (commands, version, directory inventory,
+findings) is at `reports/wandb_real_offline_qualification_v001/
+qualification_record.json` (untracked, not part of this patch). Scope
+limits: single machine, Windows, one short local run per invocation, no
+GPU/NeuralHydrology training, no real multi-node Slurm continuation (two
+subprocesses on one machine stood in for it).
+
+**Online tracking (stage 3) remains not yet qualified** — `mode: online`
+is implemented and policy-selectable but has never been exercised against
+a live network connection; treat it as unqualified until it has been.
+**Sweeps (stage 4) remain deferred**, unchanged, until Stage B's search
+space/objective/fidelity/promotion rules are frozen. The wrapper's shipped
+default remains `enabled: false` / `mode: disabled`
+(`config/stage1_wandb_tracking_policy_v001.yaml`, unchanged) — none of the
+above turned tracking on for any real candidate. `raw_seedA` remains the
+next scientific candidate to launch, tracking-optional as before, and W&B
+is not yet approved for operational use on it (stage 3 is unqualified and
+a live raw_seedA run would be W&B's first real production exercise). The
+previously-required project-specific W&B learning guide has now been
+authored: `docs/stage1_wandb_user_guide.md`.
 
 **L.5 — Multi-fidelity direction (adopted direction; no cap adopted).** The
 preferred first multi-fidelity mechanism for Stage B is NeuralHydrology's

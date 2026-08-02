@@ -1321,14 +1321,21 @@ def run_pilot(
         slurm_partition=(slurm_identity or {}).get("partition"),
         slurm_gres=(slurm_identity or {}).get("gres"),
     )
-    tracking_run = init_pilot_tracking_run(pilot_policy, run_identity)
+
+    # Discovered BEFORE starting the tracking run (not after, as a fresh NH
+    # run directory does not yet exist on this candidate's very first call):
+    # a resumed run passes its already-existing NH run directory into
+    # init_pilot_tracking_run so the W&B run-identity persistence/
+    # contradiction-check (see pilot_tracking.resolve_pilot_wandb_run_id)
+    # can see it on this and every later continuation.
+    existing_nh_run_dir = _try_discover_nh_run_dir(config_dir, experiment_name)
+    have_started = existing_nh_run_dir is not None
+
+    tracking_run = init_pilot_tracking_run(pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir)
 
     targets = chunk_epoch_targets(pilot_policy, effective_policy["max_epoch_budget"])
     if not targets:
         raise PilotOrchestrationError("chunk_epoch_targets returned no targets -- nothing to train")
-
-    existing_nh_run_dir = _try_discover_nh_run_dir(config_dir, experiment_name)
-    have_started = existing_nh_run_dir is not None
 
     previous_target = 0
     previous_checkpoint_dir = None

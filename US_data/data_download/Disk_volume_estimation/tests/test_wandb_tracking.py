@@ -63,28 +63,36 @@ class _FakeWandbConfig(dict):
 
 
 class _FakeWandbRun:
-    def __init__(self):
+    def __init__(self, fail_ops: frozenset[str] = frozenset()):
         self.config = _FakeWandbConfig()
         self.summary = {}
         self.logged: list[tuple[int | None, dict]] = []
         self.finished = False
+        self.log_call_count = 0
+        self._fail_ops = fail_ops
 
     def log(self, data, step=None):
+        self.log_call_count += 1
+        if "log" in self._fail_ops:
+            raise RuntimeError("simulated wandb.log failure")
         self.logged.append((step, dict(data)))
 
     def finish(self):
+        if "finish" in self._fail_ops:
+            raise RuntimeError("simulated wandb.finish failure")
         self.finished = True
 
 
 class _FakeWandbModule(types.ModuleType):
-    def __init__(self):
+    def __init__(self, fail_ops: frozenset[str] = frozenset()):
         super().__init__("wandb")
         self.init_calls: list[dict] = []
         self.last_run: _FakeWandbRun | None = None
+        self._fail_ops = fail_ops
 
     def init(self, **kwargs):
         self.init_calls.append(kwargs)
-        run = _FakeWandbRun()
+        run = _FakeWandbRun(fail_ops=self._fail_ops)
         self.last_run = run
         return run
 
@@ -92,6 +100,25 @@ class _FakeWandbModule(types.ModuleType):
 @pytest.fixture
 def fake_wandb(monkeypatch):
     fake = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    return fake
+
+
+@pytest.fixture
+def fake_wandb_failing_log(monkeypatch):
+    """A fake wandb backend whose run.log() always raises -- used to prove
+    the failure-isolation boundary around log_scientific_metrics/
+    log_resource_metrics."""
+    fake = _FakeWandbModule(fail_ops=frozenset({"log"}))
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    return fake
+
+
+@pytest.fixture
+def fake_wandb_failing_finish(monkeypatch):
+    """A fake wandb backend whose run.finish() always raises -- used to
+    prove finish_tracking_run stays non-fatal."""
+    fake = _FakeWandbModule(fail_ops=frozenset({"finish"}))
     monkeypatch.setitem(sys.modules, "wandb", fake)
     return fake
 
@@ -317,3 +344,130 @@ def test_module_public_api_has_no_credential_symbol():
 
     for name in mod.__all__:
         assert not any(frag in name.lower() for frag in _DISALLOWED_PARAM_NAME_FRAGMENTS)
+
+
+# ---------------------------------------------------------------------------
+# Failure isolation: a backend failure after init must never propagate, and
+# must never silently claim tracking succeeded.
+# ---------------------------------------------------------------------------
+
+def test_log_scientific_metrics_failure_isolated_and_recorded(fake_wandb_failing_log):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    assert run.degraded is False
+
+    with pytest.warns(RuntimeWarning, match="log_scientific_metrics"):
+        log_scientific_metrics(run, 1, {"median_nse": 0.2})
+
+    # Scientific/local state is preserved even though the backend call failed.
+    assert run.scientific_metrics == [(1, {"median_nse": 0.2})]
+    assert run.degraded is True
+    assert "log_scientific_metrics" in run.degraded_operations
+
+
+def test_repeated_logging_failure_warns_only_once(fake_wandb_failing_log):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+
+    with pytest.warns(RuntimeWarning):
+        log_scientific_metrics(run, 1, {"median_nse": 0.2})
+
+    import warnings as warnings_mod
+
+    with warnings_mod.catch_warnings(record=True) as caught:
+        warnings_mod.simplefilter("always")
+        log_scientific_metrics(run, 2, {"median_nse": 0.25})
+        log_scientific_metrics(run, 3, {"median_nse": 0.30})
+    assert len(caught) == 0  # no repeat warning for the same operation
+    assert run.scientific_metrics[-1] == (3, {"median_nse": 0.30})
+
+
+def test_finish_tracking_run_failure_is_nonfatal_and_recorded(fake_wandb_failing_finish):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+
+    with pytest.warns(RuntimeWarning, match="finish_tracking_run"):
+        finish_tracking_run(run)
+
+    assert run.finished is True  # local/scientific completion state still recorded
+    assert run.degraded is True
+    assert "finish_tracking_run" in run.degraded_operations
+
+
+def test_resource_metrics_failure_does_not_affect_scientific_metrics(fake_wandb_failing_log):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+
+    with pytest.warns(RuntimeWarning):
+        log_resource_metrics(run, 1, {"epoch_wall_seconds": 12.0})
+    # A different, unrelated (non-backend) call proceeds normally.
+    log_scientific_metrics_call_ok = True
+    try:
+        with pytest.warns(RuntimeWarning):
+            log_scientific_metrics(run, 1, {"median_nse": 0.2})
+    except AssertionError:
+        log_scientific_metrics_call_ok = False
+    assert log_scientific_metrics_call_ok
+    assert run.resource_metrics == [(1, {"epoch_wall_seconds": 12.0})]
+    assert run.scientific_metrics == [(1, {"median_nse": 0.2})]
+    # Two distinct operations both failed -- per-operation warning dedup must
+    # not collapse them into a single hidden failure.
+    assert run.degraded_operations == {"log_resource_metrics", "log_scientific_metrics"}
+
+
+def test_null_backend_never_degrades():
+    policy = _policy()
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    log_scientific_metrics(run, 1, {"median_nse": 0.2})
+    finish_tracking_run(run)
+    assert run.degraded is False
+    assert run.degraded_operations == set()
+
+
+# ---------------------------------------------------------------------------
+# Stable run identity across restarts: run_id / resume pass-through.
+# ---------------------------------------------------------------------------
+
+def test_init_tracking_run_passes_run_id_and_default_resume(fake_wandb):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"}, run_id="flashnh-emb128x64-seedA")
+    assert fake_wandb.init_calls[0]["id"] == "flashnh-emb128x64-seedA"
+    assert fake_wandb.init_calls[0]["resume"] == "allow"
+    assert run.wandb_run_id == "flashnh-emb128x64-seedA"
+
+
+def test_init_tracking_run_without_run_id_passes_none(fake_wandb):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    assert fake_wandb.init_calls[0]["id"] is None
+    assert fake_wandb.init_calls[0]["resume"] is None
+    assert run.wandb_run_id is None
+
+
+def test_init_tracking_run_explicit_resume_overrides_default(fake_wandb):
+    policy = _policy(enabled=True, mode="offline")
+    init_tracking_run(policy, {"run_name": "r1"}, run_id="rid-1", resume="must")
+    assert fake_wandb.init_calls[0]["resume"] == "must"
+
+
+def test_same_run_id_reused_across_two_init_calls_is_recorded_identically(fake_wandb):
+    policy = _policy(enabled=True, mode="offline")
+    run_a = init_tracking_run(policy, {"run_name": "r1"}, run_id="rid-stable")
+    run_b = init_tracking_run(policy, {"run_name": "r1"}, run_id="rid-stable")
+    assert run_a.wandb_run_id == run_b.wandb_run_id == "rid-stable"
+    assert fake_wandb.init_calls[0]["id"] == fake_wandb.init_calls[1]["id"] == "rid-stable"
+
+
+def test_disabled_mode_does_not_require_run_id(monkeypatch):
+    monkeypatch.setitem(sys.modules, "wandb", None)
+    policy = _policy(enabled=False, mode="disabled")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    assert run.backend == "null"
+    assert run.wandb_run_id is None
+    assert run.mode == "disabled"
+
+
+def test_tracking_run_mode_field_matches_policy(fake_wandb):
+    policy = _policy(enabled=True, mode="offline")
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    assert run.mode == "offline"

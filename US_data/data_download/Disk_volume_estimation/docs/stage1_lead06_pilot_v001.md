@@ -147,6 +147,43 @@ sealed-scope-shaped scientific-metric keys (`test`/`holdout`/`temporal`/
 `spatial` fragments) are both rejected by `wandb_tracking.py`'s key guards
 before anything is logged.
 
+**Qualification status.** Two failure-mode gaps were confirmed and fixed:
+(1) every backend call after `wandb.init` (metric logging,
+checkpoint-reference logging, finish) is now wrapped so a real backend
+exception is caught, warned once per operation, and recorded on the
+`TrackingRun` as `degraded`/`degraded_operations`, never raised into
+training/screening/early-stopping/checkpoint-selection code; (2) a
+candidate that restarts across multiple bounded Slurm continuations now
+keeps one stable W&B run identity — `derive_pilot_wandb_run_id`/
+`resolve_pilot_wandb_run_id` compute a deterministic id from
+`(pilot_policy_name, run_id, tracking_generation)`, passed to
+`wandb.init(id=..., resume="allow")`, cross-checked against a small
+persisted record in the NH run directory so a misidentified/reused run
+directory raises a `TrackingError` instead of silently merging two
+candidates' histories (`tracking_generation`, default `"g1"`, additionally
+disambiguates a deliberate restart-from-scratch under the same `run_id`
+from a genuine first attempt). This contract was first exercised entirely
+offline, in-process, against a fake `wandb` module — never the real
+package, never a network call — across `tests/test_wandb_tracking.py`,
+`tests/test_pilot_tracking.py`, `tests/test_pilot_orchestration.py`, and a
+dedicated `tests/test_wandb_offline_qualification.py` (15 numbered
+scenarios, 140 tests total across the four files as of this update). **The
+wrapper's contract has since also been exercised against the real,
+installed wandb 0.28.1 package in offline mode** (two independent OS
+processes reusing one stable run id, no network, no API key) via
+`scripts/wandb_real_offline_qualification_smoke.py`; see
+`docs/stage1_validation_optimization_foundation.md` Part L.4 for the full
+record, scope limits, and one corrected assumption (offline `resume=
+"allow"` does not locally continue a prior run directory — each invocation
+gets a fresh local directory; reconciliation is server-side, at `wandb
+sync` time only). **Online tracking remains not yet qualified** (`mode:
+online` is implemented but never exercised against a live network
+connection) and **sweeps remain deferred** to Stage B. The shipped default
+is unchanged — `enabled: false` / `mode: disabled` — so none of this
+qualification work turned tracking on for any real candidate. For what W&B
+does and does not control, and how to read a tracked run once tracking is
+enabled, see the project-specific `docs/stage1_wandb_user_guide.md`.
+
 ## Orchestration
 
 `src/baseline/pilot_orchestration.run_pilot()` composes the pieces above
@@ -726,3 +763,15 @@ promotion rules are not designed or frozen here — see
 roadmap-level framing (including the preferred `max_updates_per_epoch`
 multi-fidelity direction and its provisional, non-binding fidelity
 fractions, none of which apply to this Stage A pilot).
+
+**W&B offline qualification (this update).** W&B tracking's wrapper
+contract is fake-backend-tested, and its offline mode has now additionally
+been qualified against the real, installed wandb 0.28.1 package (see "W&B
+tracking" section above and
+`docs/stage1_validation_optimization_foundation.md` Part L.4 for the full
+record and scope limits). Online mode remains unqualified. This makes
+offline tracking safe to *consider* enabling for `raw_seedA` if/when
+desired — it is not itself a decision to enable it. This is documentation,
+test, and a local no-network smoke-script exercise only — it does not
+launch `raw_seedA`, does not enable tracking by default, and does not
+change the preferred-next-candidate decision above.

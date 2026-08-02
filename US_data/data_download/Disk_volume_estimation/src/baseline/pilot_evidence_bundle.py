@@ -183,7 +183,11 @@ def write_pilot_evidence_bundle(
         "hyperparameters": tracking_run.hyperparameters,
         "wandb": {
             "backend": tracking_run.backend,
+            "mode": tracking_run.mode,
+            "wandb_run_id": tracking_run.wandb_run_id,
             "finished": tracking_run.finished,
+            "degraded": tracking_run.degraded,
+            "degraded_operations": sorted(tracking_run.degraded_operations),
         },
         "slurm_identity": dict(slurm_identity) if slurm_identity else None,
         "epoch_timing_table": epoch_timing_table,
