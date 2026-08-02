@@ -37,6 +37,7 @@ import xarray as xr
 
 from src.baseline.pilot_orchestration import (
     ACCEPTED_CONTINUATION_FILENAME,
+    PREPARATION_RESULT_FILENAME,
     EvaluationRequest,
     PilotOrchestrationError,
     TrainChunkRequest,
@@ -48,6 +49,7 @@ from src.baseline.pilot_orchestration import (
     ensure_validation_results,
     load_accepted_continuation_manifest,
     prepare_pilot_run,
+    prepare_pilot_run_only,
     resolve_trusted_chunk_checkpoint,
     root_logger_has_file_handler,
     run_pilot,
@@ -235,6 +237,54 @@ def test_run_pilot_end_to_end_stops_on_patience_exhaustion(run_pilot_fixture):
     assert len(record["screening_events"]) > 0
     for event in record["screening_events"]:
         assert event["scope"] == "screening_subset_provisional"
+
+
+def test_run_pilot_threads_tracking_generation_default_and_explicit(run_pilot_fixture):
+    # run_pilot()'s tracking_generation kwarg (default "g1") must reach
+    # build_pilot_run_identity() and, from there, the evidence bundle's
+    # run_identity -- this is the one place tracking_generation needed
+    # threading; pilot_tracking.py itself already fully implements and tests
+    # the parameter (see tests/test_pilot_tracking.py).
+    fx = run_pilot_fixture
+    default_result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        commands_used=["test_pilot_orchestration.py"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+    )
+    default_record = json.loads(
+        (Path(default_result["evidence_bundle_path"]) / "pilot_run_evidence.json").read_text()
+    )
+    assert default_record["run_identity"]["tracking_generation"] == "g1"
+
+    bumped_config_out_dir = fx["config_out_dir"].parent / "config_out_g2"
+    bumped_evidence_out_dir = fx["evidence_out_dir"].parent / "evidence_g2"
+    bumped_result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=bumped_config_out_dir,
+        evidence_out_dir=bumped_evidence_out_dir,
+        screening_basin_ids=fx["basins"],
+        commands_used=["test_pilot_orchestration.py"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+        tracking_generation="g2",
+    )
+    bumped_record = json.loads(
+        (Path(bumped_result["evidence_bundle_path"]) / "pilot_run_evidence.json").read_text()
+    )
+    assert bumped_record["run_identity"]["tracking_generation"] == "g2"
+    assert bumped_record["run_identity"]["wandb_run_id"] != default_record["run_identity"]["wandb_run_id"]
 
 
 def test_run_pilot_resume_is_idempotent_and_does_not_retrain(run_pilot_fixture):
@@ -1703,3 +1753,169 @@ def test_rerun_idempotency_with_accepted_manifest(run_pilot_fixture):
     assert second["checkpoint_dir_for_target"] == cont_dir
     assert train_calls == []
     assert [r.epoch for r in eval_calls] == [12], "second call must not re-evaluate epoch 12"
+
+
+# --- prepare_pilot_run_only (--prepare-only): config-generation, no training,
+# no W&B backend init (see scripts/run_stage1_lead06_pilot.py's --prepare-only
+# flag and src.baseline.pilot_orchestration.prepare_pilot_run_only) ----------
+
+def _prepare_only_kwargs(fx, **overrides):
+    kwargs = dict(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        preparation_out_dir=fx["evidence_out_dir"],
+        commands_used=["test_pilot_orchestration.py --prepare-only"],
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_prepare_pilot_run_only_reports_prepared_only_and_writes_result_file(run_pilot_fixture):
+    fx = run_pilot_fixture
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+
+    assert result["status"] == "PREPARED_ONLY"
+    assert result["run_id"] == "raw_seedA"
+    assert result["training_started"] is False
+    assert result["evaluation_started"] is False
+    assert result["wandb_backend_initialized"] is False
+    assert Path(result["generated_config_path"]).is_file()
+    assert Path(result["generation_manifest_path"]).is_file()
+
+    result_path = fx["evidence_out_dir"] / PREPARATION_RESULT_FILENAME
+    assert result_path.is_file()
+    on_disk = json.loads(result_path.read_text())
+    assert on_disk["status"] == "PREPARED_ONLY"
+    assert on_disk["wandb_policy_sha256"] == result["wandb_policy_sha256"]
+
+    # no NH run directory, checkpoint, or orchestration/early-stopping state
+    # of any kind was created by this call.
+    runs_root = fx["config_out_dir"] / "runs"
+    assert not runs_root.is_dir() or list(runs_root.iterdir()) == []
+
+
+def test_prepare_pilot_run_only_never_initializes_wandb_backend(monkeypatch, run_pilot_fixture):
+    """The one real NH/W&B side-effecting call run_pilot() makes
+    (init_pilot_tracking_run) must never be reached by --prepare-only --
+    proven behaviorally, not just by reading the source, by making that
+    function raise if it is ever called."""
+    import src.baseline.pilot_orchestration as pilot_orchestration_module
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("prepare_pilot_run_only must never initialize a W&B/tracking backend")
+
+    monkeypatch.setattr(pilot_orchestration_module, "init_pilot_tracking_run", _must_not_be_called)
+
+    fx = run_pilot_fixture
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+    assert result["status"] == "PREPARED_ONLY"
+
+
+def test_prepare_pilot_run_only_resolves_wandb_policy_override_checksum(tmp_path, run_pilot_fixture):
+    fx = run_pilot_fixture
+    override_policy_path = tmp_path / "override_wandb_policy.yaml"
+    override_policy_path.write_text(
+        "policy_name: test_override\n"
+        "enabled: true\n"
+        "mode: offline\n"
+        "project: flashnh-stage1-test\n"
+        "entity: null\n"
+        "tags: [test]\n"
+        "max_artifact_reference_bytes: 1048576\n",
+        encoding="utf-8",
+    )
+    overridden_policy = dataclasses.replace(fx["pilot_policy"], wandb_policy_path=str(override_policy_path))
+
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx, pilot_policy=overridden_policy))
+
+    assert result["wandb_policy_sha256"] == sha256_of(override_policy_path)
+    assert result["run_identity"]["wandb_policy_sha256"] == sha256_of(override_policy_path)
+
+
+def test_prepare_pilot_run_only_tracking_generation_defaults_to_g1(run_pilot_fixture):
+    fx = run_pilot_fixture
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+    assert result["tracking_generation"] == "g1"
+    assert result["run_identity"]["tracking_generation"] == "g1"
+
+
+def test_prepare_pilot_run_only_explicit_tracking_generation_is_retained(run_pilot_fixture):
+    fx = run_pilot_fixture
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx, tracking_generation="g2"))
+    assert result["tracking_generation"] == "g2"
+    assert result["run_identity"]["tracking_generation"] == "g2"
+
+
+def test_prepare_pilot_run_only_fails_loudly_when_an_nh_run_directory_already_exists(run_pilot_fixture):
+    """A single pre-existing NH run directory means training already
+    started for this run_id -- --prepare-only must refuse (never describe
+    an already-trained candidate as a clean preparation), even though this
+    is the same single-match case discover_nh_run_dir would happily resolve
+    for continuation purposes."""
+    fx = run_pilot_fixture
+    experiment_name = "stage1_lead06_pilot_raw_seedA_v001"
+    # Realistic shape: config generation always precedes training, so an
+    # already-trained candidate has both a generated config bundle AND a
+    # runs/ subdirectory -- generate the former the ordinary way first.
+    prepare_pilot_run(
+        pilot_policy=fx["pilot_policy"], run_id="raw_seedA", baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"], splits_dir=SPLITS_DIR, config_out_dir=fx["config_out_dir"],
+    )
+    runs_root = fx["config_out_dir"] / "runs"
+    (runs_root / f"{experiment_name}_20260101_000000").mkdir(parents=True)
+
+    with pytest.raises(PilotOrchestrationError, match="already present"):
+        prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+
+
+def test_prepare_pilot_run_only_fails_loudly_on_unexpected_preparation_out_dir_contents(run_pilot_fixture):
+    """A preparation_out_dir already containing something other than a prior
+    pilot_preparation_result.json (e.g. a real evidence bundle from an
+    actual training invocation) must never be silently treated as a fresh,
+    clean preparation target."""
+    fx = run_pilot_fixture
+    fx["evidence_out_dir"].mkdir(parents=True)
+    (fx["evidence_out_dir"] / "pilot_run_evidence.json").write_text("{}")
+
+    with pytest.raises(PilotOrchestrationError, match="unexpected"):
+        prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+
+
+def test_prepare_pilot_run_only_is_restart_safe_across_repeated_calls(run_pilot_fixture):
+    """Calling --prepare-only twice for a run_id that has only ever been
+    prepared (never trained) must succeed both times, reusing the
+    already-generated config rather than failing or silently overwriting
+    it."""
+    fx = run_pilot_fixture
+    first = prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+    second = prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+    assert first["status"] == second["status"] == "PREPARED_ONLY"
+    assert first["generated_config_path"] == second["generated_config_path"]
+
+
+def test_prepare_pilot_run_only_generates_the_same_config_as_ordinary_preparation(run_pilot_fixture):
+    """--prepare-only must not diverge from run_pilot()'s own first step in
+    any scientific-setting-relevant way: the config.yaml/generation_manifest
+    it writes must be byte-identical to calling prepare_pilot_run() directly
+    with the same inputs."""
+    fx = run_pilot_fixture
+    direct_config_out_dir = fx["config_out_dir"].parent / "config_out_direct"
+    prepare_pilot_run(
+        pilot_policy=fx["pilot_policy"], run_id="raw_seedA", baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"], splits_dir=SPLITS_DIR, config_out_dir=direct_config_out_dir,
+    )
+
+    prepare_pilot_run_only(**_prepare_only_kwargs(fx))
+
+    # Both configs embed their own out_dir's absolute path (e.g. in
+    # train_basin_file/validation_basin_file) -- normalize that one expected
+    # difference away before comparing everything else verbatim.
+    direct_config_text = (direct_config_out_dir / "config.yaml").read_text()
+    prepare_only_config_text = (fx["config_out_dir"] / "config.yaml").read_text()
+    direct_normalized = direct_config_text.replace(str(direct_config_out_dir), "<CONFIG_OUT_DIR>")
+    prepare_only_normalized = prepare_only_config_text.replace(str(fx["config_out_dir"]), "<CONFIG_OUT_DIR>")
+    assert direct_normalized == prepare_only_normalized

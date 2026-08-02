@@ -37,7 +37,8 @@ if str(_REPO_WORKDIR) not in sys.path:
     sys.path.insert(0, str(_REPO_WORKDIR))
 
 from src.baseline.pilot_lead06_config import load_pilot_policy, pilot_run_ids
-from src.baseline.pilot_orchestration import run_pilot
+from src.baseline.pilot_orchestration import prepare_pilot_run_only, run_pilot
+from src.baseline.wandb_tracking import load_tracking_policy
 
 _DEFAULT_PILOT_POLICY_PATH = _REPO_WORKDIR / "config" / "stage1_lead06_pilot_v001.yaml"
 _DEFAULT_BASELINE_POLICY_PATH = _REPO_WORKDIR / "config" / "stage1_scientific_baseline_v001.yaml"
@@ -98,12 +99,68 @@ def main() -> None:
     parser.add_argument("--slurm-node", default=None)
     parser.add_argument("--slurm-partition", default=None)
     parser.add_argument("--slurm-gres", default=None)
+    parser.add_argument(
+        "--wandb-policy-path", type=Path, default=None,
+        help="Optional per-invocation override for the W&B tracking policy file. Replaces "
+        "only PilotPolicy.wandb_policy_path for this one run -- the committed "
+        "config/stage1_wandb_tracking_policy_v001.yaml (and its safe enabled=false/"
+        "mode=disabled default) is never read, edited, or otherwise affected. Intended for "
+        "an untracked, machine-local policy YAML (e.g. a copy of the committed policy with "
+        "only enabled/mode flipped). Loaded through the same validator as the committed "
+        "policy, so a missing or malformed file fails immediately, before any config "
+        "generation or training starts. Leave unset to keep the committed disabled policy.",
+    )
+    parser.add_argument(
+        "--tracking-generation", default="g1",
+        help="W&B tracking_generation for this candidate (default 'g1', correct for every "
+        "ordinary run and bounded-Slurm continuation). Only a deliberate, manual "
+        "restart-from-scratch under the same --run-id (e.g. after abandoning and deleting "
+        "an NH run directory) should ever pass a different value -- see "
+        "src/baseline/pilot_tracking.py's module docstring.",
+    )
+    parser.add_argument(
+        "--prepare-only", action="store_true",
+        help="Generate this run_id's NH config + generation manifest (exactly the "
+        "prepare_pilot_run() step run_pilot() itself calls first) and exit before any NH "
+        "training call, W&B backend initialization, or offline run directory creation. "
+        "Writes pilot_preparation_result.json under --evidence-out-dir. Refuses to run (see "
+        "src.baseline.pilot_orchestration.prepare_pilot_run_only) if this run_id already has "
+        "a real NH run directory or evidence bundle -- --prepare-only only ever prepares a "
+        "brand-new, untrained candidate, never resumes or continues one.",
+    )
     args = parser.parse_args()
 
     pilot_policy = load_pilot_policy(args.pilot_policy_path)
     if args.run_id not in pilot_run_ids(pilot_policy):
         parser.error(f"--run-id {args.run_id!r} is not one of {pilot_run_ids(pilot_policy)}")
     pilot_policy = _resolve_policy_relative_paths(pilot_policy)
+
+    if args.wandb_policy_path is not None:
+        wandb_policy_override_path = str(args.wandb_policy_path)
+        # Fail loudly right here, before any config generation or training,
+        # if the supplied override is missing or malformed -- reuses the
+        # exact same validator the committed default policy goes through
+        # (src.baseline.wandb_tracking.load_tracking_policy), not a
+        # separate, weaker check.
+        load_tracking_policy(wandb_policy_override_path)
+        pilot_policy = dataclasses.replace(pilot_policy, wandb_policy_path=wandb_policy_override_path)
+
+    if args.prepare_only:
+        result = prepare_pilot_run_only(
+            pilot_policy=pilot_policy,
+            run_id=args.run_id,
+            baseline_policy_path=args.baseline_policy_path,
+            package_root=args.package_root,
+            splits_dir=args.splits_dir,
+            config_out_dir=args.config_out_dir,
+            preparation_out_dir=args.evidence_out_dir,
+            static_column_manifest_path=args.static_column_manifest_path,
+            tracking_generation=args.tracking_generation,
+            commands_used=["python scripts/run_stage1_lead06_pilot.py " + " ".join(sys.argv[1:])],
+            force=args.force,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return
 
     result = run_pilot(
         pilot_policy=pilot_policy,
@@ -117,6 +174,7 @@ def main() -> None:
         slurm_identity=_slurm_identity_from_env(args),
         commands_used=["python scripts/run_stage1_lead06_pilot.py " + " ".join(sys.argv[1:])],
         force=args.force,
+        tracking_generation=args.tracking_generation,
     )
 
     printable = dict(result)

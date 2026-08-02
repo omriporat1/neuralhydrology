@@ -75,6 +75,7 @@ from pathlib import Path
 from .nh_config_generation import GeneratedConfigBundle
 from .pilot_lead06_config import PilotPolicy, PilotRunSpec
 from .pilot_screening_eval import SCREENING_METRIC_SCOPE
+from .splits import sha256_of
 from .wandb_tracking import (
     TrackingError,
     TrackingRun,
@@ -286,6 +287,15 @@ def build_pilot_run_identity(
         "max_updates_per_epoch": None,
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
+        # Whichever W&B policy file actually took effect for this invocation
+        # -- the committed disabled default, or an explicit per-run
+        # --wandb-policy-path override (see scripts/run_stage1_lead06_pilot.py
+        # and docs/stage1_wandb_user_guide.md). The raw path itself is
+        # machine-local and already captured verbatim in this run's
+        # commands_used/evidence bundle; only the checksum belongs in the
+        # portable run identity, mirroring pilot_policy_sha256/
+        # baseline_policy_sha256 above.
+        "wandb_policy_sha256": sha256_of(pilot_policy.wandb_policy_path),
         "tracking_generation": tracking_generation,
         "wandb_run_id": derive_pilot_wandb_run_id(
             pilot_policy.raw.get("policy_name"), run_spec.run_id, tracking_generation

@@ -251,6 +251,45 @@ def test_build_pilot_run_identity_includes_extended_metadata_contract_fields(bun
     assert bumped_identity["wandb_run_id"] != identity["wandb_run_id"]
 
 
+def test_build_pilot_run_identity_wandb_policy_sha256_reflects_override(bundle_and_effective_policy, tmp_path):
+    # run_identity carries only the checksum of whichever W&B policy file
+    # actually took effect (committed default, or an explicit per-run
+    # --wandb-policy-path override) -- never the raw path itself, mirroring
+    # pilot_policy_sha256/baseline_policy_sha256 above. The raw override path
+    # is machine-local and already captured verbatim in commands_used/the
+    # evidence bundle instead (see scripts/run_stage1_lead06_pilot.py).
+    import dataclasses
+
+    policy, bundle, effective, _ = bundle_and_effective_policy
+    run_spec = resolve_pilot_run_spec(policy, "raw_seedA")
+    default_identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert default_identity["wandb_policy_sha256"] == sha256_of(policy.wandb_policy_path)
+
+    override_raw = {
+        "policy_name": "test_override_wandb_policy",
+        "enabled": True,
+        "mode": "offline",
+        "project": "flashnh-stage1-test",
+        "entity": None,
+        "tags": ["test"],
+        "max_artifact_reference_bytes": 1048576,
+    }
+    override_path = tmp_path / "override_wandb_policy.yaml"
+    override_path.write_text(yaml.safe_dump(override_raw), encoding="utf-8")
+    overridden_policy = dataclasses.replace(policy, wandb_policy_path=str(override_path))
+    overridden_identity = build_pilot_run_identity(
+        pilot_policy=overridden_policy, run_spec=run_spec, bundle=bundle,
+        effective_early_stopping_policy=effective,
+    )
+    assert overridden_identity["wandb_policy_sha256"] == sha256_of(override_path)
+    assert overridden_identity["wandb_policy_sha256"] != default_identity["wandb_policy_sha256"]
+    # the raw path never leaks into run_identity
+    for v in overridden_identity.values():
+        assert str(override_path) != v
+
+
 # --- stable W&B run identity across restarts --------------------------------
 
 def test_derive_pilot_wandb_run_id_is_deterministic():

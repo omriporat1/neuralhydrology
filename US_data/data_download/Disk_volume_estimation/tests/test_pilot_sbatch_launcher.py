@@ -164,6 +164,59 @@ def test_sbatch_script_uses_the_only_confirmed_working_gpu_class():
     assert "--gres=gpu:l4:1" in text
 
 
+# --- per-run W&B policy override + tracking_generation (WANDB_POLICY_PATH) --
+
+def test_sbatch_script_wandb_policy_override_is_optional_and_not_hardcoded_enabled():
+    text = _text()
+    # empty by default -- the committed disabled policy is used unless a
+    # submitter explicitly exports WANDB_POLICY_PATH.
+    assert 'WANDB_POLICY_PATH="${WANDB_POLICY_PATH:-}"' in text
+    assert 'if [ -n "${WANDB_POLICY_PATH}" ]; then' in text
+
+
+def test_sbatch_script_wandb_dir_defaults_outside_repo_clone_and_is_run_id_scoped():
+    text = _text()
+    assert 'WANDB_DIR="${WANDB_DIR:-${FLASHNH_BASE}/wandb/offline/${RUN_ID}}"' in text
+    assert 'mkdir -p "${WANDB_DIR}"' in text
+    # never rooted under the tracked repo clone/work directory
+    assert "${REPO_CLONE_DIR}/wandb" not in text
+    assert "${REPO_WORKDIR}/wandb" not in text
+
+
+def test_sbatch_script_tracking_generation_defaults_to_g1():
+    text = _text()
+    assert 'TRACKING_GENERATION="${TRACKING_GENERATION:-g1}"' in text
+    assert '--tracking-generation "${TRACKING_GENERATION}"' in text
+
+
+def test_sbatch_script_forwards_wandb_policy_path_to_cli_only_when_set():
+    text = _text()
+    assert "PILOT_CLI_ARGS+=(--wandb-policy-path \"${WANDB_POLICY_PATH}\")" in text
+
+
+def test_sbatch_script_exports_offline_mode_and_explicit_wandb_dir_only_when_override_supplied():
+    text = _text()
+    # both exports live inside the same `if [ -n "${WANDB_POLICY_PATH}" ]`
+    # block as the CLI-arg forwarding above -- never unconditional, and
+    # online mode is never exported anywhere in this script.
+    assert "export WANDB_MODE=offline" in text
+    assert "export WANDB_DIR" in text
+    assert "WANDB_MODE=online" not in text
+    # "wandb sync" appears only in an explanatory comment (never-online,
+    # never-sync policy) -- must never appear as an actual executable command.
+    code_lines = [
+        line for line in text.splitlines() if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any("wandb sync" in line for line in code_lines)
+
+
+def test_sbatch_script_records_wandb_fields_in_result_json():
+    text = _text()
+    assert "'wandb_policy_path': env['WANDB_POLICY_PATH_USED'] or None," in text
+    assert "'wandb_dir': env['WANDB_DIR_USED'] or None," in text
+    assert "'tracking_generation': env['TRACKING_GENERATION_USED']," in text
+
+
 def test_sbatch_script_finds_checkpoints_recursively_not_just_maxdepth_1():
     # second real Moriah failure (job 45705457): a -maxdepth 1 find missed
     # checkpoints written into a nested continue_training_from_epoch###/
@@ -253,6 +306,9 @@ def _base_env(tmp_path: Path, *, nh_run_dir: Path, stdout_json_path: Path, lates
         "SLURM_JOB_ID": "45718473",
         "SLURM_JOB_PARTITION": "catfish",
         "SOURCE_COMMIT": "fbf7eea",
+        "WANDB_POLICY_PATH_USED": "",
+        "WANDB_DIR_USED": "",
+        "TRACKING_GENERATION_USED": "g1",
         "RESULT_JSON_PATH": str(tmp_path / "pilot_result.json"),
     }
 
@@ -296,6 +352,149 @@ def test_sbatch_status_block_reports_blocked_not_completed_when_stdout_empty_but
     assert result["blocked_reason"] is not None
     assert result["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
     assert result["safe_to_continue_automatically"] is False
+
+
+def test_sbatch_status_block_records_wandb_override_fields_when_supplied(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
+    )
+    env = _base_env(
+        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+    )
+    override_policy_path = str(tmp_path / "raw_seedA_offline_override.yaml")
+    wandb_dir = str(tmp_path / "wandb" / "offline" / "raw_seedA")
+    env["WANDB_POLICY_PATH_USED"] = override_policy_path
+    env["WANDB_DIR_USED"] = wandb_dir
+    env["TRACKING_GENERATION_USED"] = "g1"
+
+    result = _run_status_classification_block(tmp_path, env)
+
+    assert result["wandb_policy_path"] == override_policy_path
+    assert result["wandb_dir"] == wandb_dir
+    assert result["tracking_generation"] == "g1"
+
+
+def test_sbatch_status_block_wandb_fields_null_when_no_override_supplied(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
+    )
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["wandb_policy_path"] is None
+    assert result["wandb_dir"] is None
+    assert result["tracking_generation"] == "g1"
+
+
+# --- PREPARE_ONLY=1 (--prepare-only) threading + classification ------------
+
+def test_sbatch_script_threads_prepare_only_env_var_to_cli_flag():
+    """(Part 4, #9) PREPARE_ONLY=1 must append --prepare-only to the CLI
+    wrapper's argument list, defaulting to off (0) so ordinary training
+    submissions are unaffected."""
+    text = _text()
+    assert 'PREPARE_ONLY="${PREPARE_ONLY:-0}"' in text
+    assert 'if [ "${PREPARE_ONLY}" = "1" ]; then' in text
+    assert "PILOT_CLI_ARGS+=(--prepare-only)" in text
+
+
+def test_sbatch_script_skips_gpu_check_only_in_prepare_only_mode():
+    """(Part 4, #9) The nvidia-smi/CUDA hard-check must still run for
+    ordinary training submissions, and must be skipped only when
+    PREPARE_ONLY=1 (preparation never imports torch/neuralhydrology)."""
+    text = _text()
+    assert "nvidia-smi" in text
+    assert "skipping the nvidia-smi/CUDA check" in text
+    # the nvidia-smi call itself lives in the PREPARE_ONLY=0 (else) branch,
+    # never unconditionally at top level.
+    prepare_only_idx = text.index('echo "PREPARE_ONLY=1: preparation-only job')
+    nvidia_smi_idx = text.index("nvidia-smi\n")
+    assert prepare_only_idx < nvidia_smi_idx
+
+
+def test_sbatch_script_never_hardcodes_prepare_only_enabled():
+    # PREPARE_ONLY must never be forced to "1" anywhere outside a comment.
+    code_lines = [
+        line for line in _text().splitlines() if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any('PREPARE_ONLY="1"' in line for line in code_lines)
+
+
+def test_sbatch_status_block_classifies_prepare_only_result_as_prepared_only_not_completed(tmp_path):
+    """(Part 4, #10) A successful --prepare-only invocation (CLI stdout
+    JSON has 'status': 'PREPARED_ONLY', no 'final_status' key at all) must be
+    classified PREPARED_ONLY, never COMPLETED -- COMPLETED would falsely
+    imply training occurred."""
+    nh_run_dir = tmp_path / "nh_run"  # never created: --prepare-only makes no NH run dir
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps(
+            {
+                "status": "PREPARED_ONLY",
+                "run_id": "raw_seedA",
+                "generated_config_path": str(tmp_path / "config_out" / "config.yaml"),
+                "generation_manifest_path": str(tmp_path / "config_out" / "generation_manifest.json"),
+                "preparation_result_path": str(tmp_path / "evidence_out" / "pilot_preparation_result.json"),
+                "wandb_policy_sha256": "abc123",
+                "training_started": False,
+                "evaluation_started": False,
+                "wandb_backend_initialized": False,
+            }
+        )
+    )
+    env = _base_env(
+        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+    )
+
+    result = _run_status_classification_block(tmp_path, env)
+
+    assert result["status"] == "PREPARED_ONLY"
+    assert result["status"] != "COMPLETED"
+    assert result["prepare_only"] is True
+    assert result["generated_config_path"] == str(tmp_path / "config_out" / "config.yaml")
+    assert result["generation_manifest_path"] == str(tmp_path / "config_out" / "generation_manifest.json")
+    assert result["preparation_result_path"] == str(tmp_path / "evidence_out" / "pilot_preparation_result.json")
+    assert result["wandb_policy_sha256"] == "abc123"
+
+
+def test_sbatch_status_block_ordinary_completed_run_is_not_flagged_prepare_only(tmp_path):
+    """(Part 4, #10) The converse of the above: a genuine trained/completed
+    run's classification must never be mistaken for a preparation-only
+    result."""
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
+    )
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["status"] == "COMPLETED"
+    assert result["prepare_only"] is False
+    assert result["generated_config_path"] is None
+    assert result["generation_manifest_path"] is None
+    assert result["preparation_result_path"] is None
+    assert result["wandb_policy_sha256"] is None
+
+
+def test_sbatch_script_prepared_only_exit_code_is_zero_and_distinct_case_arm():
+    text = _text()
+    assert "PREPARED_ONLY) exit 0 ;;" in text
+    # must be its own case arm, not folded into the COMPLETED arm's pattern.
+    assert "COMPLETED) exit 0 ;;" in text
 
 
 def test_sbatch_status_block_ordinary_completed_run_remains_completed(tmp_path):

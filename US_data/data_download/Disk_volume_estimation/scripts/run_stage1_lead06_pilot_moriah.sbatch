@@ -110,6 +110,43 @@ PACKAGE_ROOT="${PILOT_PACKAGE_ROOT:-${FLASHNH_BASE}/data/stage1_scientific_packa
 CONFIG_OUT_DIR="${PILOT_CONFIG_OUT_DIR:-${FLASHNH_BASE}/runs/stage1_lead06_pilot_${RUN_ID}_v001}"
 EVIDENCE_OUT_DIR="${PILOT_EVIDENCE_OUT_DIR:-${FLASHNH_BASE}/evidence/stage1_lead06_pilot_${RUN_ID}_v001}"
 
+# Optional per-run W&B policy override (see docs/stage1_wandb_user_guide.md).
+# The committed config/stage1_wandb_tracking_policy_v001.yaml (enabled=false/
+# mode=disabled) is used, unmodified, unless the submitter explicitly sets
+# WANDB_POLICY_PATH to an untracked, machine-local override policy file --
+# this script never edits or reads the committed policy itself, it only
+# forwards whatever path (if any) it was given to the CLI wrapper below.
+# Whenever an override is supplied, a WANDB_DIR outside this tracked repo
+# clone is required so W&B never writes beneath REPO_WORKDIR: default it to a
+# RUN_ID-scoped subdirectory of FLASHNH_BASE (never inside the repo clone),
+# consistent with every other *_OUT_DIR/PACKAGE_ROOT default above, but allow
+# the submitter to override it directly.
+WANDB_POLICY_PATH="${WANDB_POLICY_PATH:-}"
+if [ -n "${WANDB_POLICY_PATH}" ]; then
+    WANDB_DIR="${WANDB_DIR:-${FLASHNH_BASE}/wandb/offline/${RUN_ID}}"
+    mkdir -p "${WANDB_DIR}"
+fi
+TRACKING_GENERATION="${TRACKING_GENERATION:-g1}"
+
+# Preparation-only mode (set PREPARE_ONLY=1 in the submission environment):
+# threads --prepare-only through to the CLI wrapper (see
+# scripts/run_stage1_lead06_pilot.py), which generates only this run_id's NH
+# config + generation manifest and exits before any NH training call or W&B
+# backend initialization -- never a "completed" run. Since preparation needs
+# no GPU (no torch/neuralhydrology import happens on this path -- see
+# src.baseline.pilot_orchestration.prepare_pilot_run_only), the CUDA
+# availability check below is skipped in this mode; this script's #SBATCH
+# resource header above still requests the same GPU class as an ordinary
+# training submission (see this script's header comment -- conditionally
+# changing #SBATCH directives at submission time is not attempted here, since
+# they are parsed by Slurm before this shell runs). Submit a preparation-only
+# job against a non-GPU/lighter allocation instead by overriding at `sbatch`
+# time, e.g.:
+#   PREPARE_ONLY=1 sbatch --partition=<cpu-partition> --gres= \
+#       --export=ALL,PREPARE_ONLY --cpus-per-task=2 --mem=16G \
+#       scripts/run_stage1_lead06_pilot_moriah.sbatch raw_seedA
+PREPARE_ONLY="${PREPARE_ONLY:-0}"
+
 RESULT_DIR="${FLASHNH_BASE}/evidence/lead06_pilot_${RUN_ID}_${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}" "$(dirname "${CONFIG_OUT_DIR}")" "$(dirname "${EVIDENCE_OUT_DIR}")"
 RESULT_LOG="${RESULT_DIR}/pilot_human.log"
@@ -146,8 +183,12 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${ENV_PREFIX}"
 which python
 
-nvidia-smi
-python -u -c "
+if [ "${PREPARE_ONLY}" = "1" ]; then
+    echo "PREPARE_ONLY=1: preparation-only job -- no NH training call, no W&B backend init, "
+    echo "and no GPU/CUDA required (see comment above); skipping the nvidia-smi/CUDA check."
+else
+    nvidia-smi
+    python -u -c "
 import torch
 print('PyTorch:', torch.__version__)
 cuda_ok = torch.cuda.is_available()
@@ -156,6 +197,7 @@ if not cuda_ok:
     raise SystemExit('CUDA not available -- check module loads and GPU allocation')
 print('device:', torch.cuda.get_device_name(0))
 "
+fi
 
 # Pre-launch repository guard: refuse to launch against a repo work
 # directory that doesn't exist, or one whose tracked files have been
@@ -179,15 +221,32 @@ if [ -n "${TRACKED_CHANGES}" ]; then
     exit 1
 fi
 
+PILOT_CLI_ARGS=(
+    --run-id "${RUN_ID}"
+    --package-root "${PACKAGE_ROOT}"
+    --config-out-dir "${CONFIG_OUT_DIR}"
+    --evidence-out-dir "${EVIDENCE_OUT_DIR}"
+    --slurm-job-id "${SLURM_JOB_ID:-}"
+    --slurm-partition "${SLURM_JOB_PARTITION:-}"
+    --slurm-gres "${SLURM_JOB_GRES:-}"
+    --tracking-generation "${TRACKING_GENERATION}"
+)
+if [ -n "${WANDB_POLICY_PATH}" ]; then
+    PILOT_CLI_ARGS+=(--wandb-policy-path "${WANDB_POLICY_PATH}")
+    # Offline-only, never online: no API key, no `wandb sync`, no checkpoint
+    # byte uploads (see docs/stage1_wandb_user_guide.md). WANDB_DIR is always
+    # set above (default or caller override) whenever a policy override is
+    # supplied, so this never falls back to writing beneath REPO_WORKDIR.
+    export WANDB_MODE=offline
+    export WANDB_DIR
+    echo "W&B tracking override active: policy=${WANDB_POLICY_PATH} dir=${WANDB_DIR} mode=offline"
+fi
+if [ "${PREPARE_ONLY}" = "1" ]; then
+    PILOT_CLI_ARGS+=(--prepare-only)
+fi
+
 echo "=== launching scripts/run_stage1_lead06_pilot.py --run-id ${RUN_ID} ==="
-python scripts/run_stage1_lead06_pilot.py \
-    --run-id "${RUN_ID}" \
-    --package-root "${PACKAGE_ROOT}" \
-    --config-out-dir "${CONFIG_OUT_DIR}" \
-    --evidence-out-dir "${EVIDENCE_OUT_DIR}" \
-    --slurm-job-id "${SLURM_JOB_ID:-}" \
-    --slurm-partition "${SLURM_JOB_PARTITION:-}" \
-    --slurm-gres "${SLURM_JOB_GRES:-}" \
+python scripts/run_stage1_lead06_pilot.py "${PILOT_CLI_ARGS[@]}" \
     > "${RESULT_DIR}/pilot_stdout.json.log" &
 PILOT_PID=$!
 
@@ -270,6 +329,8 @@ CONFIG_OUT_DIR="${CONFIG_OUT_DIR}" EVIDENCE_OUT_DIR="${EVIDENCE_OUT_DIR}" \
 LATEST_CKPT_AFTER="${LATEST_CKPT_AFTER}" LATEST_EPOCH_AFTER="${LATEST_EPOCH_AFTER}" \
 TERM_REQUESTED="${TERM_REQUESTED}" SLURM_JOB_ID="${SLURM_JOB_ID:-}" \
 SLURM_JOB_PARTITION="${SLURM_JOB_PARTITION:-unknown}" SOURCE_COMMIT="${SOURCE_COMMIT}" \
+WANDB_POLICY_PATH_USED="${WANDB_POLICY_PATH}" WANDB_DIR_USED="${WANDB_DIR:-}" \
+TRACKING_GENERATION_USED="${TRACKING_GENERATION}" \
 RESULT_JSON_PATH="${RESULT_DIR}/pilot_result.json" \
 python -c "
 import json
@@ -301,6 +362,12 @@ status_fields = {
     'blocked_reason': stdout_result.get('blocked_reason'),
 }
 pilot_final_status = stdout_result.get('final_status')
+# --prepare-only's CLI output has no 'final_status' at all -- it uses its own
+# 'status': 'PREPARED_ONLY' schema (see
+# src.baseline.pilot_orchestration.prepare_pilot_run_only) and must never be
+# folded into the ordinary COMPLETED/INTERRUPTED_RESUMABLE/etc. classification
+# below, since no training or W&B backend initialization occurred.
+prepare_only_result = stdout_result if stdout_result.get('status') == 'PREPARED_ONLY' else None
 
 if not stdout_result and nh_run_dir and os.path.isdir(nh_run_dir):
     try:
@@ -349,7 +416,14 @@ if (
 # (it made a deliberate, non-crashing determination) but is NOT an
 # unqualified COMPLETED, since a human must resolve the overshoot before
 # this run_id can proceed.
-if pilot_final_status == 'blocked_continuation_overshoot_conflict':
+if prepare_only_result is not None:
+    # Never COMPLETED: this run_id was only prepared (config + generation
+    # manifest written), never trained -- see prepare_only_result's own
+    # 'training_started'/'evaluation_started'/'wandb_backend_initialized'
+    # fields (all False) and its 'statement' field for the explicit
+    # non-training confirmation.
+    run_status = 'PREPARED_ONLY'
+elif pilot_final_status == 'blocked_continuation_overshoot_conflict':
     run_status = 'BLOCKED_MANUAL_REVIEW_REQUIRED'
 elif pilot_status == 0:
     run_status = 'COMPLETED'
@@ -375,6 +449,14 @@ out = {
     'slurm_job_partition': env['SLURM_JOB_PARTITION'],
     'source_commit': env['SOURCE_COMMIT'],
     'hostname': socket.gethostname(),
+    'wandb_policy_path': env['WANDB_POLICY_PATH_USED'] or None,
+    'wandb_dir': env['WANDB_DIR_USED'] or None,
+    'tracking_generation': env['TRACKING_GENERATION_USED'],
+    'prepare_only': prepare_only_result is not None,
+    'generated_config_path': (prepare_only_result or {}).get('generated_config_path'),
+    'generation_manifest_path': (prepare_only_result or {}).get('generation_manifest_path'),
+    'preparation_result_path': (prepare_only_result or {}).get('preparation_result_path'),
+    'wandb_policy_sha256': (prepare_only_result or {}).get('wandb_policy_sha256'),
 }
 with open(env['RESULT_JSON_PATH'], 'w') as fh:
     json.dump(out, fh, indent=2)
@@ -385,14 +467,18 @@ print('RUN_STATUS_FOR_SHELL=' + run_status)
 RUN_STATUS=$(grep '^RUN_STATUS_FOR_SHELL=' "${RESULT_DIR}/pilot_result_stdout.log" | tail -1 | cut -d= -f2-)
 
 echo "=== done (run_status ${RUN_STATUS}, exit ${PILOT_STATUS}) ==="
-# COMPLETED -> 0; INTERRUPTED_RESUMABLE -> 2 (nonzero but distinct from an
-# unqualified failure -- resubmitting this exact script resumes
-# automatically, see restart-safety note above); BLOCKED_MANUAL_REVIEW_REQUIRED
-# and FAILED_NO_CHECKPOINT -> 1 (both require a human before this run_id can
+# COMPLETED -> 0; PREPARED_ONLY -> 0 (a deliberate, successful --prepare-only
+# invocation -- never implies training occurred, see pilot_result.json's
+# 'training_started'/'wandb_backend_initialized': false fields);
+# INTERRUPTED_RESUMABLE -> 2 (nonzero but distinct from an unqualified
+# failure -- resubmitting this exact script resumes automatically, see
+# restart-safety note above); BLOCKED_MANUAL_REVIEW_REQUIRED and
+# FAILED_NO_CHECKPOINT -> 1 (both require a human before this run_id can
 # proceed further, though for different reasons -- see pilot_result.json's
 # distinct 'status'/'blocked_reason' fields for which one actually occurred).
 case "${RUN_STATUS}" in
     COMPLETED) exit 0 ;;
+    PREPARED_ONLY) exit 0 ;;
     INTERRUPTED_RESUMABLE) exit 2 ;;
     *) exit 1 ;;
 esac

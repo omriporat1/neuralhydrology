@@ -251,6 +251,8 @@ __all__ = [
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
+    "PREPARATION_RESULT_FILENAME",
+    "prepare_pilot_run_only",
     "run_pilot_chunk",
     "run_pilot",
 ]
@@ -909,6 +911,166 @@ def prepare_pilot_run(
     return run_spec, bundle, config_out_dir, experiment_name
 
 
+PREPARATION_RESULT_FILENAME = "pilot_preparation_result.json"
+
+
+def _assert_no_prior_training_state(
+    *, config_out_dir: Path, experiment_name: str, preparation_out_dir, run_id: str
+) -> None:
+    """Fail loudly if this candidate already has a real NH run directory (or
+    an evidence bundle from a real training invocation) -- ``--prepare-only``
+    (see :func:`prepare_pilot_run_only`) only ever prepares a brand-new,
+    untrained candidate, and must never describe an already-trained (or
+    ambiguously-trained: more than one matching run directory) candidate as a
+    clean preparation."""
+    runs_root = Path(config_out_dir) / "runs"
+    if runs_root.is_dir():
+        candidates = sorted(
+            p for p in runs_root.iterdir() if p.is_dir() and p.name.startswith(experiment_name)
+        )
+        if candidates:
+            raise PilotOrchestrationError(
+                f"--prepare-only refuses to proceed for run_id={run_id!r}: "
+                f"{len(candidates)} existing NH run director{'y' if len(candidates) == 1 else 'ies'} "
+                f"already present under {runs_root} matching {experiment_name!r} "
+                f"({[str(c) for c in candidates]}) -- this indicates training has already started "
+                "(or an ambiguous/partial prior attempt exists); --prepare-only only supports "
+                "preparing a brand-new, untrained candidate. Use the ordinary (non---prepare-only) "
+                "invocation to continue training this run_id, or resolve the existing directory "
+                "manually before re-preparing."
+            )
+
+    preparation_out_dir = Path(preparation_out_dir)
+    if preparation_out_dir.is_dir():
+        unexpected = sorted(
+            p.name for p in preparation_out_dir.iterdir() if p.name != PREPARATION_RESULT_FILENAME
+        )
+        if unexpected:
+            raise PilotOrchestrationError(
+                f"--prepare-only refuses to proceed: {preparation_out_dir} already contains "
+                f"unexpected file(s)/directory(ies) not written by a prior --prepare-only call "
+                f"({unexpected}) -- this looks like a real training evidence bundle or other "
+                "non-preparation state; refusing to silently overwrite it. Point "
+                "--evidence-out-dir at a fresh location, or resolve the existing directory "
+                "manually."
+            )
+
+
+def prepare_pilot_run_only(
+    *,
+    pilot_policy: PilotPolicy,
+    run_id: str,
+    baseline_policy_path,
+    package_root,
+    splits_dir,
+    config_out_dir,
+    preparation_out_dir,
+    static_column_manifest_path=None,
+    tracking_generation: str = "g1",
+    commands_used: "list[str] | None" = None,
+    force: bool = False,
+) -> dict:
+    """Expose exactly :func:`run_pilot`'s config-generation phase --
+    :func:`prepare_pilot_run` plus this pilot's provenance/identity
+    computation (:func:`~src.baseline.pilot_tracking.build_pilot_run_identity`)
+    -- and stop, one early-exit mode around existing preparation, not a
+    second, generalized lifecycle framework.
+
+    Calls no NH entrypoint (``start_run``/``continue_run``) and initializes
+    no W&B backend (never calls
+    :func:`~src.baseline.pilot_tracking.init_pilot_tracking_run`): the only
+    NH/W&B-shaped values this function computes
+    (``wandb_run_id``/``wandb_policy_sha256`` inside ``run_identity``) are
+    pure, deterministic computations over already-in-memory config/policy
+    data, never a call into NH or the W&B SDK. Creates no checkpoint,
+    optimizer-state, validation-result pickle, screening-event,
+    early-stopping-state, or orchestration-state file, and accesses no
+    temporal-test-period, spatial-holdout, or California data (this pilot's
+    screening machinery, which does touch the development-population
+    validation period, is never invoked here -- only
+    :func:`~src.baseline.pilot_screening_eval.load_validated_screening_basin_ids`
+    is, to validate the screening-subset file itself resolves).
+
+    Restart-safe like :func:`run_pilot`, but strictly narrower:
+    :func:`prepare_pilot_run`'s own idempotent config-file reuse is
+    unaffected by this function, and :func:`_assert_no_prior_training_state`
+    additionally refuses to run at all if this candidate already has any real
+    NH run directory or evidence-bundle output.
+
+    Returns a JSON-serializable dict describing the prepared candidate (also
+    written verbatim to ``preparation_out_dir/PREPARATION_RESULT_FILENAME``).
+    """
+    run_spec, bundle, config_dir, experiment_name = prepare_pilot_run(
+        pilot_policy=pilot_policy,
+        run_id=run_id,
+        baseline_policy_path=baseline_policy_path,
+        package_root=package_root,
+        splits_dir=splits_dir,
+        config_out_dir=config_out_dir,
+        static_column_manifest_path=static_column_manifest_path,
+        force=force,
+    )
+
+    _assert_no_prior_training_state(
+        config_out_dir=config_dir,
+        experiment_name=experiment_name,
+        preparation_out_dir=preparation_out_dir,
+        run_id=run_id,
+    )
+
+    screening_basin_ids = load_validated_screening_basin_ids(
+        pilot_policy=pilot_policy, package_root=package_root, splits_dir=splits_dir
+    )
+    effective_policy = build_effective_policy(pilot_policy)
+
+    run_identity = build_pilot_run_identity(
+        pilot_policy=pilot_policy,
+        run_spec=run_spec,
+        bundle=bundle,
+        effective_early_stopping_policy=effective_policy,
+        tracking_generation=tracking_generation,
+    )
+
+    config_path = config_dir / "config.yaml"
+    manifest_path = config_dir / "generation_manifest.json"
+
+    preparation_out_dir = Path(preparation_out_dir)
+    preparation_out_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "schema_name": "stage1_lead06_pilot_preparation_result",
+        "schema_version": 1,
+        "status": "PREPARED_ONLY",
+        "run_id": run_id,
+        "experiment_name": experiment_name,
+        "config_out_dir": str(config_dir),
+        "generated_config_path": str(config_path),
+        "generation_manifest_path": str(manifest_path),
+        "n_screening_basins": len(screening_basin_ids),
+        "wandb_policy_sha256": run_identity["wandb_policy_sha256"],
+        "tracking_generation": run_identity["tracking_generation"],
+        "run_identity": run_identity,
+        "commands_used": list(commands_used) if commands_used else [],
+        "training_started": False,
+        "evaluation_started": False,
+        "wandb_backend_initialized": False,
+        "statement": (
+            "This --prepare-only invocation generated only this candidate's NH config and "
+            "generation manifest, via the same prepare_pilot_run() step run_pilot() itself "
+            "calls first. It never called neuralhydrology.nh_run.start_run or continue_run, "
+            "never initialized a W&B backend or offline run directory, and never created any "
+            "checkpoint, optimizer-state, validation-result pickle, screening-event, "
+            "early-stopping-state, or orchestration-state file. It never accessed the "
+            "temporal-test period, any spatial-holdout basin, or any California basin."
+        ),
+    }
+
+    result_path = preparation_out_dir / PREPARATION_RESULT_FILENAME
+    result_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    result["preparation_result_path"] = str(result_path)
+    return result
+
+
 def _advance_chunk_via_continuation(
     *,
     nh_base_run_dir: Path,
@@ -1267,6 +1429,7 @@ def run_pilot(
     slurm_identity: "dict | None" = None,
     commands_used: "list[str] | None" = None,
     force: bool = False,
+    tracking_generation: str = "g1",
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
 ) -> dict:
@@ -1292,6 +1455,13 @@ def run_pilot(
     wrapper) is the only intended caller with ``train_chunk_fn`` left at its
     default (real NH training); tests and any local dry run must always pass
     a fake ``train_chunk_fn``.
+
+    ``tracking_generation`` (default ``"g1"``) is passed straight through to
+    :func:`src.baseline.pilot_tracking.build_pilot_run_identity` -- see that
+    function and ``pilot_tracking.py``'s module docstring for when a caller
+    should deliberately pass a different value. Leaving it at the default is
+    correct for every ordinary bounded-chunk continuation of an in-progress
+    candidate.
     """
     run_spec, bundle, config_dir, experiment_name = prepare_pilot_run(
         pilot_policy=pilot_policy,
@@ -1316,6 +1486,7 @@ def run_pilot(
         run_spec=run_spec,
         bundle=bundle,
         effective_early_stopping_policy=effective_policy,
+        tracking_generation=tracking_generation,
         slurm_job_id=(slurm_identity or {}).get("job_id"),
         slurm_node=(slurm_identity or {}).get("node"),
         slurm_partition=(slurm_identity or {}).get("partition"),
