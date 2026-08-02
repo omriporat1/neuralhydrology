@@ -1,6 +1,37 @@
 # Flash-NH Current State
 
-Last updated: 2026-07-30 (Stage 1 lead-6 pilot — `emb128x64_seedA` candidate complete: epoch 6→15 continuation adopted via the real-hash manifest and screened to completion in Moriah job 45722908; early stopping fired at epoch 15; epoch 6 is the selected checkpoint for this one candidate, not the final Stage 1 production model)
+Last updated: 2026-08-02 (Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap recorded: Stage A structural contrasts vs. Stage B proper HPO, hydrograph-diagnostic timing, W&B adoption sequencing, and the `max_updates_per_epoch` multi-fidelity direction with provisional, non-binding fidelity fractions. **Documentation only** — no run launched, no hydrograph generated, no W&B tracking enabled, no capped-update cap adopted. `emb128x64_seedA` itself remains complete as of 2026-07-30, unchanged by this update: epoch 6→15 continuation adopted via the real-hash manifest and screened to completion in Moriah job 45722908; early stopping fired at epoch 15; epoch 6 is the selected checkpoint for this one candidate, not the final Stage 1 production model.)
+
+## Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap: Stage A/Stage B, hydrograph timing, W&B sequencing, multi-fidelity direction (2026-08-02)
+
+Documentation-only roadmap patch, written after `emb128x64_seedA`'s
+completion below. Full text: `docs/decision_log.md`'s 2026-08-02 entry;
+full framing: `docs/stage1_validation_optimization_foundation.md` Part L;
+pilot-specific next step: `docs/stage1_lead06_pilot_v001.md`'s "Current
+status and next step" section.
+
+**Adopted, binding.** Stage A (this six-run structural pilot) is distinct
+from Stage B (proper HPO, deferred) and is not a hyperparameter sweep.
+Preferred next candidate: `raw_seedA` — not a launch authorization; the
+remaining four runs are reviewed between candidates, not auto-launched.
+Hydrographs move earlier as an early diagnostic, not a mandatory gate.
+W&B adoption is sequenced (tracking → offline test → live → sweeps after
+Stage B freezes); repository code stays authoritative, never W&B.
+Preferred multi-fidelity mechanism: NeuralHydrology's
+`max_updates_per_epoch`. Full framing and rationale:
+`docs/stage1_validation_optimization_foundation.md` Part L (linked above).
+
+**Provisional, not binding.** Fidelity fractions (low ≈10-15%, medium
+≈25-50%, full uncapped) and the screening-only/restart-from-seed
+capped-update recommendation are starting points only — the real
+full-epoch update count is unresolved against Moriah NeuralHydrology 1.13,
+and capped-update stopping/promotion semantics remain an open design item.
+Full caveats and open questions: Part L.5-L.6 of the same document.
+
+**Not done by this update.** No run launched or reviewed as a result of
+this entry; no hydrograph generated; no W&B tracking enabled; no
+`max_updates_per_epoch` value set anywhere in the repository; no code,
+config, or Slurm script changed.
 
 ## Stage 1 lead-6 optimization pilot — `emb128x64_seedA` candidate complete: continuation adopted, epochs 12 and 15 screened (job 45722908) (2026-07-30)
 
@@ -182,7 +213,10 @@ attributable to this work. One residual risk flagged but not resolved (the
 section and `docs/decision_log.md`.
 
 **Current status: epoch-9 recovery is safe; further training is not.**
-`emb128x64_seedA` remains paused after epoch 6.
+`emb128x64_seedA` remains paused after epoch 6. **Superseded:** see the
+"`emb128x64_seedA` candidate complete" entry above (job `45722908`) —
+`emb128x64_seedA` is now complete, epoch 6→15 was adopted without
+retraining, and early stopping fired at epoch 15.
 `continue_training_from_epoch006/model_epoch009.pt` sits in exactly the
 directory this pilot's own chunk sequence would produce, so it is trusted:
 one controlled recovery invocation of the corrected orchestration reuses
@@ -236,6 +270,9 @@ review entry.
 **Current status: not complete.** `emb128x64_seedA` remains paused after
 epoch 6 pending a resumed Moriah job with the corrected orchestration; no
 resume has been submitted. The other five pilot runs have not started.
+**Superseded:** see the "`emb128x64_seedA` candidate complete" entry above
+(job `45722908`) — `emb128x64_seedA` is now complete, epoch 6→15 was
+adopted without retraining, and early stopping fired at epoch 15.
 
 ## Stage 1 lead-6 optimization pilot — implementation and tests complete (2026-07-27)
 

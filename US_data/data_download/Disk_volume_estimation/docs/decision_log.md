@@ -4,6 +4,97 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-08-02 — Stage 1 lead-6 pilot — post-`emb128x64_seedA` roadmap: Stage A/Stage B framing, hydrograph timing, W&B sequencing, multi-fidelity direction (documentation only)
+
+**Scope.** Documentation-only roadmap patch, written after the local,
+read-only Stage 1 inspection/planning pass over the completed
+`emb128x64_seedA` candidate (commit
+`74ca95dbea9425c7f76a7263c97f14c4898e3f94`). No code, tests, configs,
+Slurm scripts, checkpoints, manifests, or state files changed. No
+Moriah/h2o access, no training, no evaluation, no hydrograph generation, no
+W&B contact, no capped-update implementation, and no config generation
+occurred in this task. This entry records only workflow-direction and
+documentation decisions; it introduces no new binding numerical values
+anywhere in the repository.
+
+**Completed facts restated (unchanged, not reopened).** `emb128x64_seedA`
+is complete: epoch 6 median raw-space screening NSE `0.20454161610527344`
+(best), epoch 9 `0.18124855313577198`, epoch 12 `0.1993193615763258`,
+epoch 15 `0.17125263282608943`; stopped at epoch 15
+(`patience_exhausted`); epoch 6 is the selected checkpoint for this one
+candidate configuration only. Sealed temporal-test and spatial-holdout
+populations were not accessed. The continuation-repair/adoption history
+closed by the 2026-07-30 entries below is not reopened by this entry.
+
+**Adopted workflow direction (binding; full framing and rationale in
+`docs/stage1_validation_optimization_foundation.md` Part L).**
+- Stage A (this six-run structural pilot: raw-vs-learned-embedding static
+  pathway, approximate embedding shape, limited two-seed robustness) and
+  Stage B (proper HPO, deferred) are distinct phases; every other
+  hyperparameter stays frozen across all six Stage A runs, and Stage A must
+  not be described as a hyperparameter sweep (Part L.1).
+- Preferred next Stage A candidate: `raw_seedA` (clean same-seed contrast
+  against `emb128x64_seedA`) — a preference, not a launch authorization
+  (Part L.2).
+- The remaining four runs (`emb128x64_seedB`, `emb64_seedA`,
+  `emb128_seedA`, `raw_seedB`) are reviewed between candidates, not
+  committed to automatic or parallel launch; parallel execution remains an
+  available but non-preferred option (Part L.2).
+- Hydrographs (compact ~6-8-basin panel + existing 24-basin atlas) move
+  earlier as an early diagnostic, not a mandatory gate after every routine
+  candidate; none generated yet, and the compact-panel code does not exist
+  yet (Part L.3).
+- W&B adoption order: tracking qualification → offline-mode test →
+  controlled live tracking → sweeps only after Stage B is frozen.
+  Repository code remains authoritative over basin membership, sealed-set
+  protection, metrics, early stopping, checkpoint provenance, and package
+  identity; W&B is never the scientific source of truth. Not yet qualified
+  or enabled; a project-specific W&B learning guide is still a required,
+  unwritten artifact (Part L.4).
+- Preferred first multi-fidelity mechanism for Stage B: NeuralHydrology's
+  `max_updates_per_epoch`, in preference to a reduced training-basin
+  subset — a direction, not an implementation; no config in this
+  repository sets it (Part L.5).
+
+**Provisional numerical ranges (explicitly not binding; full caveat in
+Part L.5).** Low fidelity ≈10-15% of one confirmed full uncapped epoch's
+optimizer-update count, medium ≈25-50%, full uncapped (unchanged) — starting
+points for later calibration, not approved integer update caps. The real
+full-epoch update count is unresolved against the real Moriah
+NeuralHydrology 1.13 environment; the only local inspection done was a
+rough, non-authoritative one against a differently-versioned, vendored NH
+1.12 copy.
+
+**Open technical questions (explicitly unresolved, require calibration
+before Stage B screening can run; full list in Part L.6).** Epoch- vs.
+cumulative-update-based screening/patience for capped trials; the patience
+unit; fair cross-fidelity budget comparison; promotion thresholds;
+continuation-from-checkpoint vs. restart-from-seed for promoted finalists;
+learning-rate scheduling implications; and reliable cumulative-update
+provenance across a resumed run (NeuralHydrology's own resumed-logger
+count is not adopted as authoritative for this purpose until its
+capped-epoch behavior is verified against the real environment).
+
+**Current provisional recommendation for the first capped-update campaign
+(not an immutable scientific decision; full text in Part L.6).** Capped
+fidelities for screening/ranking only; restart promoted finalists from
+their original seed at full fidelity rather than continuing from a
+lower-fidelity checkpoint. No implementation of this recommendation exists
+yet.
+
+**Documentation changes made by this entry.** A new roadmap addendum (Part
+L) was added to `docs/stage1_validation_optimization_foundation.md`; a
+current-status/next-step section was added to
+`docs/stage1_lead06_pilot_v001.md`; the top-of-file status pointer in
+`docs/FLASHNH_CURRENT_STATE.md` was updated and two stale "remains paused
+after epoch 6" passages there (2026-07-30 and 2026-07-29 historical
+entries) were marked superseded in place, pointing to the existing
+2026-07-30 closure entry — their original text was not deleted or
+rewritten. Two equivalent stale passages in this file (below, in the
+2026-07-30 continuation-nesting entry and the 2026-07-29
+evaluation-prerequisite entry) are marked superseded the same way in this
+same edit. `docs/stage1_scientific_baseline_design.md` was not edited.
+
 ## 2026-07-30 — Stage 1 lead-6 pilot — `emb128x64_seedA` candidate complete: continuation adopted, epochs 12 and 15 screened (job 45722908)
 
 **Scope.** Documentation-only closure of the continuation-repair/adoption
@@ -389,7 +480,10 @@ file-lock `PermissionError` during atomic promotion, confirmed to pass
 cleanly in isolation — pre-existing flakiness, not a regression.
 
 **Current status: epoch-9 recovery is safe; further training is not.**
-`emb128x64_seedA` remains paused after epoch 6.
+`emb128x64_seedA` remains paused after epoch 6. **Status (superseded):** see
+the 2026-07-30 closure entry above (job `45722908`) —
+`emb128x64_seedA` is now complete, epoch 6→15 was adopted without
+retraining, and early stopping fired at epoch 15.
 `continue_training_from_epoch006/model_epoch009.pt` sits in exactly the
 directory this pilot's own chunk sequence would produce, so it is trusted:
 one controlled recovery invocation of the corrected orchestration reuses
@@ -500,7 +594,10 @@ cleanly in isolation both with and without this change (via `git stash`) —
 pre-existing flakiness, not a regression.
 
 **Current status: not complete.** `emb128x64_seedA` remains paused after
-epoch 6. No resume has been submitted to Moriah. Full detail:
+epoch 6. No resume has been submitted to Moriah. **Status (superseded):**
+see the 2026-07-30 closure entry above (job `45722908`) —
+`emb128x64_seedA` is now complete, epoch 6→15 was adopted without
+retraining, and early stopping fired at epoch 15. Full detail:
 `docs/stage1_lead06_pilot_v001.md`'s "Moriah workflow-qualification run and
 orchestration correction" section.
 
