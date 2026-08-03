@@ -94,6 +94,25 @@ if [ -z "${RUN_ID}" ]; then
     exit 2
 fi
 
+# Optional bounded-recovery epoch limit (job 45731908 postmortem -- see
+# docs/stage1_lead06_pilot_v001.md and run_pilot()'s max_target_epoch
+# parameter): forwarded to the CLI wrapper's --max-target-epoch flag only
+# when the submitter explicitly sets MAX_TARGET_EPOCH. Left unset, this
+# script's behavior is completely unchanged from before this option existed
+# -- no flag is appended, and the CLI wrapper's own default (None, unbounded)
+# applies. This is a single scoped recovery knob, not a general runtime-
+# override framework: no other pilot parameter is threaded through an
+# environment variable this way. Validated here, before any GPU/module setup
+# or CLI invocation, so a mistyped value fails fast rather than burning a GPU
+# allocation.
+MAX_TARGET_EPOCH="${MAX_TARGET_EPOCH:-}"
+if [ -n "${MAX_TARGET_EPOCH}" ]; then
+    if ! [[ "${MAX_TARGET_EPOCH}" =~ ^[0-9]+$ ]] || [ "${MAX_TARGET_EPOCH}" -le 0 ]; then
+        echo "MAX_TARGET_EPOCH must be a positive integer, got: '${MAX_TARGET_EPOCH}'" >&2
+        exit 2
+    fi
+fi
+
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 ENV_PREFIX="${FLASHNH_BASE}/envs/flashnh-moriah"
 
@@ -244,6 +263,10 @@ fi
 if [ "${PREPARE_ONLY}" = "1" ]; then
     PILOT_CLI_ARGS+=(--prepare-only)
 fi
+if [ -n "${MAX_TARGET_EPOCH}" ]; then
+    PILOT_CLI_ARGS+=(--max-target-epoch "${MAX_TARGET_EPOCH}")
+    echo "Bounded recovery active: --max-target-epoch ${MAX_TARGET_EPOCH}"
+fi
 
 echo "=== launching scripts/run_stage1_lead06_pilot.py --run-id ${RUN_ID} ==="
 python scripts/run_stage1_lead06_pilot.py "${PILOT_CLI_ARGS[@]}" \
@@ -331,6 +354,7 @@ TERM_REQUESTED="${TERM_REQUESTED}" SLURM_JOB_ID="${SLURM_JOB_ID:-}" \
 SLURM_JOB_PARTITION="${SLURM_JOB_PARTITION:-unknown}" SOURCE_COMMIT="${SOURCE_COMMIT}" \
 WANDB_POLICY_PATH_USED="${WANDB_POLICY_PATH}" WANDB_DIR_USED="${WANDB_DIR:-}" \
 TRACKING_GENERATION_USED="${TRACKING_GENERATION}" \
+MAX_TARGET_EPOCH_USED="${MAX_TARGET_EPOCH}" \
 RESULT_JSON_PATH="${RESULT_DIR}/pilot_result.json" \
 python -c "
 import json
@@ -452,6 +476,7 @@ out = {
     'wandb_policy_path': env['WANDB_POLICY_PATH_USED'] or None,
     'wandb_dir': env['WANDB_DIR_USED'] or None,
     'tracking_generation': env['TRACKING_GENERATION_USED'],
+    'max_target_epoch': int(env['MAX_TARGET_EPOCH_USED']) if env['MAX_TARGET_EPOCH_USED'] else None,
     'prepare_only': prepare_only_result is not None,
     'generated_config_path': (prepare_only_result or {}).get('generated_config_path'),
     'generation_manifest_path': (prepare_only_result or {}).get('generation_manifest_path'),

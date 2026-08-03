@@ -309,6 +309,7 @@ def _base_env(tmp_path: Path, *, nh_run_dir: Path, stdout_json_path: Path, lates
         "WANDB_POLICY_PATH_USED": "",
         "WANDB_DIR_USED": "",
         "TRACKING_GENERATION_USED": "g1",
+        "MAX_TARGET_EPOCH_USED": "",
         "RESULT_JSON_PATH": str(tmp_path / "pilot_result.json"),
     }
 
@@ -533,3 +534,197 @@ def test_sbatch_status_block_ordinary_completed_run_remains_completed(tmp_path):
 
     assert result["status"] == "COMPLETED"
     assert result["pilot_final_status"] == "stopped_patience_exhausted"
+
+
+# --- MAX_TARGET_EPOCH bounded-recovery threading + classification (job
+# 45731908 postmortem) -------------------------------------------------------
+#
+# Mirrors the WANDB_POLICY_PATH/PREPARE_ONLY sections above: a single
+# optional, default-empty env var, validated and forwarded to the CLI
+# wrapper's --max-target-epoch flag only when explicitly set, recorded in
+# pilot_result.json. The validation-rejection tests below extract just the
+# new validation block (and, separately, the CLI-arg-append block) and run
+# them standalone via bash -- this proves actual bash behavior (the
+# positive-integer regex + -le 0 check) without needing Slurm, GPU, modules,
+# or any other part of this script to be runnable locally.
+
+def _extract_max_target_epoch_validation_block() -> str:
+    text = _text()
+    start_marker = 'MAX_TARGET_EPOCH="${MAX_TARGET_EPOCH:-}"'
+    start = text.find(start_marker)
+    assert start != -1, "MAX_TARGET_EPOCH validation block not found"
+    end_marker = "\n\nFLASHNH_BASE="
+    end = text.find(end_marker, start)
+    assert end != -1, "could not find the end of the MAX_TARGET_EPOCH validation block"
+    return text[start:end]
+
+
+def _extract_max_target_epoch_cli_append_block() -> str:
+    text = _text()
+    marker = (
+        'if [ -n "${MAX_TARGET_EPOCH}" ]; then\n'
+        '    PILOT_CLI_ARGS+=(--max-target-epoch "${MAX_TARGET_EPOCH}")\n'
+        '    echo "Bounded recovery active: --max-target-epoch ${MAX_TARGET_EPOCH}"\n'
+        "fi"
+    )
+    assert marker in text, "expected MAX_TARGET_EPOCH CLI-arg append block not found verbatim"
+    return marker
+
+
+def _run_max_target_epoch_validation(tmp_path: Path, value) -> subprocess.CompletedProcess:
+    """Run just the extracted MAX_TARGET_EPOCH validation block standalone.
+    Never reaches FLASHNH_BASE/module loads/GPU checks/PACKAGE_ROOT -- those
+    lines are excluded from the extracted fragment entirely."""
+    import os
+
+    script_path = tmp_path / "max_target_epoch_validation.sh"
+    script_path.write_text(
+        "#!/usr/bin/env bash\nset -uo pipefail\n"
+        + _extract_max_target_epoch_validation_block()
+        + '\necho "VALIDATION_PASSED"\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    if value is None:
+        env.pop("MAX_TARGET_EPOCH", None)
+    else:
+        env["MAX_TARGET_EPOCH"] = value
+    return subprocess.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+
+
+def _run_max_target_epoch_cli_arg_threading(tmp_path: Path, value) -> subprocess.CompletedProcess:
+    """Run the extracted validation block followed by the extracted
+    PILOT_CLI_ARGS-append block standalone, then print PILOT_CLI_ARGS so the
+    actual forwarded argv can be inspected -- proving the append is gated on
+    the same condition and produces exactly ``--max-target-epoch <value>``,
+    without executing anything else in the real script."""
+    import os
+
+    script_path = tmp_path / "max_target_epoch_cli_args.sh"
+    script_path.write_text(
+        "#!/usr/bin/env bash\nset -uo pipefail\n"
+        + _extract_max_target_epoch_validation_block()
+        + "\nPILOT_CLI_ARGS=()\n"
+        + _extract_max_target_epoch_cli_append_block()
+        + '\nprintf \'%s\\n\' "${PILOT_CLI_ARGS[@]-}"\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    if value is None:
+        env.pop("MAX_TARGET_EPOCH", None)
+    else:
+        env["MAX_TARGET_EPOCH"] = value
+    return subprocess.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+
+
+def test_sbatch_script_max_target_epoch_defaults_to_empty_and_forwarding_is_gated():
+    text = _text()
+    assert 'MAX_TARGET_EPOCH="${MAX_TARGET_EPOCH:-}"' in text
+    assert 'if [ -n "${MAX_TARGET_EPOCH}" ]; then' in text
+    assert 'PILOT_CLI_ARGS+=(--max-target-epoch "${MAX_TARGET_EPOCH}")' in text
+
+
+def test_sbatch_script_never_hardcodes_max_target_epoch_to_six():
+    # the value 6 (job 45731908's recovery epoch) must never be baked in as a
+    # default or fallback -- only ever a value the submitter explicitly sets.
+    code_lines = [
+        line for line in _text().splitlines() if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not any("MAX_TARGET_EPOCH:-6" in line for line in code_lines)
+    assert not any('--max-target-epoch "6"' in line for line in code_lines)
+    assert not any("--max-target-epoch 6" in line for line in code_lines)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_unset_produces_no_cli_flag(tmp_path):
+    result = _run_max_target_epoch_cli_arg_threading(tmp_path, None)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_six_forwards_exact_flag(tmp_path):
+    result = _run_max_target_epoch_cli_arg_threading(tmp_path, "6")
+    assert result.returncode == 0, result.stderr
+    # the block's own "Bounded recovery active: ..." echo precedes the
+    # printf'd PILOT_CLI_ARGS dump -- only the final two lines are the array.
+    assert result.stdout.strip().splitlines()[-2:] == ["--max-target-epoch", "6"]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_rejects_non_integer_text_before_launch(tmp_path):
+    result = _run_max_target_epoch_validation(tmp_path, "abc")
+    assert result.returncode == 2
+    assert "must be a positive integer" in result.stderr
+    assert "VALIDATION_PASSED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_rejects_zero(tmp_path):
+    result = _run_max_target_epoch_validation(tmp_path, "0")
+    assert result.returncode == 2
+    assert "must be a positive integer" in result.stderr
+    assert "VALIDATION_PASSED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_rejects_negative(tmp_path):
+    result = _run_max_target_epoch_validation(tmp_path, "-3")
+    assert result.returncode == 2
+    assert "must be a positive integer" in result.stderr
+    assert "VALIDATION_PASSED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available in this environment")
+def test_sbatch_script_max_target_epoch_unset_passes_validation(tmp_path):
+    result = _run_max_target_epoch_validation(tmp_path, None)
+    assert result.returncode == 0, result.stderr
+    assert "VALIDATION_PASSED" in result.stdout
+
+
+def test_sbatch_script_records_max_target_epoch_field_name_in_result_json():
+    text = _text()
+    assert (
+        "'max_target_epoch': int(env['MAX_TARGET_EPOCH_USED']) if env['MAX_TARGET_EPOCH_USED'] else None,"
+        in text
+    )
+
+
+def test_sbatch_status_block_records_max_target_epoch_when_provided(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
+    )
+    env = _base_env(
+        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+    )
+    env["MAX_TARGET_EPOCH_USED"] = "6"
+
+    result = _run_status_classification_block(tmp_path, env)
+
+    assert result["max_target_epoch"] == 6
+
+
+def test_sbatch_status_block_max_target_epoch_null_when_not_provided(tmp_path):
+    """Also the ordinary-launcher-behavior-unchanged regression: with
+    MAX_TARGET_EPOCH_USED left at its default-empty value (see _base_env),
+    every other field must classify exactly as before this feature existed."""
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    stdout_json_path = tmp_path / "pilot_stdout.json.log"
+    stdout_json_path.write_text(
+        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
+    )
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["max_target_epoch"] is None
+    assert result["status"] == "COMPLETED"
+    assert result["pilot_final_status"] == "stopped_patience_exhausted"
+    assert result["wandb_policy_path"] is None
+    assert result["prepare_only"] is False
