@@ -27,6 +27,7 @@ from src.baseline.wandb_tracking import (
     init_tracking_run,
     load_tracking_policy,
     log_artifact_reference,
+    log_checkpoint_reference,
     log_hyperparameters,
     log_resource_metrics,
     log_scientific_metrics,
@@ -62,10 +63,19 @@ class _FakeWandbConfig(dict):
             dict.update(self, kwargs)
 
 
+class _FailingSummaryDict(dict):
+    """A wandb ``run.summary``-shaped dict whose ``__setitem__`` always
+    raises -- used to prove checkpoint-reference/artifact-reference backend
+    writes are isolated the same way as every other backend call."""
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("simulated wandb summary write failure")
+
+
 class _FakeWandbRun:
     def __init__(self, fail_ops: frozenset[str] = frozenset()):
         self.config = _FakeWandbConfig()
-        self.summary = {}
+        self.summary = _FailingSummaryDict() if "summary" in fail_ops else {}
         self.logged: list[tuple[int | None, dict]] = []
         self.finished = False
         self.log_call_count = 0
@@ -119,6 +129,15 @@ def fake_wandb_failing_finish(monkeypatch):
     """A fake wandb backend whose run.finish() always raises -- used to
     prove finish_tracking_run stays non-fatal."""
     fake = _FakeWandbModule(fail_ops=frozenset({"finish"}))
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    return fake
+
+
+@pytest.fixture
+def fake_wandb_failing_summary(monkeypatch):
+    """A fake wandb backend whose run.summary[...] = ... always raises --
+    used to prove log_checkpoint_reference's backend write is isolated."""
+    fake = _FakeWandbModule(fail_ops=frozenset({"summary"}))
     monkeypatch.setitem(sys.modules, "wandb", fake)
     return fake
 
@@ -300,6 +319,57 @@ def test_artifact_reference_rejects_missing_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint references: metadata-only, never subject to the compact-artifact
+# size ceiling, and never fatal (job 45731908 postmortem).
+# ---------------------------------------------------------------------------
+
+def test_checkpoint_reference_ignores_artifact_size_ceiling(tmp_path):
+    # A real NH checkpoint (~1.25 MB in the job 45731908 postmortem) is
+    # always far above a "compact artifact" ceiling -- log_artifact_reference
+    # would refuse it; log_checkpoint_reference must not.
+    policy = _policy(max_artifact_reference_bytes=10)
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    ckpt = tmp_path / "model_epoch006.pt"
+    ckpt.write_bytes(b"0" * 5000)
+    log_checkpoint_reference(run, epoch=6, path=ckpt, checksum="deadbeef")
+    assert run.degraded is False
+    assert len(run.artifact_references) == 1
+    record = run.artifact_references[0]
+    assert record["epoch"] == 6
+    assert record["size_bytes"] == 5000
+    assert record["checkpoint_type"] == "nh_model_checkpoint"
+    assert record["checksum"] == "deadbeef"
+    assert record["path"] == str(ckpt)
+
+
+def test_checkpoint_reference_missing_file_degrades_not_raises(tmp_path):
+    policy = _policy()
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    with pytest.warns(RuntimeWarning, match="log_checkpoint_reference"):
+        log_checkpoint_reference(run, epoch=6, path=tmp_path / "nope.pt", checksum="x")
+    assert run.degraded is True
+    assert "log_checkpoint_reference" in run.degraded_operations
+    assert run.artifact_references == []
+
+
+def test_checkpoint_reference_backend_failure_is_nonfatal(fake_wandb_failing_summary, tmp_path):
+    policy = _policy(enabled=True, mode="offline", max_artifact_reference_bytes=10)
+    run = init_tracking_run(policy, {"run_name": "r1"})
+    ckpt = tmp_path / "model_epoch006.pt"
+    ckpt.write_bytes(b"0" * 5000)
+
+    with pytest.warns(RuntimeWarning, match="log_checkpoint_reference"):
+        log_checkpoint_reference(run, epoch=6, path=ckpt, checksum="deadbeef")
+
+    assert run.degraded is True
+    assert "log_checkpoint_reference" in run.degraded_operations
+    # Local mirror is still recorded even though the backend write failed --
+    # this is optional telemetry, so scientific/evidence state must not be
+    # lost just because wandb itself failed.
+    assert run.artifact_references[0]["epoch"] == 6
+
+
+# ---------------------------------------------------------------------------
 # Structural proof: no temporal-test / spatial-holdout metric keys.
 # ---------------------------------------------------------------------------
 
@@ -328,6 +398,7 @@ _DISALLOWED_PARAM_NAME_FRAGMENTS = ("api_key", "apikey", "secret", "password", "
         log_scientific_metrics,
         log_resource_metrics,
         log_artifact_reference,
+        log_checkpoint_reference,
         finish_tracking_run,
     ],
 )

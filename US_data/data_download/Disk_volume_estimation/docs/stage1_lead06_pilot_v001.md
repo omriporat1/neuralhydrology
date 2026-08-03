@@ -497,6 +497,82 @@ is the wider optimization campaign: the other five run specifications,
 screened and stopped under this same frozen protocol. Full detail:
 `docs/decision_log.md`'s 2026-07-30 closure entry.
 
+## Sixth Moriah result: `raw_seedA` tracking/screening-persistence failure and local repair (2026-08-02/03)
+
+Job `45731908` (source commit `771e2bd1984f3b90a2a3d30c1b07069d6d1198df`,
+candidate `raw_seedA`) trained epochs 1-6 successfully — checkpoints
+`model_epoch001.pt`-`model_epoch006.pt` and matching optimizer states 1-6
+exist and are usable, and epoch 3's `validation_results.p` (diagnostic-only
+screening) was saved — but the pilot process died before epoch 6 finished
+screening. **No epoch-6 validation result exists.** The real offline W&B
+run directory for `flashnh-stage1_lead06_pilot_v001-raw_seedA-g1` exists but
+was never cleanly finished.
+
+**Root cause, part one.** `pilot_orchestration.py` called
+`log_pilot_checkpoint_reference()` for epoch 6, which was routed through
+`wandb_tracking.log_artifact_reference()` — a function designed for small,
+generic artifacts and gated by `max_artifact_reference_bytes` (the
+committed policy value is `1,048,576` bytes). The real checkpoint file is
+~1.25 MB, so `log_artifact_reference()` raised `TrackingError`. That
+exception was uncaught at the call site and propagated out of
+`run_pilot_chunk()`, killing the pilot mid-screening — a direct violation
+of this pilot's own design contract that W&B is optional telemetry and can
+never stop training, validation, screening, early stopping, checkpoint
+selection, or evidence generation (see "W&B tracking" above).
+
+**Root cause, part two.** Even setting the crash aside,
+`pilot_orchestration_state.json` (`logged_screening_epochs`) was only
+persisted once, after the *entire* per-chunk screening loop finished — not
+per epoch as each screening event was recorded. So when the crash hit
+during epoch 6's telemetry call, epoch 3's already-complete, already-saved
+screening result was not yet durably reflected in orchestration state
+either.
+
+**Local repair (no Moriah access, no Slurm submission, `raw_seedA` not
+continued).**
+1. A new `wandb_tracking.log_checkpoint_reference()` records a compact
+   checkpoint reference (epoch, path, checksum, size, `checkpoint_type`) —
+   never the checkpoint's own bytes — and, unlike
+   `log_artifact_reference()`, never applies the "compact artifact" size
+   ceiling to it (checkpoints are always large by nature) and never raises
+   on any failure; any failure degrades tracking (`TrackingRun.degraded`
+   plus a named entry in `degraded_operations`) instead of propagating.
+   `pilot_tracking.log_pilot_checkpoint_reference()` now routes through it
+   instead of the generic, size-gated function.
+2. `run_pilot_chunk()` now persists `pilot_orchestration_state.json`
+   immediately after each epoch's screening/early-stopping processing,
+   before that epoch's W&B calls — not once after the whole chunk loop —
+   so a later telemetry failure can no longer leave an already-processed
+   epoch's orchestration state stale.
+3. `run_pilot()` gained an optional `max_target_epoch` parameter (default
+   `None`, no behavior change for ordinary callers). Passed as `6`, it
+   bounds one call to the epoch-6 chunk target only, so a recovery
+   invocation can reuse checkpoints 1-6, reuse the existing epoch-3 result,
+   evaluate and record epoch 6, and then stop — `final_status` reports
+   `"paused_at_max_target_epoch"` — without automatically training or
+   screening epoch 9 within the same call. This exists solely so a human
+   can review epoch 6 before any further training; ordinary
+   idempotent/restart-safe orchestration alone cannot stop at a specific
+   epoch mid-budget, since `run_pilot()`'s chunk walk otherwise proceeds
+   through every remaining chunk target automatically. It is unrelated to,
+   and does not implement, the separate (not-yet-implemented)
+   `max_updates_per_epoch` per-epoch minibatch cap discussed elsewhere in
+   this project.
+
+Focused tests reproducing the real failure shape and the bounded-recovery
+behavior were added to `tests/test_wandb_tracking.py`,
+`tests/test_pilot_tracking.py`, and `tests/test_pilot_orchestration.py`
+(see "Tests" below).
+
+**Current state of `raw_seedA`.** Epochs 1-6 are trained and usable;
+epoch 3 is validly screened (diagnostic-only); **epoch 6 is not yet validly
+screened** (no saved validation result, no persisted screening/
+early-stopping state for it) — `raw_seedA` is not yet a completed or
+selectable candidate. Nothing has been retrained, re-evaluated, or deleted
+on Moriah. The fix above has not been run against the real Moriah run
+directory — see "Current status and next step" below for the prepared (not
+executed) recovery sequence.
+
 ## Implementation modules
 
 | Module | Task |

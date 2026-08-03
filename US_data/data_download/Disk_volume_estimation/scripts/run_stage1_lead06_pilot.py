@@ -119,6 +119,17 @@ def main() -> None:
         "src/baseline/pilot_tracking.py's module docstring.",
     )
     parser.add_argument(
+        "--max-target-epoch", type=int, default=None,
+        help="Bound this invocation to never train/screen past this epoch, even if the "
+        "pilot policy's chunk schedule would otherwise continue further (e.g. towards the "
+        "36-epoch pilot sub-cap). Leave unset for an ordinary unbounded run. Intended for "
+        "a deliberate, human-supervised recovery/resume where training must pause for "
+        "review after a specific epoch -- see run_pilot()'s max_target_epoch parameter and "
+        "the job-45731908 postmortem in docs/stage1_lead06_pilot_v001.md. Never used to "
+        "implement per-epoch update-count limiting (a separate, unrelated, not-yet-"
+        "implemented concept).",
+    )
+    parser.add_argument(
         "--prepare-only", action="store_true",
         help="Generate this run_id's NH config + generation manifest (exactly the "
         "prepare_pilot_run() step run_pilot() itself calls first) and exit before any NH "
@@ -175,6 +186,7 @@ def main() -> None:
         commands_used=["python scripts/run_stage1_lead06_pilot.py " + " ".join(sys.argv[1:])],
         force=args.force,
         tracking_generation=args.tracking_generation,
+        max_target_epoch=args.max_target_epoch,
     )
 
     printable = dict(result)

@@ -21,8 +21,12 @@ anything above ``MAX_COPIED_FILE_BYTES`` into the bundle body (checkpoints /
 NetCDF / Parquet / prediction pickles are referenced by path + checksum only,
 via :func:`_checkpoint_inventory`, never copied) -- the same "compact
 reference only" discipline
-:func:`src.baseline.wandb_tracking.log_artifact_reference` already enforces
-one layer up.
+:func:`src.baseline.wandb_tracking.log_artifact_reference`/
+:func:`src.baseline.wandb_tracking.log_checkpoint_reference` already enforce
+one layer up. The ``run_record["wandb"]`` section below is read straight off
+the live ``TrackingRun`` (``degraded``/``degraded_operations``/``finished``),
+so a tracking failure (e.g. a checkpoint-reference error) is always reported
+honestly here, never masked as a clean finish.
 """
 from __future__ import annotations
 

@@ -82,7 +82,7 @@ from .wandb_tracking import (
     finish_tracking_run,
     init_tracking_run,
     load_tracking_policy,
-    log_artifact_reference,
+    log_checkpoint_reference,
     log_hyperparameters,
     log_resource_metrics,
     log_scientific_metrics,
@@ -461,10 +461,17 @@ def log_pilot_epoch_training_metrics(
 
 
 def log_pilot_checkpoint_reference(run: TrackingRun, *, epoch: int, path, checksum: str) -> None:
-    """Record a compact checkpoint-file reference (path + checksum + size),
-    never the checkpoint's own bytes -- ``log_artifact_reference`` already
-    structurally refuses anything above its configured size ceiling."""
-    log_artifact_reference(run, name=f"checkpoint_epoch_{epoch:03d}", path=path, checksum=checksum)
+    """Record a compact checkpoint-file reference (epoch + path + checksum +
+    size + checkpoint_type), never the checkpoint's own bytes. Routed
+    through :func:`wandb_tracking.log_checkpoint_reference`, which -- unlike
+    the generic ``log_artifact_reference`` -- never applies a "compact
+    artifact" size ceiling to the referenced file (checkpoints are always
+    large) and never raises on failure; any failure degrades tracking
+    instead of propagating (see Moriah job 45731908 postmortem,
+    docs/stage1_lead06_pilot_v001.md)."""
+    log_checkpoint_reference(
+        run, epoch=epoch, path=path, checksum=checksum, checkpoint_type="nh_model_checkpoint"
+    )
 
 
 def finish_pilot_run(run: TrackingRun, *, final_status: str, best_epoch: "int | None" = None) -> None:

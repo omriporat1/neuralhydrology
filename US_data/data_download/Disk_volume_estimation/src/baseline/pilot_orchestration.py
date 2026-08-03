@@ -1390,18 +1390,27 @@ def run_pilot_chunk(
             effective_policy=effective_policy,
         )
 
-        if tracking_run is not None and epoch not in logged_epochs:
+        # Persist authoritative orchestration state for this epoch BEFORE
+        # any optional W&B telemetry call, not after the whole loop: real
+        # Moriah job 45731908 raised an uncaught TrackingError out of the
+        # checkpoint-reference call below, so the old post-loop-only save
+        # never ran even though this epoch's validation + early-stopping
+        # state was already durable on disk. Tracking is now also fully
+        # non-fatal (see log_pilot_screening_event/log_pilot_checkpoint_reference),
+        # so this ordering is a durability improvement, not a correctness
+        # dependency of the fix.
+        logged_epochs.add(epoch)
+        orchestration_state["logged_screening_epochs"] = sorted(logged_epochs)
+        _save_orchestration_state(nh_base_run_dir, orchestration_state)
+
+        if tracking_run is not None:
             log_pilot_screening_event(tracking_run, epoch=epoch, screening_result=result, early_stopping_state=es_state)
             ckpt_path = Path(checkpoint_dir_for_target) / f"model_epoch{epoch:03d}.pt"
             if ckpt_path.is_file():
                 log_pilot_checkpoint_reference(tracking_run, epoch=epoch, path=ckpt_path, checksum=sha256_of(ckpt_path))
-            logged_epochs.add(epoch)
 
         if es_state.get("stopped"):
             break
-
-    orchestration_state["logged_screening_epochs"] = sorted(logged_epochs)
-    _save_orchestration_state(nh_base_run_dir, orchestration_state)
 
     return {
         "nh_run_dir": nh_base_run_dir,
@@ -1432,6 +1441,7 @@ def run_pilot(
     tracking_generation: str = "g1",
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+    max_target_epoch: "int | None" = None,
 ) -> dict:
     """Top-level pilot orchestration for one ``run_id``: prepare the config,
     train in bounded chunks via NH's own ``start_run``/``continue_run``
@@ -1462,6 +1472,20 @@ def run_pilot(
     should deliberately pass a different value. Leaving it at the default is
     correct for every ordinary bounded-chunk continuation of an in-progress
     candidate.
+
+    ``max_target_epoch``, if given, bounds this call to chunk targets at or
+    below it (see :func:`chunk_epoch_targets`) -- e.g. ``max_target_epoch=6``
+    processes only the first chunk target and returns without attempting the
+    next one, even though this call is neither ``blocked`` nor ``stopped``.
+    Leave it ``None`` (the default) for ordinary operation, where one call
+    walks every chunk target up to the policy's full epoch budget. This
+    exists only so one specific call can stop for human review at a
+    caller-chosen epoch (see the job 45731908 recovery note in
+    docs/stage1_lead06_pilot_v001.md); it never changes what is
+    trained/evaluated/recorded for any target at or below it, only whether
+    later targets are attempted within this same call -- a later call with a
+    higher (or absent) ``max_target_epoch`` resumes exactly where this one
+    left off, through the same idempotent-resume path as any other restart.
     """
     run_spec, bundle, config_dir, experiment_name = prepare_pilot_run(
         pilot_policy=pilot_policy,
@@ -1507,6 +1531,13 @@ def run_pilot(
     targets = chunk_epoch_targets(pilot_policy, effective_policy["max_epoch_budget"])
     if not targets:
         raise PilotOrchestrationError("chunk_epoch_targets returned no targets -- nothing to train")
+    if max_target_epoch is not None:
+        bounded_targets = [t for t in targets if t <= max_target_epoch]
+        if not bounded_targets:
+            raise PilotOrchestrationError(
+                f"max_target_epoch={max_target_epoch} excludes every chunk target in {targets}"
+            )
+        targets = bounded_targets
 
     previous_target = 0
     previous_checkpoint_dir = None
@@ -1556,7 +1587,12 @@ def run_pilot(
             final_status = f"stopped_{chunk_result['stop_reason']}"
             break
     else:
-        final_status = "budget_exhausted_not_stopped"
+        was_bounded_before_full_budget = (
+            max_target_epoch is not None and targets[-1] < effective_policy["max_epoch_budget"]
+        )
+        final_status = (
+            "paused_at_max_target_epoch" if was_bounded_before_full_budget else "budget_exhausted_not_stopped"
+        )
 
     best_epoch = pilot_best_checkpoint_epoch(last_chunk_result["state"])
     finish_pilot_run(tracking_run, final_status=final_status, best_epoch=best_epoch)

@@ -21,8 +21,13 @@ Design points, all directly from section 10:
     credential-shaped keys and rejected if any are found.
   * Compact artifacts/references only: `log_artifact_reference` refuses any
     file above `policy["max_artifact_reference_bytes"]`, so large prediction
-    pickles, checkpoints, NetCDF, or Parquet files can never be logged by
-    this module, structurally, not just by convention.
+    pickles, NetCDF, or Parquet files can never be logged by this module,
+    structurally, not just by convention. Checkpoint files are the one
+    reference kind that is structurally always large: `log_checkpoint_reference`
+    logs epoch/path/checksum/size/checkpoint_type metadata for one without
+    ever applying that size ceiling to it, and (unlike a bare
+    `log_artifact_reference` call) never raises on failure -- see the next
+    bullet.
   * Best-effort after init: every call that touches a real wandb backend
     (`log_hyperparameters`/`log_scientific_metrics`/`log_resource_metrics`/
     `log_artifact_reference`/`finish_tracking_run`) always updates this
@@ -71,6 +76,7 @@ __all__ = [
     "log_scientific_metrics",
     "log_resource_metrics",
     "log_artifact_reference",
+    "log_checkpoint_reference",
     "finish_tracking_run",
 ]
 
@@ -177,31 +183,38 @@ class TrackingRun:
         self.degraded_operations: set[str] = set()
 
 
+def _mark_degraded(run: "TrackingRun", operation: str, exc: BaseException) -> None:
+    """Record a best-effort tracking failure on ``run`` without raising.
+
+    Warns once per distinct ``operation`` per run (not once per call) so a
+    metric log failing every epoch cannot flood stderr, and records the
+    degradation on ``run.degraded``/``run.degraded_operations`` so it is
+    never silently mistaken for tracking having completed cleanly.
+    """
+    run.degraded = True
+    first_for_operation = operation not in run.degraded_operations
+    run.degraded_operations.add(operation)
+    if first_for_operation:
+        warnings.warn(
+            f"W&B tracking operation {operation!r} failed and has been downgraded to "
+            f"best-effort ({exc!r}); the underlying scientific operation was NOT affected. "
+            "Further failures of this same operation on this run will not be re-warned.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
 def _guard_backend_call(run: "TrackingRun", operation: str, fn) -> None:
     """Best-effort wrapper around a single real-wandb backend call.
 
     Any exception raised by ``fn`` is caught here, never re-raised: this is
     the failure-isolation boundary that keeps W&B telemetry from ever being
     able to stop training/screening/early-stopping/checkpoint selection.
-    Warns once per distinct ``operation`` per run (not once per call) so a
-    metric log failing every epoch cannot flood stderr, and records the
-    degradation on ``run.degraded``/``run.degraded_operations`` so it is
-    never silently mistaken for tracking having completed cleanly.
     """
     try:
         fn()
     except Exception as exc:  # noqa: BLE001 -- deliberate, documented catch-all
-        run.degraded = True
-        first_for_operation = operation not in run.degraded_operations
-        run.degraded_operations.add(operation)
-        if first_for_operation:
-            warnings.warn(
-                f"W&B tracking operation {operation!r} failed and has been downgraded to "
-                f"best-effort ({exc!r}); the underlying scientific operation was NOT affected. "
-                "Further failures of this same operation on this run will not be re-warned.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+        _mark_degraded(run, operation, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +338,49 @@ def log_artifact_reference(run: TrackingRun, name: str, path, checksum: str) -> 
         _guard_backend_call(
             run, "log_artifact_reference", lambda: run._wandb_run.summary.__setitem__(f"artifact_ref/{name}", record)
         )
+
+
+def log_checkpoint_reference(
+    run: TrackingRun, *, epoch: int, path, checksum: str, checkpoint_type: str = "nh_model_checkpoint"
+) -> None:
+    """Record a compact CHECKPOINT reference (epoch + path + checksum + size
+    + checkpoint_type) -- never the checkpoint file's own bytes.
+
+    Unlike :func:`log_artifact_reference`, this never applies
+    ``run.max_artifact_reference_bytes`` to the referenced file's size:
+    checkpoint files are structurally always large, so a "compact
+    reference" to one is expected to describe a large file, not refuse to
+    record it (that size ceiling exists to catch accidentally-large
+    CONTENT payloads, which this function never reads -- only
+    ``Path.stat()``).
+
+    Every failure mode here (missing checkpoint file, backend error,
+    formatting error) is optional telemetry, exactly like every other
+    logging call in this module: it degrades tracking
+    (``run.degraded``/``run.degraded_operations``) via ``_mark_degraded``
+    and returns -- it NEVER raises, so a tracking failure can never abort
+    training/screening/early-stopping/checkpoint selection (this is the
+    exact failure mode that killed Moriah job 45731908 when the old
+    generic ``log_artifact_reference`` path was used for a checkpoint
+    reference instead; see docs/stage1_lead06_pilot_v001.md).
+    """
+    operation = "log_checkpoint_reference"
+    try:
+        p = Path(path)
+        size_bytes = p.stat().st_size
+        record = {
+            "name": f"checkpoint_epoch_{epoch:03d}",
+            "path": str(p),
+            "checksum": checksum,
+            "size_bytes": size_bytes,
+            "epoch": epoch,
+            "checkpoint_type": checkpoint_type,
+        }
+        run.artifact_references.append(record)
+        if run.backend == "wandb":
+            run._wandb_run.summary[f"checkpoint_ref/epoch_{epoch:03d}"] = record
+    except Exception as exc:  # noqa: BLE001 -- optional telemetry, see docstring above
+        _mark_degraded(run, operation, exc)
 
 
 def finish_tracking_run(run: TrackingRun) -> None:

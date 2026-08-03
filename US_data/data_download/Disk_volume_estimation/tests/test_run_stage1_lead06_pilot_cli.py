@@ -198,6 +198,21 @@ def test_ordinary_invocation_without_override_unchanged(cli_module, monkeypatch,
     assert call["force"] is False
 
 
+# --- --max-target-epoch: bounded-recovery flag threading -------------------
+
+def test_max_target_epoch_defaults_to_none(cli_module, monkeypatch, tmp_path):
+    fake_run_pilot = _FakeRunPilotCapture()
+    _run_main(cli_module, monkeypatch, _base_argv(tmp_path), fake_run_pilot)
+    assert fake_run_pilot.calls[0]["max_target_epoch"] is None
+
+
+def test_explicit_max_target_epoch_is_threaded(cli_module, monkeypatch, tmp_path):
+    fake_run_pilot = _FakeRunPilotCapture()
+    argv = _base_argv(tmp_path) + ["--max-target-epoch", "6"]
+    _run_main(cli_module, monkeypatch, argv, fake_run_pilot)
+    assert fake_run_pilot.calls[0]["max_target_epoch"] == 6
+
+
 # --- --prepare-only: config-generation only, never real training -----------
 
 class _FakePreparePilotRunOnlyCapture:

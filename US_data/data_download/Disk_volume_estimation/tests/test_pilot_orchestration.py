@@ -59,6 +59,7 @@ from src.baseline.pilot_orchestration import (
 )
 from src.baseline.pilot_early_stopping import build_effective_policy
 from src.baseline.pilot_lead06_config import load_pilot_policy
+from src.baseline.pilot_tracking import log_pilot_screening_event as real_log_pilot_screening_event
 from src.baseline.nh_seed_evaluation import weight_stem
 from src.baseline.splits import sha256_of
 from src.baseline.wandb_tracking import init_tracking_run
@@ -371,7 +372,16 @@ def test_run_pilot_chunk_resume_after_successful_epoch9_is_idempotent(run_pilot_
     nested case) must be fully idempotent on a second resume call: no
     further trainer call, no re-evaluation (epoch 9's result already saved),
     no duplicate stopping-history entry -- covers "reuse of existing epoch-9
-    result" and "idempotent repeated-resume-after-epoch-9"."""
+    result" and "idempotent repeated-resume-after-epoch-9". Orchestration
+    state (``logged_screening_epochs``) is now persisted unconditionally per
+    epoch -- decoupled from whether a ``tracking_run`` was passed at all, not
+    just moved earlier within the old ``tracking_run is not None`` guard --
+    see the job-45731908 fix note in ``run_pilot_chunk``. So epoch 9 is
+    recognized as already-logged on the third call and skipped outright,
+    rather than falling through to re-processing that only happened to look
+    idempotent before because ``ensure_validation_results``/
+    ``record_screening_event`` separately tolerate replaying the same
+    epoch."""
     fx = run_pilot_fixture
     common_kwargs = _prepare_common_kwargs(fx)
 
@@ -409,7 +419,7 @@ def test_run_pilot_chunk_resume_after_successful_epoch9_is_idempotent(run_pilot_
     assert eval_calls == [], "epoch 9's result already saved -- must not re-evaluate"
     assert third["blocked"] is False
     assert third["checkpoint_dir_for_target"] == expected_dir
-    assert [r["epoch"] for r in third["screening_results"]] == [9]
+    assert third["screening_results"] == [], "epoch 9 is already logged -- must be skipped, not re-processed"
     assert len(third["state"]["history"]) == len(second["state"]["history"])
 
 
@@ -747,8 +757,56 @@ def test_run_pilot_chunk_screening_log_failure_does_not_break_orchestration_stat
     assert orchestration_state["logged_screening_epochs"] == [3, 6]
 
     # Tracking itself is honestly reported as degraded, never silently "fine".
+    # Both the screening-metrics log AND the checkpoint-reference log (the
+    # exact call that killed job 45731908 when it raised uncaught) must be
+    # recorded as independently degraded, never masked as a clean finish.
     assert tracking_run.degraded is True
     assert "log_scientific_metrics" in tracking_run.degraded_operations
+    assert "log_checkpoint_reference" in tracking_run.degraded_operations
+
+
+def test_run_pilot_chunk_persists_state_before_telemetry_even_if_telemetry_raises_directly(
+    monkeypatch, run_pilot_fixture
+):
+    """Proves task 2C's persistence ORDERING independently of 2B's
+    non-fatal-tracking guarantee: even if a telemetry call is forced to
+    raise straight out of run_pilot_chunk (bypassing wandb_tracking.py's own
+    internal failure isolation entirely, as if some future call were added
+    without it), the screening/early-stopping/orchestration state for the
+    epoch just processed must already be durable on disk -- this is exactly
+    the ordering bug that lost job 45731908's epoch-6 processing when
+    log_pilot_checkpoint_reference raised uncaught. The forced raise is
+    scoped to epoch 6 only (epoch 3 -- diagnostic-only, processed first --
+    must complete normally) so this reproduces the real failure shape
+    exactly, including the epoch-3 early-stopping no-op."""
+
+    def _raise_only_for_epoch_6(*args, **kwargs):
+        if kwargs.get("epoch") == 6:
+            raise RuntimeError("simulated telemetry failure, bypassing 2B")
+        return real_log_pilot_screening_event(*args, **kwargs)
+
+    monkeypatch.setattr("src.baseline.pilot_orchestration.log_pilot_screening_event", _raise_only_for_epoch_6)
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+
+    tracking_run = init_tracking_run({"enabled": False, "mode": "disabled", "max_artifact_reference_bytes": 10_000_000}, {})
+
+    with pytest.raises(RuntimeError, match="simulated telemetry failure"):
+        run_pilot_chunk(
+            chunk_target_epoch=6, previous_target_epoch=0, is_first_chunk=True,
+            train_chunk_fn=fx["fake_train"], evaluate_checkpoint_fn=fx["fake_evaluate"],
+            tracking_run=tracking_run, **common_kwargs,
+        )
+
+    nh_run_dir = common_kwargs["config_dir"] / "runs" / f'{common_kwargs["experiment_name"]}_20260101_000000'
+    es_state = json.loads((nh_run_dir / "pilot_early_stopping_state.json").read_text())
+    assert [h["epoch"] for h in es_state["history"]] == [6], (
+        "epoch 6's early-stopping state must already be persisted before the telemetry call that then raised"
+    )
+    orchestration_state = json.loads((nh_run_dir / "pilot_orchestration_state.json").read_text())
+    assert orchestration_state["logged_screening_epochs"] == [3, 6], (
+        "epoch 6 must already be recorded as logged in orchestration state before the telemetry call that then raised"
+    )
 
 
 # --- ensure_validation_results: explicit-evaluation prerequisite check -----
@@ -973,6 +1031,134 @@ def test_run_pilot_chunk_resumes_from_real_qualification_run_failure_shape(run_p
     assert eval_calls[0].nh_run_dir == expected_dir
     assert resumed["checkpoint_dir_for_target"] == expected_dir
     assert [r["epoch"] for r in resumed["screening_results"]] == [9]
+
+
+def test_run_pilot_recovers_job_45731908_shaped_state_without_auto_continuing(run_pilot_fixture):
+    """Reproduces job 45731908's exact real starting state (task item 11):
+    checkpoints 1-6 already flat on disk, epoch 3's validation_results.p
+    already saved (NH's in-training validation), but NO epoch-6 validation
+    result (the run died mid-epoch-6 screening, inside the checkpoint-
+    reference call, before evaluate_screening_checkpoint ever ran), and
+    neither pilot_orchestration_state.json nor pilot_early_stopping_state.json
+    exist yet for this run. A single recovery call bounded with
+    max_target_epoch=6 must: never retrain epochs 1-6; reuse the existing
+    epoch-3 result without re-evaluating it; evaluate epoch 6 exactly once;
+    record epoch 6 as the first (and only) early-stopping history entry;
+    and stop there -- never automatically training/screening epoch 9 within
+    the same call, so a human can review epoch 6 first."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+
+    assert not (nh_run_dir / "pilot_orchestration_state.json").exists()
+    assert not (nh_run_dir / "pilot_early_stopping_state.json").exists()
+
+    train_calls = []
+    evaluate_calls = []
+
+    def counting_train(request):
+        train_calls.append(request)
+        fx["fake_train"](request)
+
+    def counting_evaluate(request):
+        evaluate_calls.append(request)
+        fx["fake_evaluate"](request)
+
+    result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        commands_used=["test recovery replay of job 45731908"],
+        train_chunk_fn=counting_train,
+        evaluate_checkpoint_fn=counting_evaluate,
+        max_target_epoch=6,
+    )
+
+    assert train_calls == [], "checkpoints 1-6 already exist on disk -- recovery must not retrain"
+    assert [r.epoch for r in evaluate_calls] == [6], "epoch 3 already saved (reuse); epoch 6 must be newly evaluated"
+    assert result["final_status"] == "paused_at_max_target_epoch"
+
+    orchestration_state = json.loads((nh_run_dir / "pilot_orchestration_state.json").read_text())
+    assert orchestration_state["logged_screening_epochs"] == [3, 6]
+
+    es_state = json.loads((nh_run_dir / "pilot_early_stopping_state.json").read_text())
+    assert [h["epoch"] for h in es_state["history"]] == [6]
+    assert es_state["stopped"] is False
+    assert result["best_checkpoint_epoch"] == 6
+
+
+def test_run_pilot_recovery_of_job_45731908_shaped_state_is_idempotent_on_replay(run_pilot_fixture):
+    """Calling the exact same bounded recovery a second time (e.g. a retried
+    orchestration invocation before a human has reviewed epoch 6) must not
+    retrain, must not re-evaluate epoch 3 or epoch 6, and must not append a
+    second history entry for epoch 6."""
+    fx = run_pilot_fixture
+    common_kwargs = _prepare_common_kwargs(fx)
+    config_dir = common_kwargs["config_dir"]
+    experiment_name = common_kwargs["experiment_name"]
+
+    runs_root = config_dir / "runs"
+    nh_run_dir = runs_root / f"{experiment_name}_20260101_000000"
+    nh_run_dir.mkdir(parents=True)
+    for epoch in range(1, 7):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+
+    def _run_once():
+        train_calls = []
+        evaluate_calls = []
+
+        def counting_train(request):
+            train_calls.append(request)
+            fx["fake_train"](request)
+
+        def counting_evaluate(request):
+            evaluate_calls.append(request)
+            fx["fake_evaluate"](request)
+
+        result = run_pilot(
+            pilot_policy=fx["pilot_policy"],
+            run_id="raw_seedA",
+            baseline_policy_path=BASELINE_POLICY_PATH,
+            package_root=fx["package_root"],
+            splits_dir=SPLITS_DIR,
+            config_out_dir=fx["config_out_dir"],
+            evidence_out_dir=fx["evidence_out_dir"],
+            screening_basin_ids=fx["basins"],
+            commands_used=["test recovery replay of job 45731908"],
+            train_chunk_fn=counting_train,
+            evaluate_checkpoint_fn=counting_evaluate,
+            max_target_epoch=6,
+        )
+        return result, train_calls, evaluate_calls
+
+    first_result, first_train, first_eval = _run_once()
+    assert [r.epoch for r in first_eval] == [6]
+    assert first_result["final_status"] == "paused_at_max_target_epoch"
+
+    second_result, second_train, second_eval = _run_once()
+
+    assert second_train == [], "replay must not retrain"
+    assert second_eval == [], "replay must not re-evaluate an already-logged epoch"
+    assert second_result["final_status"] == "paused_at_max_target_epoch"
+
+    orchestration_state = json.loads((nh_run_dir / "pilot_orchestration_state.json").read_text())
+    assert orchestration_state["logged_screening_epochs"] == [3, 6]
+    es_state = json.loads((nh_run_dir / "pilot_early_stopping_state.json").read_text())
+    assert [h["epoch"] for h in es_state["history"]] == [6], "replay must not append a duplicate history entry"
 
 
 def test_run_pilot_chunk_real_qualification_run_evidence_with_overshoot_checkpoints_present(run_pilot_fixture):

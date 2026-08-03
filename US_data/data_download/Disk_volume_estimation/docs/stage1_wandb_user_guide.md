@@ -111,6 +111,25 @@ A small `pilot_wandb_run_identity.json` file is also written into the NH run dir
 
 After init, every individual W&B call (metric log, checkpoint reference, finish) is best-effort: a real backend failure is caught, warns once, and is recorded rather than raised -- it can never stop training, screening, early stopping, or checkpoint selection. To tell whether a run's tracking is complete: check its logged `wandb` summary (mirrored into the repository evidence bundle's `"wandb"` block) for `degraded: true` and a non-empty `degraded_operations` list. A `true` value means some telemetry calls silently failed for that run -- inspect `degraded_operations` to see which kind (e.g. `log_scientific_metrics`, `finish_tracking_run`); it never means the underlying scientific run itself is incomplete or untrustworthy. A run whose `backend` is `"null"` was never tracked at all (disabled policy, or a graceful init-failure downgrade) -- that is a normal, expected state for the vast majority of runs today (tracking defaults to disabled), not a degradation.
 
+**Real incident (job `45731908`, 2026-08-02, `raw_seedA`) and local fix
+(2026-08-03).** Before this fix, checkpoint references were routed through
+`log_artifact_reference`, which enforces `max_artifact_reference_bytes`
+(committed value `1,048,576` bytes) against the referenced file's own size
+-- appropriate for small generic artifacts, but wrong for a checkpoint
+reference, which is always well over that ceiling and was never meant to
+carry the file's bytes in the first place. Logging a real ~1.25 MB
+checkpoint's reference raised `TrackingError` **uncaught**, which killed
+the whole pilot process mid-screening -- a direct violation of the "never
+raised" contract stated at the top of this section. Checkpoint references
+are now logged through a separate `log_checkpoint_reference` function that
+never applies that size ceiling and never raises; any failure degrades
+tracking (recorded under `degraded_operations` as
+`"log_checkpoint_reference"`) exactly like any other telemetry call. See
+`docs/stage1_lead06_pilot_v001.md`'s "Sixth Moriah result" section for the
+full incident and the accompanying orchestration-state persistence-ordering
+fix; this local repair has not yet been re-verified against a real Moriah
+run.
+
 ## 14. How a historical backfilled run would be labeled, if one is ever added
 
 No completed candidate has been backfilled into W&B. If this is ever done later (e.g. to make an already-completed pre-tracking candidate like `emb128x64_seedA` visible alongside newly-tracked ones), it must be clearly distinguishable from a live-tracked run, not indistinguishable retroactive history: at minimum, a `backfilled: true` config field and a note in the run's notes/description naming the source evidence bundle it was reconstructed from, with any metrics that cannot be reconstructed byte-for-byte from that evidence bundle left absent rather than approximated. This convention is documented here as a requirement for if/when backfilling happens -- **it has not been implemented, and no backfilled run exists yet.**

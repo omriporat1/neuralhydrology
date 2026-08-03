@@ -212,6 +212,32 @@ def test_log_pilot_checkpoint_reference_records_path_and_checksum(tmp_path, pilo
     assert len(run.artifact_references) == 1
     assert run.artifact_references[0]["name"] == "checkpoint_epoch_006"
     assert run.artifact_references[0]["checksum"] == "deadbeef"
+    assert run.artifact_references[0]["checkpoint_type"] == "nh_model_checkpoint"
+
+
+def test_log_pilot_checkpoint_reference_survives_real_oversized_checkpoint(
+    fake_wandb, enabled_offline_policy, pilot_policy, tmp_path
+):
+    """Reproduces the exact job 45731908 failure shape: a real-sized (>1MB)
+    NH checkpoint logged through log_pilot_checkpoint_reference under the
+    real committed 1,048,576-byte max_artifact_reference_bytes policy value
+    must not raise -- this used to route through log_artifact_reference,
+    whose size ceiling raised TrackingError uncaught and killed the pilot
+    mid-screening."""
+    policy = enabled_offline_policy(pilot_policy)
+    run = init_pilot_tracking_run(
+        policy, run_identity={"pilot_policy_name": "stage1_lead06_pilot_v001", "run_id": "raw_seedA"}
+    )
+    assert run.max_artifact_reference_bytes == 1_048_576
+
+    ckpt = tmp_path / "model_epoch003.pt"
+    ckpt.write_bytes(b"0" * 1_300_000)  # ~1.25 MB, matching the real checkpoint size
+
+    log_pilot_checkpoint_reference(run, epoch=3, path=ckpt, checksum="deadbeef")
+
+    assert run.degraded is False
+    assert run.artifact_references[0]["size_bytes"] == 1_300_000
+    assert run.artifact_references[0]["epoch"] == 3
 
 
 # --- finish_pilot_run ---------------------------------------------------------

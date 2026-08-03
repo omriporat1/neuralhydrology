@@ -233,7 +233,7 @@ def test_scenario_06_checkpoint_reference_metadata_without_uploading_bytes(fake_
     assert ref["checksum"] == "deadbeef"
     assert ref["path"] == str(ckpt)
     assert "size_bytes" in ref
-    logged_summary_value = run._wandb_run.summary["artifact_ref/checkpoint_epoch_006"]
+    logged_summary_value = run._wandb_run.summary["checkpoint_ref/epoch_006"]
     assert logged_summary_value == ref
     assert isinstance(logged_summary_value["path"], str)  # a path string, never file content
 
