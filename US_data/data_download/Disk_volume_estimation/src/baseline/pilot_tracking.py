@@ -117,6 +117,7 @@ _HYPERPARAMETER_CONFIG_KEYS = (
     "model", "hidden_size", "output_dropout", "batch_size", "optimizer",
     "learning_rate", "loss", "save_weights_every", "validate_every",
     "validate_n_random_basins", "num_workers", "seed", "statics_embedding",
+    "max_updates_per_epoch",
 )
 
 
@@ -278,13 +279,18 @@ def build_pilot_run_identity(
         "screening_validation_every_n_epochs": pilot_policy.screening_validation_every_n_epochs,
         "diagnostic_only_epoch": pilot_policy.diagnostic_only_epoch,
         "stopping_eligible_from_epoch": pilot_policy.stopping_eligible_from_epoch,
-        # Nullable multi-fidelity placeholder (see docs/
-        # stage1_validation_optimization_foundation.md Part L.5): this pilot
-        # runs at full fidelity only -- no capped-update training exists yet,
-        # so this is always None here, logged explicitly rather than omitted
-        # so a future fidelity-capped run's non-null value is distinguishable
-        # from "field didn't exist yet".
-        "max_updates_per_epoch": None,
+        # Nullable multi-fidelity field (see docs/
+        # stage1_validation_optimization_foundation.md Part L.5/L.6): None
+        # (the default, and every pre-existing pilot run's value) means
+        # uncapped/full-fidelity training; a positive int is this run's
+        # frozen fidelity-screening cap, sourced straight from the bundle
+        # that was actually used to generate this run's config.yaml -- never
+        # re-derived or mutated here. Logged explicitly (never omitted) so a
+        # capped run's value is always distinguishable from an uncapped run's
+        # None. See pilot_orchestration.enforce_pilot_cap_identity for the
+        # continuation-time safeguard that keeps this value frozen across
+        # any Slurm resumption of the same run directory.
+        "max_updates_per_epoch": bundle.max_updates_per_epoch,
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
         # Whichever W&B policy file actually took effect for this invocation

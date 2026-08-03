@@ -58,6 +58,7 @@ from .nh_config_generation import (
     validate_seq_length,
     validate_static_attribute_contract,
     validate_target_variables,
+    validate_max_updates_per_epoch,
     _get_git_commit,
 )
 from datetime import datetime, timezone
@@ -126,6 +127,14 @@ class PilotRunSpec:
     seed_name: str
     seed: int
     run_profile_name: str
+    # Optional per-epoch NH training-batch cap for cheap early-fidelity
+    # screening (see nh_config_generation.validate_max_updates_per_epoch and
+    # docs/stage1_validation_optimization_foundation.md Part L.5/L.6). None
+    # (the default) is uncapped/full-fidelity -- byte-identical to every
+    # pre-existing pilot run. Frozen for this run's entire lifetime; never
+    # mutated or overridden at launch time (see pilot_orchestration's
+    # enforce_pilot_cap_identity, which rejects any later change).
+    max_updates_per_epoch: "int | None" = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +278,10 @@ def load_pilot_policy(path) -> PilotPolicy:
                 f"seed {profile.get('seed')!r}"
             )
 
+        max_updates_per_epoch = entry.get("max_updates_per_epoch")
+        if max_updates_per_epoch is not None:
+            validate_max_updates_per_epoch(max_updates_per_epoch)
+
         runs[run_id] = PilotRunSpec(
             run_id=run_id,
             static_pathway=static_pathway,
@@ -276,6 +289,7 @@ def load_pilot_policy(path) -> PilotPolicy:
             seed_name=seed_name,
             seed=seeds[seed_name],
             run_profile_name=entry["run_profile_name"],
+            max_updates_per_epoch=max_updates_per_epoch,
         )
 
     known_run_ids = set(PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME)
@@ -385,6 +399,7 @@ def build_pilot_bundle_with_validation_scope(
     population_role: str,
     package_type: str,
     static_column_manifest_path=None,
+    max_updates_per_epoch: "int | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
     bundle (task item 1) and ``pilot_full_validation.py``'s full-population
@@ -443,6 +458,7 @@ def build_pilot_bundle_with_validation_scope(
         dynamic_inputs=dynamic_inputs,
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
     package_manifest_identity = {
@@ -474,6 +490,7 @@ def build_pilot_bundle_with_validation_scope(
         validation_basin_ids=list(validation_basin_ids),
         test_basin_ids=development_basins,
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
 
@@ -512,6 +529,7 @@ def build_pilot_bundle(
         population_role=SCREENING_VALIDATION_POPULATION_ROLE,
         package_type=f"stage1_lead06_pilot_{run_id}",
         static_column_manifest_path=static_column_manifest_path,
+        max_updates_per_epoch=run_spec.max_updates_per_epoch,
     )
 
 

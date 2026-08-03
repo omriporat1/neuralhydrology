@@ -23,11 +23,13 @@ from src.baseline.nh_config_generation import (
     EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME,
     KNOWN_RUN_PROFILE_NAMES,
     NHConfigGenerationError,
+    build_nh_config_mapping,
     generate_stage1_nh_config,
     read_package_attribute_columns,
     validate_basin_membership,
     validate_dynamic_inputs,
     validate_lead_hours,
+    validate_max_updates_per_epoch,
     validate_seq_length,
     validate_static_attribute_contract,
     validate_statics_embedding_spec,
@@ -493,4 +495,102 @@ def test_generate_rejects_invalid_statics_embedding_in_profile(tmp_path, monkeyp
         generate_stage1_nh_config(
             policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
             lead_hours=6, seq_length=24, run_profile_name=bad_profile_name,
+        )
+
+
+# ---------------------------------------------------------------------------
+# max_updates_per_epoch: optional per-epoch NH training-batch cap for cheap
+# early-fidelity screening (efficiency feature, not a numerical-cap decision;
+# uncapped/None remains the default for every pre-existing caller).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [1, 5, 100])
+def test_validate_max_updates_per_epoch_accepts_positive_ints(value):
+    validate_max_updates_per_epoch(value)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -1, -100, 1.5, "5", None, [], {}],
+)
+def test_validate_max_updates_per_epoch_rejects_invalid_values(value):
+    with pytest.raises(NHConfigGenerationError):
+        validate_max_updates_per_epoch(value)
+
+
+def _build_mapping_kwargs(**overrides):
+    kwargs = dict(
+        policy=POLICY,
+        target_variable="qobs_mm_per_h_lead06",
+        seq_length=24,
+        dynamic_inputs=REAL_DYNAMIC_INPUTS,
+        static_attributes=_static_columns(),
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_build_nh_config_mapping_omits_key_when_uncapped():
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs())
+    assert "max_updates_per_epoch" not in mapping
+
+
+def test_build_nh_config_mapping_includes_exact_int_when_capped():
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs(max_updates_per_epoch=25))
+    assert mapping["max_updates_per_epoch"] == 25
+
+
+def test_build_nh_config_mapping_rejects_invalid_cap():
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(max_updates_per_epoch=True))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(max_updates_per_epoch=0))
+
+
+def test_generate_stage1_nh_config_uncapped_default_omits_key_everywhere(tmp_path):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    bundle = generate_stage1_nh_config(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+    )
+    assert bundle.max_updates_per_epoch is None
+    assert "max_updates_per_epoch" not in bundle.config_mapping
+
+    written = write_generated_config(bundle, tmp_path / "out")
+    cfg = yaml.safe_load(written["config.yaml"].read_text(encoding="utf-8"))
+    assert "max_updates_per_epoch" not in cfg
+
+    manifest = json.loads(written["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["max_updates_per_epoch"] is None
+
+
+def test_generate_stage1_nh_config_capped_threads_exact_value(tmp_path):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    bundle = generate_stage1_nh_config(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24, max_updates_per_epoch=10,
+    )
+    assert bundle.max_updates_per_epoch == 10
+    assert bundle.config_mapping["max_updates_per_epoch"] == 10
+
+    written = write_generated_config(bundle, tmp_path / "out")
+    cfg = yaml.safe_load(written["config.yaml"].read_text(encoding="utf-8"))
+    assert cfg["max_updates_per_epoch"] == 10
+
+    manifest = json.loads(written["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["max_updates_per_epoch"] == 10
+
+
+def test_generate_stage1_nh_config_rejects_invalid_cap(tmp_path):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    with pytest.raises(NHConfigGenerationError):
+        generate_stage1_nh_config(
+            policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+            lead_hours=6, seq_length=24, max_updates_per_epoch=-5,
         )

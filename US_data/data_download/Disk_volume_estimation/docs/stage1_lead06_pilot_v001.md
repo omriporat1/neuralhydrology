@@ -864,6 +864,20 @@ The `.sbatch` launcher's `PREPARE_ONLY=1` threads `--prepare-only` through, reta
 
 No scientific, screening, early-stopping, continuation, checkpoint, or sealed-set behavior changed, and no Moriah operation was performed to implement this (no package install, no Slurm submission, no config generation against real transferred data, no training). Focused tests: additions to `tests/test_pilot_orchestration.py`, `tests/test_run_stage1_lead06_pilot_cli.py`, and `tests/test_pilot_sbatch_launcher.py`.
 
+## `max_updates_per_epoch` capped-update support (2026-08-03, implementation-only, not launched)
+
+An optional `max_updates_per_epoch: int | None` field is now supported end-to-end for efficient structural-candidate screening (config generation, pilot/candidate policy, run identity, continuation/checkpoint safeguards, evidence recording). Full design framing: `docs/stage1_validation_optimization_foundation.md` Part L (L.5 adopted the direction; L.7, added alongside this section, records that the mechanism is now implemented). **This section documents the mechanism only.** It does not change `raw_seedA`, `emb128x64_seedA`, or any other named candidate — all of them keep `max_updates_per_epoch: null` (uncapped, full-fidelity) exactly as before. No numerical cap has been adopted, no capped run has been launched, and no Moriah operation was performed to implement this (no package install, no Slurm submission, no config generation against real transferred data, no training).
+
+Key points:
+- `null` (the default) means unchanged, uncapped behavior; any other value must be a positive integer — `0`, negative integers, bools, floats, and strings are all rejected before config generation.
+- The cap is frozen for a candidate's whole trajectory. `enforce_pilot_cap_identity` rejects (before any training call) a continuation/resume whose freshly-resolved cap disagrees with the cap already recorded for that NH run directory — covers null→int, int→null, and int→different-int, in both directions. A capped run and an uncapped run are always distinct identities; a capped checkpoint is never a valid continuation source for an uncapped trajectory or vice versa.
+- `--prepare-only` records the declared cap in the run identity without starting training, same as every other identity field it already records.
+- Verified NeuralHydrology 1.13 semantics (read from the vendored source, not assumed): the cap truncates each epoch's DataLoader iteration to a deterministic index-based prefix, re-applied fresh every epoch; the scheduler still steps once per epoch, and both `model_epochNNN.pt` and `optimizer_state_epochNNN.pt` are still written unconditionally once per epoch regardless of the cap. That unconditional per-epoch optimizer-state checkpoint is what makes real actual-update evidence obtainable (`optimizer_state_epochNNN.pt`'s own persisted Adam/AdamW `state[p]['step']` counter) without any NeuralHydrology core-code change.
+- The evidence bundle records the *configured* cap and, where measured, the *actual* per-epoch optimizer-update count (`actual_optimizer_updates_by_epoch`) as two distinct fields, never conflated.
+- `MAX_TARGET_EPOCH`, early stopping, screening cadence, checkpoint discovery, and W&B-disabled behavior are all unchanged and structurally uncoupled from this field (confirmed by code inspection, not just testing — none of those code paths reference `max_updates_per_epoch`).
+
+No scientific, screening, early-stopping, continuation, checkpoint, or sealed-set behavior changed. Focused tests: additions to `tests/test_pilot_lead06_config.py`, `tests/test_pilot_orchestration.py` (cap-identity safeguard plus real-optimizer-state evidence extraction), `tests/test_pilot_tracking.py`, and `tests/test_pilot_evidence_bundle.py`.
+
 ## Current status and next step (2026-08-02)
 
 Documentation-only update, recording the roadmap decided after

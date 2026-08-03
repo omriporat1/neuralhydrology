@@ -74,7 +74,7 @@ Secondary raw-space metrics (bias, KGE components, pooled statistics, etc., wher
 
 ## 6. Filtering/grouping by architecture, seed, fidelity
 
-Use W&B's run filter/group-by on config fields, not custom tags, since the config already carries the structural axes: group by `static_pathway` or `embedding_hiddens` to compare architectures, by `seed_name`/`seed` to compare seeds, by `run_profile_name` for the exact candidate label. A `max_updates_per_epoch` config field always shows `null` right now (see §14's neighbor, the multi-fidelity note below) -- every run in this pilot trains at full fidelity; grouping by that field will not distinguish anything yet.
+Use W&B's run filter/group-by on config fields, not custom tags, since the config already carries the structural axes: group by `static_pathway` or `embedding_hiddens` to compare architectures, by `seed_name`/`seed` to compare seeds, by `run_profile_name` for the exact candidate label. A `max_updates_per_epoch` config field always shows `null` right now (see §16) -- every run in this pilot trains at full fidelity; grouping by that field will not distinguish anything yet.
 
 ## 7. What a sweep is (and why none exists yet)
 
@@ -144,5 +144,14 @@ The committed `config/stage1_wandb_tracking_policy_v001.yaml` ships `enabled: fa
 - Leaves the **stable W&B run id and `tracking_generation` mechanism (§12) untouched**: switching the policy file does not change `derive_pilot_wandb_run_id`'s inputs, so a candidate resumed with and without an override still targets the same logical W&B run for a given `tracking_generation`.
 - Requires an **explicit `WANDB_DIR` outside the repository whenever it is supplied on Moriah**: production tracking code never sets `WANDB_DIR` itself (W&B's own default would otherwise write local run state beneath the tracked repository clone). The `.sbatch` launcher defaults `WANDB_DIR` to `${FLASHNH_BASE}/wandb/offline/${RUN_ID}` (never under `REPO_CLONE_DIR`/`REPO_WORKDIR`) whenever `WANDB_POLICY_PATH` is set, and exports `WANDB_MODE=offline` alongside it -- online mode is never exported by this launcher, matching § status item 3 above. A caller may still override `WANDB_DIR` directly if a different location outside the repo is wanted.
 - Does not generalize into a runtime-override framework: this is the one optional path (plus the pre-existing `--tracking-generation`, default `"g1"`, see §12) the CLI/launcher accept -- no other pilot-policy field has, or needs, an equivalent override point.
+
+## 16. `max_updates_per_epoch` in the config panel (2026-08-03, implementation-only)
+
+Capped-update screening support (an optional bounded-optimizer-update mechanism for cheap early candidate screening, see `docs/stage1_validation_optimization_foundation.md` Part L) is now implemented, but **no numerical cap has been adopted and no capped run has ever been launched.** What this means for what you see in W&B:
+
+- `run_identity["max_updates_per_epoch"]` is always present in the config panel -- `null` for every existing/uncapped run (including `raw_seedA` and `emb128x64_seedA`), or the exact configured positive integer for a future capped run. It reaches the real W&B config the same way every other `run_identity` field does, via `init_tracking_run`'s `wandb.init(..., config=dict(run_identity), ...)` -- there is no separate wiring to remember.
+- A capped run is a **distinct identity** from an uncapped one: Flash-NH rejects (before any training call) a resumed/continued run whose freshly-resolved cap contradicts a previously persisted cap for the same NH run directory, so you will never see a run's `max_updates_per_epoch` silently change value across a continuation in this project's evidence or W&B history.
+- Capped-run results are provisional screening evidence, not full-fidelity confirmation -- treat any future run with a non-null `max_updates_per_epoch` accordingly when comparing metrics against this pilot's six full-fidelity runs.
+- The evidence bundle (`pilot_run_evidence.json`) separately records the *actual* number of optimizer updates completed per epoch (`actual_optimizer_updates_by_epoch`, read from NH's own persisted optimizer checkpoint state, never inferred from wall time or logs) alongside the *configured* cap -- W&B does not currently get this second field; consult the evidence bundle directly if you need it.
 
 An invocation with no `--wandb-policy-path` (the ordinary case for every run today) is completely unaffected by any of this: it loads and uses the committed disabled policy exactly as before this flag existed.

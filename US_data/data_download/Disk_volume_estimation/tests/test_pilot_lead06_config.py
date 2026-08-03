@@ -531,3 +531,93 @@ def test_build_all_pilot_bundles_builds_exactly_six(tmp_path):
     for run_id, bundle in bundles.items():
         assert bundle.run_profile_name == PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME[run_id]
         assert sorted(bundle.validation_basin_ids) == sorted(screening)
+
+
+# ---------------------------------------------------------------------------
+# max_updates_per_epoch: optional per-epoch NH training-batch cap for cheap
+# early-fidelity screening (efficiency feature; uncapped/None remains the
+# default for every declared run unless a policy entry explicitly opts in).
+# ---------------------------------------------------------------------------
+
+def test_pilot_run_spec_max_updates_per_epoch_defaults_to_none_for_every_real_run():
+    policy = load_pilot_policy(PILOT_POLICY_PATH)
+    for run_id in EXPECTED_RUN_IDS:
+        assert resolve_pilot_run_spec(policy, run_id).max_updates_per_epoch is None
+
+
+def test_load_pilot_policy_parses_valid_max_updates_per_epoch_for_one_run(tmp_path):
+    raw = _raw_policy_dict()
+    entry = next(r for r in raw["runs"] if r["run_id"] == "raw_seedA")
+    entry["max_updates_per_epoch"] = 10
+    path = _write_policy(tmp_path, raw)
+
+    policy = load_pilot_policy(path)
+    assert resolve_pilot_run_spec(policy, "raw_seedA").max_updates_per_epoch == 10
+    # no cross-adoption onto sibling runs left undeclared in the YAML
+    assert resolve_pilot_run_spec(policy, "raw_seedB").max_updates_per_epoch is None
+    assert resolve_pilot_run_spec(policy, "emb128x64_seedA").max_updates_per_epoch is None
+
+
+@pytest.mark.parametrize("bad_value", [True, False, 0, -1, -100, 1.5, "5"])
+def test_load_pilot_policy_rejects_invalid_max_updates_per_epoch(tmp_path, bad_value):
+    raw = _raw_policy_dict()
+    entry = next(r for r in raw["runs"] if r["run_id"] == "raw_seedA")
+    entry["max_updates_per_epoch"] = bad_value
+    path = _write_policy(tmp_path, raw)
+    with pytest.raises(nh_config_generation.NHConfigGenerationError):
+        load_pilot_policy(path)
+
+
+def test_build_pilot_bundle_uncapped_default_omits_key_from_mapping(tmp_path):
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+
+    screening = REAL_DEVELOPMENT[:350]
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", screening)
+    policy = load_pilot_policy(PILOT_POLICY_PATH)
+    policy = _with_screening_path(policy, screening_path)
+
+    bundle = build_pilot_bundle(
+        pilot_policy=policy,
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=package_root,
+        splits_dir=SPLITS_DIR,
+    )
+    assert bundle.max_updates_per_epoch is None
+    assert "max_updates_per_epoch" not in bundle.config_mapping
+
+
+def test_build_pilot_bundle_threads_declared_cap_without_cross_adoption(tmp_path):
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+
+    screening = REAL_DEVELOPMENT[:350]
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", screening)
+
+    raw = _raw_policy_dict()
+    entry = next(r for r in raw["runs"] if r["run_id"] == "raw_seedA")
+    entry["max_updates_per_epoch"] = 7
+    policy_path = _write_policy(tmp_path, raw)
+    policy = load_pilot_policy(policy_path)
+    policy = _with_screening_path(policy, screening_path)
+
+    capped_bundle = build_pilot_bundle(
+        pilot_policy=policy,
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=package_root,
+        splits_dir=SPLITS_DIR,
+    )
+    assert capped_bundle.max_updates_per_epoch == 7
+    assert capped_bundle.config_mapping["max_updates_per_epoch"] == 7
+
+    uncapped_bundle = build_pilot_bundle(
+        pilot_policy=policy,
+        run_id="raw_seedB",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=package_root,
+        splits_dir=SPLITS_DIR,
+    )
+    assert uncapped_bundle.max_updates_per_epoch is None
+    assert "max_updates_per_epoch" not in uncapped_bundle.config_mapping

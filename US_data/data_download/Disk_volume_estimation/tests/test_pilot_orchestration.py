@@ -37,19 +37,23 @@ import xarray as xr
 
 from src.baseline.pilot_orchestration import (
     ACCEPTED_CONTINUATION_FILENAME,
+    CAP_IDENTITY_STATE_FILENAME,
     PREPARATION_RESULT_FILENAME,
     EvaluationRequest,
     PilotOrchestrationError,
     TrainChunkRequest,
     _continuation_overlay,
+    actual_optimizer_updates_by_epoch,
     chunk_epoch_targets,
     compute_pilot_status_fields,
     discover_nh_run_dir,
     discover_physical_checkpoints,
     ensure_validation_results,
+    enforce_pilot_cap_identity,
     load_accepted_continuation_manifest,
     prepare_pilot_run,
     prepare_pilot_run_only,
+    read_actual_optimizer_updates,
     resolve_trusted_chunk_checkpoint,
     root_logger_has_file_handler,
     run_pilot,
@@ -2105,3 +2109,213 @@ def test_prepare_pilot_run_only_generates_the_same_config_as_ordinary_preparatio
     direct_normalized = direct_config_text.replace(str(direct_config_out_dir), "<CONFIG_OUT_DIR>")
     prepare_only_normalized = prepare_only_config_text.replace(str(fx["config_out_dir"]), "<CONFIG_OUT_DIR>")
     assert direct_normalized == prepare_only_normalized
+
+
+# ---------------------------------------------------------------------------
+# max_updates_per_epoch: cap-identity safeguard (enforce_pilot_cap_identity)
+# and actual-optimizer-update evidence (read_actual_optimizer_updates /
+# actual_optimizer_updates_by_epoch). Efficiency-feature support only -- see
+# module docstring's task-7 note; none of this changes raw_seedA or any
+# other existing candidate's identity/behavior.
+# ---------------------------------------------------------------------------
+
+def _cap_identity(*, pilot_policy_name="stage1_lead06_pilot_policy", run_id="raw_seedA", max_updates_per_epoch=None):
+    return {
+        "pilot_policy_name": pilot_policy_name,
+        "run_id": run_id,
+        "max_updates_per_epoch": max_updates_per_epoch,
+    }
+
+
+def test_enforce_pilot_cap_identity_noop_when_nh_run_dir_is_none():
+    # must not raise, must not touch the filesystem
+    enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=10), nh_run_dir=None)
+
+
+def test_enforce_pilot_cap_identity_noop_when_nh_run_dir_does_not_exist(tmp_path):
+    missing = tmp_path / "does_not_exist_yet"
+    enforce_pilot_cap_identity(run_identity=_cap_identity(), nh_run_dir=missing)
+    assert not missing.exists()
+
+
+def test_enforce_pilot_cap_identity_first_call_persists_record(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=10), nh_run_dir=nh_run_dir)
+
+    state_path = nh_run_dir / CAP_IDENTITY_STATE_FILENAME
+    assert state_path.is_file()
+    record = json.loads(state_path.read_text())
+    assert record == {
+        "pilot_policy_name": "stage1_lead06_pilot_policy",
+        "run_id": "raw_seedA",
+        "max_updates_per_epoch": 10,
+    }
+
+
+def test_enforce_pilot_cap_identity_matching_repeat_call_succeeds(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    identity = _cap_identity(max_updates_per_epoch=None)
+    enforce_pilot_cap_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+    # a second, identical call must be a no-op success, not a re-raise
+    enforce_pilot_cap_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_cap_identity_mismatched_cap_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=None), nh_run_dir=nh_run_dir)
+    with pytest.raises(PilotOrchestrationError, match="cap identity"):
+        enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=5), nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_cap_identity_mismatched_run_id_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_cap_identity(run_identity=_cap_identity(run_id="raw_seedA"), nh_run_dir=nh_run_dir)
+    with pytest.raises(PilotOrchestrationError, match="cap identity"):
+        enforce_pilot_cap_identity(run_identity=_cap_identity(run_id="raw_seedB"), nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_cap_identity_matching_repeat_call_succeeds_with_int_cap(tmp_path):
+    # task item 6.2: a CAPPED trajectory (not just uncapped) continues with
+    # the identical integer cap across repeated calls.
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    identity = _cap_identity(max_updates_per_epoch=25)
+    enforce_pilot_cap_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+    enforce_pilot_cap_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_cap_identity_int_to_null_raises(tmp_path):
+    # task item 6.5: an integer-to-null change fails before training.
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=8), nh_run_dir=nh_run_dir)
+    with pytest.raises(PilotOrchestrationError, match="cap identity"):
+        enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=None), nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_cap_identity_different_int_caps_raise(tmp_path):
+    # task item 6.6: two different integer caps conflict.
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=5), nh_run_dir=nh_run_dir)
+    with pytest.raises(PilotOrchestrationError, match="cap identity"):
+        enforce_pilot_cap_identity(run_identity=_cap_identity(max_updates_per_epoch=10), nh_run_dir=nh_run_dir)
+
+
+def test_prepare_pilot_run_only_records_declared_cap_without_training(run_pilot_fixture):
+    # task item 6.14: preparation-only records the cap but performs no
+    # training -- extends the existing uncapped-only preparation-only
+    # coverage with a genuinely capped policy.
+    fx = run_pilot_fixture
+    capped_run_spec = dataclasses.replace(fx["pilot_policy"].runs["raw_seedA"], max_updates_per_epoch=20)
+    capped_runs = dict(fx["pilot_policy"].runs)
+    capped_runs["raw_seedA"] = capped_run_spec
+    capped_policy = dataclasses.replace(fx["pilot_policy"], runs=capped_runs)
+
+    result = prepare_pilot_run_only(**_prepare_only_kwargs(fx, pilot_policy=capped_policy))
+    assert result["status"] == "PREPARED_ONLY"
+    assert result["training_started"] is False
+    assert result["run_identity"]["max_updates_per_epoch"] == 20
+    # no NH run directory was ever created by preparation alone
+    assert not (fx["config_out_dir"] / "runs").exists()
+
+
+def test_run_pilot_enforces_cap_identity_across_calls_with_changed_cap(run_pilot_fixture):
+    """A run_pilot() call against an NH run directory whose persisted cap
+    identity was already recorded on an earlier call must be rejected if its
+    freshly-resolved run_spec now declares a different max_updates_per_epoch
+    -- capped vs uncapped (or two different int caps) must never silently
+    change across a continuation of the same run directory.
+
+    enforce_pilot_cap_identity() is a no-op until the NH run directory
+    physically exists (see its docstring), so the very first-ever call for a
+    brand-new candidate (which creates that directory mid-call) never has
+    anything to persist against yet -- the record is only written starting
+    the NEXT call, once the directory already exists. Three calls are
+    therefore needed to exercise the contradiction: (1) creates the run
+    directory (no-op, nothing persisted yet), (2) persists the uncapped
+    identity now that the directory exists, (3) a changed cap contradicts
+    it."""
+    fx = run_pilot_fixture
+    common_kwargs = dict(
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+    )
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 1 (uncapped, creates run dir)"], **common_kwargs)
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 2 (uncapped, persists cap identity)"], **common_kwargs)
+
+    capped_run_spec = dataclasses.replace(fx["pilot_policy"].runs["raw_seedA"], max_updates_per_epoch=5)
+    capped_runs = dict(fx["pilot_policy"].runs)
+    capped_runs["raw_seedA"] = capped_run_spec
+    capped_policy = dataclasses.replace(fx["pilot_policy"], runs=capped_runs)
+    common_kwargs["pilot_policy"] = capped_policy
+
+    with pytest.raises(PilotOrchestrationError, match="cap identity"):
+        run_pilot(commands_used=["call 3 (capped) -- must be rejected"], **common_kwargs)
+
+
+def _torch_save_optimizer_state(path, step):
+    torch = pytest.importorskip("torch")
+    param = torch.nn.Parameter(torch.zeros(1))
+    state_dict = {"state": {0: {"step": torch.tensor(step)}}, "param_groups": []}
+    torch.save(state_dict, path)
+
+
+def test_read_actual_optimizer_updates_reads_real_torch_step_counter(tmp_path):
+    pytest.importorskip("torch")
+    path = tmp_path / "optimizer_state_epoch003.pt"
+    _torch_save_optimizer_state(path, step=117)
+    assert read_actual_optimizer_updates(path) == 117
+
+
+def test_read_actual_optimizer_updates_rejects_missing_file(tmp_path):
+    pytest.importorskip("torch")
+    with pytest.raises(PilotOrchestrationError, match="not found"):
+        read_actual_optimizer_updates(tmp_path / "optimizer_state_epoch003.pt")
+
+
+def test_read_actual_optimizer_updates_rejects_empty_state(tmp_path):
+    torch = pytest.importorskip("torch")
+    path = tmp_path / "optimizer_state_epoch003.pt"
+    torch.save({"state": {}, "param_groups": []}, path)
+    with pytest.raises(PilotOrchestrationError, match="no per-parameter state"):
+        read_actual_optimizer_updates(path)
+
+
+def test_read_actual_optimizer_updates_rejects_disagreeing_steps(tmp_path):
+    torch = pytest.importorskip("torch")
+    path = tmp_path / "optimizer_state_epoch003.pt"
+    state_dict = {
+        "state": {0: {"step": torch.tensor(10)}, 1: {"step": torch.tensor(20)}},
+        "param_groups": [],
+    }
+    torch.save(state_dict, path)
+    with pytest.raises(PilotOrchestrationError, match="disagreeing"):
+        read_actual_optimizer_updates(path)
+
+
+def test_actual_optimizer_updates_by_epoch_reads_base_and_continuation_directories(tmp_path):
+    pytest.importorskip("torch")
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    for epoch, step in ((1, 100), (2, 200)):
+        (nh_run_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
+        _torch_save_optimizer_state(nh_run_dir / f"optimizer_state_epoch{epoch:03d}.pt", step=step)
+
+    continuation_dir = nh_run_dir / "continue_training_from_epoch002"
+    continuation_dir.mkdir()
+    (continuation_dir / "model_epoch003.pt").write_bytes(b"ckpt3")
+    _torch_save_optimizer_state(continuation_dir / "optimizer_state_epoch003.pt", step=300)
+
+    assert actual_optimizer_updates_by_epoch(nh_run_dir) == {1: 100, 2: 200, 3: 300}

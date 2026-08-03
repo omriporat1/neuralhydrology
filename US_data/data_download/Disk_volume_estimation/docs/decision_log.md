@@ -4,6 +4,71 @@
 
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
+## 2026-08-03 — Stage 1 — `max_updates_per_epoch` capped-update screening support (implementation + tests only)
+
+**Scope.** Implements and locally qualifies the optional
+`max_updates_per_epoch` mechanism whose direction was adopted in the
+2026-08-02 roadmap entry below (Part L.5). Efficiency feature only: no
+training/evaluation, no Moriah/h2o access, no Slurm submission, no numerical
+cap adopted, no capped run ever launched. A separate, independent Moriah
+operations session was concurrently advancing the existing uncapped
+`raw_seedA` trajectory through epoch 9 during this work; that trajectory,
+its evidence, and the Moriah clone were not touched.
+
+**Contract.** `max_updates_per_epoch: int | None`. `None` (default) is
+exactly today's uncapped behavior; any other value must be a positive
+integer (`0`, negative integers, bools, floats, strings rejected before
+config generation). The cap is frozen for a candidate's entire trajectory:
+`enforce_pilot_cap_identity` rejects, before any training call, a
+continuation/resume whose freshly-resolved cap disagrees with the cap
+already persisted for that NH run directory (null↔int and int↔different-int
+in both directions). Capped and uncapped runs — and different integer caps
+— are always distinct identities; a capped checkpoint is never a valid
+continuation source for an uncapped trajectory or vice versa. A promoted
+finalist is expected to start a new full-fidelity trajectory from its
+original seed, never continue from a capped checkpoint (provisional
+recommendation, per Part L.6, unchanged by this entry).
+
+**Verified NeuralHydrology 1.13 semantics** (read from the vendored source
+directly, `neuralhydrology/utils/config.py` and
+`neuralhydrology/training/basetrainer.py` — not assumed): the cap is a
+deterministic index-based prefix-truncation of each epoch's DataLoader
+iteration order, re-applied fresh every `_train_epoch` call (the counter
+resets every epoch); the scheduler still steps once per epoch; both
+`model_epochNNN.pt` and `optimizer_state_epochNNN.pt` are still written
+unconditionally once per epoch regardless of the cap. That last point is
+why real actual-optimizer-update evidence (`optimizer_state_epochNNN.pt`'s
+own persisted Adam/AdamW `state[p]['step']` counter) is obtainable with
+**no NeuralHydrology core-code modification** — evidence bundles record
+this actual per-epoch update count and the configured cap as two distinct,
+never-conflated fields.
+
+**Files changed.** `src/baseline/nh_config_generation.py` (validation +
+optional YAML key emission), `src/baseline/pilot_lead06_config.py`
+(`PilotRunSpec.max_updates_per_epoch` field), `src/baseline/pilot_tracking.py`
+(`_HYPERPARAMETER_CONFIG_KEYS`, always-present `run_identity` field),
+`src/baseline/pilot_orchestration.py` (`enforce_pilot_cap_identity`,
+`read_actual_optimizer_updates`, `actual_optimizer_updates_by_epoch`, wired
+into `run_pilot`/`prepare_pilot_run_only`), `src/baseline/pilot_evidence_bundle.py`
+(verbatim recording of both cap fields). Documentation:
+`docs/stage1_validation_optimization_foundation.md` (new L.7),
+`docs/stage1_lead06_pilot_v001.md` (new dated section),
+`docs/stage1_wandb_user_guide.md` (new §16, §6 cross-reference fix).
+
+**Structural independence confirmed by code inspection, not just testing.**
+`MAX_TARGET_EPOCH`, early stopping (`src/baseline/pilot_early_stopping.py`),
+screening cadence, checkpoint discovery, and the additive-continuation
+overlay have zero references to `max_updates_per_epoch` in their
+implementations — no coupling was introduced.
+
+**Not done, intentionally.** No numerical cap chosen; no real uncapped
+optimizer-updates-per-epoch count measured against Moriah; no capped run
+launched; no sweep/HPO machinery; no change to `raw_seedA` or
+`emb128x64_seedA` (`max_updates_per_epoch` remains `null` for both, exactly
+as before). A compact, execution-deferred Moriah calibration plan was
+prepared alongside this entry (see the corresponding session report) but
+not run.
+
 ## 2026-08-02 — Stage 1 — W&B offline tracking qualification + Flash-NH W&B user guide (documentation + tests only)
 
 **Scope.** Documentation-and-test-only pass qualifying ordinary W&B

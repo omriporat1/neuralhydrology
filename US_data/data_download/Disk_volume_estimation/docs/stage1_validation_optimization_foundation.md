@@ -470,6 +470,122 @@ uncapped protocol, rather than continuing from a lower-fidelity checkpoint;
 reconsider checkpoint continuation at higher fidelity only after evidence
 shows it is methodologically fair and operationally reliable.
 
+**L.7 — Capped-update mechanism implemented (2026-08-03); calibration and
+adoption remain open.** The optional `max_updates_per_epoch` mechanism
+described in L.5 is now implemented end-to-end in Flash-NH (config
+generation, pilot/candidate policy, run identity, continuation/checkpoint
+safeguards, evidence recording) and locally tested. This entry records only
+that the mechanism exists and is safe to use later; it changes nothing
+stated in L.5/L.6 about calibration — **no numerical cap has been adopted,
+no capped run has been launched on Moriah, no speedup has been measured, and
+the true uncapped optimizer-updates-per-epoch count has still not been
+established against the real environment.**
+
+Verified NeuralHydrology 1.13 semantics (read directly from the vendored
+source, not inferred): `Config.max_updates_per_epoch` (`neuralhydrology/
+utils/config.py`) is `Optional[int]`, read once per trainer construction
+(`BaseTrainer.__init__`, `neuralhydrology/training/basetrainer.py`) and
+re-applied fresh at the start of every `_train_epoch` call — it truncates
+that epoch's DataLoader iteration to a deterministic index-based prefix
+(`enumerate(pbar)`, `break` once the counter reaches the cap), not a
+randomized subset; the counter resets every epoch; the scheduler still
+steps once per epoch and checkpointing (`model_epochNNN.pt` and
+`optimizer_state_epochNNN.pt`, the latter carrying PyTorch's own persisted
+Adam/AdamW `state[p]['step']` counter) still occurs unconditionally once per
+epoch regardless of the cap — this is also why no NH core-code modification
+was needed to obtain real per-epoch actual-update evidence.
+
+The Flash-NH contract: `max_updates_per_epoch: int | None`, `None` (the
+default, and the only value any existing candidate — including `raw_seedA`
+and `emb128x64_seedA` — has ever used) means uncapped/unchanged behavior;
+any other value must be a positive integer (`0`, negative integers, bools,
+floats, and strings are all rejected before config generation). The cap is
+frozen for a candidate's entire trajectory: continuation/resume against an
+already-started NH run directory is rejected before any training call if
+the freshly-resolved cap disagrees with the cap already recorded for that
+run directory (covers uncapped→capped, capped→uncapped, and capped-N→
+capped-M, in both directions). Capped and uncapped runs are always distinct
+identities; a capped checkpoint can never be adopted as the continuation
+source for an uncapped trajectory or vice versa; a promoted (adopted-cap)
+finalist config is expected to start a new full-fidelity trajectory from
+its original seed, never continue from a capped checkpoint (still the
+provisional recommendation from L.6, unchanged here). Preparation-only mode
+records the declared cap in the run identity without starting training.
+Evidence bundles record the configured cap and, where measured, the actual
+per-epoch optimizer-update count (`actual_optimizer_updates_by_epoch`, read
+from the real `optimizer_state_epochNNN.pt` step counter) as two distinct,
+never-conflated fields.
+
+Test coverage added across `tests/test_pilot_lead06_config.py`,
+`tests/test_pilot_orchestration.py`, `tests/test_pilot_tracking.py`, and
+`tests/test_pilot_evidence_bundle.py` (config validation, identity
+conflict/continuation safeguards including the specific null↔int and
+int↔int mismatch cases, `MAX_TARGET_EPOCH`/early-stopping/W&B-disabled
+independence, offline-W&B cap recording, actual-optimizer-update-evidence
+extraction and rejection of malformed/disagreeing optimizer state). A full
+run of each affected test file showed no regressions; `raw_seedA` and
+`emb128x64_seedA` behavior is unaffected (their `max_updates_per_epoch`
+remains `null`, exactly as before this change).
+
+**L.8 — Smallest Moriah calibration plan (prepared 2026-08-03, not
+executed).** This plan exists so a future session can calibrate real caps
+without redesigning the approach; nothing in it has been run, and it
+authorizes no Slurm submission by itself.
+
+*Step 1 — measure, don't guess (1 job).* Launch one short calibration-only
+run, fixed architecture (`raw_seedA`'s static pathway) and fixed seed
+(reuse `967139` — read-only reuse of the seed value, never of `raw_seedA`'s
+checkpoints or run identity), `max_updates_per_epoch: null` (uncapped),
+for exactly 1 epoch, under a distinct run id (e.g.
+`calib_uncapped_probe_v001`, never `raw_seedA`/`emb128x64_seedA`). Purpose:
+read the real `optimizer_state_epoch001.pt` step count via the
+already-implemented `read_actual_optimizer_updates` to get the true
+uncapped optimizer-updates-per-epoch count for the full 2,307-basin
+development population on real Moriah hardware — the one number every
+later step depends on and that no existing local evidence establishes
+authoritatively. If a still-running or already-completed uncapped epoch
+from the separate `raw_seedA` continuation already has its
+`optimizer_state_epochNNN.pt` on disk by the time this step is reached,
+read that instead (read-only) and skip launching a redundant probe job —
+per the plan's own point (2), avoid a redundant baseline if existing
+evidence already suffices.
+
+*Step 2 — two caps only, informed by step 1 (2 jobs).* Using the measured
+count from step 1, derive one **medium** integer cap and one **low**
+integer cap (both explicit positive integers in the generated config, never
+a fraction — the fractions in L.5 are non-binding starting intuition for
+picking these two integers, not the values themselves). Launch two short
+calibration-only runs (`calib_medium_v001`, `calib_low_v001`), same fixed
+architecture/seed as step 1, each for enough epochs (expected 2-4) to
+observe: cap enforcement (actual updates == configured cap, every epoch),
+wall-clock time per epoch vs. step 1's uncapped baseline, training-loss
+trajectory, checkpoint/optimizer-state creation every epoch, one
+continuation (Slurm requeue or manual resume) to confirm the frozen-cap
+identity safeguard accepts a matching resume and would reject a changed
+one, and — only if the above all look sound — one screening point to see
+whether the screening metric is even directionally informative at that
+fidelity. No promotion decision is made from this alone.
+
+*Explicitly out of scope for this plan*: any change to `raw_seedA`'s or
+`emb128x64_seedA`'s identity, checkpoints, or trajectory; more than two
+caps; more than one architecture/seed; a promotion threshold; a broader
+sweep or campaign of any kind. The plan stops after step 2's evidence is
+in hand and is reviewed before anything further is authorized.
+
+**Estimate.** 3 Slurm jobs total (1 uncapped probe + 2 capped, or 2 total
+if an existing `raw_seedA` epoch's optimizer state can be read instead of
+launching the probe). Approximate GPU time: well under the ~2h40m
+`raw_seedA` took for 6 full epochs, since every calibration job here is
+1-4 epochs on the same architecture/data population — order of a few GPU
+hours total, not a campaign. Expected calendar duration: well under a day
+of wall-clock elapsed time (each job is short and Moriah queueing is the
+main variable, not compute). Evidence required before adopting *any*
+numerical cap for real screening use: step 1's measured uncapped
+updates/epoch count, step 2's two caps' enforcement/wall-time/loss/
+continuation results, and an explicit review confirming the screening
+metric at the chosen fidelity is directionally trustworthy relative to
+this pilot's existing full-fidelity results — none of which exists yet.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

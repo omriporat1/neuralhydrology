@@ -518,3 +518,62 @@ def test_init_pilot_tracking_run_disabled_policy_never_writes_identity_file(tmp_
         nh_run_dir=nh_run_dir,
     )
     assert not (nh_run_dir / WANDB_RUN_ID_STATE_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# max_updates_per_epoch: run-identity + hyperparameter threading for a capped
+# (early-fidelity-screening) bundle, distinguished from the uncapped default
+# already covered by test_build_pilot_run_identity_includes_extended_metadata_
+# contract_fields above.
+# ---------------------------------------------------------------------------
+
+def _build_capped_bundle_and_effective_policy(tmp_path, pilot_policy, *, cap):
+    import dataclasses
+
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:350])
+
+    with open(PILOT_POLICY_PATH, "r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    entry = next(r for r in raw["runs"] if r["run_id"] == "raw_seedA")
+    entry["max_updates_per_epoch"] = cap
+    policy_path = tmp_path / "capped_policy.yaml"
+    policy_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    policy = load_pilot_policy(policy_path)
+    policy = dataclasses.replace(
+        policy,
+        screening_basin_ids_path=str(screening_path),
+        screening_expected_count=350,
+        screening_expected_sha256=sha256_of(screening_path),
+    )
+    bundle = build_pilot_bundle(
+        pilot_policy=policy, run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+    )
+    effective = build_effective_policy(policy)
+    return policy, bundle, effective
+
+
+def test_build_pilot_run_identity_max_updates_per_epoch_reflects_capped_bundle(tmp_path, pilot_policy):
+    policy, bundle, effective = _build_capped_bundle_and_effective_policy(tmp_path, pilot_policy, cap=10)
+    assert bundle.max_updates_per_epoch == 10
+    run_spec = resolve_pilot_run_spec(policy, "raw_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["max_updates_per_epoch"] == 10
+
+
+def test_build_pilot_hyperparameters_omits_cap_key_when_bundle_uncapped(bundle_and_effective_policy):
+    _, bundle, _, _ = bundle_and_effective_policy
+    assert bundle.max_updates_per_epoch is None
+    hyperparams = build_pilot_hyperparameters(bundle)
+    assert "max_updates_per_epoch" not in hyperparams
+
+
+def test_build_pilot_hyperparameters_includes_cap_key_when_bundle_capped(tmp_path, pilot_policy):
+    _, bundle, _ = _build_capped_bundle_and_effective_policy(tmp_path, pilot_policy, cap=15)
+    hyperparams = build_pilot_hyperparameters(bundle)
+    assert hyperparams["max_updates_per_epoch"] == 15

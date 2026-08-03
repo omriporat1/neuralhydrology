@@ -294,3 +294,61 @@ def test_write_pilot_evidence_bundle_wandb_block_reflects_degraded_state_after_f
     assert record["wandb"]["finished"] is True
     assert record["wandb"]["degraded"] is True
     assert record["wandb"]["degraded_operations"] == ["finish_tracking_run"]
+
+
+# ---------------------------------------------------------------------------
+# max_updates_per_epoch / actual_optimizer_updates_by_epoch: efficiency-
+# feature evidence fields, both recorded verbatim (never re-derived here).
+# ---------------------------------------------------------------------------
+
+def test_write_pilot_evidence_bundle_records_max_updates_per_epoch_default_none(tmp_path, policy, run_spec):
+    assert run_spec.max_updates_per_epoch is None
+    fx = _build_evidence_inputs(tmp_path, policy)
+    bundle_path = write_pilot_evidence_bundle(
+        out_dir=fx["evidence_dir"], config_dir=fx["config_dir"], nh_run_dir=fx["run_dir"],
+        pilot_policy=policy, run_spec=run_spec, tracking_run=fx["tracking_run"],
+        early_stopping_state=fx["early_stopping_state"], screening_events=[fx["screening_result"]],
+        run_status="in_progress_epoch_6", commands_used=[],
+    )
+    record = json.loads((bundle_path / "pilot_run_evidence.json").read_text())
+    assert record["max_updates_per_epoch"] is None
+
+
+def test_write_pilot_evidence_bundle_records_declared_cap(tmp_path, policy, run_spec):
+    capped_run_spec = dataclasses.replace(run_spec, max_updates_per_epoch=12)
+    fx = _build_evidence_inputs(tmp_path, policy)
+    bundle_path = write_pilot_evidence_bundle(
+        out_dir=fx["evidence_dir"], config_dir=fx["config_dir"], nh_run_dir=fx["run_dir"],
+        pilot_policy=policy, run_spec=capped_run_spec, tracking_run=fx["tracking_run"],
+        early_stopping_state=fx["early_stopping_state"], screening_events=[fx["screening_result"]],
+        run_status="in_progress_epoch_6", commands_used=[],
+    )
+    record = json.loads((bundle_path / "pilot_run_evidence.json").read_text())
+    assert record["max_updates_per_epoch"] == 12
+
+
+def test_write_pilot_evidence_bundle_actual_optimizer_updates_by_epoch_defaults_to_none(tmp_path, policy, run_spec):
+    fx = _build_evidence_inputs(tmp_path, policy)
+    bundle_path = write_pilot_evidence_bundle(
+        out_dir=fx["evidence_dir"], config_dir=fx["config_dir"], nh_run_dir=fx["run_dir"],
+        pilot_policy=policy, run_spec=run_spec, tracking_run=fx["tracking_run"],
+        early_stopping_state=fx["early_stopping_state"], screening_events=[fx["screening_result"]],
+        run_status="in_progress_epoch_6", commands_used=[],
+    )
+    record = json.loads((bundle_path / "pilot_run_evidence.json").read_text())
+    assert record["actual_optimizer_updates_by_epoch"] is None
+
+
+def test_write_pilot_evidence_bundle_records_actual_optimizer_updates_by_epoch_verbatim(tmp_path, policy, run_spec):
+    fx = _build_evidence_inputs(tmp_path, policy)
+    evidence = {3: 45, 6: 90}
+    bundle_path = write_pilot_evidence_bundle(
+        out_dir=fx["evidence_dir"], config_dir=fx["config_dir"], nh_run_dir=fx["run_dir"],
+        pilot_policy=policy, run_spec=run_spec, tracking_run=fx["tracking_run"],
+        early_stopping_state=fx["early_stopping_state"], screening_events=[fx["screening_result"]],
+        run_status="in_progress_epoch_6", commands_used=[],
+        actual_optimizer_updates_by_epoch=evidence,
+    )
+    record = json.loads((bundle_path / "pilot_run_evidence.json").read_text())
+    # JSON object keys are always strings -- the int epoch keys round-trip as "3"/"6".
+    assert record["actual_optimizer_updates_by_epoch"] == {"3": 45, "6": 90}

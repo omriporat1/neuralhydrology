@@ -521,6 +521,15 @@ class GeneratedConfigBundle:
     # explicitly asks for a different named profile (see _RUN_PROFILES)
     # gets something else.
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME
+    # Optional per-epoch NH training-batch cap (see NHConfigGenerationError
+    # validate_max_updates_per_epoch and docs/stage1_validation_optimization_
+    # foundation.md Part L.5/L.6): None (the default) means uncapped/full
+    # fidelity, byte-identical to every pre-existing caller. A positive int
+    # is this candidate's frozen fidelity-screening cap -- never mutated
+    # after a bundle is built, and never adopted/compared loosely (capped vs
+    # uncapped, or two different int caps, are distinct identities; see
+    # pilot_orchestration.enforce_pilot_cap_identity).
+    max_updates_per_epoch: "int | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +853,7 @@ def build_nh_config_mapping(
     dynamic_inputs: list,
     static_attributes: list,
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
+    max_updates_per_epoch: "int | None" = None,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
@@ -852,11 +862,24 @@ def build_nh_config_mapping(
 
     ``run_profile_name`` selects which named training-hyperparameter profile
     (see ``_RUN_PROFILES``) is merged in; it defaults to the compact-smoke
-    profile so every pre-existing caller is unaffected."""
+    profile so every pre-existing caller is unaffected.
+
+    ``max_updates_per_epoch`` (default ``None``, uncapped) is this candidate's
+    optional per-epoch NH training-batch cap (see
+    :func:`validate_max_updates_per_epoch` and docs/
+    stage1_validation_optimization_foundation.md Part L.5/L.6). When ``None``
+    the key is omitted from the returned mapping entirely -- not written as
+    ``null`` -- so every pre-existing caller's generated ``config.yaml`` is
+    byte-for-byte unchanged. This is never part of a named ``_RUN_PROFILES``
+    entry: profiles are shared scientific-architecture identities reused
+    across candidates, while a fidelity cap is a per-candidate screening
+    concern layered on top."""
     if run_profile_name not in _RUN_PROFILES:
         raise NHConfigGenerationError(
             f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
         )
+    if max_updates_per_epoch is not None:
+        validate_max_updates_per_epoch(max_updates_per_epoch)
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -891,7 +914,22 @@ def build_nh_config_mapping(
     # (accepted finding #7); never set as a defensive backstop here.
     if "statics_embedding" in mapping:
         validate_statics_embedding_spec(mapping["statics_embedding"])
+    if max_updates_per_epoch is not None:
+        mapping["max_updates_per_epoch"] = max_updates_per_epoch
     return mapping
+
+
+def validate_max_updates_per_epoch(value) -> None:
+    """Reject anything but a positive Python int (bools rejected even though
+    ``bool`` is an ``int`` subclass, per this codebase's established
+    positive-int idiom -- see :func:`validate_statics_embedding_spec`'s
+    ``hiddens`` check). ``None`` (uncapped) is never passed to this
+    function -- callers only call it once they already know a cap was
+    requested; see :func:`build_nh_config_mapping`."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise NHConfigGenerationError(
+            f"max_updates_per_epoch must be a positive int or None (uncapped), got {value!r}"
+        )
 
 
 _ALLOWED_STATICS_EMBEDDING_ACTIVATIONS = ("tanh", "sigmoid", "linear")
@@ -959,6 +997,7 @@ def generate_stage1_nh_config(
     seq_length: int,
     static_column_manifest_path=None,
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
+    max_updates_per_epoch: "int | None" = None,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
@@ -1002,6 +1041,7 @@ def generate_stage1_nh_config(
         dynamic_inputs=dynamic_inputs,
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
     package_manifest_identity = {
@@ -1028,6 +1068,7 @@ def generate_stage1_nh_config(
         generated_at_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         git_commit=_get_git_commit(),
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
 
@@ -1056,6 +1097,7 @@ def generate_stage1_full_population_nh_config_bundles(
     seq_length: int,
     static_column_manifest_path=None,
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
+    max_updates_per_epoch: "int | None" = None,
 ) -> FullPopulationConfigBundles:
     """Generate the development + spatial-holdout config bundle pair for one
     approved (lead, seq_length) combination against the certified full
@@ -1122,6 +1164,7 @@ def generate_stage1_full_population_nh_config_bundles(
         dynamic_inputs=dynamic_inputs,
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
     package_manifest_identity = {
@@ -1150,6 +1193,7 @@ def generate_stage1_full_population_nh_config_bundles(
         generated_at_utc=generated_at_utc,
         git_commit=git_commit,
         run_profile_name=run_profile_name,
+        max_updates_per_epoch=max_updates_per_epoch,
     )
 
     development_bundle = GeneratedConfigBundle(
@@ -1356,6 +1400,7 @@ def write_generated_config(
             "storage-layout compatibility, not the runtime dataset key."
         ),
         "nan_handling_method": None,
+        "max_updates_per_epoch": bundle.max_updates_per_epoch,
         "artifact_sha256": artifact_sha256,
     }
     manifest_path = out_dir / "generation_manifest.json"

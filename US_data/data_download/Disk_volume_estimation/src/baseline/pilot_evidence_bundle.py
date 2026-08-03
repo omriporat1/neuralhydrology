@@ -125,6 +125,7 @@ def write_pilot_evidence_bundle(
     commands_used: "list[str]",
     slurm_identity: "dict | None" = None,
     continuation_status: "dict | None" = None,
+    actual_optimizer_updates_by_epoch: "dict[int, int] | None" = None,
     force: bool = False,
 ) -> Path:
     """Write this run's compact evidence bundle to ``out_dir`` and return it.
@@ -144,6 +145,20 @@ def write_pilot_evidence_bundle(
     letting ``checkpoint_inventory`` containing epoch 15 be misread as
     "screening reached epoch 15" (see ``pilot_orchestration.py``'s
     continuation-epoch-semantics note).
+
+    ``actual_optimizer_updates_by_epoch``, when given, is
+    :func:`src.baseline.pilot_orchestration.actual_optimizer_updates_by_epoch`'s
+    return dict -- the exact cumulative ``optimizer.step()`` count read
+    straight from each epoch's real, unconditionally-saved PyTorch optimizer
+    state (see that function's docstring for why this is exact evidence, not
+    an inference). Left at its default ``None`` for every existing
+    local/test caller (all of which use byte-content fake checkpoint files,
+    never real torch state); a real Moriah launch computes it explicitly
+    against the real run directory and passes it in. Recorded verbatim
+    (never re-derived here) so a capped-fidelity candidate's actual
+    updates-per-epoch can be verified against its configured
+    ``max_updates_per_epoch`` without re-reading any checkpoint file a
+    second time.
     """
     out_dir = Path(out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not force:
@@ -182,6 +197,7 @@ def write_pilot_evidence_bundle(
         "embedding_hiddens": run_spec.embedding_hiddens,
         "seed_name": run_spec.seed_name,
         "seed": run_spec.seed,
+        "max_updates_per_epoch": run_spec.max_updates_per_epoch,
         "run_status": run_status,
         "run_identity": dict(tracking_run.run_identity),
         "hyperparameters": tracking_run.hyperparameters,
@@ -200,6 +216,7 @@ def write_pilot_evidence_bundle(
         "best_checkpoint_epoch": best_epoch,
         "checkpoint_inventory": checkpoint_inventory,
         "continuation_status": continuation_status,
+        "actual_optimizer_updates_by_epoch": actual_optimizer_updates_by_epoch,
         "artifact_references": tracking_run.artifact_references,
         "commands_used": list(commands_used),
         "sealed_set_non_access_statement": SEALED_SET_NON_ACCESS_STATEMENT,

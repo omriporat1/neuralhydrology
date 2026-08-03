@@ -242,12 +242,16 @@ __all__ = [
     "discover_nh_run_dir",
     "PhysicalCheckpoint",
     "discover_physical_checkpoints",
+    "read_actual_optimizer_updates",
+    "actual_optimizer_updates_by_epoch",
     "resolve_trusted_chunk_checkpoint",
     "untrusted_overshoot_epochs",
     "ACCEPTED_CONTINUATION_FILENAME",
     "AcceptedContinuationEntry",
     "load_accepted_continuation_manifest",
     "compute_pilot_status_fields",
+    "CAP_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_cap_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -261,6 +265,12 @@ _CHECKPOINT_GLOB = "model_epoch*.pt"
 _ORCHESTRATION_STATE_FILENAME = "pilot_orchestration_state.json"
 _CONTINUATION_DIR_RE = re.compile(r"^continue_training_from_epoch(\d{3})$")
 _CHECKPOINT_FILE_RE = re.compile(r"^model_epoch(\d{3})\.pt$")
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id, max_updates_per_epoch)
+# identity this run directory was first used for -- an always-active
+# (W&B-independent) safeguard; see enforce_pilot_cap_identity.
+CAP_IDENTITY_STATE_FILENAME = "pilot_cap_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -549,6 +559,89 @@ def discover_physical_checkpoints(base_run_dir) -> "dict[int, PhysicalCheckpoint
     return {epoch: cands[0] for epoch, cands in found.items()}
 
 
+def read_actual_optimizer_updates(optimizer_state_path) -> int:
+    """Read the exact cumulative number of ``optimizer.step()`` calls
+    performed through this checkpoint, straight from PyTorch's own
+    unconditionally-saved optimizer state file (``optimizer_state_epochNNN.pt``,
+    written by NH's ``BaseTrainer._save_weights_and_optimizer`` alongside
+    every ``model_epochNNN.pt`` -- see ``neuralhydrology/training/basetrainer.py``).
+
+    This is genuine structured evidence, not an inference: NH's only two
+    supported optimizers (``torch.optim.Adam``/``AdamW``, see
+    ``neuralhydrology/training/__init__.py``'s ``get_optimizer``) both
+    maintain a per-parameter ``state[p]['step']`` counter that PyTorch itself
+    increments exactly once per ``optimizer.step()`` call for that parameter
+    -- i.e. exactly once per non-NaN training batch (NH's own
+    ``BaseTrainer._train_epoch`` skips ``optimizer.step()``, but never
+    ``experiment_logger.log_step()``, on a NaN-loss batch), making this a
+    MORE precise source than NH's in-memory ``Logger.update`` counter, which
+    increments on every batch including NaN-skipped ones. The value is
+    cumulative since this run directory's first ``start_run`` call --
+    optimizer state, and therefore this counter, survives every
+    ``continue_run`` via ``BaseTrainer._restore_training_state``'s
+    ``optimizer.load_state_dict``.
+
+    Requires no modification to vendored/installed NH core code -- this only
+    reads an artifact NH already writes unconditionally today. Lazily
+    imports torch (never imported at this module's import time), so this
+    module stays importable without torch installed; only a caller that
+    actually invokes this function against a real optimizer-state file needs
+    torch present.
+
+    Raises :class:`PilotOrchestrationError` if the file is missing, contains
+    no per-parameter state, or -- an anomaly worth surfacing loudly, never
+    silently averaged or guessed over -- different parameters disagree on
+    their step count.
+    """
+    import torch
+
+    optimizer_state_path = Path(optimizer_state_path)
+    if not optimizer_state_path.is_file():
+        raise PilotOrchestrationError(
+            f"optimizer state file not found: {optimizer_state_path} -- cannot read actual "
+            "optimizer-update evidence for this checkpoint"
+        )
+    state_dict = torch.load(optimizer_state_path, map_location="cpu")
+    param_states = state_dict.get("state", {})
+    if not param_states:
+        raise PilotOrchestrationError(
+            f"optimizer state file {optimizer_state_path} contains no per-parameter state -- "
+            "cannot read actual optimizer-update evidence"
+        )
+
+    steps = set()
+    for param_state in param_states.values():
+        step = param_state["step"]
+        steps.add(int(step.item()) if hasattr(step, "item") else int(step))
+
+    if len(steps) != 1:
+        raise PilotOrchestrationError(
+            f"optimizer state file {optimizer_state_path} has disagreeing per-parameter step "
+            f"counts {sorted(steps)} -- refusing to guess which is authoritative"
+        )
+    return steps.pop()
+
+
+def actual_optimizer_updates_by_epoch(nh_run_dir) -> "dict[int, int]":
+    """Cumulative actual-optimizer-update evidence (see
+    :func:`read_actual_optimizer_updates`) for every physically-checkpointed
+    epoch under ``nh_run_dir`` (base run directory plus any nested
+    continuation directory -- see :func:`discover_physical_checkpoints`).
+
+    Requires torch. NOT called automatically by
+    :func:`~src.baseline.pilot_evidence_bundle.write_pilot_evidence_bundle`
+    (which stays torch-free so every existing local/test caller -- all of
+    which use byte-content fake checkpoint files, never real torch state --
+    is unaffected). A real Moriah launch calls this explicitly and passes
+    its result into that function's optional
+    ``actual_optimizer_updates_by_epoch`` parameter."""
+    inventory = discover_physical_checkpoints(nh_run_dir)
+    return {
+        epoch: read_actual_optimizer_updates(ckpt.path.parent / f"optimizer_state_epoch{epoch:03d}.pt")
+        for epoch, ckpt in inventory.items()
+    }
+
+
 def _expected_continuation_dir(previous_checkpoint_dir: Path, previous_target_epoch: int) -> Path:
     """The exact physical directory a clean, chunk-sized ``continue_run``
     call -- continuing from ``previous_target_epoch``'s checkpoint, which
@@ -832,6 +925,75 @@ def _save_orchestration_state(nh_run_dir, state: dict) -> None:
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
+
+
+def _load_cap_identity_record(nh_run_dir) -> "dict | None":
+    path = Path(nh_run_dir) / CAP_IDENTITY_STATE_FILENAME
+    if not path.is_file():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_cap_identity_record(nh_run_dir, record: dict) -> None:
+    path = Path(nh_run_dir) / CAP_IDENTITY_STATE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+
+def enforce_pilot_cap_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard: a candidate's
+    ``max_updates_per_epoch`` -- capped (positive int) or uncapped (``None``)
+    -- is this run directory's frozen identity for its entire on-disk
+    lifetime, exactly like ``pilot_policy_name``/``run_id``. Unlike
+    ``pilot_tracking.resolve_pilot_wandb_run_id``'s contradiction check
+    (active only when W&B tracking is enabled, which is NOT this pilot's
+    default -- see ``pilot_tracking.py``'s module docstring), this check
+    always runs: a cap-identity contradiction is a training-safety concern,
+    not a tracking concern, so it must be caught even when tracking is
+    disabled.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id, max_updates_per_epoch)``
+    triple; every later call for the same directory must match it exactly,
+    or :class:`PilotOrchestrationError` is raised -- before any further
+    tracking or training call. See this function's call site in
+    :func:`run_pilot` (right after ``existing_nh_run_dir`` is discovered,
+    before ``init_pilot_tracking_run`` and before any chunk is trained) and
+    the module docstring's restart-safety discipline."""
+    if nh_run_dir is None:
+        return
+    nh_run_dir = Path(nh_run_dir)
+    if not nh_run_dir.is_dir():
+        return
+
+    current = {
+        "pilot_policy_name": run_identity["pilot_policy_name"],
+        "run_id": run_identity["run_id"],
+        "max_updates_per_epoch": run_identity["max_updates_per_epoch"],
+    }
+    record = _load_cap_identity_record(nh_run_dir)
+    if record is None:
+        _save_cap_identity_record(nh_run_dir, current)
+        return
+
+    if record != current:
+        raise PilotOrchestrationError(
+            f"NH run directory {nh_run_dir} already has a persisted cap identity "
+            f"{record!r}, which contradicts this call's identity {current!r} -- "
+            "max_updates_per_epoch (capped vs uncapped, or two different int caps) "
+            "must never change across a continuation of the same run directory"
+        )
 
 
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
@@ -1525,6 +1687,11 @@ def run_pilot(
     # can see it on this and every later continuation.
     existing_nh_run_dir = _try_discover_nh_run_dir(config_dir, experiment_name)
     have_started = existing_nh_run_dir is not None
+
+    # Always active, regardless of W&B tracking policy -- must run before any
+    # tracking or training call so a cap-identity contradiction is caught
+    # before it can affect either. See enforce_pilot_cap_identity's docstring.
+    enforce_pilot_cap_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
     tracking_run = init_pilot_tracking_run(pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir)
 
