@@ -573,6 +573,58 @@ on Moriah. The fix above has not been run against the real Moriah run
 directory — see "Current status and next step" below for the prepared (not
 executed) recovery sequence.
 
+## Seventh Moriah result: `raw_seedA` bounded recovery run, second launcher-summary defect found and fixed (2026-08-03)
+
+Job `45734071` (`raw_seedA`, `--max-target-epoch 6`, the recovery sequence
+prepared in the Sixth Moriah result above) ran against the real epoch-1-6
+artifact. `pilot_run_evidence.json` (the authoritative evidence bundle) and
+the pilot CLI's own printed JSON both correctly recorded
+`final_status: "paused_at_max_target_epoch"` — no retraining occurred, the
+existing checkpoints were reused, and the process paused deliberately after
+epoch 6 exactly as `max_target_epoch` is designed to do. **`raw_seedA` is
+still only paused at epoch 6; it is not complete, and epoch 9 continuation
+has not been attempted.**
+
+However the launcher's own `pilot_result.json` again reported an
+inconsistent summary — this time losing `pilot_final_status`,
+`wandb_policy_sha256`, and every other authoritative field to `null`
+outright, rather than the Third Moriah result's narrower fallback-derivation
+gap. Root cause: the launcher's classification step ran `json.load()` on
+the pilot subprocess's entire captured stdout
+(`pilot_stdout.json.log`), but that stream also carries NeuralHydrology's
+own log/progress-bar text ahead of the CLI's single final printed JSON
+line for every ordinary or bounded-recovery invocation (only a
+`--prepare-only` invocation's stdout is pure JSON, since that path never
+imports `neuralhydrology`/`torch`). The resulting `JSONDecodeError` was
+caught and silently reset to an empty mapping, discarding every
+scientifically meaningful field even though the authoritative sources were
+correct all along.
+
+**Local fix (no Moriah access, no Slurm submission, `raw_seedA` not
+continued).** `scripts/run_stage1_lead06_pilot_moriah.sbatch`'s
+classification step no longer parses subprocess stdout at all. It instead
+reads the same authoritative file `run_pilot()`/`prepare_pilot_run_only()`
+already write under `--evidence-out-dir`
+(`pilot_run_evidence.json`, or `pilot_preparation_result.json` for a
+`--prepare-only` invocation — selected via the explicitly forwarded
+`PREPARE_ONLY_USED` flag, never inferred from file presence, since a stale
+preparation-result file from an earlier, unrelated `--prepare-only` call
+can persist in the same fixed per-`run_id` evidence directory). A
+successful bounded pause now gets its own distinct, truthful
+`PAUSED_AT_MAX_TARGET_EPOCH` status (Slurm exit `0`) instead of being
+folded into generic `COMPLETED`. `pilot_result.json` now also records
+`wandb_run_id`, `authoritative_result_source`, and
+`authoritative_result_parse_status` (`parsed_successfully` / `absent` /
+`absent_pilot_failed_before_evidence_creation` / `corrupt`) and
+`physical_state_fallback_used`, so a missing or corrupt authoritative file
+is always visible rather than silently reduced to an empty mapping. The
+on-disk physical-state fallback (`compute_pilot_status_fields`) and the
+Third/Fourth Moriah results' overshoot-blocking classification are
+unchanged. No training, evaluation, metric, stopping, checkpoint,
+screening, or W&B policy logic changed. Focused tests were added to
+`tests/test_pilot_sbatch_launcher.py`. **No further Moriah job should run
+until this local fix is committed.**
+
 ## Implementation modules
 
 | Module | Task |

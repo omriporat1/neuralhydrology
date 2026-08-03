@@ -274,53 +274,304 @@ def test_sbatch_script_status_json_fields_passed_via_environment_not_string_inte
     assert "os.environ" in text
 
 
-# --- status-classification behavior (job 45718473) --------------------------
+# --- status-classification behavior (job 45718473, job 45734071) -----------
 #
 # Real Moriah recovery job 45718473 (commit fbf7eea): the pilot correctly
 # reused the trusted epoch-9 checkpoint and refused to advance into the
 # untrusted 10-15 overshoot range (pilot_orchestration.run_pilot() itself
-# returns "final_status": "blocked_continuation_overshoot_conflict" and a
-# non-null "blocked_reason" for this exact scenario -- see
+# returns "final_status": "blocked_continuation_overshoot_conflict" for this
+# exact scenario -- see
 # test_run_pilot_end_to_end_propagates_blocked_continuation_overshoot_conflict
-# in tests/test_pilot_orchestration.py). But the launcher's own primary
-# pilot_stdout.json.log was empty when read, so its status-derivation
-# fallback (computed directly from on-disk state) restored
-# overshoot_epochs/safe_to_continue_automatically but left
-# pilot_final_status/blocked_reason as None -- and the classification below
-# only checked pilot_final_status, so a blocked run was reported as
-# COMPLETED. The tests below exercise the actual extracted classification
-# snippet (see _run_status_classification_block above), not just its text.
+# in tests/test_pilot_orchestration.py).
+#
+# Real Moriah bounded-recovery job 45734071 (raw_seedA, MAX_TARGET_EPOCH=6):
+# the launcher's OLD classification block did `json.load()` on the pilot
+# subprocess's entire captured stdout (pilot_stdout.json.log), which also
+# carries NH's own log/progress-bar text ahead of the CLI's single final
+# printed JSON line -- so json.load() raised JSONDecodeError on every
+# ordinary/bounded-recovery invocation, was silently caught, and
+# pilot_final_status/wandb_policy_sha256/etc. were all lost even though the
+# authoritative sources (pilot_run_evidence.json, the CLI's own printed
+# JSON) were correct all along. The fix below stops parsing stdout entirely
+# and reads the authoritative evidence file the CLI itself already writes
+# under --evidence-out-dir instead. The tests in this section exercise the
+# actual extracted classification snippet (see
+# _run_status_classification_block above) against realistic
+# pilot_run_evidence.json / pilot_preparation_result.json fixtures, not just
+# the script's text.
 
-def _base_env(tmp_path: Path, *, nh_run_dir: Path, stdout_json_path: Path, latest_ckpt: str, latest_epoch: str):
+def _write_evidence_bundle_fixture(
+    evidence_out_dir: Path,
+    *,
+    run_status: str,
+    wandb_run_id: str = "flashnh-stage1_lead06_pilot_v001-raw_seedA-g1",
+    wandb_policy_sha256: str = "policysha256abc",
+    continuation_status: dict | None = None,
+) -> None:
+    """Write a pilot_run_evidence.json fixture matching the real schema
+    write_pilot_evidence_bundle() produces (src/baseline/pilot_evidence_bundle.py):
+    top-level 'run_status', nested 'run_identity' (wandb_run_id/
+    wandb_policy_sha256/final_status), nested 'wandb' (wandb_run_id), and
+    'continuation_status' verbatim from compute_pilot_status_fields()."""
+    evidence_out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_name": "stage1_lead06_pilot_evidence_bundle",
+        "schema_version": 1,
+        "run_status": run_status,
+        "run_identity": {
+            "wandb_run_id": wandb_run_id,
+            "wandb_policy_sha256": wandb_policy_sha256,
+            "final_status": run_status,
+        },
+        "wandb": {
+            "backend": "wandb",
+            "mode": "offline",
+            "wandb_run_id": wandb_run_id,
+            "finished": True,
+            "degraded": False,
+            "degraded_operations": [],
+        },
+        "continuation_status": continuation_status
+        or {
+            "highest_physical_checkpoint_epoch": 6,
+            "highest_screened_epoch": 6,
+            "next_intended_screening_epoch": None,
+            "overshoot_epochs": [],
+            "stopped": run_status != "paused_at_max_target_epoch",
+            "safe_to_continue_automatically": run_status == "paused_at_max_target_epoch",
+        },
+    }
+    (evidence_out_dir / "pilot_run_evidence.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_preparation_result_fixture(evidence_out_dir: Path, **overrides) -> Path:
+    """Write a pilot_preparation_result.json fixture matching the real schema
+    prepare_pilot_run_only() writes (src/baseline/pilot_orchestration.py) --
+    notably, the file itself never contains a 'preparation_result_path' key
+    (prepare_pilot_run_only adds that key to its returned in-memory dict only
+    AFTER writing the file, since the file cannot know its own eventual path
+    at write time)."""
+    evidence_out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_name": "stage1_lead06_pilot_preparation_result",
+        "schema_version": 1,
+        "status": "PREPARED_ONLY",
+        "run_id": "raw_seedA",
+        "generated_config_path": str(evidence_out_dir / "config_out" / "config.yaml"),
+        "generation_manifest_path": str(evidence_out_dir / "config_out" / "generation_manifest.json"),
+        "wandb_policy_sha256": "policysha256abc",
+        "training_started": False,
+        "evaluation_started": False,
+        "wandb_backend_initialized": False,
+    }
+    payload.update(overrides)
+    path = evidence_out_dir / "pilot_preparation_result.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _base_env(
+    tmp_path: Path,
+    *,
+    nh_run_dir: Path,
+    evidence_out_dir: Path,
+    latest_ckpt: str,
+    latest_epoch: str,
+    prepare_only_used: str = "0",
+    pilot_status: str = "0",
+):
     return {
         "RUN_ID": "raw_seedA",
         "NH_RUN_DIR": str(nh_run_dir),
-        "STDOUT_JSON_PATH": str(stdout_json_path),
-        "PILOT_STATUS": "0",
+        "PILOT_STATUS": pilot_status,
         "PACKAGE_ROOT": "/fake/package",
         "CONFIG_OUT_DIR": "/fake/config_out",
-        "EVIDENCE_OUT_DIR": "/fake/evidence_out",
+        "EVIDENCE_OUT_DIR": str(evidence_out_dir),
         "LATEST_CKPT_AFTER": latest_ckpt,
         "LATEST_EPOCH_AFTER": latest_epoch,
         "TERM_REQUESTED": "0",
-        "SLURM_JOB_ID": "45718473",
+        "SLURM_JOB_ID": "45734071",
         "SLURM_JOB_PARTITION": "catfish",
-        "SOURCE_COMMIT": "fbf7eea",
+        "SOURCE_COMMIT": "19672ff",
         "WANDB_POLICY_PATH_USED": "",
         "WANDB_DIR_USED": "",
         "TRACKING_GENERATION_USED": "g1",
         "MAX_TARGET_EPOCH_USED": "",
+        "PREPARE_ONLY_USED": prepare_only_used,
         "RESULT_JSON_PATH": str(tmp_path / "pilot_result.json"),
     }
 
 
-def test_sbatch_status_block_reports_blocked_not_completed_when_stdout_empty_but_overshoot_on_disk(tmp_path):
-    """Job 45718473's exact shape: primary stdout JSON empty, but on-disk
-    state (checkpoints 1-6 flat, 7-15 in a continue_training_from_epoch006/
+# 1) The core defect: mixed stdout content (NH log lines ahead of a final
+# JSON line) must never be parsed at all, and must never break classification
+# of an ordinary completed run -- since the authoritative source is now the
+# evidence file, not stdout.
+def test_sbatch_status_block_ignores_mixed_stdout_content_and_reads_evidence_file_instead(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
+
+    # A pilot_stdout.json.log containing NH's own mixed log/progress text
+    # ahead of the CLI's final JSON line may still exist on disk (written by
+    # the real launcher's subprocess redirection) -- it must simply never be
+    # read by this classification block at all.
+    (tmp_path / "pilot_stdout.json.log").write_text(
+        "Epoch 1/6: 100%|##########| 62/62 [00:12<00:00]\n"
+        "INFO:neuralhydrology:Epoch 6 average loss: 0.021\n"
+        '{"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6}\n'
+    )
+
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+        ),
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["pilot_final_status"] == "stopped_patience_exhausted"
+    assert result["authoritative_result_source"] == "pilot_run_evidence.json"
+    assert result["authoritative_result_parse_status"] == "parsed_successfully"
+    assert result["physical_state_fallback_used"] is False
+
+
+# 2) job-45734071-shaped bounded recovery pause must classify as its own
+# truthful PAUSED_AT_MAX_TARGET_EPOCH status, never generic COMPLETED.
+def test_sbatch_status_block_classifies_paused_at_max_target_epoch_distinctly_from_completed(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(
+        evidence_out_dir,
+        run_status="paused_at_max_target_epoch",
+        continuation_status={
+            "highest_physical_checkpoint_epoch": 6,
+            "highest_screened_epoch": 6,
+            "next_intended_screening_epoch": 9,
+            "overshoot_epochs": [],
+            "stopped": False,
+            "safe_to_continue_automatically": True,
+        },
+    )
+    env = _base_env(
+        tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+    )
+    env["MAX_TARGET_EPOCH_USED"] = "6"
+
+    result = _run_status_classification_block(tmp_path, env)
+
+    assert result["status"] == "PAUSED_AT_MAX_TARGET_EPOCH"
+    assert result["status"] != "COMPLETED"
+    assert result["pilot_final_status"] == "paused_at_max_target_epoch"
+    assert result["max_target_epoch"] == 6
+    assert result["next_intended_screening_epoch"] == 9
+    assert result["safe_to_continue_automatically"] is True
+
+
+def test_sbatch_script_paused_at_max_target_epoch_exit_code_is_zero_and_distinct_case_arm():
+    text = _text()
+    assert "PAUSED_AT_MAX_TARGET_EPOCH) exit 0 ;;" in text
+    assert "COMPLETED) exit 0 ;;" in text
+
+
+# 3) authoritative_result_parse_status visibility across all four states --
+# never silently reduced to an empty mapping without a recorded reason.
+def test_sbatch_status_block_parse_status_absent_when_evidence_file_missing_and_process_succeeded(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"  # never created: no evidence file at all
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path,
+            nh_run_dir=nh_run_dir,
+            evidence_out_dir=evidence_out_dir,
+            latest_ckpt="",
+            latest_epoch="",
+            pilot_status="0",
+        ),
+    )
+    assert result["authoritative_result_parse_status"] == "absent"
+    assert result["pilot_final_status"] is None
+
+
+def test_sbatch_status_block_parse_status_absent_before_evidence_creation_when_process_failed(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"  # never created
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path,
+            nh_run_dir=nh_run_dir,
+            evidence_out_dir=evidence_out_dir,
+            latest_ckpt="",
+            latest_epoch="",
+            pilot_status="1",
+        ),
+    )
+    assert result["authoritative_result_parse_status"] == "absent_pilot_failed_before_evidence_creation"
+
+
+def test_sbatch_status_block_parse_status_corrupt_when_evidence_file_is_invalid_json(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    evidence_out_dir.mkdir()
+    (evidence_out_dir / "pilot_run_evidence.json").write_text("{not valid json", encoding="utf-8")
+
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["authoritative_result_parse_status"] == "corrupt"
+    # never silently reduced to an empty mapping without visibility: the
+    # parse error itself must be surfaced (this test inspects the fixture's
+    # RESULT_JSON_PATH-adjacent stderr via the subprocess call directly
+    # rather than the parsed dict, since the error text goes to stderr).
+
+
+def test_sbatch_status_block_parse_error_written_to_stderr_not_silently_swallowed(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    evidence_out_dir.mkdir()
+    (evidence_out_dir / "pilot_run_evidence.json").write_text("{not valid json", encoding="utf-8")
+
+    import os
+
+    block_path = tmp_path / "status_block_stderr.py"
+    block_path.write_text(_extract_status_classification_block(), encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.update(
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+        )
+    )
+    proc = subprocess.run(
+        [sys.executable, str(block_path)], env=env, capture_output=True, text=True, cwd=str(REPO_ROOT)
+    )
+    assert proc.returncode == 0
+    assert "AUTHORITATIVE_RESULT_PARSE_ERROR" in proc.stderr
+    assert "pilot_run_evidence.json" in proc.stderr
+
+
+# 4) physical_state_fallback_used visibility, and the fallback must never
+# invent a final_status the evidence bundle did not itself record -- it only
+# recomputes the physical/overshoot fields.
+def test_sbatch_status_block_reports_blocked_not_completed_when_evidence_absent_but_overshoot_on_disk(tmp_path):
+    """Job 45718473's exact shape re-expressed against the new authoritative-
+    file design: the evidence file is absent/unavailable, but on-disk state
+    (checkpoints 1-6 flat, 7-15 in a continue_training_from_epoch006/
     continuation directory, only epochs 6 and 9 actually screened) shows an
     untrusted overshoot. The launcher must classify this as
     BLOCKED_MANUAL_REVIEW_REQUIRED with a non-null pilot_final_status and
-    blocked_reason -- never COMPLETED."""
+    blocked_reason -- never COMPLETED -- and must report
+    physical_state_fallback_used=True."""
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
     for epoch in range(1, 7):
@@ -333,15 +584,14 @@ def test_sbatch_status_block_reports_blocked_not_completed_when_stdout_empty_but
         json.dumps({"history": [{"epoch": 6, "median": 0.2}, {"epoch": 9, "median": 0.18}], "stopped": False})
     )
 
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text("")  # primary stdout unavailable, exactly as observed
+    evidence_out_dir = tmp_path / "evidence_out"  # never created: evidence unavailable, exactly as observed
 
     result = _run_status_classification_block(
         tmp_path,
         _base_env(
             tmp_path,
             nh_run_dir=nh_run_dir,
-            stdout_json_path=stdout_json_path,
+            evidence_out_dir=evidence_out_dir,
             latest_ckpt=str(cont_dir / "model_epoch015.pt"),
             latest_epoch="15",
         ),
@@ -353,17 +603,31 @@ def test_sbatch_status_block_reports_blocked_not_completed_when_stdout_empty_but
     assert result["blocked_reason"] is not None
     assert result["overshoot_epochs"] == [10, 11, 12, 13, 14, 15]
     assert result["safe_to_continue_automatically"] is False
+    assert result["physical_state_fallback_used"] is True
+    assert result["authoritative_result_parse_status"] == "absent"
+
+
+def test_sbatch_status_block_fallback_not_used_when_evidence_file_parses_successfully(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["physical_state_fallback_used"] is False
 
 
 def test_sbatch_status_block_records_wandb_override_fields_when_supplied(tmp_path):
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
-    )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
     env = _base_env(
-        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
     )
     override_policy_path = str(tmp_path / "raw_seedA_offline_override.yaml")
     wandb_dir = str(tmp_path / "wandb" / "offline" / "raw_seedA")
@@ -381,19 +645,40 @@ def test_sbatch_status_block_records_wandb_override_fields_when_supplied(tmp_pat
 def test_sbatch_status_block_wandb_fields_null_when_no_override_supplied(tmp_path):
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
-    )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
     result = _run_status_classification_block(
         tmp_path,
         _base_env(
-            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
         ),
     )
     assert result["wandb_policy_path"] is None
     assert result["wandb_dir"] is None
     assert result["tracking_generation"] == "g1"
+
+
+# 5) wandb_run_id and wandb_policy_sha256 now correctly recovered from the
+# evidence file's run_identity/wandb blocks (previously always lost/null for
+# ordinary runs due to the mixed-stdout parse failure).
+def test_sbatch_status_block_recovers_wandb_run_id_and_policy_sha256_from_evidence_file(tmp_path):
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(
+        evidence_out_dir,
+        run_status="stopped_patience_exhausted",
+        wandb_run_id="flashnh-stage1_lead06_pilot_v001-raw_seedA-g1",
+        wandb_policy_sha256="deadbeef1234",
+    )
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
+        ),
+    )
+    assert result["wandb_run_id"] == "flashnh-stage1_lead06_pilot_v001-raw_seedA-g1"
+    assert result["wandb_policy_sha256"] == "deadbeef1234"
 
 
 # --- PREPARE_ONLY=1 (--prepare-only) threading + classification ------------
@@ -431,29 +716,25 @@ def test_sbatch_script_never_hardcodes_prepare_only_enabled():
 
 
 def test_sbatch_status_block_classifies_prepare_only_result_as_prepared_only_not_completed(tmp_path):
-    """(Part 4, #10) A successful --prepare-only invocation (CLI stdout
-    JSON has 'status': 'PREPARED_ONLY', no 'final_status' key at all) must be
-    classified PREPARED_ONLY, never COMPLETED -- COMPLETED would falsely
-    imply training occurred."""
+    """(Part 4, #10) A successful --prepare-only invocation (authoritative
+    pilot_preparation_result.json has 'status': 'PREPARED_ONLY', no
+    'run_status'/'final_status' key at all) must be classified PREPARED_ONLY,
+    never COMPLETED -- COMPLETED would falsely imply training occurred."""
     nh_run_dir = tmp_path / "nh_run"  # never created: --prepare-only makes no NH run dir
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps(
-            {
-                "status": "PREPARED_ONLY",
-                "run_id": "raw_seedA",
-                "generated_config_path": str(tmp_path / "config_out" / "config.yaml"),
-                "generation_manifest_path": str(tmp_path / "config_out" / "generation_manifest.json"),
-                "preparation_result_path": str(tmp_path / "evidence_out" / "pilot_preparation_result.json"),
-                "wandb_policy_sha256": "abc123",
-                "training_started": False,
-                "evaluation_started": False,
-                "wandb_backend_initialized": False,
-            }
-        )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_preparation_result_fixture(
+        evidence_out_dir,
+        generated_config_path=str(tmp_path / "config_out" / "config.yaml"),
+        generation_manifest_path=str(tmp_path / "config_out" / "generation_manifest.json"),
+        wandb_policy_sha256="abc123",
     )
     env = _base_env(
-        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        tmp_path,
+        nh_run_dir=nh_run_dir,
+        evidence_out_dir=evidence_out_dir,
+        latest_ckpt="",
+        latest_epoch="",
+        prepare_only_used="1",
     )
 
     result = _run_status_classification_block(tmp_path, env)
@@ -463,8 +744,11 @@ def test_sbatch_status_block_classifies_prepare_only_result_as_prepared_only_not
     assert result["prepare_only"] is True
     assert result["generated_config_path"] == str(tmp_path / "config_out" / "config.yaml")
     assert result["generation_manifest_path"] == str(tmp_path / "config_out" / "generation_manifest.json")
-    assert result["preparation_result_path"] == str(tmp_path / "evidence_out" / "pilot_preparation_result.json")
+    # not a key inside the file itself (see _write_preparation_result_fixture) --
+    # this is the path the launcher just read the authoritative file from.
+    assert result["preparation_result_path"] == str(evidence_out_dir / "pilot_preparation_result.json")
     assert result["wandb_policy_sha256"] == "abc123"
+    assert result["authoritative_result_source"] == "pilot_preparation_result.json"
 
 
 def test_sbatch_status_block_ordinary_completed_run_is_not_flagged_prepare_only(tmp_path):
@@ -473,14 +757,12 @@ def test_sbatch_status_block_ordinary_completed_run_is_not_flagged_prepare_only(
     result."""
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
-    )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
     result = _run_status_classification_block(
         tmp_path,
         _base_env(
-            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
         ),
     )
     assert result["status"] == "COMPLETED"
@@ -488,7 +770,43 @@ def test_sbatch_status_block_ordinary_completed_run_is_not_flagged_prepare_only(
     assert result["generated_config_path"] is None
     assert result["generation_manifest_path"] is None
     assert result["preparation_result_path"] is None
-    assert result["wandb_policy_sha256"] is None
+    # Previously always null for ordinary runs (the defect this patch fixes
+    # -- see job-45734071 postmortem above): now correctly recovered from the
+    # evidence file's run_identity.
+    assert result["wandb_policy_sha256"] == "policysha256abc"
+
+
+def test_sbatch_status_block_stale_prepare_only_file_never_misclassifies_a_real_training_run(tmp_path):
+    """Stale-file trap: pilot_preparation_result.json can persist in the same
+    fixed per-run_id EVIDENCE_OUT_DIR from an EARLIER, unrelated
+    --prepare-only invocation. Its mere on-disk presence must never be used
+    to infer "this job was prepare-only" -- only the actual PREPARE_ONLY_USED
+    flag (known at submission time) may select which authoritative file to
+    read. Here both files coexist (a leftover prepare-only result alongside
+    a real run's evidence bundle) and PREPARE_ONLY_USED=0 -- the real
+    training result must win."""
+    nh_run_dir = tmp_path / "nh_run"
+    nh_run_dir.mkdir()
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_preparation_result_fixture(evidence_out_dir)  # stale leftover from an earlier prepare-only call
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
+
+    result = _run_status_classification_block(
+        tmp_path,
+        _base_env(
+            tmp_path,
+            nh_run_dir=nh_run_dir,
+            evidence_out_dir=evidence_out_dir,
+            latest_ckpt="",
+            latest_epoch="",
+            prepare_only_used="0",
+        ),
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["status"] != "PREPARED_ONLY"
+    assert result["prepare_only"] is False
+    assert result["authoritative_result_source"] == "pilot_run_evidence.json"
 
 
 def test_sbatch_script_prepared_only_exit_code_is_zero_and_distinct_case_arm():
@@ -499,36 +817,30 @@ def test_sbatch_script_prepared_only_exit_code_is_zero_and_distinct_case_arm():
 
 
 def test_sbatch_status_block_ordinary_completed_run_remains_completed(tmp_path):
-    """Regression: a genuinely completed/stopped run (primary stdout JSON
-    present and populated, no overshoot) must remain classified COMPLETED --
-    the new fallback-derived blocked classification must not fire when the
-    primary status is already known."""
+    """Regression: a genuinely completed/stopped run (authoritative evidence
+    file present and populated, no overshoot) must remain classified
+    COMPLETED -- the fallback-derived blocked classification must not fire
+    when the authoritative status is already known."""
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps(
-            {
-                "run_id": "raw_seedA",
-                "final_status": "stopped_patience_exhausted",
-                "best_checkpoint_epoch": 6,
-                "nh_run_dir": str(nh_run_dir),
-                "evidence_bundle_path": str(tmp_path / "evidence"),
-                "highest_physical_checkpoint_epoch": 15,
-                "highest_screened_epoch": 15,
-                "next_intended_screening_epoch": None,
-                "overshoot_epochs": [],
-                "safe_to_continue_automatically": True,
-                "blocked_reason": None,
-            }
-        )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(
+        evidence_out_dir,
+        run_status="stopped_patience_exhausted",
+        continuation_status={
+            "highest_physical_checkpoint_epoch": 15,
+            "highest_screened_epoch": 15,
+            "next_intended_screening_epoch": None,
+            "overshoot_epochs": [],
+            "stopped": True,
+            "safe_to_continue_automatically": True,
+        },
     )
 
     result = _run_status_classification_block(
         tmp_path,
         _base_env(
-            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
         ),
     )
 
@@ -693,12 +1005,10 @@ def test_sbatch_script_records_max_target_epoch_field_name_in_result_json():
 def test_sbatch_status_block_records_max_target_epoch_when_provided(tmp_path):
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
-    )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
     env = _base_env(
-        tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+        tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
     )
     env["MAX_TARGET_EPOCH_USED"] = "6"
 
@@ -713,14 +1023,12 @@ def test_sbatch_status_block_max_target_epoch_null_when_not_provided(tmp_path):
     every other field must classify exactly as before this feature existed."""
     nh_run_dir = tmp_path / "nh_run"
     nh_run_dir.mkdir()
-    stdout_json_path = tmp_path / "pilot_stdout.json.log"
-    stdout_json_path.write_text(
-        json.dumps({"final_status": "stopped_patience_exhausted", "best_checkpoint_epoch": 6})
-    )
+    evidence_out_dir = tmp_path / "evidence_out"
+    _write_evidence_bundle_fixture(evidence_out_dir, run_status="stopped_patience_exhausted")
     result = _run_status_classification_block(
         tmp_path,
         _base_env(
-            tmp_path, nh_run_dir=nh_run_dir, stdout_json_path=stdout_json_path, latest_ckpt="", latest_epoch=""
+            tmp_path, nh_run_dir=nh_run_dir, evidence_out_dir=evidence_out_dir, latest_ckpt="", latest_epoch=""
         ),
     )
     assert result["max_target_epoch"] is None

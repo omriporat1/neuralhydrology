@@ -336,17 +336,19 @@ fi
 # to epoch N" -- see pilot_orchestration.py's continuation-epoch-semantics
 # note (the second real qualification-run failure this was written to fix:
 # checkpoints 10-15 existed as accidental overshoot while screening had only
-# actually reached epoch 9). Primary source is run_stage1_lead06_pilot.py's
-# own stdout JSON (already carries these fields from run_pilot()'s return
-# dict); if that's missing or incomplete (e.g. wall-time SIGTERM before it
-# could print), fall back to computing them directly from on-disk state via
+# actually reached epoch 9). Primary source is the authoritative evidence
+# file run_pilot()/prepare_pilot_run_only() themselves write under
+# --evidence-out-dir (pilot_run_evidence.json / pilot_preparation_result.json
+# -- see job-45734071 postmortem below, this is NOT parsed from
+# pilot_stdout.json.log); if that file is missing or incomplete (e.g.
+# wall-time SIGTERM before the pilot subprocess could write it), fall back to
+# computing these fields directly from on-disk state via
 # pilot_orchestration.compute_pilot_status_fields (no next-intended-epoch in
 # this fallback path -- it needs the full pilot policy object, not
 # conveniently available here). Passed via environment, never interpolated
 # into the Python source string, so a free-text blocked_reason containing
 # quotes/newlines can never break this script.
-STDOUT_JSON_PATH="${RESULT_DIR}/pilot_stdout.json.log"
-RUN_ID="${RUN_ID}" NH_RUN_DIR="${NH_RUN_DIR}" STDOUT_JSON_PATH="${STDOUT_JSON_PATH}" \
+RUN_ID="${RUN_ID}" NH_RUN_DIR="${NH_RUN_DIR}" \
 PILOT_STATUS="${PILOT_STATUS}" PACKAGE_ROOT="${PACKAGE_ROOT}" \
 CONFIG_OUT_DIR="${CONFIG_OUT_DIR}" EVIDENCE_OUT_DIR="${EVIDENCE_OUT_DIR}" \
 LATEST_CKPT_AFTER="${LATEST_CKPT_AFTER}" LATEST_EPOCH_AFTER="${LATEST_EPOCH_AFTER}" \
@@ -355,45 +357,77 @@ SLURM_JOB_PARTITION="${SLURM_JOB_PARTITION:-unknown}" SOURCE_COMMIT="${SOURCE_CO
 WANDB_POLICY_PATH_USED="${WANDB_POLICY_PATH}" WANDB_DIR_USED="${WANDB_DIR:-}" \
 TRACKING_GENERATION_USED="${TRACKING_GENERATION}" \
 MAX_TARGET_EPOCH_USED="${MAX_TARGET_EPOCH}" \
+PREPARE_ONLY_USED="${PREPARE_ONLY}" \
 RESULT_JSON_PATH="${RESULT_DIR}/pilot_result.json" \
 python -c "
 import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.getcwd())
 
 env = os.environ
 pilot_status = int(env['PILOT_STATUS'])
 nh_run_dir = env['NH_RUN_DIR']
+prepare_only_flag = env['PREPARE_ONLY_USED'] == '1'
+evidence_out_dir = Path(env['EVIDENCE_OUT_DIR'])
 
-stdout_result = {}
-stdout_json_path = env['STDOUT_JSON_PATH']
-if os.path.getsize(stdout_json_path) > 0 if os.path.exists(stdout_json_path) else False:
+# Authoritative scientific result source (job-45734071 launcher-summary
+# postmortem -- see docs/stage1_lead06_pilot_v001.md). pilot_stdout.json.log
+# is the pilot subprocess's raw stdout capture: it also carries NH's own
+# log/progress-bar text ahead of the CLI's final printed JSON object, so a
+# naive json.load() on that whole file fails on every ordinary training
+# invocation (only a --prepare-only invocation's stdout is pure JSON, since
+# that path never imports neuralhydrology/torch -- see
+# scripts/run_stage1_lead06_pilot.py), and the previous exception handler
+# silently discarded every scientifically meaningful field as a result. The
+# authoritative result now always comes from the same file
+# run_pilot()/prepare_pilot_run_only() themselves write under
+# --evidence-out-dir -- never from parsing mixed subprocess stdout, and
+# never from a heuristic scan of that stdout for an embedded JSON substring.
+authoritative_filename = 'pilot_preparation_result.json' if prepare_only_flag else 'pilot_run_evidence.json'
+authoritative_path = evidence_out_dir / authoritative_filename
+authoritative_result = {}
+if not authoritative_path.is_file():
+    authoritative_parse_status = 'absent_pilot_failed_before_evidence_creation' if pilot_status != 0 else 'absent'
+else:
     try:
-        with open(stdout_json_path) as fh:
-            stdout_result = json.load(fh)
-    except Exception:
-        stdout_result = {}
+        with open(authoritative_path) as fh:
+            authoritative_result = json.load(fh)
+        authoritative_parse_status = 'parsed_successfully'
+    except Exception as exc:
+        authoritative_result = {}
+        authoritative_parse_status = 'corrupt'
+        print('AUTHORITATIVE_RESULT_PARSE_ERROR: ' + str(authoritative_path) + ': ' + type(exc).__name__ + ': ' + str(exc), file=sys.stderr)
 
+# --prepare-only's authoritative file has its own 'status': 'PREPARED_ONLY'
+# schema (see src.baseline.pilot_orchestration.prepare_pilot_run_only) and
+# must never be folded into the ordinary
+# COMPLETED/INTERRUPTED_RESUMABLE/etc. classification below, since no
+# training or W&B backend initialization occurred.
+prepare_only_result = authoritative_result if (prepare_only_flag and authoritative_parse_status == 'parsed_successfully') else None
+
+continuation_status = authoritative_result.get('continuation_status') or {}
 status_fields = {
-    'highest_physical_checkpoint_epoch': stdout_result.get('highest_physical_checkpoint_epoch'),
-    'highest_screened_epoch': stdout_result.get('highest_screened_epoch'),
-    'next_intended_screening_epoch': stdout_result.get('next_intended_screening_epoch'),
-    'overshoot_epochs': stdout_result.get('overshoot_epochs'),
-    'safe_to_continue_automatically': stdout_result.get('safe_to_continue_automatically'),
-    'blocked_reason': stdout_result.get('blocked_reason'),
+    'highest_physical_checkpoint_epoch': continuation_status.get('highest_physical_checkpoint_epoch'),
+    'highest_screened_epoch': continuation_status.get('highest_screened_epoch'),
+    'next_intended_screening_epoch': continuation_status.get('next_intended_screening_epoch'),
+    'overshoot_epochs': continuation_status.get('overshoot_epochs'),
+    'safe_to_continue_automatically': continuation_status.get('safe_to_continue_automatically'),
+    'blocked_reason': None,
 }
-pilot_final_status = stdout_result.get('final_status')
-# --prepare-only's CLI output has no 'final_status' at all -- it uses its own
-# 'status': 'PREPARED_ONLY' schema (see
-# src.baseline.pilot_orchestration.prepare_pilot_run_only) and must never be
-# folded into the ordinary COMPLETED/INTERRUPTED_RESUMABLE/etc. classification
-# below, since no training or W&B backend initialization occurred.
-prepare_only_result = stdout_result if stdout_result.get('status') == 'PREPARED_ONLY' else None
+pilot_final_status = None if prepare_only_flag else authoritative_result.get('run_status')
 
-if not stdout_result and nh_run_dir and os.path.isdir(nh_run_dir):
+# Physical-state fallback (visible via physical_state_fallback_used below,
+# never silent): only fills in fields the authoritative file could not
+# supply -- never invents a final_status the CLI/evidence bundle did not
+# itself record, and never overwrites a known scientific final status with
+# generic process success.
+physical_state_fallback_used = False
+if authoritative_parse_status != 'parsed_successfully' and nh_run_dir and os.path.isdir(nh_run_dir):
+    physical_state_fallback_used = True
     try:
         from src.baseline.pilot_orchestration import compute_pilot_status_fields
         fallback = compute_pilot_status_fields(nh_run_dir)
@@ -407,14 +441,11 @@ if not stdout_result and nh_run_dir and os.path.isdir(nh_run_dir):
     except Exception as exc:
         status_fields['status_fallback_error'] = str(exc)
 
-# Job 45718473: the primary pilot_stdout.json.log path can be empty/
-# unavailable for reasons unrelated to a genuine crash (see the fallback
-# comment above), and when that happens the fallback just above already
+# Job 45718473: an unavailable/corrupt authoritative source can still leave
+# a genuinely blocked run (untrusted continuation overshoot) undetected by
+# pilot_final_status alone -- the physical-state fallback above already
 # recomputes safe_to_continue_automatically/overshoot_epochs directly from
-# on-disk state -- but pilot_final_status/blocked_reason stayed None, so a
-# run correctly blocked by an untrusted continuation overshoot was
-# misclassified as COMPLETED below (exit 0, status: COMPLETED) even though
-# safe_to_continue_automatically was already False. Reuse the exact same
+# on-disk state in that case. Reuse the exact same
 # 'blocked_continuation_overshoot_conflict' status string
 # pilot_orchestration.run_pilot() itself uses for this condition, rather
 # than inventing a second convention.
@@ -424,8 +455,9 @@ if (
     and status_fields.get('overshoot_epochs')
 ):
     pilot_final_status = 'blocked_continuation_overshoot_conflict'
+
+if pilot_final_status == 'blocked_continuation_overshoot_conflict' and status_fields.get('blocked_reason') is None:
     status_fields['blocked_reason'] = (
-        'derived from on-disk state (primary pilot stdout status was unavailable): '
         'untrusted physical checkpoint(s) at epoch(s) ' + str(status_fields['overshoot_epochs']) + ' '
         'sit beyond the highest screened epoch -- manual review is required before this '
         'pilot can safely continue automatically'
@@ -435,11 +467,11 @@ if (
 # SIGTERM mid-chunk) is a resumable partial run, not an unqualified failure
 # -- resubmitting this exact script resumes automatically (see
 # restart-safety note above). A blocked pilot (untrusted continuation
-# overshoot, never trained into automatically -- see
-# pilot_orchestration.py) is its own distinct status: the process exits 0
-# (it made a deliberate, non-crashing determination) but is NOT an
-# unqualified COMPLETED, since a human must resolve the overshoot before
-# this run_id can proceed.
+# overshoot, never trained into automatically -- see pilot_orchestration.py)
+# and a deliberate bounded pause (--max-target-epoch reached, job-45731908
+# recovery -- see docs/stage1_lead06_pilot_v001.md) are each their own
+# distinct, truthful status: neither is ever collapsed into generic
+# COMPLETED.
 if prepare_only_result is not None:
     # Never COMPLETED: this run_id was only prepared (config + generation
     # manifest written), never trained -- see prepare_only_result's own
@@ -449,12 +481,19 @@ if prepare_only_result is not None:
     run_status = 'PREPARED_ONLY'
 elif pilot_final_status == 'blocked_continuation_overshoot_conflict':
     run_status = 'BLOCKED_MANUAL_REVIEW_REQUIRED'
+elif pilot_final_status == 'paused_at_max_target_epoch':
+    run_status = 'PAUSED_AT_MAX_TARGET_EPOCH'
 elif pilot_status == 0:
     run_status = 'COMPLETED'
 elif env['LATEST_CKPT_AFTER']:
     run_status = 'INTERRUPTED_RESUMABLE'
 else:
     run_status = 'FAILED_NO_CHECKPOINT'
+
+run_identity = authoritative_result.get('run_identity') or {}
+wandb_block = authoritative_result.get('wandb') or {}
+wandb_policy_sha256 = authoritative_result.get('wandb_policy_sha256') or run_identity.get('wandb_policy_sha256')
+wandb_run_id = wandb_block.get('wandb_run_id') or run_identity.get('wandb_run_id')
 
 out = {
     'status': run_status,
@@ -480,8 +519,15 @@ out = {
     'prepare_only': prepare_only_result is not None,
     'generated_config_path': (prepare_only_result or {}).get('generated_config_path'),
     'generation_manifest_path': (prepare_only_result or {}).get('generation_manifest_path'),
-    'preparation_result_path': (prepare_only_result or {}).get('preparation_result_path'),
-    'wandb_policy_sha256': (prepare_only_result or {}).get('wandb_policy_sha256'),
+    # not itself a key inside pilot_preparation_result.json (the file cannot
+    # know its own eventual path at the moment it is written -- see
+    # prepare_pilot_run_only()); this is simply the path we just read it from.
+    'preparation_result_path': str(authoritative_path) if prepare_only_result is not None else None,
+    'wandb_policy_sha256': wandb_policy_sha256,
+    'wandb_run_id': wandb_run_id,
+    'authoritative_result_source': authoritative_filename,
+    'authoritative_result_parse_status': authoritative_parse_status,
+    'physical_state_fallback_used': physical_state_fallback_used,
 }
 with open(env['RESULT_JSON_PATH'], 'w') as fh:
     json.dump(out, fh, indent=2)
@@ -495,15 +541,20 @@ echo "=== done (run_status ${RUN_STATUS}, exit ${PILOT_STATUS}) ==="
 # COMPLETED -> 0; PREPARED_ONLY -> 0 (a deliberate, successful --prepare-only
 # invocation -- never implies training occurred, see pilot_result.json's
 # 'training_started'/'wandb_backend_initialized': false fields);
-# INTERRUPTED_RESUMABLE -> 2 (nonzero but distinct from an unqualified
-# failure -- resubmitting this exact script resumes automatically, see
-# restart-safety note above); BLOCKED_MANUAL_REVIEW_REQUIRED and
-# FAILED_NO_CHECKPOINT -> 1 (both require a human before this run_id can
-# proceed further, though for different reasons -- see pilot_result.json's
-# distinct 'status'/'blocked_reason' fields for which one actually occurred).
+# PAUSED_AT_MAX_TARGET_EPOCH -> 0 (a deliberate, successful bounded pause at
+# --max-target-epoch -- see job-45734071 recovery; this is a distinct,
+# truthful status and must never be reported as COMPLETED, since screening
+# is intentionally not finished); INTERRUPTED_RESUMABLE -> 2 (nonzero but
+# distinct from an unqualified failure -- resubmitting this exact script
+# resumes automatically, see restart-safety note above);
+# BLOCKED_MANUAL_REVIEW_REQUIRED and FAILED_NO_CHECKPOINT -> 1 (both require
+# a human before this run_id can proceed further, though for different
+# reasons -- see pilot_result.json's distinct 'status'/'blocked_reason'
+# fields for which one actually occurred).
 case "${RUN_STATUS}" in
     COMPLETED) exit 0 ;;
     PREPARED_ONLY) exit 0 ;;
+    PAUSED_AT_MAX_TARGET_EPOCH) exit 0 ;;
     INTERRUPTED_RESUMABLE) exit 2 ;;
     *) exit 1 ;;
 esac
