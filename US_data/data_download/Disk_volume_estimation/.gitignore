@@ -38,6 +38,9 @@ tmp/
 # Flash-NH pipeline: external data root directories (guard against accidental placement inside repo)
 Flash-NH_data/
 
+# Local scratch (transferred evidence bundles, ad hoc downloads) — never committed
+.scratch_local/
+
 # GeoPackage (basin geometry files — external data)
 **/*.gpkg
 

@@ -940,3 +940,23 @@ desired — it is not itself a decision to enable it. This is documentation,
 test, and a local no-network smoke-script exercise only — it does not
 launch `raw_seedA`, does not enable tracking by default, and does not
 change the preferred-next-candidate decision above.
+
+## Capped-update calibration complete: mechanism qualified, capped screening candidates distinguished from the six-run Stage A pilot (2026-08-04)
+
+Documentation-only closure recording three real Moriah calibration exercises run this session (mechanism qualification only — see `docs/stage1_validation_optimization_foundation.md` Part L.9 and `docs/decision_log.md`'s 2026-08-04 entry for full detail). **None of this section's runs are members of the six-run Stage A structural pilot above** (`raw_seedA`, `emb128x64_seedA`, `emb128x64_seedB`, `emb64_seedA`, `emb128_seedA`, `raw_seedB`) — they are separate, distinctly-named calibration/screening candidates that exist to qualify the `max_updates_per_epoch` mechanism and characterize capped-fidelity behavior, not to answer this pilot's own raw-vs-embedded question.
+
+**Calibration candidates run this session (all through epoch 6, offline W&B, no sealed-population access):**
+- `raw_seedA_cap_medium_cal` (cap 100,000/epoch) and `raw_seedA_cap_low_cal` (cap 50,000/epoch) — raw pathway, Seed A 967139; the latter later reused read-only as a protected reference in the parallel batch below.
+- `emb128x64_seedA_cap_low_cal` (cap 50,000/epoch) — `[128,64]` embedded pathway, Seed A; matched against `raw_seedA_cap_low_cal`, and later also reused read-only as a protected reference.
+- `raw_seedA_cap25k_cal`, `emb128x64_seedA_cap25k_cal` (both cap 25,000/epoch, Seed A) and `raw_seedB_cap50k_cal`, `emb128x64_seedB_cap50k_cal` (both cap 50,000/epoch, Seed B 1729) — the four-candidate parallel batch.
+- Reference only: `raw_seedA`'s own uncapped trajectory supplied the measured full-epoch update count (237,298/epoch, Seed A raw pathway). `raw_seedA` itself is unaffected by this calibration work and remains the preferred next Stage A candidate (unchanged from the 2026-08-02 section above).
+
+**Cap enforcement:** exact, every epoch, every one of the above candidates (verified from each run's own `optimizer_state_epochNNN.pt` step counter) — zero drift anywhere.
+
+**Provisional fidelity workflow (adopted for future screening; not used to select among this pilot's own six candidates).** 25k = first-pass coarse rejection; 50k = second-stage triage; uncapped = finalists only, distinct run identity per fidelity, no cross-fidelity checkpoint continuation, promoted candidates restart from their original seed at full fidelity.
+
+**Static embedding, still open.** The matched `raw_seedA_cap_low_cal` vs `emb128x64_seedA_cap_low_cal` comparison and the parallel batch's comparisons A/B/C (see Part L.9) show the two pathways remaining close, with direction/magnitude varying by epoch, seed, and fidelity — **this pilot's central raw-vs-embedded question is not resolved by capped-fidelity evidence**, and remains properly answered only by this pilot's own full-fidelity candidates (`raw_seedA` still preferred next, per the section above).
+
+**Next approved, not-yet-started structural batch.** One-layer `[64]` and one-layer `[128]` embeddings, Seed A, 25k cap, against the existing Seed-A raw/`[128,64]` references — embedding activation (tanh), embedding dropout (0.1), output dropout (0.25), `hidden_size` (128), learning rate (0.001), and all data/split settings held fixed. **Not launched by this entry.**
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no numerical cap adopted for production use, no generated evidence committed, no sealed-population access.
