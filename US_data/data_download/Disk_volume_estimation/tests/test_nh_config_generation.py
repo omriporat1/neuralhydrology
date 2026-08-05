@@ -22,9 +22,14 @@ from src.baseline.nh_config_generation import (
     COMPACT_SMOKE_RUN_PROFILE_NAME,
     EMBEDDED_STATIC_CUDALSTM_PILOT_PROFILE_NAME,
     KNOWN_RUN_PROFILE_NAMES,
+    PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME,
+    PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME,
+    PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME,
+    PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME,
     NHConfigGenerationError,
     build_nh_config_mapping,
     generate_stage1_nh_config,
+    get_run_profile_mapping,
     read_package_attribute_columns,
     validate_basin_membership,
     validate_dynamic_inputs,
@@ -495,6 +500,119 @@ def test_generate_rejects_invalid_statics_embedding_in_profile(tmp_path, monkeyp
         generate_stage1_nh_config(
             policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
             lead_hours=6, seq_length=24, run_profile_name=bad_profile_name,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 23. lead-6 embedding-shape neighborhood profiles ([64,32]/[128,32]/[256,64])
+# canonical registry additions for the next approved 25k embedding-shape
+# batch (runtime-only calibration cannot invent new _RUN_PROFILES entries).
+# ---------------------------------------------------------------------------
+
+_LEAD06_NEIGHBORHOOD_PROFILES = [
+    (PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME, [64, 32]),
+    (PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, [128, 32]),
+    (PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME, [256, 64]),
+]
+
+# Fields that must match the [128,64] reference profile exactly (everything
+# except profile identity, statics_embedding.hiddens, and the manifest note).
+_LEAD06_REFERENCE_MATCH_KEYS = (
+    "seed", "model", "hidden_size", "output_dropout", "batch_size",
+    "optimizer", "learning_rate", "loss", "epochs", "device",
+)
+
+
+def test_lead06_embedding_neighborhood_profile_names_are_registered():
+    for profile_name, _hiddens in _LEAD06_NEIGHBORHOOD_PROFILES:
+        assert profile_name in KNOWN_RUN_PROFILE_NAMES
+
+
+@pytest.mark.parametrize("profile_name,hiddens", _LEAD06_NEIGHBORHOOD_PROFILES)
+def test_lead06_embedding_neighborhood_profile_mapping_matches_reference(profile_name, hiddens):
+    reference = get_run_profile_mapping(PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME)
+    candidate = get_run_profile_mapping(profile_name)
+
+    for key in _LEAD06_REFERENCE_MATCH_KEYS:
+        assert candidate[key] == reference[key], f"field {key!r} diverged from [128,64] reference"
+
+    assert candidate["statics_embedding"]["hiddens"] == hiddens
+    assert candidate["statics_embedding"]["activation"] == reference["statics_embedding"]["activation"] == "tanh"
+    assert candidate["statics_embedding"]["dropout"] == reference["statics_embedding"]["dropout"] == 0.1
+    assert candidate["statics_embedding"]["type"] == reference["statics_embedding"]["type"] == "fc"
+
+    # No canonical profile encodes a per-epoch training-batch cap or a
+    # permanent pilot-policy run entry; those remain runtime-only.
+    assert "max_updates_per_epoch" not in candidate
+
+    # Differ from the reference only in embedding hiddens (name/note are
+    # registry keys, not mapping fields, so the mapping itself differs only
+    # in statics_embedding).
+    assert set(candidate) == set(reference)
+    diverging_keys = {k for k in candidate if candidate[k] != reference[k]}
+    assert diverging_keys == {"statics_embedding"}
+
+
+@pytest.mark.parametrize("profile_name,hiddens", _LEAD06_NEIGHBORHOOD_PROFILES)
+def test_generate_lead06_embedding_neighborhood_profile_end_to_end(tmp_path, profile_name, hiddens):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+
+    bundle = generate_stage1_nh_config(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24, run_profile_name=profile_name,
+    )
+    assert bundle.run_profile_name == profile_name
+    assert bundle.target_variable == "qobs_mm_per_h_lead06"
+    assert bundle.seq_length == 24
+    assert bundle.dynamic_inputs == REAL_DYNAMIC_INPUTS
+    assert bundle.config_mapping["statics_embedding"]["hiddens"] == hiddens
+    assert bundle.config_mapping["seed"] == 967139
+    assert bundle.config_mapping["hidden_size"] == 128
+    assert bundle.config_mapping["batch_size"] == 256
+    assert bundle.config_mapping["optimizer"] == "Adam"
+    assert bundle.config_mapping["learning_rate"] == 0.001
+    assert bundle.config_mapping["loss"] == "NSE"
+    assert bundle.config_mapping["output_dropout"] == 0.25
+
+    written = write_generated_config(bundle, tmp_path / "out", experiment_name=f"test_{profile_name}")
+    cfg = yaml.safe_load(written["config.yaml"].read_text(encoding="utf-8"))
+    assert cfg["statics_embedding"] == {
+        "type": "fc", "hiddens": hiddens, "activation": "tanh", "dropout": 0.1,
+    }
+    assert cfg["target_variables"] == ["qobs_mm_per_h_lead06"]
+    assert cfg["seed"] == 967139
+
+    manifest = json.loads(written["generation_manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["run_profile_name"] == profile_name
+    assert manifest["run_profile_note"]  # non-empty, records the correct profile identity
+
+
+def test_lead06_embedding_neighborhood_profiles_do_not_alter_existing_emb128x64_seedA():
+    reference = get_run_profile_mapping(PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME)
+    assert reference["statics_embedding"]["hiddens"] == [128, 64]
+    assert reference["seed"] == 967139
+    assert reference["model"] == "cudalstm"
+    assert reference["hidden_size"] == 128
+    assert reference["output_dropout"] == 0.25
+    assert reference["batch_size"] == 256
+    assert reference["optimizer"] == "Adam"
+    assert reference["learning_rate"] == 0.001
+    assert reference["loss"] == "NSE"
+
+
+def test_unknown_lead06_neighborhood_profile_name_still_rejected():
+    with pytest.raises(NHConfigGenerationError):
+        get_run_profile_mapping("pilot_lead06_emb999x999_seedA_v001")
+
+
+def test_unknown_run_profile_name_rejected_at_generation(tmp_path):
+    basins = _pick_basins(4)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+    with pytest.raises(NHConfigGenerationError):
+        generate_stage1_nh_config(
+            policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+            lead_hours=6, seq_length=24, run_profile_name="pilot_lead06_emb999x999_seedA_v001",
         )
 
 

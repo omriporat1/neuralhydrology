@@ -73,6 +73,9 @@ __all__ = [
     "PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME",
     "PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME",
     "PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME",
+    "PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME",
     "PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME",
     "KNOWN_RUN_PROFILE_NAMES",
     "get_run_profile_mapping",
@@ -362,6 +365,14 @@ _PILOT_LEAD06_EMB128X64_SEEDB_PROFILE = _pilot_lead06_profile(seed=_SEED_B, embe
 _PILOT_LEAD06_EMB64_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[64])
 _PILOT_LEAD06_EMB128_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[128])
 
+PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME = "pilot_lead06_emb64x32_seedA_v001"
+PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME = "pilot_lead06_emb128x32_seedA_v001"
+PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME = "pilot_lead06_emb256x64_seedA_v001"
+
+_PILOT_LEAD06_EMB64X32_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[64, 32])
+_PILOT_LEAD06_EMB128X32_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[128, 32])
+_PILOT_LEAD06_EMB256X64_SEEDA_PROFILE = _pilot_lead06_profile(seed=_SEED_A, embedding_hiddens=[256, 64])
+
 # Canonical run-profile registry: name -> (hyperparameter mapping, manifest
 # note). New profiles must be added here, never spliced in ad hoc, so every
 # generated manifest can unambiguously record which named profile it used.
@@ -379,6 +390,9 @@ _RUN_PROFILES = {
     PILOT_LEAD06_EMB128X64_SEEDB_PROFILE_NAME: _PILOT_LEAD06_EMB128X64_SEEDB_PROFILE,
     PILOT_LEAD06_EMB64_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB64_SEEDA_PROFILE,
     PILOT_LEAD06_EMB128_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB128_SEEDA_PROFILE,
+    PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB64X32_SEEDA_PROFILE,
+    PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB128X32_SEEDA_PROFILE,
+    PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME: _PILOT_LEAD06_EMB256X64_SEEDA_PROFILE,
 }
 
 # run_id (config/stage1_lead06_pilot_v001.yaml) -> run_profile_name, so
@@ -460,6 +474,27 @@ _RUN_PROFILE_NOTES = {
         "Stage 1 lead-6 optimization pilot run_id=emb128_seedA: learned FC "
         "statics_embedding hiddens=[128] (single wider layer), seed=967139 "
         "('seed A'). Embedding-depth ablation against emb128x64_seedA."
+    ),
+    PILOT_LEAD06_EMB64X32_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 embedding-shape neighborhood: learned FC "
+        "statics_embedding hiddens=[64, 32] (two-layer neighbor of "
+        "emb128x64_seedA), seed=967139 ('seed A'). Canonical profile for the "
+        "next approved 25k embedding-shape batch; not a config/"
+        "stage1_lead06_pilot_v001.yaml run_id and not yet trained."
+    ),
+    PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 embedding-shape neighborhood: learned FC "
+        "statics_embedding hiddens=[128, 32] (two-layer neighbor of "
+        "emb128x64_seedA), seed=967139 ('seed A'). Canonical profile for the "
+        "next approved 25k embedding-shape batch; not a config/"
+        "stage1_lead06_pilot_v001.yaml run_id and not yet trained."
+    ),
+    PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME: (
+        "Stage 1 lead-6 embedding-shape neighborhood: learned FC "
+        "statics_embedding hiddens=[256, 64] (two-layer neighbor of "
+        "emb128x64_seedA), seed=967139 ('seed A'). Canonical profile for the "
+        "next approved 25k embedding-shape batch; not a config/"
+        "stage1_lead06_pilot_v001.yaml run_id and not yet trained."
     ),
 }
 
