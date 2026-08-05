@@ -36,12 +36,18 @@ whole basis for what "qualified" means below:**
    standing in for it) -- see §12 for the one continuation-semantics
    assumption this smoke run corrected.
 3. **Real package, online mode: not qualified.** No live network-connected
-   run and no sweep have ever been executed for this project, deliberately
-   -- Path A above was scoped to offline-only by explicit instruction (no
-   API key, no network). Treat `mode: "online"` as implemented and
+   run (i.e. training itself running with `mode: "online"`) has ever been
+   executed for this project. Treat `mode: "online"` as implemented and
    policy-selectable but unqualified until it is separately exercised
-   against a live network connection.
+   against a live network connection during training.
 4. **Sweeps: not implemented.** See §7.
+5. **Offline-to-server sync: qualified for single-segment runs.** Two
+   already-completed offline candidates were synced to the real hosted
+   `flashnh-stage1` project on 2026-08-05 and independently verified via
+   `wandb.Api()`. See §17. This did **not** exercise the multi-segment
+   reconciliation case described in §12 (each synced run had exactly one
+   local offline directory) -- that remains unverified until a
+   multi-Slurm-job candidate is synced.
 
 Every screen this guide describes below is a description of what W&B will
 show once tracking is actually enabled for a real candidate -- not a
@@ -103,7 +109,7 @@ W&B is TRACKING ONLY. It never decides, and this codebase never lets it decide: 
 
 A candidate that trains across multiple bounded Slurm jobs (this pilot's normal restart pattern) reuses one stable W&B run id, not a new one per job: `pilot_tracking.derive_pilot_wandb_run_id` computes a deterministic id from `(pilot_policy_name, run_id, tracking_generation)`, and every `init_pilot_tracking_run` call passes it as W&B's own `id=` with `resume="allow"`. `tracking_generation` defaults to `"g1"` and stays there for every ordinary continuation; an operator only bumps it (e.g. to `"g2"`) to deliberately mark a genuine restart-from-scratch of the same `run_id` after abandoning its prior NH run directory -- see the module docstring in `src/baseline/pilot_tracking.py` for why that case cannot be told apart from a first-ever attempt any other way (NH run directories are timestamped, not fixed per `run_id`).
 
-**Corrected by the real-package qualification (§ status item 2 above; do not assume the older, offline-untested description that used to be here):** in *offline* mode, "same `id=`, `resume="allow"`" does **not** make job 2 append to job 1's local run directory. Each process invocation gets its own fresh, timestamped local `offline-run-<timestamp>-<id>/` directory, and wandb itself says so out loud: `` WARNING `resume` will be ignored since W&B syncing is set to `offline`. Starting a new run with run id <id>. `` Reconciling every invocation that shares the same run id into one logical run is a **server-side, sync-time** operation (`wandb sync`, matched by run id + project) -- it never happens locally, and nothing in this repo has performed that sync yet. Until sync happens, a Slurm-continued candidate's tracking history exists as N separate local offline-run directories sharing one id, not one merged directory; W&B's own dashboard/history view only becomes a single coherent run for that id after all N are synced. (`online` mode's `resume="allow"` behaves as originally described -- a live server-side run is genuinely reconnected to in real time -- but `online` mode remains unqualified per § status item 3.)
+**Corrected by the real-package qualification (§ status item 2 above; do not assume the older, offline-untested description that used to be here):** in *offline* mode, "same `id=`, `resume="allow"`" does **not** make job 2 append to job 1's local run directory. Each process invocation gets its own fresh, timestamped local `offline-run-<timestamp>-<id>/` directory, and wandb itself says so out loud: `` WARNING `resume` will be ignored since W&B syncing is set to `offline`. Starting a new run with run id <id>. `` Reconciling every invocation that shares the same run id into one logical run is a **server-side, sync-time** operation (`wandb sync`, matched by run id + project) -- it never happens locally. Two single-segment offline runs have now been synced (§17), but no multi-segment candidate (one whose local `wandb/offline/<run_id>/` holds more than one `offline-run-<timestamp>-<id>/` directory) has been synced yet, so the reconciliation behavior described in this paragraph is still unverified in practice for this project. Until sync happens, a Slurm-continued candidate's tracking history exists as N separate local offline-run directories sharing one id, not one merged directory; W&B's own dashboard/history view only becomes a single coherent run for that id after all N are synced. (`online` mode's `resume="allow"` behaves as originally described -- a live server-side run is genuinely reconnected to in real time -- but `online` mode remains unqualified per § status item 3.)
 
 A small `pilot_wandb_run_identity.json` file is also written into the NH run directory once it exists, cross-checking `(pilot_policy_name, run_id, tracking_generation)` on every call, purely so a stale run directory accidentally reused for a *different* candidate, or reused under a different `tracking_generation` without bumping it, is caught loudly (a `TrackingError`) rather than silently mixing two attempts' histories into one W&B run id. This id is derived, never handed to you to invent -- you should never need to look it up manually except as `wandb_run_id` in a run's own config or evidence bundle.
 
@@ -155,3 +161,100 @@ Capped-update screening support (an optional bounded-optimizer-update mechanism 
 - The evidence bundle (`pilot_run_evidence.json`) separately records the *actual* number of optimizer updates completed per epoch (`actual_optimizer_updates_by_epoch`, read from NH's own persisted optimizer checkpoint state, never inferred from wall time or logs) alongside the *configured* cap -- W&B does not currently get this second field; consult the evidence bundle directly if you need it.
 
 An invocation with no `--wandb-policy-path` (the ordinary case for every run today) is completely unaffected by any of this: it loads and uses the committed disabled policy exactly as before this flag existed.
+
+## 17. Real offline-to-server sync (2026-08-05 qualification)
+
+Two already-completed capped calibration candidates (see §16),
+`raw_seedA_cap25k_cal` and `emb128x64_seedA_cap25k_cal` -- both Seed A
+(967139), both `max_updates_per_epoch: 25000`, distinct only in
+`static_pathway`/`embedding_hiddens` -- were synced from their Moriah
+local offline directories to the real hosted `flashnh-stage1` project and
+independently verified via `wandb.Api()`. This is the first time any run
+has been synced to a live W&B server for this project; it qualifies the
+sync workflow itself, not any new training or online-mode behavior (§
+status items 3 and 5 above still apply).
+
+**Workflow used, on the Moriah login node, from `$FLASHNH_BASE`:**
+
+```bash
+ENVBIN=$FLASHNH_BASE/envs/flashnh-moriah/bin
+
+# One-time (or after any credential doubt): interactive re-login, verified
+# against the W&B server. Never print $WANDB_API_KEY.
+env -u WANDB_API_KEY "$ENVBIN/wandb" login --cloud --relogin --verify
+
+# Sync exactly one local offline run directory. --legacy is required: this
+# wandb version's default ("beta") sync mode failed with
+# "ERROR user is not logged in" even immediately after a verified login.
+env -u WANDB_API_KEY "$ENVBIN/wandb" sync --legacy -p flashnh-stage1 \
+  "$FLASHNH_BASE/wandb/offline/<run_id>/wandb/offline-run-<timestamp>-<full-run-name>"
+```
+
+No `--entity` was passed; the verified account's `api.default_entity`
+(`omri-porat1-huji`) resolved correctly on its own. Each run's local
+directory holds exactly one `offline-run-<timestamp>-...` segment, so this
+exercised single-segment sync only -- see §12's updated note on
+multi-segment reconciliation, still unverified.
+
+**A first sync attempt (before the `--relogin --verify` step) reported
+`done.` but never actually landed the run under the verified account** --
+`wandb.Api()` and a direct GraphQL `viewer` query both showed zero
+projects existed. This was caught by verifying run 1 before syncing run 2
+(the same discipline this section recommends for any future sync), never
+attributed with false confidence, and resolved simply by re-running
+`wandb login --cloud --relogin --verify` before re-attempting the sync.
+Anyone syncing a run and not seeing it appear under `wandb.Api()` should
+suspect stale/mismatched local credential state first, before assuming
+the sync itself failed silently.
+
+**Verification performed for each run**, read-only via `wandb.Api()` with
+`WANDB_API_KEY` unset:
+
+- `run.state == "finished"` for both.
+- Config matched the source evidence bundle exactly: `run_id`,
+  `static_pathway` (`raw_identity_concatenation` vs.
+  `learned_fc_embedding`), `embedding_hiddens` (`null` vs. `[128, 64]`),
+  `seed` (967139 for both), `max_updates_per_epoch` (25000 for both),
+  `git_commit`, `package_manifest_identity`, `splits_dir` (identical
+  across both, as expected for two candidates from the same package/split
+  policy).
+- Summary contained only metadata-only `checkpoint_ref/epoch_NNN` dict
+  entries (path/checksum/size_bytes/epoch, never file bytes) plus scalar
+  screening/early-stopping fields -- no `wandb.Artifact`, no
+  `add_reference`/`add_file` call exists anywhere in
+  `src/baseline/wandb_tracking.py` (confirmed by source read, not just by
+  what happened to be logged), so no checkpoint, optimizer-state,
+  validation-pickle, NetCDF, parquet, or evidence-bundle file was ever a
+  candidate for upload in the first place.
+- `run.files()` listed only small text/JSON files that `wandb.init`/
+  `wandb.log` always write (`config.yaml`, `output.log`,
+  `requirements.txt`, `wandb-metadata.json`, `wandb-summary.json`) --
+  nothing else.
+- `api.runs("omri-porat1-huji/flashnh-stage1")` listed exactly these two
+  runs, both `finished`, confirming they appear together in one project
+  and that the earlier failed attempt left no stray run behind.
+
+**Resulting run identifiers** (entity `omri-porat1-huji`, project
+`flashnh-stage1`):
+
+- `flashnh-stage1_lead06_pilot_cap_parallel_batch_v001-raw_seedA_cap25k_cal-g1`
+- `flashnh-stage1_lead06_pilot_cap_parallel_batch_v001-emb128x64_seedA_cap25k_cal-g1`
+
+**To compare them in the W&B web UI**: open the `flashnh-stage1` project
+under the `omri-porat1-huji` entity, select both run rows in the runs
+table, and use W&B's built-in "Compare" action -- this is a native table
+feature, not anything custom built for Flash-NH (§ hard boundary: no
+custom dashboard exists or is planned here). Group by `static_pathway` or
+`embedding_hiddens` (§6) to see the two candidates' structural difference
+line up against their `screening/primary_metric_median` curves.
+
+**Scope of this qualification**: two runs, both already-completed and
+non-degraded, both single-segment, synced manually from an interactive
+Moriah login-node shell. It does not qualify: syncing a run still being
+written to (a "running" W&B state) mid-training, syncing a multi-segment
+Slurm-continued candidate, `wandb sync --sync-all` or any bulk sync of
+this project's other (still-local, unsynced) offline runs, or any
+automation of the login/sync step itself. Every other capped-calibration
+and structural-matrix run in `docs/stage1_lead06_pilot_v001.md` remains
+local-only (`mode: "offline"`, never synced) unless a future entry in
+this section says otherwise.
