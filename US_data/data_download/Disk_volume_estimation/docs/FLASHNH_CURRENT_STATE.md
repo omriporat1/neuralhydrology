@@ -1,14 +1,48 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-04 (`max_updates_per_epoch` capped-update calibration
-complete — mechanism qualified across uncapped/100k/50k/25k caps, raw and
-`[128,64]`-embedded static pathways, and Seed A/B; provisional 25k-to-50k-to-
-full-fidelity screening workflow adopted; static embedding remains an open,
-bounded hyperparameter family. Documentation-only closure — no Moriah access,
-no Slurm submission, no training/evaluation in this update. See the section
-immediately below for detail; see further below for the preceding W&B
-qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and post-
-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-05 (25k Seed-A embedding-shape neighborhood screening
+closed — `[64,32]`, `[128,32]`, `[256,64]` compared against the `[128,64]`
+reference; no candidate shows broad, consistent superiority; `[128,64]`
+(incumbent) and `[128,32]` (challenger) are the structural survivors carried
+into a new, more informative 50k comparison (not yet started); sequence
+length reframed as a separate temporal-context model-family axis, fixed at
+24 for the current family, and removed from the ordinary near-term tuning
+order; revised hyperparameter order, learning-curve standard, and
+hydrograph-demonstration standard recorded. Documentation-only closure — no
+Moriah access, no Slurm submission, no training/evaluation in this update.
+See the section immediately below for detail; see further below for the
+preceding `max_updates_per_epoch` calibration, W&B qualification,
+`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
+roadmap entries it builds on.)
+
+## Stage 1 — 25k Seed-A embedding-shape neighborhood screening closed: `[128,64]`/`[128,32]` structural survivors, next 50k comparison approved, sequence length reframed as a separate model-family axis, learning-curve/hydrograph standards revised (2026-08-05)
+
+Documentation-only closure (no Moriah access, no Slurm submission, no training/evaluation in this task) recording a completed real Moriah screening batch run earlier in this same session under unchanged commit `5aba586dc4856ecb05945b41d3ff29a34f096cb7` (verified against local `HEAD` and `origin/master` before this update; both identical, clean tree before editing). Full technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.10; decision text: `docs/decision_log.md`'s 2026-08-05 entry; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s 2026-08-05 section. Local evidence (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/embedding_shape_neighborhood_seedA_25k_v001/`.
+
+**Screening closed.** Three new capped-update (`max_updates_per_epoch=25000`) candidates — `emb64x32_seedA_cap25k_cal` (`[64,32]`), `emb128x32_seedA_cap25k_cal` (`[128,32]`), `emb256x64_seedA_cap25k_cal` (`[256,64]`) — were trained and compared against the pre-existing, untouched `emb128x64_seedA_cap25k_cal` reference (`[128,64]`). All four share Seed A (967139), `hidden_size` 128, embedding activation tanh, embedding dropout 0.1, output dropout 0.25, Adam `lr` 0.001, NSE loss, `seq_length` 24, `qobs_mm_per_h_lead06`, the fixed 2,307-basin development-training population, and the fixed 400-basin development-validation screening subset — differing only in `statics_embedding.hiddens`. All three new candidates completed successfully, performed exactly 25,000 optimizer updates in every one of 6 epochs (directly verified from each `optimizer_state_epochNNN.pt` Adam step counter — 25,000/50,000/75,000/100,000/125,000/150,000 cumulative, zero drift), reached 150,000 cumulative updates at epoch 6, created checkpoints 1-6 and no epoch 7, stayed offline in W&B throughout, and accessed no sealed population.
+
+**Provisional interpretation (coarse-screening resolution only).**
+1. **No tested candidate shows broad, consistent superiority over the `[128,64]` reference.**
+2. **`[128,32]` shows the mildest positive edge**: positive median paired per-basin difference vs. `[128,64]` at 5 of 6 epochs (only epoch 2 slightly negative), but its paired win rate against the reference never exceeds ≈0.53 in any epoch — a plausible challenger, not a demonstrated winner.
+3. **`[64,32]` stays broadly close to `[128,64]`**: positive median paired difference at all 6 epochs, but no stable or broad advantage (a one-off epoch-5 spike is not sustained at epoch 6) — no compelling reason to prioritize it further.
+4. **`[256,64]` is the weakest tested shape**: negative median paired difference vs. the reference in 4 of 6 epochs, and the lowest official median NSE at both official screening epochs (3 and 6) — provisionally rejected at this 25k structural-screening tier.
+5. **The 25k cap remains useful for divergence detection and rejecting clearly weak regions** (it separates `[256,64]` as weakest) **but is not precise enough for fine ranking** among `[64,32]`/`[128,32]`/`[128,64]`, whose paired win rates all sit close to chance.
+
+**Structural survivors for the next phase: `[128,64]` (incumbent) and `[128,32]` (challenger).** Neither is described as the final architecture.
+
+**Next approved structural phase (not yet started): existing Seed-A `[128,64]` trajectory continued to 50k vs. new Seed-A `[128,32]` trajectory at 50k.** Design: `max_updates_per_epoch=50000`, target up to epoch 12, official screening at epochs 3/6/9/12, existing early-stopping policy authoritative (stopping-eligible from epoch 6, minimum improvement 0.005, patience 3 eligible screening events), every epoch saved, retrospective checkpoint evaluation usable diagnostically, no cross-fidelity checkpoint reuse. The new `[128,32]` 50k candidate starts from the original Seed-A initialization; the existing `[128,64]` 50k candidate (`emb128x64_seedA_cap_low_cal`) may continue only within its own unchanged candidate identity and fidelity. **Not launched by this entry.**
+
+**Sequence length reframed (adopted, binding for the current model family).** Sequence length is fixed at 24 for the current model family and is **not** an ordinary near-term tuning-funnel hyperparameter — alternative sequence lengths define separate temporal-context model families (different scientific information, antecedent-memory assumptions, input construction, compute/memory cost, and cross-basin response-time interpretation). A later sequence-length study may compare alternative model families against a mature 24-hour model, but that is not part of the current hyperparameter phase. `docs/stage1_validation_optimization_foundation.md` Part L.1's Stage B dimension list is corrected accordingly.
+
+**Revised hyperparameter order within the fixed `seq_length=24` model family:** (1) close embedding structure at 50k (`[128,32]` vs. `[128,64]`); (2) learning rate (bounded contrast around 0.001, exact values not yet authorized); (3) LSTM hidden size (bounded capacity contrast, exact candidates not yet authorized); (4) embedding dropout; (5) output dropout; (6) small integration/interaction checks among independently promising settings; (7) Seed-B confirmation for only the top integrated candidates; (8) uncapped authoritative finalists; (9) a separate, later temporal-context model-family study for sequence length. Ordering rationale: expected scientific/optimization impact, dependency/interaction structure, experimental clarity, and operational cost.
+
+**Learning-curve standard (adopted for future serious-triage/finalist packets).** Training diagnostics: mean training loss vs. epoch and vs. cumulative optimizer updates. Validation/scientific diagnostics: median raw-space per-basin NSE vs. epoch, a p25-p75 (or equivalent) distributional band, `frac(NSE>0)`, and explicit official-vs-retrospective evaluation markers. Transformed-space validation loss may be included only if already available or cheaply/deterministically derivable, and only as a training diagnostic — **never as the official scientific model-selection metric.** The existing scientific rule is preserved: NH training/validation losses are diagnostics in transformed target space; official Flash-NH benchmark metrics remain computed after full inverse conversion to raw m³/s; raw-space screening metrics remain authoritative for candidate selection. Raw-space median NSE must not be labeled "validation loss."
+
+**Hydrograph-demonstration standard (design update; not yet implemented — see `docs/stage1_validation_optimization_foundation.md` Part L.3d).** For future 50k-promoted candidates: a fixed eight-basin compact panel with basin area (km², authoritative basin-area field) in every title; basin-average hourly MRMS QPE precipitation (mm h⁻¹) as blue bars descending from a secondary right-hand axis (zero at top, increasing downward); rainfall plotted at its physical valid time, observations at physical discharge time, lead-6 predictions at their target valid time (no artificial six-hour shift); matched time windows/discharge limits/precipitation limits/plot conventions across compared candidates; a compact-panel metrics table; and a short interpretation covering peak magnitude/timing, false peaks, recession, baseflow, basin-specific bias, and rainfall-runoff timing. The full 24-basin atlas remains reserved for ambiguous cases, integrated candidates, or authoritative finalists — not required for every 50k candidate. Cadence: 25k coarse screening uses strategic metrics/learning curves only (no routine hydrograph package); 50k serious triage uses the compact panel + compact metrics + short interpretation; integrated/uncapped finalists use the compact panel + full 24-basin atlas + standardized 6-8 figure package + comprehensive summary.
+
+**W&B status (already-qualified capability only; nothing new qualified by this entry).** Offline W&B remains the operational mode for all four screening runs above (`tracking_generation=g1`, no `wandb sync` run for any of them); the previously-qualified controlled post-run sync (`docs/stage1_wandb_user_guide.md` §17) covers two other, unrelated single-segment runs and is unaffected by this entry; the private project remains entity `omri-porat1-huji`, project `flashnh-stage1`; W&B stays the experiment-index/comparison interface, not scientific authority; online training and multi-segment offline-run reconciliation remain unqualified; no automatic sync or `--sync-all` workflow is approved.
+
+**Not done by this update.** No Moriah access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout access. The next approved 50k comparison (`[128,64]` continuation vs. new `[128,32]`) is approved in design only and has not been launched.
 
 ## Stage 1 — `max_updates_per_epoch` capped-update calibration complete: mechanism qualified, provisional fidelity workflow adopted, static embedding reopened as a bounded hyperparameter family (2026-08-04)
 

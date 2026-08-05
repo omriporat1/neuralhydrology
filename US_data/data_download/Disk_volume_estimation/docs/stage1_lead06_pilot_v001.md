@@ -959,4 +959,32 @@ Documentation-only closure recording three real Moriah calibration exercises run
 
 **Next approved, not-yet-started structural batch.** One-layer `[64]` and one-layer `[128]` embeddings, Seed A, 25k cap, against the existing Seed-A raw/`[128,64]` references — embedding activation (tanh), embedding dropout (0.1), output dropout (0.25), `hidden_size` (128), learning rate (0.001), and all data/split settings held fixed. **Not launched by this entry.**
 
+**Superseded:** the next batch actually run diverged from the shape pair described immediately above (`[64]`/`[128]`, one layer each) — it instead compared three two-layer shapes (`[64,32]`/`[128,32]`/`[256,64]`) against the `[128,64]` reference, all raw pathway excluded. See the following section for the real batch and its closure.
+
+## Embedding-shape neighborhood screening (25k) closed: `[128,64]`/`[128,32]` structural survivors, next 50k comparison approved (2026-08-05)
+
+Documentation-only closure recording a real Moriah screening batch run this session (mechanism reused unchanged from the 2026-08-04 calibration section above — see `docs/stage1_validation_optimization_foundation.md` Part L.10 and `docs/decision_log.md`'s 2026-08-05 entry for full detail). **None of this section's runs are members of the six-run Stage A structural pilot** at the top of this document — they are separate, distinctly-named capped-screening candidates in the same naming family as the 2026-08-04 calibration section (`..._cap25k_cal` suffix), extending that family's static-embedding-shape axis.
+
+**Batch run this session (all through epoch 6, offline W&B, no sealed-population access):**
+- `emb64x32_seedA_cap25k_cal` (`[64,32]`), `emb128x32_seedA_cap25k_cal` (`[128,32]`), `emb256x64_seedA_cap25k_cal` (`[256,64]`) — all Seed A (967139), `max_updates_per_epoch=25000`, compared against the pre-existing, untouched `emb128x64_seedA_cap25k_cal` (`[128,64]`) reference from the 2026-08-04 `cap_parallel_batch_v001` batch above. All four share `hidden_size=128`, embedding activation tanh, embedding dropout 0.1, output dropout 0.25, Adam `lr=0.001`, NSE loss, `seq_length=24`, target `qobs_mm_per_h_lead06`, the fixed 2,307-basin development-training population, and the fixed 400-basin development-validation screening subset — differing only in `statics_embedding.hiddens`.
+
+**Cap enforcement:** exact, every epoch, all three new candidates (job 45756766: cumulative 25,000/50,000/75,000/100,000/125,000/150,000 through epoch 6) — zero drift. Six checkpoints each, no epoch 7.
+
+**Official screening-epoch median NSE (400-basin subset).** Epoch 3 (`diagnostic_only`): `[128,32]` 0.25829 > reference `[128,64]` 0.25462 > `[64,32]` 0.25141 > `[256,64]` 0.24170. Epoch 6 (`stopping_eligible`): `[128,32]` 0.25347 > `[64,32]` 0.25250 > reference `[128,64]` 0.24750 > `[256,64]` 0.24494 — all four within a 0.0086 band.
+
+**Paired per-basin result vs. `[128,64]` (job 45756761, provisional, coarse-screening resolution only).**
+- **No candidate shows broad, consistent superiority over `[128,64]`.**
+- **`[128,32]`** — mildest positive edge: positive median paired diff at 5 of 6 epochs (only epoch 2 slightly negative, -0.0031); paired win rate never exceeds ≈0.53 in any epoch. A plausible challenger, not a demonstrated winner.
+- **`[64,32]`** — positive median paired diff at all 6 epochs, but a one-off epoch-5 spike (+0.029) not sustained at epoch 6 (+0.0065); no stable or broad advantage; no compelling reason to prioritize further.
+- **`[256,64]`** — weakest tested shape: negative median paired diff at 4 of 6 epochs (2, 3, 4, 6); lowest official median NSE at both official epochs (3 and 6). Provisionally rejected at this 25k structural-screening tier.
+- The 25k cap remains useful for divergence detection and rejecting a clearly weaker region (`[256,64]`) but is not precise enough for fine ranking among `[64,32]`/`[128,32]`/`[128,64]`, whose paired win rates all sit close to chance (≈0.48-0.53) at every epoch.
+
+**Structural survivors: `[128,64]` as incumbent, `[128,32]` as challenger.** Neither is described as the final architecture; this is not statistical significance.
+
+**Next approved structural phase (design only, not launched).** Existing Seed-A `[128,64]` trajectory (`emb128x64_seedA_cap_low_cal`, the 50k candidate already run through epoch 6 in the 2026-08-04 calibration section above) continued to 50k, vs. a new Seed-A `[128,32]` trajectory at 50k. `max_updates_per_epoch=50000`; target up to epoch 12; official screening at epochs 3/6/9/12; existing early-stopping policy authoritative (stopping-eligible from epoch 6, minimum improvement 0.005, patience 3 eligible screening events); every epoch saved; retrospective checkpoint evaluation usable diagnostically; no cross-fidelity checkpoint reuse; the new `[128,32]` candidate starts from the original Seed-A initialization; the existing `[128,64]` candidate may continue only within its own unchanged candidate identity and fidelity. Purpose: close the embedding-structure question at a more informative fidelity, avoiding further width/depth exploration unless new evidence later justifies it. **Not started.**
+
+**Sequence length, revised framing.** Sequence length (24, fixed for the current model family) is explicitly removed from the ordinary near-term tuning order and reframed as a separate temporal-context model-family axis — see `docs/stage1_validation_optimization_foundation.md` Part L.10 and Part L.1 (corrected). This does not change anything about this pilot's own six closed structural candidates, which already froze `seq_length=24` by design.
+
+**Revised hyperparameter order (within the fixed `seq_length=24` model family), for reference.** (1) Close embedding structure at 50k (`[128,32]` vs `[128,64]`, this section); (2) learning rate; (3) LSTM hidden size; (4) embedding dropout; (5) output dropout; (6) small integration/interaction checks; (7) Seed-B confirmation for top integrated candidates; (8) uncapped authoritative finalists; (9) a separate later temporal-context model-family study for sequence length. Full rationale: `docs/stage1_validation_optimization_foundation.md` Part L.10.
+
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no numerical cap adopted for production use, no generated evidence committed, no sealed-population access.

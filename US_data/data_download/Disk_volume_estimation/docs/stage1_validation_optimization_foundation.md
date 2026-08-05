@@ -46,7 +46,7 @@ each Part lives in its own evidence subdirectory under
 | I | §13 | First embedded-static CudaLSTM candidate (`embedded_static_cudalstm_pilot`): design/config + structural-smoke-only construction choice, not a scientific or tuned candidate; embedding width/depth/activation/dropout remain open optimization hyperparameters for a later phase | Complete | `src/baseline/nh_config_generation.py` extension, `part_i_embedded_static_pilot/`, 8 new tests in `tests/test_nh_config_generation.py` |
 | J | §14 | Disposition of two retained diagnostic utility scripts: keep, recommend commit, no code change | Complete | `part_j_utility_script_disposition/` |
 | K | §15 | Full test verification for Parts A/C/D/E/F/I | Complete | `part_k_test_verification/` |
-| L | §16 | Post-`emb128x64_seedA` roadmap addendum: Stage A (structural contrasts) vs. Stage B (proper HPO) framing, hydrograph-diagnostic timing, W&B adoption sequencing, and the `max_updates_per_epoch` multi-fidelity direction. Documentation only — no run launched, no hydrograph generated, no W&B tracking enabled, no update cap adopted. | Complete (roadmap documented; several sub-items remain open/deferred by design — see §16) | `docs/decision_log.md` (2026-08-02 entry) |
+| L | §16 | Post-`emb128x64_seedA` roadmap addendum (L.1-L.4); `max_updates_per_epoch` capped-update mechanism, implementation and calibration (L.5-L.9); 25k Seed-A embedding-shape neighborhood screening closed, `[128,64]`/`[128,32]` structural survivors, 50k next-phase design, sequence length reframed as a separate model-family axis, revised hyperparameter order, learning-curve/hydrograph standards (L.10). Real Moriah execution occurred for L.3c, L.7-L.9, and L.10's screening batch; this row's own documentation edits are otherwise documentation-only. | Complete through L.10 (several sub-items remain open/deferred by design — see §16; the L.10 50k comparison is designed but not launched) | `docs/decision_log.md` (2026-08-02, 2026-08-04, 2026-08-05 entries) |
 
 ## What this phase explicitly does NOT do
 
@@ -129,10 +129,18 @@ a hyperparameter sweep.** Stage B is proper HPO — deferred, not designed
 here — and begins only once Stage A yields enough structural evidence to
 select or narrow the architecture family. Likely Stage B dimensions:
 learning rate, hidden size, output dropout, embedding width/depth,
-embedding dropout, batch size, sequence length, and possibly
-activation/scheduler after the architecture family is chosen. Stage B's
-search space, optimizer, trial budget, fidelity policy, and promotion rules
-remain unfrozen.
+embedding dropout, batch size, and possibly activation/scheduler after the
+architecture family is chosen. Stage B's search space, optimizer, trial
+budget, fidelity policy, and promotion rules remain unfrozen.
+**Corrected (2026-08-05, see Part L.10):** sequence length is explicitly
+excluded from this list — it is fixed at 24 for the current model family
+and is not an ordinary Stage B/HPO dimension. Alternative sequence lengths
+define separate temporal-context model families (different antecedent-
+memory assumptions, input construction, compute/memory cost, and cross-
+basin response-time interpretation), not a value to be tuned inside this
+funnel; any future sequence-length study compares whole model families
+against a mature 24-hour model and is out of scope for Stage B as framed
+here.
 
 **L.2 — Remaining Stage A candidates (adopted direction, not a launch
 authorization).** The preferred next candidate is `raw_seedA` (clean
@@ -323,6 +331,57 @@ point — see the "Checkpoint identity" note in the evidence write-up below).
 - **Not changed by this pass:** no model-selection decision; no full
   development/population evaluation; no sealed-set access; no `raw_seedA`
   launch; no W&B activity.
+
+**L.3d — hydrograph-demonstration standard, revised (2026-08-05, adopted
+design; not yet implemented).** Written as part of closing the embedding-
+shape neighborhood screening (Part L.10) and recorded here because it
+extends this section's rendering design, not because any new rendering ran.
+For 50k-promoted candidates, the standard compact demonstration package
+should include:
+
+1. A fixed eight-basin compact hydrograph panel (reusing `select_compact_basins`,
+   L.3a).
+2. Basin area in every panel title — km², drawn from the authoritative
+   basin-area field (`derive_basin_area_km2_from_netcdf`, already used
+   internally by `src/baseline/hydrograph_rendering.py` but not yet surfaced
+   in panel titles).
+3. Basin-average hourly precipitation (MRMS QPE, mm h⁻¹) as blue bars
+   descending from the top of a secondary right-hand y-axis (zero at the
+   top, precipitation increasing downward) — not present in the current
+   renderer.
+4. Explicit time alignment: precipitation plotted at its physical valid
+   time; observations plotted at physical discharge time; lead-6
+   predictions plotted at the target valid time they predict; no artificial
+   six-hour shift of rainfall relative to discharge. This convention must be
+   stated explicitly in the rendering manifest/metadata and in the
+   accompanying interpretation text.
+5. Matched comparison scales across candidates being compared: identical
+   time windows, identical discharge limits for the same basin/window,
+   identical precipitation limits where practical, identical plot
+   conventions.
+6. A compact-panel metrics table (reusing the existing per-basin raw-space
+   metric computation).
+7. A short hydrograph interpretation discussing peak magnitude, peak
+   timing, false peaks, recession, baseflow, basin-specific bias, and
+   rainfall-runoff timing where visible.
+8. The full 24-basin atlas is **not** required for every 50k candidate —
+   reserved for ambiguous cases, integrated candidates, or authoritative
+   finalists.
+
+**Demonstration-output cadence (adopted).** 25k coarse screening: strategic
+metrics and learning curves only, no routine hydrograph package. 50k serious
+triage: the compact eight-basin panel (items 1-7 above) plus a strategic
+review packet. Integrated or uncapped finalists: the compact panel plus the
+full 24-basin atlas plus a standardized 6-8 figure package plus a
+comprehensive scientific summary.
+
+**Status.** This is a design update to the existing L.3/L.3a rendering
+standard, not a new visualization framework — items 2-5 above are gaps in
+the current `render_basin_panel`/`render_compact_panel` implementation
+(confirmed by source inspection: basin area is derived but not titled, and
+no precipitation axis exists today) to be closed when a 50k-promoted
+candidate first needs this package, not by this documentation-only entry.
+No rendering code changed by this entry; no new panel generated.
 
 **L.4 — W&B adoption sequencing (Stage (1) and (2) complete; (3)/(4) not yet
 started).** Order: (1) ordinary tracking qualification, (2) an offline-mode
@@ -611,6 +670,28 @@ this pilot's existing full-fidelity results — none of which exists yet.
 **Strategic review packet standard (new, documentation-level, for future structural-comparison tasks only).** See `docs/decision_log.md`'s 2026-08-04 entry for the full 7-component definition. Not applied retroactively to the evidence summarized above.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no numerical cap adopted for production use, no generated evidence committed, no sealed temporal-test/spatial-holdout data accessed.
+
+**L.10 — Embedding-shape neighborhood screening closed (2026-08-05): `[128,64]`/`[128,32]` structural survivors, next 50k comparison designed, sequence length reframed, revised hyperparameter order, learning-curve standard revised.** Real Moriah screening batch this session, under unchanged commit `5aba586dc4856ecb05945b41d3ff29a34f096cb7`, closing L.9 point 6's "next approved, not-yet-started batch." Full decision text: `docs/decision_log.md`'s 2026-08-05 entry. Local evidence (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/embedding_shape_neighborhood_seedA_25k_v001/`.
+
+*Batch.* `emb64x32_seedA_cap25k_cal` (`[64,32]`), `emb128x32_seedA_cap25k_cal` (`[128,32]`), `emb256x64_seedA_cap25k_cal` (`[256,64]`) — Seed A, 25k cap, all other settings matching L.9's `emb128x64_seedA_cap25k_cal` reference (which was not touched, re-run, or continued). All three completed cleanly through epoch 6, exact cap enforcement verified every epoch for all three (job 45756766, cumulative 25,000/50,000/75,000/100,000/125,000/150,000, zero drift), full retrospective epoch-1-6 trajectories (jobs 45756721-45756723), and a true per-basin paired comparison against the reference for all 3 candidates x 6 epochs (job 45756761).
+
+*Result (provisional, coarse-screening resolution only).* No candidate shows broad, consistent superiority over `[128,64]`. `[128,32]` has the mildest positive edge (positive median paired diff at 5/6 epochs, win rate never exceeding ≈0.53) — a plausible challenger, not a demonstrated winner. `[64,32]` stays broadly close to `[128,64]` (positive median paired diff at all 6 epochs but no stable/broad advantage). `[256,64]` is the weakest tested shape (negative median paired diff at 4/6 epochs; lowest official median NSE at both official epochs 3 and 6) — provisionally rejected at this tier. The 25k cap remains useful for divergence detection/coarse rejection (it separates `[256,64]`) but is not precise enough for fine ranking among `[64,32]`/`[128,32]`/`[128,64]`, all of whose paired win rates sit close to chance — extending L.9 point 2's "coarse rejection, not fine ranking" finding to this finer shape granularity.
+
+*Structural survivors.* `[128,64]` (incumbent), `[128,32]` (challenger). Not a final architecture decision.
+
+*Next approved structural phase (design only, not launched).* Existing Seed-A `[128,64]` trajectory (`emb128x64_seedA_cap_low_cal`) continued to 50k vs. a new Seed-A `[128,32]` trajectory at 50k. `max_updates_per_epoch=50000`; target up to epoch 12; official screening at epochs 3/6/9/12; existing early-stopping policy authoritative (stopping-eligible from epoch 6, minimum improvement 0.005, patience 3 eligible screening events); every epoch saved; retrospective checkpoint evaluation usable diagnostically; no cross-fidelity checkpoint reuse; the new `[128,32]` candidate starts from the original Seed-A initialization; the existing `[128,64]` candidate may continue only within its own unchanged candidate identity and fidelity. Purpose: close the embedding-structure question at a more informative fidelity and avoid further width/depth exploration unless new evidence later justifies it. **Not started.**
+
+*Sequence length (adopted, binding — corrects L.1 above).* Sequence length is fixed at 24 for the current model family and is not an ordinary Stage B/HPO dimension. Alternative sequence lengths are separate temporal-context model families (different antecedent-memory assumptions, input construction, compute/memory cost, cross-basin response-time interpretation); a later study may compare such families against a mature 24-hour model, but that is a separate, later phase, not part of the current funnel. L.1's Stage B dimension list has been corrected to remove sequence length.
+
+*Revised hyperparameter order, within the fixed `seq_length=24` model family.* (1) Close embedding structure at 50k (`[128,32]` vs `[128,64]`); (2) learning rate (bounded contrast around 0.001, values TBD); (3) LSTM hidden size (bounded capacity contrast, candidates TBD); (4) embedding dropout; (5) output dropout; (6) small integration/interaction checks; (7) Seed-B confirmation for top integrated candidates only; (8) uncapped authoritative finalists; (9) a separate later temporal-context model-family study for sequence length. Rationale: hybrid of expected scientific/optimization impact, dependency/interaction structure, experimental clarity, operational cost.
+
+*Learning-curve standard, revised (adopted for future serious-triage/finalist packets).* Training diagnostics: mean training loss vs. epoch and vs. cumulative optimizer updates. Validation/scientific diagnostics: median raw-space per-basin NSE vs. epoch, p25-p75 distributional band, `frac(NSE>0)`, explicit official-vs-retrospective markers. Transformed-space validation loss, if cheaply available, is a training diagnostic only, never the official model-selection metric. **Preserved:** NH losses may be transformed-space diagnostics; official Flash-NH benchmark metrics are always computed after full inverse conversion to raw m³/s; raw-space screening metrics remain authoritative for candidate selection; raw-space median NSE is never labeled "validation loss."
+
+*Hydrograph-demonstration standard, revised.* See new L.3d above (basin area in titles, MRMS precipitation bars on an inverted secondary axis, explicit valid-time alignment, matched scales, compact metrics/interpretation, demonstration cadence by fidelity tier).
+
+*W&B.* All four screening runs stayed offline throughout (`tracking_generation=g1`, no sync). No new W&B capability qualified by this batch; the previously-qualified single-segment sync (`docs/stage1_wandb_user_guide.md` §17) covers two unrelated runs and is unaffected.
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no run described as started.
 
 ## Cross-references
 
