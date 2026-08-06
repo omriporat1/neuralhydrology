@@ -724,6 +724,26 @@ this pilot's existing full-fidelity results — none of which exists yet.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no run described as started.
 
+**L.11 — 50k Seed-A embedding-shape comparison closed (2026-08-06): `[128,32]` adopted as working default, further embedding-shape exploration paused, bounded learning-rate calibration approved next.** Real Moriah closure batch this session, under unchanged commit `a4c5456331d97af61c71167a39bf5a6a0644d1ab`, closing L.10's "next approved structural phase." Full decision text: `docs/decision_log.md`'s 2026-08-06 entry. Local evidence (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/cap50k_closure_comparison_audit_2026-08-06/`; Moriah archive `cap50k_closure_comparison_audit_2026-08-06.tar.gz` (SHA256 `9ff1960bf7537da78ea62e5046805c28c0436bd1804395086e12c13c1a347207`, independently re-verified locally against `MANIFEST.csv`, 38/38 files).
+
+*Batch.* Existing Seed-A `[128,64]` trajectory (`emb128x64_seedA_cap_low_cal`, job 45762223, continued from epoch 6) vs. new Seed-A `[128,32]` trajectory (`emb128x32_seedA_cap_low_cal`, job 45762224, fresh Seed-A initialization), both `max_updates_per_epoch=50000`, both reaching the fixed epoch-12 closure bound cleanly (exit `0:0`, `PAUSED_AT_MAX_TARGET_EPOCH`), otherwise identical configuration (Seed A 967139, `qobs_mm_per_h_lead06`, lead 6h, `seq_length=24`, `hidden_size=128`, tanh embedding activation, embedding dropout 0.1, output dropout 0.25, Adam `lr=0.001`, NSE training loss, fixed 2,307-basin training population, fixed 400-basin screening set), differing only in `statics_embedding.hiddens`.
+
+*Official screening-epoch median NSE (400-basin population).* Epoch 3: incumbent 0.2418, challenger 0.2480. Epoch 6: incumbent 0.2547, challenger 0.2541. Epoch 9: incumbent 0.2367, challenger 0.2569. Epoch 12: incumbent 0.2427, challenger 0.2464.
+
+*True per-basin paired result (challenger minus incumbent, 400/400 matched basins, tie tolerance ±0.01).* Epoch 3: median +0.0136, Q25 -0.0293, Q75 +0.0650, challenger better 53.5%. Epoch 6: median +0.0145, Q25 -0.0294, Q75 +0.0640, challenger better 53.25%. Epoch 9: median +0.0160, Q25 -0.0330, Q75 +0.0636, challenger better 54.25%. Epoch 12: median +0.0072, Q25 -0.0447, Q75 +0.0709, challenger better 48.5%. Computed by a new minimal untracked helper (`tmp/paired_basin_csv_join.py`, pure CSV join+describe, no pickle access, no metric recomputation) after the three pre-existing `tmp/operations/` paired-comparison helpers were inspected and found unsuitable (all three recompute NSE from `validation_results.p` pickles rather than joining the already-certified per-basin CSVs). Run under Slurm, job 45763464, exit `0:0`.
+
+*Interpretation (adopted, cautious).* `[128,32]` is at least comparable to `[128,64]`, with a small, directionally consistent paired advantage at epochs 3/6/9 that weakens by epoch 12 (median ΔNSE narrows to +0.0072, win-rate margin narrows from ~53-54%/33-35% to 48.5%/41.5%). Not decisively superior. Effect is modest relative to cross-basin heterogeneity (paired IQR ≈0.10 at every epoch). Single seed only. Training-loss diagnostics point the same direction but remain non-authoritative. No inference is drawn about the importance of static attributes generally — this compares two embedding widths only.
+
+*Decision (adopted).* `[128,32]` becomes the working default embedding shape (at least as competitive, more economical). Further embedding-shape (width/depth) exploration is paused, not permanently closed. No model-family switch proposed.
+
+*Early-stopping / closure interpretation.* Both trajectories' best official screening epoch is 6 (incumbent 0.25474, challenger 0.25414); neither early-stopped before epoch 12 (`stopped=false`). Epoch-12 termination was the fixed closure bound only, not early stopping. `next_intended_screening_epoch=15` in both bundles was never executed and is not a planned continuation.
+
+*Next approved phase (design only, not launched).* Bounded learning-rate calibration around the current 0.001 baseline, `[128,32]` fixed, candidate values TBD, same 400-basin raw-space validation contract, staged promotion. **Not launched.**
+
+*Operational efficiency (deferred engineering item, not a blocker).* Each nested NH continuation boundary added roughly 20-40 minutes of dataset/lookup-table/dataloader rebuild against a roughly 4-minute steady-state epoch (~25-45% of total wall time across the two boundaries here), quantified from checkpoint mtimes (both bundles' `epoch_timing_table` empty). Recorded as a future optimization target; not fixed here.
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no learning-rate experiment implemented or launched.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

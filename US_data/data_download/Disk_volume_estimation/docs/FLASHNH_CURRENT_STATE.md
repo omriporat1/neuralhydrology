@@ -1,19 +1,57 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-05 (25k Seed-A embedding-shape neighborhood screening
-closed — `[64,32]`, `[128,32]`, `[256,64]` compared against the `[128,64]`
-reference; no candidate shows broad, consistent superiority; `[128,64]`
-(incumbent) and `[128,32]` (challenger) are the structural survivors carried
-into a new, more informative 50k comparison (not yet started); sequence
-length reframed as a separate temporal-context model-family axis, fixed at
-24 for the current family, and removed from the ordinary near-term tuning
-order; revised hyperparameter order, learning-curve standard, and
-hydrograph-demonstration standard recorded. Documentation-only closure — no
-Moriah access, no Slurm submission, no training/evaluation in this update.
+Last updated: 2026-08-06 (50k Seed-A embedding-shape comparison closed —
+`[128,32]` (challenger) adopted as the working default embedding shape over
+`[128,64]` (incumbent); official raw-space median NSE and true per-basin
+paired comparison both show a small, directionally consistent `[128,32]`
+edge at epochs 3/6/9, weakening at epoch 12; further embedding width/depth
+exploration is paused as low expected value, not permanently closed; bounded
+learning-rate calibration around the current 0.001 baseline is approved as
+the next scientific phase, with `[128,32]` fixed and exact candidate values
+not yet frozen. Documentation-only closure — no Moriah access, no Slurm
+submission, no training/evaluation, no new experiment launch in this update.
 See the section immediately below for detail; see further below for the
-preceding `max_updates_per_epoch` calibration, W&B qualification,
-`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
-roadmap entries it builds on.)
+preceding 25k neighborhood-screening closure, `max_updates_per_epoch`
+calibration, W&B qualification, `emb128x64_seedA` hydrograph-atlas
+evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — 50k Seed-A embedding-shape comparison closed: `[128,32]` adopted as working default, further embedding-shape exploration paused, bounded learning-rate calibration approved next (2026-08-06)
+
+Documentation-only closure (no Moriah access, no Slurm submission, no training/evaluation, no new experiment launch in this task) recording a completed real Moriah closure run under unchanged commit `a4c5456331d97af61c71167a39bf5a6a0644d1ab` (verified against local `HEAD` before this update; clean tree before editing). Full technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.11; decision text: `docs/decision_log.md`'s 2026-08-06 entry; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s 2026-08-06 section. Evidence: Moriah `/sci/labs/efratmorin/omripo/Flash-NH/evidence/cap50k_closure_comparison_audit_2026-08-06/` and archive `cap50k_closure_comparison_audit_2026-08-06.tar.gz` (SHA256 `9ff1960bf7537da78ea62e5046805c28c0436bd1804395086e12c13c1a347207`); local extracted copy (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/cap50k_closure_comparison_audit_2026-08-06/`.
+
+**Closure completed.** The 2026-08-05 (L.10) "next approved structural phase" ran to completion exactly as designed: the existing Seed-A `[128,64]` trajectory (`emb128x64_seedA_cap_low_cal`, job 45762223, continued from its epoch-6 state) and a new Seed-A `[128,32]` trajectory (`emb128x32_seedA_cap_low_cal`, job 45762224, fresh Seed-A initialization) both reached the fixed epoch-12 closure bound cleanly — exit `0:0`, final status `PAUSED_AT_MAX_TARGET_EPOCH`, physical checkpoints and official screening through epoch 12, no overshoot, no sealed-data access, no W&B sync. Both share Seed A (967139), target `qobs_mm_per_h_lead06`, lead 6 h, `seq_length=24`, `hidden_size=128`, learned FC static embedding, tanh activation, embedding dropout 0.1, output dropout 0.25, Adam `lr=0.001`, NSE-style training loss, `max_updates_per_epoch=50000`, the fixed 2,307-basin training population, and the fixed 400-basin development-validation screening set — differing only in `statics_embedding.hiddens`.
+
+**Official raw-space result (400-basin screening population, median NSE).**
+
+| Epoch | Incumbent `[128,64]` | Challenger `[128,32]` |
+|---|---|---|
+| 3 | 0.2418 | 0.2480 |
+| 6 | 0.2547 | 0.2541 |
+| 9 | 0.2367 | 0.2569 |
+| 12 | 0.2427 | 0.2464 |
+
+**True per-basin paired result (challenger minus incumbent, 400/400 matched basins, tie tolerance ±0.01).**
+
+| Epoch | Median ΔNSE | Q25 | Q75 | Challenger better | Incumbent better | Tied |
+|---|---|---|---|---|---|---|
+| 3 | +0.0136 | -0.0293 | +0.0650 | 53.5% | 35.0% | 11.5% |
+| 6 | +0.0145 | -0.0294 | +0.0640 | 53.25% | 34.75% | 12.0% |
+| 9 | +0.0160 | -0.0330 | +0.0636 | 54.25% | 33.25% | 12.5% |
+| 12 | +0.0072 | -0.0447 | +0.0709 | 48.5% | 41.5% | 10.0% |
+
+**Adopted interpretation (cautious).** `[128,32]` is at least comparable to `[128,64]` and shows a small, directionally consistent paired advantage at epochs 3, 6, and 9; the advantage weakens by epoch 12 (median ΔNSE narrows to +0.0072 and the win-rate margin narrows to 48.5%/41.5%, down from roughly 53-54%/33-35% at the earlier epochs). The effect is modest relative to cross-basin heterogeneity — the paired IQR (Q25-Q75) spans roughly 0.10 at every epoch, an order of magnitude wider than the median shift. The comparison rests on one seed only (Seed A, 967139); no independent seed replication was run at this fidelity. Transformed-space training-loss diagnostics (`docs/stage1_lead06_pilot_v001.md`'s 2026-08-06 section) point in the same direction — challenger's training loss is consistently lower than incumbent's across all 12 epochs — but per standing policy this is a training diagnostic only, never the official scientific benchmark.
+
+**Adopted decision: `[128,32]` becomes the working default embedding shape.** Not because it is decisively superior — it is not — but because it is at least as competitive as `[128,64]` on the official raw-space and paired evidence while being more economical (fewer static-embedding parameters). This decision does not imply that static attributes are unimportant, and does not imply that static attributes should be removed — the comparison is between two learned-embedding widths, not between the embedded and raw static pathways (that separate, still-open question is unaffected by this entry).
+
+**Further embedding-shape (width/depth) exploration is paused.** Given the `[128,64]`/`[128,32]`/`[64,32]`/`[256,64]` evidence gathered across the 25k neighborhood screening and this 50k closure, further exploration of this axis now has low expected value relative to other open hyperparameters. This is a pause, not a permanent close — new evidence could reopen it. No model-family switch is proposed by this entry.
+
+**Early-stopping / closure interpretation.** Both trajectories share best official screening epoch 6 under the current early-stopping history (incumbent best value 0.25474, challenger 0.25414); neither met an early-stopping condition (`stopped=false`, `stop_reason=null`) before epoch 12 in either trajectory. Termination at epoch 12 was caused solely by the fixed `CLOSURE_MAX_TARGET_EPOCH=12` closure bound, not by early stopping. Both evidence bundles' generic `continuation_status.next_intended_screening_epoch=15` / `safe_to_continue_automatically=true` fields describe what the unbounded 36-epoch policy would do next — they were never executed and must not be read as a planned or approved continuation.
+
+**Next approved scientific phase (design only, not launched): bounded learning-rate calibration.** `[128,32]` fixed as the working embedding; current baseline learning rate 0.001; exact candidate values not yet frozen (no existing approved document specifies them); same fixed 400-basin raw-space validation contract; staged promotion (coarse fidelity first) rather than running every candidate to epoch 12 automatically. **Not launched by this entry.**
+
+**Operational efficiency item (deferred engineering work, not a blocker).** Each nested NH continuation boundary (`continue_training_from_epochNNN/`) reloaded the full dataset, recalculated target standard deviations, and rebuilt lookup tables and dataloaders, adding roughly 20-40 minutes per boundary against a roughly 4-minute steady-state epoch — approximately 25-45% of total wall time across the two continuation boundaries in this comparison. Quantified from checkpoint-file mtimes (both evidence bundles' `epoch_timing_table` is empty). Recorded as a future optimization target; **not fixed by this entry.**
+
+**Not done by this update.** No Moriah access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout access, no learning-rate experiment implemented or launched.
 
 ## Stage 1 — 25k Seed-A embedding-shape neighborhood screening closed: `[128,64]`/`[128,32]` structural survivors, next 50k comparison approved, sequence length reframed as a separate model-family axis, learning-curve/hydrograph standards revised (2026-08-05)
 

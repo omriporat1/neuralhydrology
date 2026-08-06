@@ -988,3 +988,36 @@ Documentation-only closure recording a real Moriah screening batch run this sess
 **Revised hyperparameter order (within the fixed `seq_length=24` model family), for reference.** (1) Close embedding structure at 50k (`[128,32]` vs `[128,64]`, this section); (2) learning rate; (3) LSTM hidden size; (4) embedding dropout; (5) output dropout; (6) small integration/interaction checks; (7) Seed-B confirmation for top integrated candidates; (8) uncapped authoritative finalists; (9) a separate later temporal-context model-family study for sequence length. Full rationale: `docs/stage1_validation_optimization_foundation.md` Part L.10.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no numerical cap adopted for production use, no generated evidence committed, no sealed-population access.
+
+## 50k Seed-A embedding-shape comparison closed: `[128,32]` adopted as working default, bounded learning-rate calibration approved next (2026-08-06)
+
+Documentation-only closure recording a real Moriah closure batch run this session (mechanism reused unchanged; see `docs/stage1_validation_optimization_foundation.md` Part L.11 and `docs/decision_log.md`'s 2026-08-06 entry for full detail). **Neither of this section's runs is a member of the six-run Stage A structural pilot** at the top of this document — both are `..._cap_low_cal` calibration-family candidates first introduced in the 2026-08-04 calibration section above, now carried forward to their epoch-12 closure.
+
+**Runs closed this session:**
+- `emb128x64_seedA_cap_low_cal` (incumbent, `[128,64]`), job 45762223, continued from its epoch-6 state.
+- `emb128x32_seedA_cap_low_cal` (challenger, `[128,32]`), job 45762224, fresh Seed-A initialization.
+- Both: Seed A (967139), `max_updates_per_epoch=50000`, target `qobs_mm_per_h_lead06`, lead 6h, `seq_length=24`, `hidden_size=128`, tanh embedding activation, embedding dropout 0.1, output dropout 0.25, Adam `lr=0.001`, NSE training loss, fixed 2,307-basin training population, fixed 400-basin development-validation screening set. Both reached the fixed epoch-12 closure bound cleanly: exit `0:0`, final status `PAUSED_AT_MAX_TARGET_EPOCH`, checkpoints and official screening through epoch 12.
+
+**Official screening-epoch median NSE (400-basin subset).** Epoch 3: incumbent 0.2418, challenger 0.2480. Epoch 6: incumbent 0.2547, challenger 0.2541. Epoch 9: incumbent 0.2367, challenger 0.2569. Epoch 12: incumbent 0.2427, challenger 0.2464.
+
+**True per-basin paired result (challenger minus incumbent, 400/400 matched basins, tie tolerance ±0.01):**
+- Epoch 3 — median +0.0136, Q25 -0.0293, Q75 +0.0650, challenger better 53.5%, incumbent better 35.0%, tied 11.5%.
+- Epoch 6 — median +0.0145, Q25 -0.0294, Q75 +0.0640, challenger better 53.25%, incumbent better 34.75%, tied 12.0%.
+- Epoch 9 — median +0.0160, Q25 -0.0330, Q75 +0.0636, challenger better 54.25%, incumbent better 33.25%, tied 12.5%.
+- Epoch 12 — median +0.0072, Q25 -0.0447, Q75 +0.0709, challenger better 48.5%, incumbent better 41.5%, tied 10.0%.
+
+Computed by a new minimal untracked helper (`tmp/paired_basin_csv_join.py`, pure CSV join+describe, no pickle access, no metric recomputation) after the three pre-existing `tmp/operations/` paired-comparison helpers (`paired_basin_comparison.py`, `paired_basin_comparison_neighborhood.py`, `extract_per_basin_paired_nse.py`) were inspected and found unsuitable — all three recompute NSE via `raw_space_metrics_for_run_period` against `validation_results.p` pickles rather than joining the already-certified per-basin CSVs. Run under Slurm, job 45763464, exit `0:0`.
+
+**Training-loss diagnostic (non-authoritative).** Challenger's transformed-space training loss is consistently roughly 0.3-0.4 lower than incumbent's across all 12 epochs. This is a training diagnostic only, never the official scientific benchmark. Extraction required stitching 6 nested continuation-directory TensorBoard segments per candidate due to the two mid-trajectory continuation boundaries.
+
+**Structural decision.** `[128,32]` becomes the working default embedding shape — at least as competitive as `[128,64]` on the official raw-space and true paired evidence (small, directionally consistent advantage at epochs 3/6/9, weakening at epoch 12) while being more economical (fewer static-embedding parameters). Not decisively superior. No inference is drawn about the importance of static attributes generally.
+
+**Early-stopping / closure.** Both trajectories' best official screening epoch is 6 (incumbent 0.25474, challenger 0.25414); neither early-stopped before epoch 12 (`stopped=false`, `stop_reason=null`). Epoch-12 termination was the fixed `CLOSURE_MAX_TARGET_EPOCH=12` bound only. `next_intended_screening_epoch=15` in both bundles was never executed and is not a planned continuation.
+
+**Next approved phase (design only, not launched).** Bounded learning-rate calibration around the current 0.001 baseline, `[128,32]` fixed, exact candidate values not yet frozen, same fixed 400-basin raw-space validation contract, staged promotion (coarse fidelity first). **Not launched by this entry.**
+
+**Operational efficiency (deferred, not fixed here).** Each nested NH continuation boundary added roughly 20-40 minutes of dataset/lookup-table/dataloader rebuild against a roughly 4-minute steady-state epoch — approximately 25-45% of total wall time across the two continuation boundaries in this comparison. Quantified from checkpoint-file mtimes (both bundles' `epoch_timing_table` empty). Recorded as a future optimization target.
+
+**Evidence.** Moriah `/sci/labs/efratmorin/omripo/Flash-NH/evidence/cap50k_closure_comparison_audit_2026-08-06/`; archive `cap50k_closure_comparison_audit_2026-08-06.tar.gz` (SHA256 `9ff1960bf7537da78ea62e5046805c28c0436bd1804395086e12c13c1a347207`, independently re-verified locally against `MANIFEST.csv`, 38/38 files, 0 mismatches); local extracted copy (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/cap50k_closure_comparison_audit_2026-08-06/`.
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no learning-rate experiment implemented or launched.
