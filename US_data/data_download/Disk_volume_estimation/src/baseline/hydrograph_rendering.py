@@ -4,6 +4,23 @@ Turns an existing NeuralHydrology validation-results pickle into (a) a
 deterministic compact ~6-8-basin observed-vs-predicted comparison panel and
 (b) a full rendering of the existing Part C 24-basin hydrograph atlas.
 
+L.3d (docs/stage1_validation_optimization_foundation.md) additionally closes
+the standing gaps in the panel/compact renderer for the 50k-serious-triage
+comparison standard: basin area in every title
+(:func:`format_basin_area_title`); MRMS QPE precipitation bars on an
+inverted secondary axis (:func:`load_mrms_series`); observed/predicted
+series plotted at their physical target-valid time rather than the NH
+result-pickle's issuance time (:func:`compute_target_valid_dates`, applied
+exactly once inside :func:`load_basin_series`); an externally-derivable
+shared axis scale for cross-candidate comparability
+(:func:`derive_comparison_scale`); a per-window compact metrics table
+(:func:`compute_compact_event_metrics`); and a structured, non-conclusory
+interpretation template (:func:`render_interpretation_template`). These are
+assembled for a single candidate by the additive
+:func:`render_stage1_compact_comparison_package` entrypoint, which does not
+alter :func:`render_stage1_hydrographs`'s existing behavior or output
+contract.
+
 This module deliberately reuses, and never reimplements:
 
 - :func:`src.baseline.nh_seed_evaluation.period_results_path` /
@@ -41,6 +58,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import xarray as xr  # noqa: E402
 
 from .hydrograph_atlas_events import EventSelectionError, EventWindow, select_atlas_events
 from .nh_raw_space_evaluation import (
@@ -73,9 +91,18 @@ __all__ = [
     "extract_basin_xr",
     "load_basin_series",
     "observed_series_for_events",
+    "compute_target_valid_dates",
+    "format_basin_area_title",
+    "MRMS_QPE_VARIABLE",
+    "load_mrms_series",
+    "ScaleSpec",
+    "derive_comparison_scale",
+    "compute_compact_event_metrics",
+    "render_interpretation_template",
     "render_basin_panel",
     "render_compact_panel",
     "render_stage1_hydrographs",
+    "render_stage1_compact_comparison_package",
 ]
 
 
@@ -232,10 +259,20 @@ def select_compact_basins(
 @dataclass(frozen=True)
 class BasinSeries:
     """One basin/period's raw-space (m^3/s) observed/predicted series plus
-    the reused raw-space evaluator's metrics for it."""
+    the reused raw-space evaluator's metrics for it.
+
+    ``dates`` is the *physical target-valid time* of every sample --
+    ``issue_dates + lead_hours`` (:func:`compute_target_valid_dates`), i.e.
+    the timestamp of the discharge value that ``obs_m3s``/``sim_m3s`` at
+    that index actually describe. This is what every consumer (event-window
+    selection, plotting, peak-timing metrics) should use. ``issue_dates`` is
+    the raw NH result-pickle 'date' coordinate (issuance time; see
+    ``src/baseline/nh_dataset.py``) and is kept only for provenance -- no
+    code in this module should plot against it."""
 
     basin_id: str
     dates: pd.DatetimeIndex
+    issue_dates: pd.DatetimeIndex
     obs_m3s: np.ndarray
     sim_m3s: np.ndarray
     admitted_mask: np.ndarray
@@ -243,6 +280,137 @@ class BasinSeries:
     n_admitted: int
     n_total: int
     metrics: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Time alignment, basin area, MRMS precipitation, and comparison-scale
+# helpers (L.3d)
+# ---------------------------------------------------------------------------
+
+def compute_target_valid_dates(issue_dates, lead_hours: int) -> pd.DatetimeIndex:
+    """Convert an NH result pickle's issuance-time 'date' coordinate into
+    the physical valid time of the lead-shifted target it predicts, i.e.
+    ``issue_time + lead_hours``. Applied exactly once, inside
+    :func:`load_basin_series` -- nothing downstream should call this again
+    on an already-converted ``BasinSeries.dates``."""
+    if lead_hours < 0:
+        raise HydrographRenderingError(f"lead_hours={lead_hours} must be >= 0")
+    return pd.DatetimeIndex(pd.to_datetime(issue_dates)) + pd.Timedelta(hours=lead_hours)
+
+
+def format_basin_area_title(basin_id: str, area_km2) -> str:
+    """``"STAID -- Area: 1,234 km^2"`` panel-title fragment. Raises
+    :class:`HydrographRenderingError` rather than silently omitting the
+    area when it is missing, non-finite, or non-positive."""
+    if area_km2 is None or not np.isfinite(area_km2) or area_km2 <= 0:
+        raise HydrographRenderingError(
+            f"basin {basin_id!r}: area_km2={area_km2!r} is missing/non-finite/non-positive; "
+            "refusing to render a panel title with an ambiguous or absent basin area"
+        )
+    return f"{basin_id} — Area: {area_km2:,.0f} km²"
+
+
+MRMS_QPE_VARIABLE = "mrms_qpe_1h_mm"
+
+
+def load_mrms_series(package_root, basin_id: str) -> pd.Series:
+    """Basin-average hourly MRMS QPE (mm, i.e. mm/h for an hourly
+    accumulation) from the same certified package NetCDF used for basin-area
+    self-derivation (:func:`~src.baseline.nh_seed_evaluation.basin_netcdf_path`).
+    Indexed by its own physical, unshifted valid-time 'date' coordinate --
+    never shifted to visually align with a lead-shifted prediction. Raises
+    :class:`HydrographRenderingError` if the file or variable is absent."""
+    nc_path = basin_netcdf_path(package_root, basin_id)
+    if not Path(nc_path).is_file():
+        raise HydrographRenderingError(f"basin {basin_id!r}: package NetCDF not found: {nc_path}")
+    with xr.open_dataset(nc_path) as ds:
+        if MRMS_QPE_VARIABLE not in ds.data_vars:
+            raise HydrographRenderingError(
+                f"basin {basin_id!r}: package NetCDF {nc_path} has no {MRMS_QPE_VARIABLE!r} "
+                f"variable (have {sorted(ds.data_vars)}); MRMS precipitation cannot be rendered"
+            )
+        dates = pd.to_datetime(np.asarray(ds["date"].values))
+        values = np.asarray(ds[MRMS_QPE_VARIABLE].values, dtype=np.float64).squeeze()
+    return pd.Series(values, index=pd.DatetimeIndex(dates), name=MRMS_QPE_VARIABLE)
+
+
+@dataclass(frozen=True)
+class ScaleSpec:
+    """A basin/window-scoped set of fixed plot limits so that multiple
+    candidates' hydrograph panels for the same basin/window are visually
+    comparable. Derive once, via :func:`derive_comparison_scale`, from the
+    union of every candidate's series, then pass the *same* ``ScaleSpec*``
+    unchanged into each candidate's :func:`render_basin_panel` /
+    :func:`render_compact_panel` call -- never re-derive it per candidate."""
+
+    x_min: pd.Timestamp
+    x_max: pd.Timestamp
+    discharge_min: float
+    discharge_max: float
+    precip_max: Optional[float] = None
+
+
+def derive_comparison_scale(
+    basin_series_list: Sequence[BasinSeries],
+    *,
+    window: Optional[EventWindow] = None,
+    precip_series_list: Sequence[pd.Series] = (),
+    discharge_margin: float = 0.05,
+    precip_margin: float = 0.05,
+) -> ScaleSpec:
+    """Derive one shared :class:`ScaleSpec` from the union of one or more
+    candidates' admitted observed/predicted discharge (and, optionally,
+    MRMS precipitation) for a single basin -- restricted to ``window`` if
+    given, otherwise the full period covered by ``basin_series_list``. Not
+    coupled to any fixed number of candidates. Never clips: the returned
+    discharge limits are padded beyond the actual min/max of the supplied
+    data."""
+    if not basin_series_list:
+        raise HydrographRenderingError("derive_comparison_scale requires at least one BasinSeries")
+
+    if window is not None:
+        x_min, x_max = pd.Timestamp(window.window_start), pd.Timestamp(window.window_end)
+    else:
+        x_min = min(bs.dates.min() for bs in basin_series_list)
+        x_max = max(bs.dates.max() for bs in basin_series_list)
+
+    discharge_chunks = []
+    for bs in basin_series_list:
+        mask = np.asarray(bs.admitted_mask, dtype=bool)
+        if window is not None:
+            mask = mask & (bs.dates >= x_min) & (bs.dates <= x_max)
+        discharge_chunks.append(np.asarray(bs.obs_m3s)[mask])
+        discharge_chunks.append(np.asarray(bs.sim_m3s)[mask])
+    all_discharge = np.concatenate(discharge_chunks) if discharge_chunks else np.array([])
+    all_discharge = all_discharge[np.isfinite(all_discharge)]
+    if all_discharge.size == 0:
+        raise HydrographRenderingError(
+            "derive_comparison_scale: no finite admitted discharge samples in the requested range"
+        )
+    d_min, d_max = float(all_discharge.min()), float(all_discharge.max())
+    d_span = max(d_max - d_min, 1e-9)
+    discharge_min = d_min - discharge_margin * d_span
+    discharge_max = d_max + discharge_margin * d_span
+
+    precip_max = None
+    if precip_series_list:
+        precip_chunks = []
+        for series in precip_series_list:
+            s = series
+            if window is not None:
+                s = series[(series.index >= x_min) & (series.index <= x_max)]
+            precip_chunks.append(np.asarray(s.values, dtype=np.float64))
+        all_precip = np.concatenate(precip_chunks) if precip_chunks else np.array([])
+        all_precip = all_precip[np.isfinite(all_precip)]
+        if all_precip.size:
+            p_max = float(all_precip.max())
+            precip_max = p_max * (1.0 + precip_margin) if p_max > 0 else 1.0
+
+    return ScaleSpec(
+        x_min=x_min, x_max=x_max,
+        discharge_min=discharge_min, discharge_max=discharge_max,
+        precip_max=precip_max,
+    )
 
 
 def extract_basin_xr(results: Mapping, basin_id: str, target_variable: str, *, freq: Optional[str] = None):
@@ -324,6 +492,8 @@ def load_basin_series(
             f"basin {basin_id!r}: 'date' coordinate is not strictly increasing "
             "(refusing to silently reorder observations/predictions)"
         )
+    issue_dates = pd.DatetimeIndex(dates)
+    target_valid_dates = compute_target_valid_dates(issue_dates, lead_hours)
 
     obs_mm_per_h = np.asarray(xr_ds[f"{target_variable}_obs"].values, dtype=np.float64).squeeze()
     sim_mm_per_h = np.asarray(xr_ds[f"{target_variable}_sim"].values, dtype=np.float64).squeeze()
@@ -362,7 +532,8 @@ def load_basin_series(
 
     return BasinSeries(
         basin_id=basin_id,
-        dates=pd.DatetimeIndex(dates),
+        dates=target_valid_dates,
+        issue_dates=issue_dates,
         obs_m3s=conversion.obs_m3s,
         sim_m3s=conversion.sim_m3s,
         admitted_mask=conversion.admitted_mask,
@@ -410,16 +581,50 @@ def _metric_subtitle(metrics: Mapping) -> str:
     return "  ".join(parts)
 
 
+def _add_precip_axis(ax, precip_series: Optional[pd.Series], scale: Optional[ScaleSpec]) -> None:
+    """Add MRMS QPE hourly bars on a secondary right-hand y-axis, inverted
+    so zero is at the top and precipitation increases downward -- never a
+    six-hour (or any other) shift relative to the primary axis's dates."""
+    if precip_series is None or len(precip_series) == 0:
+        return
+    ax2 = ax.twinx()
+    ax2.bar(
+        precip_series.index, precip_series.values,
+        width=pd.Timedelta(hours=1), color="tab:blue", alpha=0.5, label="MRMS QPE",
+    )
+    if scale is not None and scale.precip_max is not None:
+        precip_top = scale.precip_max
+    else:
+        finite_vals = np.asarray(precip_series.values, dtype=np.float64)
+        finite_vals = finite_vals[np.isfinite(finite_vals)]
+        precip_top = float(finite_vals.max()) * 1.05 if finite_vals.size and finite_vals.max() > 0 else 1.0
+    ax2.set_ylim(precip_top, 0)  # zero at the top, increasing downward
+    ax2.set_ylabel("MRMS QPE (mm h^-1)")
+
+
 def render_basin_panel(
     basin_series: BasinSeries,
     events: Mapping[str, EventWindow],
     *,
     epoch: int,
     out_path,
+    precip_series: Optional[pd.Series] = None,
+    scale: Optional[ScaleSpec] = None,
+    event_scale_by_class: Optional[Mapping[str, ScaleSpec]] = None,
 ) -> Path:
     """Render one basin's full-validation-period observed-vs-predicted
-    hydrograph plus up to four deterministic event-window zooms."""
+    hydrograph plus up to four deterministic event-window zooms.
+
+    ``basin_series.dates`` is already the physical target-valid time (see
+    :class:`BasinSeries`), so observed and predicted series are plotted at
+    the correct valid time with no further shift here. ``precip_series``
+    (if supplied, e.g. from :func:`load_mrms_series`) is plotted at its own
+    unshifted valid time on an inverted secondary axis. ``scale``/
+    ``event_scale_by_class`` (if supplied, e.g. from
+    :func:`derive_comparison_scale`) fix the axis limits so multiple
+    candidates' panels for this basin are directly comparable."""
     out_path = Path(out_path)
+    area_title = format_basin_area_title(basin_series.basin_id, basin_series.area_km2)
     n_event_cols = max(len(events), 1)
     fig = plt.figure(figsize=(max(10, 3 * n_event_cols), 6))
     grid = fig.add_gridspec(2, n_event_cols, height_ratios=[2, 1])
@@ -428,9 +633,13 @@ def render_basin_panel(
     ax_full.plot(basin_series.dates, basin_series.obs_m3s, label="observed", color="black", linewidth=0.8)
     ax_full.plot(basin_series.dates, basin_series.sim_m3s, label="predicted", color="tab:orange", linewidth=0.8)
     ax_full.set_ylabel("discharge [m^3/s]")
+    if scale is not None:
+        ax_full.set_xlim(scale.x_min, scale.x_max)
+        ax_full.set_ylim(scale.discharge_min, scale.discharge_max)
+    _add_precip_axis(ax_full, precip_series, scale)
     ax_full.legend(loc="upper right", fontsize=8)
     ax_full.set_title(
-        f"{basin_series.basin_id}  epoch={epoch}  {_metric_subtitle(basin_series.metrics)}",
+        f"{area_title}  epoch={epoch}  {_metric_subtitle(basin_series.metrics)}",
         fontsize=10,
     )
 
@@ -439,6 +648,15 @@ def render_basin_panel(
         mask = (basin_series.dates >= window.window_start) & (basin_series.dates <= window.window_end)
         ax.plot(basin_series.dates[mask], basin_series.obs_m3s[mask], color="black", linewidth=0.9)
         ax.plot(basin_series.dates[mask], basin_series.sim_m3s[mask], color="tab:orange", linewidth=0.9)
+        event_scale = (event_scale_by_class or {}).get(magnitude_class)
+        if event_scale is not None:
+            ax.set_xlim(event_scale.x_min, event_scale.x_max)
+            ax.set_ylim(event_scale.discharge_min, event_scale.discharge_max)
+        if precip_series is not None:
+            event_precip = precip_series[
+                (precip_series.index >= window.window_start) & (precip_series.index <= window.window_end)
+            ]
+            _add_precip_axis(ax, event_precip, event_scale)
         ax.set_title(magnitude_class, fontsize=8)
         ax.tick_params(axis="x", labelrotation=45, labelsize=6)
         ax.tick_params(axis="y", labelsize=6)
@@ -456,19 +674,37 @@ def render_compact_panel(
     *,
     epoch: int,
     out_path,
+    precip_series_by_basin: Optional[Mapping[str, pd.Series]] = None,
+    scale_by_basin: Optional[Mapping[str, ScaleSpec]] = None,
+    event_scale_by_basin: Optional[Mapping[str, ScaleSpec]] = None,
 ) -> Path:
     """Render the compact multi-basin panel: one row per basin, full-period
-    context plus its single highest-magnitude available event window."""
+    context plus its single highest-magnitude available event window.
+
+    ``precip_series_by_basin``/``scale_by_basin``/``event_scale_by_basin``
+    (all optional, keyed by ``basin_id``) add the MRMS QPE secondary axis
+    and fixed comparison scales for the full-period and event-zoom columns
+    respectively -- see :func:`render_basin_panel` for the same per-basin
+    conventions applied here per row."""
     out_path = Path(out_path)
     n = len(basin_series_list)
     fig, axes = plt.subplots(n, 2, figsize=(12, 2.5 * n), squeeze=False)
 
     for row, bs in enumerate(basin_series_list):
         ax_full, ax_event = axes[row]
+        area_title = format_basin_area_title(bs.basin_id, bs.area_km2)
         ax_full.plot(bs.dates, bs.obs_m3s, label="observed", color="black", linewidth=0.7)
         ax_full.plot(bs.dates, bs.sim_m3s, label="predicted", color="tab:orange", linewidth=0.7)
         ax_full.set_ylabel(f"{bs.basin_id}\n[m^3/s]", fontsize=8)
-        ax_full.set_title(_metric_subtitle(bs.metrics), fontsize=8)
+        ax_full.set_title(f"{area_title}  {_metric_subtitle(bs.metrics)}", fontsize=8)
+
+        scale = (scale_by_basin or {}).get(bs.basin_id)
+        if scale is not None:
+            ax_full.set_xlim(scale.x_min, scale.x_max)
+            ax_full.set_ylim(scale.discharge_min, scale.discharge_max)
+        precip_series = (precip_series_by_basin or {}).get(bs.basin_id)
+        _add_precip_axis(ax_full, precip_series, scale)
+
         if row == 0:
             ax_full.legend(loc="upper right", fontsize=7)
 
@@ -479,6 +715,16 @@ def render_compact_panel(
             ax_event.plot(bs.dates[mask], bs.obs_m3s[mask], color="black", linewidth=0.9)
             ax_event.plot(bs.dates[mask], bs.sim_m3s[mask], color="tab:orange", linewidth=0.9)
             ax_event.set_title("largest available event", fontsize=7)
+
+            event_scale = (event_scale_by_basin or {}).get(bs.basin_id)
+            if event_scale is not None:
+                ax_event.set_xlim(event_scale.x_min, event_scale.x_max)
+                ax_event.set_ylim(event_scale.discharge_min, event_scale.discharge_max)
+            if precip_series is not None:
+                event_precip = precip_series[
+                    (precip_series.index >= window.window_start) & (precip_series.index <= window.window_end)
+                ]
+                _add_precip_axis(ax_event, event_precip, event_scale)
         else:
             ax_event.set_axis_off()
         ax_event.tick_params(axis="x", labelrotation=45, labelsize=6)
@@ -489,6 +735,118 @@ def render_compact_panel(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Compact metrics table + interpretation template (L.3d items 6-7)
+# ---------------------------------------------------------------------------
+
+_COMPACT_METRICS_COLUMNS = (
+    "candidate_id", "basin_id", "area_km2", "window_id", "window_start", "window_end", "n_admitted",
+    "nse", "kge", "rmse", "mae", "bias", "pbias",
+    "obs_peak_value", "obs_peak_time", "sim_peak_value", "sim_peak_time",
+    "peak_magnitude_error", "peak_timing_error_hours",
+)
+
+
+def compute_compact_event_metrics(
+    basin_series_by_id: Mapping[str, BasinSeries],
+    events_by_basin: Mapping[str, Mapping[str, EventWindow]],
+    *,
+    candidate_id: Optional[str] = None,
+) -> pd.DataFrame:
+    """Per basin+window compact metrics table: basin ID, area km^2, window
+    ID, admitted sample count, NSE/KGE/RMSE/MAE/bias/PBIAS (all reused from
+    :func:`~src.baseline.nh_raw_space_evaluation.raw_space_metrics`, never
+    reimplemented), observed/predicted peak magnitude+time, and peak
+    magnitude/timing error. Deterministic row ordering: ascending
+    ``basin_id`` then ascending ``window_id`` (magnitude_class)."""
+    rows = []
+    for basin_id in sorted(basin_series_by_id):
+        bs = basin_series_by_id[basin_id]
+        events = events_by_basin.get(basin_id, {})
+        for magnitude_class, window in sorted(events.items()):
+            mask = (
+                np.asarray(bs.admitted_mask, dtype=bool)
+                & (bs.dates >= window.window_start) & (bs.dates <= window.window_end)
+            )
+            n_admitted = int(mask.sum())
+            row = {
+                "candidate_id": candidate_id,
+                "basin_id": basin_id,
+                "area_km2": bs.area_km2,
+                "window_id": magnitude_class,
+                "window_start": window.window_start,
+                "window_end": window.window_end,
+                "n_admitted": n_admitted,
+            }
+            if n_admitted == 0:
+                row.update({k: float("nan") for k in ("nse", "kge", "rmse", "mae", "bias", "pbias")})
+                row.update({
+                    "obs_peak_value": float("nan"), "obs_peak_time": pd.NaT,
+                    "sim_peak_value": float("nan"), "sim_peak_time": pd.NaT,
+                    "peak_magnitude_error": float("nan"), "peak_timing_error_hours": float("nan"),
+                })
+            else:
+                obs_win = np.asarray(bs.obs_m3s)[mask]
+                sim_win = np.asarray(bs.sim_m3s)[mask]
+                dates_win = bs.dates[mask]
+                window_metrics = raw_space_metrics(obs_win, sim_win)
+                obs_peak_idx = int(np.nanargmax(obs_win))
+                sim_peak_idx = int(np.nanargmax(sim_win))
+                obs_peak_value, obs_peak_time = float(obs_win[obs_peak_idx]), dates_win[obs_peak_idx]
+                sim_peak_value, sim_peak_time = float(sim_win[sim_peak_idx]), dates_win[sim_peak_idx]
+                row.update({
+                    "nse": window_metrics.get("nse"), "kge": window_metrics.get("kge"),
+                    "rmse": window_metrics.get("rmse"), "mae": window_metrics.get("mae"),
+                    "bias": window_metrics.get("bias"), "pbias": window_metrics.get("pbias"),
+                    "obs_peak_value": obs_peak_value, "obs_peak_time": obs_peak_time,
+                    "sim_peak_value": sim_peak_value, "sim_peak_time": sim_peak_time,
+                    "peak_magnitude_error": sim_peak_value - obs_peak_value,
+                    "peak_timing_error_hours": (sim_peak_time - obs_peak_time).total_seconds() / 3600.0,
+                })
+            rows.append(row)
+    return pd.DataFrame(rows, columns=list(_COMPACT_METRICS_COLUMNS))
+
+
+def render_interpretation_template(
+    basin_ids: Sequence[str], *, out_path, candidate_id: Optional[str] = None,
+) -> Path:
+    """Write a structured, non-conclusory Markdown interpretation template:
+    one section per basin with fill-in-the-blank prompts for a human
+    reviewer covering peak magnitude, peak timing, false peaks, recession,
+    baseflow, basin-specific bias, and rainfall-runoff timing. No
+    hydrologic conclusion is auto-generated here."""
+    out_path = Path(out_path)
+    lines = [
+        f"# Stage 1 hydrograph interpretation -- {candidate_id or '(candidate id not supplied)'}",
+        "",
+        "Structured human-review template. Every bullet below is a prompt for",
+        "a reviewer to fill in from the rendered compact panel, per-basin",
+        "figures, and `compact_event_metrics.csv` -- nothing in this file is",
+        "an auto-generated hydrologic conclusion. Observations (black) and",
+        "predictions (orange) must be explicitly distinguished; MRMS",
+        "precipitation's own physical valid time must be discussed",
+        "separately from the lead-6 prediction's target valid time.",
+        "",
+    ]
+    for basin_id in basin_ids:
+        lines.extend([
+            f"## Basin {basin_id}",
+            "",
+            "- **Peak magnitude** (observed vs. predicted, from the compact metrics table): ",
+            "- **Peak timing** (observed vs. predicted, hours): ",
+            "- **False peaks** (predicted peaks not present in the observed record): ",
+            "- **Recession behavior**: ",
+            "- **Baseflow behavior**: ",
+            "- **Basin-specific over-/under-prediction bias**: ",
+            "- **Rainfall-runoff timing** (MRMS QPE valid-time bars vs. observed/predicted response): ",
+            "- **Rainfall/discharge mismatches** (rainfall with no discharge response, or vice versa): ",
+            "",
+        ])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
     return out_path
 
 
@@ -744,3 +1102,188 @@ def render_stage1_hydrographs(
         "atlas_basin_ids": list(atlas_df["gauge_id"]) if mode in ("full", "both") else [],
         "dry_run": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# Standard 50k-serious-triage compact comparison package (L.3d)
+# ---------------------------------------------------------------------------
+
+COMPACT_COMPARISON_TIME_ALIGNMENT_CONVENTION = {
+    "issue_time_coordinate": (
+        "the NH result-pickle 'date' coordinate is the issuance time (see "
+        "src/baseline/nh_dataset.py); it is NOT the physical valid time of "
+        "the lead-shifted target"
+    ),
+    "observation_valid_time": "issue_time + lead_hours (compute_target_valid_dates)",
+    "prediction_valid_time": (
+        "issue_time + lead_hours (compute_target_valid_dates); same basis as the "
+        "observation -- no separate/additional shift"
+    ),
+    "double_shift_guard": "the shift is applied exactly once, inside load_basin_series",
+    "precipitation_valid_time": (
+        "MRMS QPE is plotted at its own unshifted physical valid time from the "
+        "package NetCDF 'date' coordinate; never shifted to visually align with "
+        "the lead-6 prediction"
+    ),
+}
+
+
+def render_stage1_compact_comparison_package(
+    *,
+    result_pickle,
+    epoch: int,
+    package_root,
+    target_variable: str,
+    lead_hours: int,
+    atlas_csv,
+    out_dir,
+    candidate_id: str,
+    compact_target_count: int = DEFAULT_COMPACT_TARGET_COUNT,
+    freq: Optional[str] = None,
+    min_area_samples: int = 100,
+    max_relative_mad: float = 1e-4,
+    scale_by_basin: Optional[Mapping[str, ScaleSpec]] = None,
+    event_scale_by_basin: Optional[Mapping[str, ScaleSpec]] = None,
+    render_individual_basin_panels: bool = True,
+    force: bool = False,
+    repo_root: Optional[Path] = None,
+) -> dict:
+    """Render the standard 50k-serious-triage fixed eight-basin compact
+    comparison package (docs/stage1_validation_optimization_foundation.md,
+    L.3d): area-titled panels (:func:`format_basin_area_title`), MRMS QPE
+    precipitation bars (:func:`load_mrms_series`), observed/predicted series
+    plotted at physical target-valid time (:class:`BasinSeries`), an
+    optional externally-supplied shared ``scale_by_basin``/
+    ``event_scale_by_basin`` for cross-candidate visual comparability
+    (:func:`derive_comparison_scale`), a per-window compact metrics table
+    (:func:`compute_compact_event_metrics`), and a structured interpretation
+    template (:func:`render_interpretation_template`).
+
+    This is additive: it reuses the same low-level building blocks as
+    :func:`render_stage1_hydrographs` (basin-series loading, event-window
+    selection, the compact-basin selection) but writes its own, separate
+    output set and does not alter :func:`render_stage1_hydrographs`'s
+    existing behavior, signature, or output contract.
+
+    Comparability across candidates is achieved by calling this function
+    once per candidate with the *same* externally-derived
+    ``scale_by_basin``/``event_scale_by_basin`` -- this function itself
+    reads and renders exactly one candidate's already-completed
+    ``result_pickle``. Only the fixed ``validation`` period's already-
+    computed result pickle is ever read: no period/scope argument is
+    exposed here, and no run_dir/period resolution, training, or evaluation
+    is performed."""
+    resolved_repo_root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+    out_dir = Path(out_dir)
+    _assert_out_dir_is_safe(out_dir, resolved_repo_root, force=force)
+
+    result_pickle_path = Path(result_pickle)
+    if not result_pickle_path.is_file():
+        raise HydrographRenderingError(f"result pickle not found: {result_pickle_path}")
+    with open(result_pickle_path, "rb") as fh:
+        results = pickle.load(fh)
+
+    atlas_df = load_atlas_selection_csv(atlas_csv)
+    compact_df, compact_manifest_piece = select_compact_basins(atlas_df, target_count=compact_target_count)
+    compact_basin_ids = list(compact_df["gauge_id"])
+
+    basin_series_by_id: dict = {}
+    events_by_basin: dict = {}
+    precip_by_basin: dict = {}
+    for basin_id in compact_basin_ids:
+        bs = load_basin_series(
+            results=results, basin_id=basin_id, target_variable=target_variable,
+            package_root=package_root, lead_hours=lead_hours, freq=freq,
+            min_area_samples=min_area_samples, max_relative_mad=max_relative_mad,
+        )
+        basin_series_by_id[basin_id] = bs
+        events_by_basin[basin_id] = _events_for_basin(bs)
+        precip_by_basin[basin_id] = load_mrms_series(package_root, basin_id)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_files: dict = {}
+
+    compact_series = [basin_series_by_id[gid] for gid in compact_basin_ids]
+    compact_panel_path = render_compact_panel(
+        compact_series, events_by_basin, epoch=epoch, out_path=out_dir / "compact_panel.png",
+        precip_series_by_basin=precip_by_basin, scale_by_basin=scale_by_basin,
+        event_scale_by_basin=event_scale_by_basin,
+    )
+    output_files["compact_panel.png"] = compact_panel_path
+
+    if render_individual_basin_panels:
+        basin_dir = out_dir / "basin_panels"
+        for basin_id in compact_basin_ids:
+            bs = basin_series_by_id[basin_id]
+            fig_path = render_basin_panel(
+                bs, events_by_basin[basin_id], epoch=epoch, out_path=basin_dir / f"{basin_id}.png",
+                precip_series=precip_by_basin[basin_id], scale=(scale_by_basin or {}).get(basin_id),
+            )
+            output_files[f"basin_panels/{basin_id}.png"] = fig_path
+
+    membership_path = out_dir / "compact_basin_membership.json"
+    membership_path.write_text(json.dumps(compact_manifest_piece, indent=2, default=str), encoding="utf-8")
+    output_files["compact_basin_membership.json"] = membership_path
+
+    metrics_table = compute_compact_event_metrics(basin_series_by_id, events_by_basin, candidate_id=candidate_id)
+    metrics_csv_path = out_dir / "compact_event_metrics.csv"
+    metrics_table.to_csv(metrics_csv_path, index=False)
+    output_files["compact_event_metrics.csv"] = metrics_csv_path
+
+    event_rows = []
+    for basin_id in compact_basin_ids:
+        event_rows.extend(_event_window_rows(basin_id, events_by_basin[basin_id]))
+    event_table_path = out_dir / "event_window_table.csv"
+    pd.DataFrame(event_rows).to_csv(event_table_path, index=False)
+    output_files["event_window_table.csv"] = event_table_path
+
+    interpretation_path = render_interpretation_template(
+        compact_basin_ids, out_path=out_dir / "interpretation_template.md", candidate_id=candidate_id,
+    )
+    output_files["interpretation_template.md"] = interpretation_path
+
+    output_sha256 = {name: sha256_of(path) for name, path in output_files.items()}
+
+    manifest = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "package_standard": (
+            "stage1_compact_hydrograph_comparison_package_v1 "
+            "(docs/stage1_validation_optimization_foundation.md L.3d)"
+        ),
+        "candidate_id": candidate_id,
+        "period": "validation",
+        "epoch": epoch,
+        "target_variable": target_variable,
+        "lead_hours": lead_hours,
+        "result_pickle_path": str(result_pickle_path),
+        "result_pickle_sha256": sha256_of(result_pickle_path),
+        "package_root": str(Path(package_root)),
+        "package_manifest_sha256": _package_manifest_sha256(package_root),
+        "atlas_csv_path": str(Path(atlas_csv)),
+        "atlas_csv_sha256": sha256_of(atlas_csv),
+        "compact_selection": compact_manifest_piece,
+        "rendered_basin_ids": compact_basin_ids,
+        "mrms_qpe_variable": MRMS_QPE_VARIABLE,
+        "time_alignment_convention": COMPACT_COMPARISON_TIME_ALIGNMENT_CONVENTION,
+        "shared_scale_supplied": scale_by_basin is not None,
+        "event_selection_basis": "observed_discharge_only",
+        "raw_space_conversion_source": "src.baseline.nh_raw_space_evaluation (reused, not reimplemented)",
+        "plotting_implementation_git_commit": _current_git_commit(resolved_repo_root),
+        "output_files": {name: {"path": str(path), "sha256": output_sha256[name]} for name, path in output_files.items()},
+    }
+    manifest_path = out_dir / "rendering_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    output_files["rendering_manifest.json"] = manifest_path
+
+    summary = {
+        "candidate_id": candidate_id,
+        "epoch": epoch,
+        "compact_basin_ids": compact_basin_ids,
+        "output_dir": str(out_dir),
+        "manifest_path": str(manifest_path),
+    }
+    summary_path = out_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    output_files["summary.json"] = summary_path
+
+    return {**summary, "manifest": manifest, "output_files": {n: str(p) for n, p in output_files.items()}}

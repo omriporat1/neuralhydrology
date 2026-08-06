@@ -383,6 +383,37 @@ no precipitation axis exists today) to be closed when a 50k-promoted
 candidate first needs this package, not by this documentation-only entry.
 No rendering code changed by this entry; no new panel generated.
 
+**L.3d implementation note (2026-08-06).** Compact-renderer support for
+items 1-8 above is now implemented in `src/baseline/hydrograph_rendering.py`
+(`BasinSeries`, `load_basin_series`, `load_mrms_series`,
+`render_stage1_compact_comparison_package`), superseding the "not yet
+implemented" status above for the rendering code itself. A read-only
+timestamp-semantics audit confirmed the following and added cross-series and
+event-window regression tests to `tests/test_hydrograph_rendering.py`:
+
+- the NeuralHydrology result-pickle `date` coordinate is issue time (the
+  last input timestep), not physical discharge time;
+- observed and predicted lead-6 discharge (`_obs`/`_sim`) are plotted at
+  target-valid time, `issue_time + lead_hours` (6 h here) — the time the
+  values physically represent — and both series share one date axis, so
+  they are always shifted identically;
+- MRMS is plotted at its own unshifted physical valid time from the
+  package NetCDF, never re-indexed or shifted by `lead_hours`;
+- raw-space scientific metrics (NSE/KGE/RMSE/MAE/PBIAS) were unaffected by
+  the prior visualization timestamp issue — `convert_period_to_raw_space`/
+  `raw_space_metrics` take plain positional arrays with no date argument,
+  so the plotting timestamp axis never entered metric computation.
+
+**Caveat — pre-existing atlas artifact.** The real atlas evidence under
+`reports/stage1_validation_optimization_foundation_v001/part_l_atlas24_eval_emb128x64_seedA_v001/`
+was generated on 2026-08-02 (`plotting_implementation_git_commit`
+`3ff9eaff90e277953026991fb793bafea603563d`) using the pre-correction
+renderer: its x-axes and `event_window_table.csv`
+`peak_time`/`window_start`/`window_end` columns are issue time, not
+target-valid time, and should not be interpreted as target-valid until that
+artifact is regenerated. Regeneration is deferred until this atlas is next
+scientifically needed; it was not performed as part of this note.
+
 **L.4 — W&B adoption sequencing (Stage (1) and (2) complete; (3)/(4) not yet
 started).** Order: (1) ordinary tracking qualification, (2) an offline-mode
 real-path test preferred before relying on online tracking, (3) controlled
