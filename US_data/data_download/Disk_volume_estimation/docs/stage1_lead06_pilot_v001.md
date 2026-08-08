@@ -1047,3 +1047,25 @@ All five share: Seed A (967139), `hidden_size=128`, tanh embedding activation, e
 **Implementation not yet done.** The `learning_rate` override field on `PilotRunSpec`, the corresponding override in `nh_config_generation.py`, the diagnostic-evaluation helper for off-cadence epochs, the `lr_range` closure-splice launcher (`scripts/run_stage1_lr_range_closure.py` + `..._moriah.sbatch`, `CLOSURE_MAX_TARGET_EPOCH=6`), and the generalized N-candidate paired-comparison tool are all planned but not implemented by this section.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no LR candidate launched.
+
+## LR-A implementation complete, preparation-only validated, ready for Moriah launch review (2026-08-08)
+
+Implementation task following the design freeze immediately above. Full decision text: `docs/decision_log.md`'s "LR-A implementation and preparation-only validation complete" 2026-08-08 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.13. **Still not launched: no LR candidate has been trained, no Slurm job submitted.**
+
+**Status table (updated).**
+
+| run_id | learning_rate | status |
+|---|---|---|
+| `emb128x32_seedA_lr1em4_cap25k_cal` | 1e-4 | implemented, preparation-only validated, not launched |
+| `emb128x32_seedA_lr3em4_cap25k_cal` | 3e-4 | implemented, preparation-only validated, not launched |
+| `emb128x32_seedA_cap25k_cal` | 1e-3 | **reused reference** — already trained and closed, 2026-08-05 section above; not retrained under this campaign |
+| `emb128x32_seedA_lr3em3_cap25k_cal` | 3e-3 | implemented, preparation-only validated, not launched |
+| `emb128x32_seedA_lr1em2_cap25k_cal` | 1e-2 | implemented, preparation-only validated, not launched |
+
+**Implementation complete.** All items from the design freeze's "Implementation not yet done" list are now built: `PilotRunSpec.learning_rate` override + `nh_config_generation.py` override application + explicit manifest provenance (`learning_rate_override`/`resolved_learning_rate`); `src/baseline/pilot_diagnostic_eval.py` (all six checkpoints evaluable, off-cadence epochs 1/2/4/5 tagged `evaluation_role="retrospective_diagnostic"` and non-authoritative, on-cadence epochs 3/6 tagged `evaluation_role="official"`, early-stopping state never mutated); `scripts/run_stage1_lr_range_seedA_closure.py` + `scripts/run_stage1_lr_range_seedA_closure_moriah.sbatch` (`LR_A_MAX_TARGET_EPOCH=6` fixed, four new run_ids only, reused reference reachable only via `--status-only`); `src/baseline/checkpoint_comparison.py` (N-vs-1-reference table, late-window epochs 4-6 trajectory summary, cadence-sensitivity view — no composite score, per the "no single decision statistic" rule above).
+
+**Preparation-only validation (real, unmocked `prepare_pilot_run_only()` calls).** For each of the four new candidates, generated a real config/generation-manifest pair against a synthetic package covering the actual full 2,557-basin development/spatial-holdout union. Confirmed: `hidden_size=128`, `output_dropout=0.25`, Adam, no scheduler, `seq_length=24`, target `qobs_mm_per_h_lead06`, `epochs=6`, `max_updates_per_epoch=25000`, seed 967139, embedding `{hiddens:[128,32], activation:"tanh", dropout:0.1}`, and each candidate's own `learning_rate` with explicit manifest provenance. Confirmed pairwise config diffs across all four are limited to `learning_rate` plus `experiment_name`/basin-list file paths/`run_dir`; `data_dir` and basin-list file *contents* identical across all four; every `experiment_name`/`run_dir`/W&B run identity pairwise-unique; `training_started`/`evaluation_started`/`wandb_backend_initialized` all `False`. A fifth, locally-synthesized, clearly non-reference-named `PilotRunSpec` (`emb128x32_seedA_lr1em3_structural_comparison_only`, `learning_rate=1e-3`) validated the same code path in isolation — this is not a reproduction of the real, historical `emb128x32_seedA_cap25k_cal` reference, which stays external and read-only; the design freeze's reuse-audit caveat (that reference's own generation manifest's package_root was never independently re-read) remains open and non-blocking.
+
+**Tests.** `tests/test_checkpoint_comparison.py` (32), `tests/test_pilot_diagnostic_eval.py` (11), `tests/test_run_stage1_lr_range_seedA_closure_cli.py` (46), `tests/test_lr_range_seedA_closure_sbatch_launcher.py` (44), `tests/test_lr_range_seedA_closure_preparation.py` (15) — all passing, plus a clean combined regression against the pre-existing pilot/config-generation test suites.
+
+**Not done by this entry.** No LR candidate launched, no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation call, no W&B Sweep, no scientific-design change, no full-population validation, no hydrograph package, nothing committed automatically.

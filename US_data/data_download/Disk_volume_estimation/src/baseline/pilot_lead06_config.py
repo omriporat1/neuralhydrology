@@ -59,6 +59,7 @@ from .nh_config_generation import (
     validate_static_attribute_contract,
     validate_target_variables,
     validate_max_updates_per_epoch,
+    validate_learning_rate_override,
     _get_git_commit,
 )
 from datetime import datetime, timezone
@@ -135,6 +136,16 @@ class PilotRunSpec:
     # mutated or overridden at launch time (see pilot_orchestration's
     # enforce_pilot_cap_identity, which rejects any later change).
     max_updates_per_epoch: "int | None" = None
+    # Optional per-candidate learning-rate override (LR-A range-
+    # characterization campaign; see nh_config_generation.
+    # validate_learning_rate_override and docs/decision_log.md). None (the
+    # default) means "use whatever the named run_profile_name already
+    # specifies" -- byte-identical to every pre-existing pilot run, including
+    # the closed six-run matrix and the cap25k/cap50k closure candidates.
+    # Frozen for this run's entire lifetime; never mutated or overridden at
+    # launch time (see pilot_orchestration's LR resume-contradiction guard,
+    # which mirrors enforce_pilot_cap_identity's always-active design).
+    learning_rate: "float | None" = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +293,10 @@ def load_pilot_policy(path) -> PilotPolicy:
         if max_updates_per_epoch is not None:
             validate_max_updates_per_epoch(max_updates_per_epoch)
 
+        learning_rate = entry.get("learning_rate")
+        if learning_rate is not None:
+            validate_learning_rate_override(learning_rate)
+
         runs[run_id] = PilotRunSpec(
             run_id=run_id,
             static_pathway=static_pathway,
@@ -290,6 +305,7 @@ def load_pilot_policy(path) -> PilotPolicy:
             seed=seeds[seed_name],
             run_profile_name=entry["run_profile_name"],
             max_updates_per_epoch=max_updates_per_epoch,
+            learning_rate=learning_rate,
         )
 
     known_run_ids = set(PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME)
@@ -400,6 +416,7 @@ def build_pilot_bundle_with_validation_scope(
     package_type: str,
     static_column_manifest_path=None,
     max_updates_per_epoch: "int | None" = None,
+    learning_rate: "float | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
     bundle (task item 1) and ``pilot_full_validation.py``'s full-population
@@ -459,6 +476,7 @@ def build_pilot_bundle_with_validation_scope(
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
+        learning_rate=learning_rate,
     )
 
     package_manifest_identity = {
@@ -491,6 +509,7 @@ def build_pilot_bundle_with_validation_scope(
         test_basin_ids=development_basins,
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
+        learning_rate=learning_rate,
     )
 
 
@@ -530,6 +549,7 @@ def build_pilot_bundle(
         package_type=f"stage1_lead06_pilot_{run_id}",
         static_column_manifest_path=static_column_manifest_path,
         max_updates_per_epoch=run_spec.max_updates_per_epoch,
+        learning_rate=run_spec.learning_rate,
     )
 
 

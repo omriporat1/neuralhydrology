@@ -252,6 +252,8 @@ __all__ = [
     "compute_pilot_status_fields",
     "CAP_IDENTITY_STATE_FILENAME",
     "enforce_pilot_cap_identity",
+    "LR_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_learning_rate_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -271,6 +273,13 @@ _CHECKPOINT_FILE_RE = re.compile(r"^model_epoch(\d{3})\.pt$")
 # identity this run directory was first used for -- an always-active
 # (W&B-independent) safeguard; see enforce_pilot_cap_identity.
 CAP_IDENTITY_STATE_FILENAME = "pilot_cap_identity.json"
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id, resolved_learning_rate)
+# identity this run directory was first used for -- an always-active
+# (W&B-independent) safeguard mirroring CAP_IDENTITY_STATE_FILENAME/
+# enforce_pilot_cap_identity; see enforce_pilot_learning_rate_identity.
+LR_IDENTITY_STATE_FILENAME = "pilot_lr_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -948,6 +957,27 @@ def _save_cap_identity_record(nh_run_dir, record: dict) -> None:
             os.remove(tmp_name)
 
 
+def _load_lr_identity_record(nh_run_dir) -> "dict | None":
+    path = Path(nh_run_dir) / LR_IDENTITY_STATE_FILENAME
+    if not path.is_file():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_lr_identity_record(nh_run_dir, record: dict) -> None:
+    path = Path(nh_run_dir) / LR_IDENTITY_STATE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+
 def enforce_pilot_cap_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
     """Always-active, W&B-independent safeguard: a candidate's
     ``max_updates_per_epoch`` -- capped (positive int) or uncapped (``None``)
@@ -993,6 +1023,58 @@ def enforce_pilot_cap_identity(*, run_identity: dict, nh_run_dir: "str | Path | 
             f"{record!r}, which contradicts this call's identity {current!r} -- "
             "max_updates_per_epoch (capped vs uncapped, or two different int caps) "
             "must never change across a continuation of the same run directory"
+        )
+
+
+def enforce_pilot_learning_rate_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard for the LR-A range-
+    characterization campaign: a candidate's resolved learning rate is this
+    run directory's frozen identity for its entire on-disk lifetime, exactly
+    like ``pilot_policy_name``/``run_id`` and mirroring
+    :func:`enforce_pilot_cap_identity`'s design (a learning-rate-identity
+    contradiction is a training-safety concern, not a tracking concern, so it
+    must be caught even when W&B tracking is disabled -- this pilot's
+    default).
+
+    Compares ``run_identity["resolved_learning_rate"]`` (see
+    ``pilot_tracking.build_pilot_run_identity``), never the
+    ``learning_rate_override`` field alone -- an override and an
+    unset-override-that-resolves-to-the-same-profile-value are the same
+    training identity, but two different resolved values (whether from
+    different overrides, or an override vs. a differing profile default) are
+    always a contradiction.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id, resolved_learning_rate)``
+    triple; every later call for the same directory must match it exactly,
+    or :class:`PilotOrchestrationError` is raised -- before any further
+    tracking or training call. See this function's call site in
+    :func:`run_pilot`, immediately alongside ``enforce_pilot_cap_identity``."""
+    if nh_run_dir is None:
+        return
+    nh_run_dir = Path(nh_run_dir)
+    if not nh_run_dir.is_dir():
+        return
+
+    current = {
+        "pilot_policy_name": run_identity["pilot_policy_name"],
+        "run_id": run_identity["run_id"],
+        "resolved_learning_rate": run_identity["resolved_learning_rate"],
+    }
+    record = _load_lr_identity_record(nh_run_dir)
+    if record is None:
+        _save_lr_identity_record(nh_run_dir, current)
+        return
+
+    if record != current:
+        raise PilotOrchestrationError(
+            f"NH run directory {nh_run_dir} already has a persisted learning-rate "
+            f"identity {record!r}, which contradicts this call's identity {current!r} "
+            "-- resolved_learning_rate must never change across a continuation of "
+            "the same run directory"
         )
 
 
@@ -1692,6 +1774,9 @@ def run_pilot(
     # tracking or training call so a cap-identity contradiction is caught
     # before it can affect either. See enforce_pilot_cap_identity's docstring.
     enforce_pilot_cap_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    # Likewise always active: see enforce_pilot_learning_rate_identity's
+    # docstring (LR-A range-characterization campaign).
+    enforce_pilot_learning_rate_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
     tracking_run = init_pilot_tracking_run(pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir)
 

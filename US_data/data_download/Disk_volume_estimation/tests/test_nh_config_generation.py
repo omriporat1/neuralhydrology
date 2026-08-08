@@ -34,6 +34,7 @@ from src.baseline.nh_config_generation import (
     validate_basin_membership,
     validate_dynamic_inputs,
     validate_lead_hours,
+    validate_learning_rate_override,
     validate_max_updates_per_epoch,
     validate_seq_length,
     validate_static_attribute_contract,
@@ -636,6 +637,54 @@ def test_validate_max_updates_per_epoch_rejects_invalid_values(value):
         validate_max_updates_per_epoch(value)
 
 
+# ---------------------------------------------------------------------------
+# learning_rate: LR-A range-characterization campaign's per-candidate
+# learning-rate override (see docs/decision_log.md's LR-A design-freeze
+# entry and validate_learning_rate_override's own docstring). Pre-commit
+# review found this validator implemented but untested; this block closes
+# that gap. No implementation change.
+#
+# validate_learning_rate_override(value) itself only ever receives a
+# non-None override (its docstring: "None ... is never passed to this
+# function -- callers only call it once they already know an override was
+# requested") -- exactly the same design already established by
+# validate_max_updates_per_epoch above, which likewise rejects None when
+# called directly. The LR-override *feature*'s tolerance of "no override"
+# is therefore exercised at build_nh_config_mapping's level (see
+# test_build_nh_config_mapping_omits_learning_rate_key_when_no_override
+# below), not by asserting validate_learning_rate_override(None) succeeds.
+# ---------------------------------------------------------------------------
+
+_LR_A_CANDIDATE_LEARNING_RATES = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+
+
+@pytest.mark.parametrize("value", _LR_A_CANDIDATE_LEARNING_RATES)
+def test_validate_learning_rate_override_accepts_lr_a_candidate_values(value):
+    validate_learning_rate_override(value)  # must not raise
+
+
+@pytest.mark.parametrize("value", [1, 5, 0.5])
+def test_validate_learning_rate_override_accepts_other_positive_reals(value):
+    validate_learning_rate_override(value)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -1, -0.001, "0.001", [], {}, float("nan"), float("inf"), float("-inf")],
+)
+def test_validate_learning_rate_override_rejects_invalid_values(value):
+    with pytest.raises(NHConfigGenerationError, match="learning_rate override"):
+        validate_learning_rate_override(value)
+
+
+def test_validate_learning_rate_override_rejects_none_directly_by_design():
+    # By design (see this test block's header comment): the validator itself
+    # never accepts None -- only build_nh_config_mapping's None-means-
+    # "no override" short-circuit does, without ever calling this function.
+    with pytest.raises(NHConfigGenerationError, match="learning_rate override"):
+        validate_learning_rate_override(None)
+
+
 def _build_mapping_kwargs(**overrides):
     kwargs = dict(
         policy=POLICY,
@@ -663,6 +712,34 @@ def test_build_nh_config_mapping_rejects_invalid_cap():
         build_nh_config_mapping(**_build_mapping_kwargs(max_updates_per_epoch=True))
     with pytest.raises(NHConfigGenerationError):
         build_nh_config_mapping(**_build_mapping_kwargs(max_updates_per_epoch=0))
+
+
+def test_build_nh_config_mapping_omits_learning_rate_key_when_no_override():
+    # "Accepted: None" at the LR-override *feature* level (see the
+    # validate_learning_rate_override test block above): no override means
+    # the profile's own learning_rate is left completely untouched, and the
+    # validator is never invoked at all.
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs())
+    default_mapping = build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=None))
+    assert mapping == default_mapping
+    assert "learning_rate" in mapping  # the profile's own default value
+
+
+@pytest.mark.parametrize("value", _LR_A_CANDIDATE_LEARNING_RATES)
+def test_build_nh_config_mapping_applies_learning_rate_override(value):
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=value))
+    assert mapping["learning_rate"] == pytest.approx(value)
+
+
+def test_build_nh_config_mapping_rejects_invalid_learning_rate_override():
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=True))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=0))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=-1e-3))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=float("nan")))
 
 
 def test_generate_stage1_nh_config_uncapped_default_omits_key_everywhere(tmp_path):

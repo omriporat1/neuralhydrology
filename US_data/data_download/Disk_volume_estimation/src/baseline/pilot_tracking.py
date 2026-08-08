@@ -291,6 +291,24 @@ def build_pilot_run_identity(
         # continuation-time safeguard that keeps this value frozen across
         # any Slurm resumption of the same run directory.
         "max_updates_per_epoch": bundle.max_updates_per_epoch,
+        # Explicit per-candidate learning-rate identity (LR-A range-
+        # characterization campaign; see docs/decision_log.md and
+        # nh_config_generation.validate_learning_rate_override).
+        # "learning_rate_override" is None for every pre-existing pilot run
+        # (including the closed six-run matrix and the cap25k/cap50k closure
+        # candidates) -- it is only non-None for an LR-A candidate that
+        # explicitly overrode its run_profile_name's own learning_rate.
+        # "resolved_learning_rate" is always the actual value this run's
+        # config.yaml carries (the override if given, else the profile's own
+        # value), so it is never omitted/None for a real config. Logged
+        # explicitly here (not only indirectly via
+        # build_pilot_hyperparameters' config-mapping dump) so a resumed run
+        # directory's identity can be checked without re-parsing config.yaml
+        # -- see pilot_orchestration.enforce_pilot_learning_rate_identity for
+        # the continuation-time safeguard that keeps this value frozen across
+        # any Slurm resumption of the same run directory.
+        "learning_rate_override": bundle.learning_rate,
+        "resolved_learning_rate": bundle.config_mapping.get("learning_rate"),
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
         # Whichever W&B policy file actually took effect for this invocation

@@ -43,6 +43,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -565,6 +566,16 @@ class GeneratedConfigBundle:
     # uncapped, or two different int caps, are distinct identities; see
     # pilot_orchestration.enforce_pilot_cap_identity).
     max_updates_per_epoch: "int | None" = None
+    # Optional per-candidate learning-rate override (LR-A range-
+    # characterization campaign; see docs/decision_log.md and
+    # pilot_lead06_config.PilotRunSpec.learning_rate). None (the default)
+    # means "use whatever the named run_profile already specifies" --
+    # byte-identical to every pre-existing caller. A float override is this
+    # candidate's frozen learning-rate identity for its entire lifetime;
+    # never mutated after a bundle is built, and never adopted/compared
+    # loosely against a differently-resolved value for the same run identity
+    # (see pilot_orchestration's LR resume-contradiction guard).
+    learning_rate: "float | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +900,7 @@ def build_nh_config_mapping(
     static_attributes: list,
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
     max_updates_per_epoch: "int | None" = None,
+    learning_rate: "float | None" = None,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
@@ -908,13 +920,24 @@ def build_nh_config_mapping(
     byte-for-byte unchanged. This is never part of a named ``_RUN_PROFILES``
     entry: profiles are shared scientific-architecture identities reused
     across candidates, while a fidelity cap is a per-candidate screening
-    concern layered on top."""
+    concern layered on top.
+
+    ``learning_rate`` (default ``None``) is this candidate's optional
+    per-candidate learning-rate override (LR-A range-characterization
+    campaign; see :func:`validate_learning_rate_override`). When ``None`` the
+    profile's own ``learning_rate`` entry (merged in below) is left
+    untouched, so every pre-existing caller is byte-for-byte unaffected. When
+    given, it is applied AFTER the profile merge so it always wins -- a
+    learning-rate override is a per-candidate identity, never part of a
+    shared named profile."""
     if run_profile_name not in _RUN_PROFILES:
         raise NHConfigGenerationError(
             f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
         )
     if max_updates_per_epoch is not None:
         validate_max_updates_per_epoch(max_updates_per_epoch)
+    if learning_rate is not None:
+        validate_learning_rate_override(learning_rate)
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -951,6 +974,8 @@ def build_nh_config_mapping(
         validate_statics_embedding_spec(mapping["statics_embedding"])
     if max_updates_per_epoch is not None:
         mapping["max_updates_per_epoch"] = max_updates_per_epoch
+    if learning_rate is not None:
+        mapping["learning_rate"] = learning_rate
     return mapping
 
 
@@ -964,6 +989,28 @@ def validate_max_updates_per_epoch(value) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise NHConfigGenerationError(
             f"max_updates_per_epoch must be a positive int or None (uncapped), got {value!r}"
+        )
+
+
+def validate_learning_rate_override(value) -> None:
+    """Reject anything but a positive, finite real number (bools rejected
+    even though ``bool`` is an ``int`` subclass, per this codebase's
+    established positive-value idiom -- see
+    :func:`validate_max_updates_per_epoch`). ``None`` (no override, use the
+    profile's own value) is never passed to this function -- callers only
+    call it once they already know an override was requested; see
+    :func:`build_nh_config_mapping`. This intentionally does not enforce any
+    broad optimizer-specific bounds -- the frozen LR-A closed matrix (see
+    docs/decision_log.md) defines the currently approved candidate values;
+    this validator only rejects structurally-invalid input (non-numeric,
+    boolean, zero, negative, NaN/inf)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise NHConfigGenerationError(
+            f"learning_rate override must be a positive finite number or None, got {value!r}"
+        )
+    if not math.isfinite(value) or value <= 0:
+        raise NHConfigGenerationError(
+            f"learning_rate override must be a positive finite number or None, got {value!r}"
         )
 
 
@@ -1033,6 +1080,7 @@ def generate_stage1_nh_config(
     static_column_manifest_path=None,
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
     max_updates_per_epoch: "int | None" = None,
+    learning_rate: "float | None" = None,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
@@ -1077,6 +1125,7 @@ def generate_stage1_nh_config(
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
+        learning_rate=learning_rate,
     )
 
     package_manifest_identity = {
@@ -1104,6 +1153,7 @@ def generate_stage1_nh_config(
         git_commit=_get_git_commit(),
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
+        learning_rate=learning_rate,
     )
 
 
@@ -1436,6 +1486,8 @@ def write_generated_config(
         ),
         "nan_handling_method": None,
         "max_updates_per_epoch": bundle.max_updates_per_epoch,
+        "learning_rate_override": bundle.learning_rate,
+        "resolved_learning_rate": full_mapping.get("learning_rate"),
         "artifact_sha256": artifact_sha256,
     }
     manifest_path = out_dir / "generation_manifest.json"

@@ -38,6 +38,7 @@ import xarray as xr
 from src.baseline.pilot_orchestration import (
     ACCEPTED_CONTINUATION_FILENAME,
     CAP_IDENTITY_STATE_FILENAME,
+    LR_IDENTITY_STATE_FILENAME,
     PREPARATION_RESULT_FILENAME,
     EvaluationRequest,
     PilotOrchestrationError,
@@ -50,6 +51,7 @@ from src.baseline.pilot_orchestration import (
     discover_physical_checkpoints,
     ensure_validation_results,
     enforce_pilot_cap_identity,
+    enforce_pilot_learning_rate_identity,
     load_accepted_continuation_manifest,
     prepare_pilot_run,
     prepare_pilot_run_only,
@@ -242,6 +244,62 @@ def test_run_pilot_end_to_end_stops_on_patience_exhaustion(run_pilot_fixture):
     assert len(record["screening_events"]) > 0
     for event in record["screening_events"]:
         assert event["scope"] == "screening_subset_provisional"
+
+
+def test_run_pilot_bounded_to_epoch_6_trains_via_start_run_only_no_continue(run_pilot_fixture):
+    """Section 8 (LR-A range-characterization campaign, docs/decision_log.md):
+    one uninterrupted epoch 1->6 training segment for a fresh candidate must
+    be exactly one start_run-equivalent call -- chunk_epoch_targets' full
+    schedule ([6, 9, ..., 36]) bounded via max_target_epoch=6 must resolve to
+    exactly [6], and run_pilot must never issue a continue_run-equivalent
+    call (``TrainChunkRequest.is_first_chunk=False``) for this fresh
+    candidate within this one call. No real training run is used -- same
+    fake train_chunk_fn as every other test in this module, wrapped only to
+    record each call's ``is_first_chunk`` flag."""
+    fx = run_pilot_fixture
+
+    full_targets = chunk_epoch_targets(fx["pilot_policy"], 36)
+    assert full_targets == [6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36]
+    bounded_targets = [t for t in full_targets if t <= 6]
+    assert bounded_targets == [6]
+
+    is_first_chunk_calls = []
+    inner_fake_train = fx["fake_train"]
+
+    def _tracking_train_chunk_fn(request: TrainChunkRequest) -> None:
+        is_first_chunk_calls.append(request.is_first_chunk)
+        inner_fake_train(request)
+
+    result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        commands_used=["test_pilot_orchestration.py"],
+        train_chunk_fn=_tracking_train_chunk_fn,
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+        max_target_epoch=6,
+    )
+
+    # Exactly one training request, and it is the start_run-equivalent shape
+    # -- never a continue_run-equivalent call in this successful, fresh-
+    # candidate, single-segment path.
+    assert is_first_chunk_calls == [True]
+
+    assert result["final_status"] == "paused_at_max_target_epoch"
+    assert result["best_checkpoint_epoch"] == 6
+
+    nh_run_dir = Path(result["nh_run_dir"])
+    checkpoints = sorted(nh_run_dir.glob("model_epoch*.pt"))
+    assert [p.name for p in checkpoints] == [f"model_epoch{epoch:03d}.pt" for epoch in range(1, 7)]
+    # start_run's real physical layout is flat in the base run directory --
+    # no nested continue_training_from_epoch*/ directory should exist since
+    # continue_run was never called.
+    assert not list(nh_run_dir.glob("continue_training_from_epoch*"))
 
 
 def test_run_pilot_threads_tracking_generation_default_and_explicit(run_pilot_fixture):
@@ -2319,3 +2377,148 @@ def test_actual_optimizer_updates_by_epoch_reads_base_and_continuation_directori
     _torch_save_optimizer_state(continuation_dir / "optimizer_state_epoch003.pt", step=300)
 
     assert actual_optimizer_updates_by_epoch(nh_run_dir) == {1: 100, 2: 200, 3: 300}
+
+
+# ---------------------------------------------------------------------------
+# learning_rate: LR-A range-characterization campaign's resume-contradiction
+# safeguard (enforce_pilot_learning_rate_identity), mirroring
+# enforce_pilot_cap_identity's own test block above field-for-field (see
+# docs/decision_log.md's LR-A design-freeze entry and this function's own
+# docstring). Pre-commit review found this guard implemented but untested;
+# this block closes that gap. No implementation change.
+# ---------------------------------------------------------------------------
+
+def _lr_identity(
+    *, pilot_policy_name="stage1_lead06_pilot_policy", run_id="raw_seedA", resolved_learning_rate=0.001
+):
+    return {
+        "pilot_policy_name": pilot_policy_name,
+        "run_id": run_id,
+        "resolved_learning_rate": resolved_learning_rate,
+    }
+
+
+def test_enforce_pilot_learning_rate_identity_noop_when_nh_run_dir_is_none():
+    # must not raise, must not touch the filesystem
+    enforce_pilot_learning_rate_identity(run_identity=_lr_identity(), nh_run_dir=None)
+
+
+def test_enforce_pilot_learning_rate_identity_noop_when_nh_run_dir_does_not_exist(tmp_path):
+    missing = tmp_path / "does_not_exist_yet"
+    enforce_pilot_learning_rate_identity(run_identity=_lr_identity(), nh_run_dir=missing)
+    assert not missing.exists()
+
+
+def test_enforce_pilot_learning_rate_identity_first_call_persists_record(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_learning_rate_identity(
+        run_identity=_lr_identity(resolved_learning_rate=0.0003), nh_run_dir=nh_run_dir
+    )
+
+    state_path = nh_run_dir / LR_IDENTITY_STATE_FILENAME
+    assert state_path.is_file()
+    record = json.loads(state_path.read_text())
+    assert record == {
+        "pilot_policy_name": "stage1_lead06_pilot_policy",
+        "run_id": "raw_seedA",
+        "resolved_learning_rate": 0.0003,
+    }
+
+
+def test_enforce_pilot_learning_rate_identity_matching_repeat_call_succeeds(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    identity = _lr_identity(resolved_learning_rate=0.001)
+    enforce_pilot_learning_rate_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+    # a second, identical call must be a no-op success, not a re-raise
+    enforce_pilot_learning_rate_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_learning_rate_identity_mismatched_lr_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_learning_rate_identity(
+        run_identity=_lr_identity(resolved_learning_rate=0.001), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="learning-rate identity"):
+        enforce_pilot_learning_rate_identity(
+            run_identity=_lr_identity(resolved_learning_rate=0.003), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_learning_rate_identity_mismatched_run_id_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_learning_rate_identity(
+        run_identity=_lr_identity(run_id="emb128x32_seedA_lr1em4_cap25k_cal"), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="learning-rate identity"):
+        enforce_pilot_learning_rate_identity(
+            run_identity=_lr_identity(run_id="emb128x32_seedA_lr3em4_cap25k_cal"), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_learning_rate_identity_mismatched_policy_name_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_learning_rate_identity(
+        run_identity=_lr_identity(pilot_policy_name="lr_range_seedA_25k_v001"), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="learning-rate identity"):
+        enforce_pilot_learning_rate_identity(
+            run_identity=_lr_identity(pilot_policy_name="stage1_lead06_pilot_policy"), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_learning_rate_identity_unset_override_and_equal_explicit_override_are_same_identity(
+    tmp_path,
+):
+    """Per this function's own docstring: it compares only
+    run_identity["resolved_learning_rate"], never learning_rate_override --
+    an unset override that resolves to a profile's own learning_rate, and an
+    explicit override that resolves to that identical value, are the same
+    training identity and must not conflict. Both calls below use
+    resolved_learning_rate=0.001 -- one standing in for "no override, profile
+    default is 0.001" and the other for "explicit override=0.001" -- the
+    guard cannot and must not distinguish them."""
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    unset_override_identity = _lr_identity(resolved_learning_rate=0.001)
+    explicit_override_identity = _lr_identity(resolved_learning_rate=0.001)
+    enforce_pilot_learning_rate_identity(run_identity=unset_override_identity, nh_run_dir=nh_run_dir)
+    enforce_pilot_learning_rate_identity(run_identity=explicit_override_identity, nh_run_dir=nh_run_dir)
+
+
+def test_run_pilot_enforces_lr_identity_across_calls_with_changed_lr(run_pilot_fixture):
+    """LR-A analogue of test_run_pilot_enforces_cap_identity_across_calls_with_changed_cap:
+    a run_pilot() call against an NH run directory whose persisted LR
+    identity was already recorded on an earlier call must be rejected if its
+    freshly-resolved run_spec now declares a different learning_rate. Same
+    three-call shape as the cap-identity analogue: (1) creates the run
+    directory (enforce_pilot_learning_rate_identity is a no-op, nothing
+    persisted yet), (2) persists the run_spec's resolved learning rate now
+    that the directory exists, (3) a changed learning_rate contradicts it."""
+    fx = run_pilot_fixture
+    common_kwargs = dict(
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+    )
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 1 (creates run dir)"], **common_kwargs)
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 2 (persists lr identity)"], **common_kwargs)
+
+    changed_lr_run_spec = dataclasses.replace(fx["pilot_policy"].runs["raw_seedA"], learning_rate=0.0005)
+    changed_lr_runs = dict(fx["pilot_policy"].runs)
+    changed_lr_runs["raw_seedA"] = changed_lr_run_spec
+    changed_lr_policy = dataclasses.replace(fx["pilot_policy"], runs=changed_lr_runs)
+    common_kwargs["pilot_policy"] = changed_lr_policy
+
+    with pytest.raises(PilotOrchestrationError, match="learning-rate identity"):
+        run_pilot(commands_used=["call 3 (changed learning_rate) -- must be rejected"], **common_kwargs)

@@ -1,18 +1,27 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-08 (LR-A — bounded learning-rate range-characterization
-design frozen: five candidates `1e-4`/`3e-4`/`1e-3`/`3e-3`/`1e-2` around the
-`[128,32]` Seed-A working default; all-epoch (1-6) whole-trajectory
-evaluation required with no single decision statistic; the existing
-`emb128x32_seedA_cap25k_cal` candidate reused as the `1e-3` reference
-without retraining; minimum implementation plan and future multidimensional
-HPO roadmap (Phase A/Phase B) recorded. Documentation-only design freeze —
-no Moriah access, no Slurm submission, no training/evaluation, no
-experiment launch in this update. See the section immediately below for
-detail; see further below for the preceding 50k embedding-shape closure,
-25k neighborhood screening, `max_updates_per_epoch` calibration, W&B
-qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and
-post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-08 (LR-A implementation and preparation-only
+validation complete — `learning_rate` override on `PilotRunSpec` +
+`nh_config_generation`, all-checkpoint diagnostic evaluation helper with
+explicit retrospective/official tagging, closure-splice launcher pair for
+the four new candidates, N-vs-1-reference comparison + trajectory/cadence
+derived views with no composite score, and real (unmocked) preparation-only
+config validation for all four candidates. No Slurm job submitted, no real
+training/evaluation run, nothing launched. See the section immediately
+below for detail; see further below for the preceding design freeze, 50k
+embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
+calibration, W&B qualification, `emb128x64_seedA` hydrograph-atlas
+evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — LR-A implementation and preparation-only validation complete, ready for Moriah launch review (2026-08-08)
+
+Implementation task following the design freeze immediately below: no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation, no W&B Sweep, no scientific-design change, nothing committed automatically. Full detail: `docs/decision_log.md`'s "LR-A implementation and preparation-only validation complete" 2026-08-08 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.13; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s "LR-A implementation complete" 2026-08-08 section.
+
+**Built.** `learning_rate` override on `PilotRunSpec`/`nh_config_generation.py` with explicit manifest provenance; `pilot_diagnostic_eval.py` (all six checkpoints evaluable, off-cadence epochs tagged `retrospective_diagnostic`/non-authoritative, on-cadence epochs tagged `official`, early-stopping state never touched); `scripts/run_stage1_lr_range_seedA_closure.py` + matching `.sbatch` launcher (four new run_ids only, reused `1e-3` reference reachable read-only via `--status-only`); `checkpoint_comparison.py` (N-vs-1-reference table, late-window trajectory summary, cadence-sensitivity view — no composite score, matching the design freeze's "no single decision statistic" rule).
+
+**Validated (preparation-only, real code, no mocking).** All four new candidates' generated configs and generation manifests confirmed to match the frozen LR-A contract exactly and to differ from each other only in `learning_rate` plus unavoidable identity/path metadata — checked against a real synthetic package covering the actual full basin population, not a byte-level diff against the historical `1e-3` reference (which remains external/read-only; see the reuse-equivalence audit's one flagged-not-blocking caveat, still open).
+
+**Not done.** No LR candidate launched, no Slurm job submitted, no real training/evaluation call, no full-population validation, no hydrograph package.
 
 ## Stage 1 — LR-A (bounded learning-rate range characterization) design frozen: five-candidate range, all-epoch evaluation gap identified and planned, `1e-3` reuse from existing candidate, multidimensional HPO roadmap recorded (2026-08-08)
 
