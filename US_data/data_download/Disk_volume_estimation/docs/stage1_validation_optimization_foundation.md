@@ -744,6 +744,22 @@ this pilot's existing full-fidelity results — none of which exists yet.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no learning-rate experiment implemented or launched.
 
+**L.12 — LR-A (bounded learning-rate range characterization) design frozen (2026-08-08): five-candidate range, all-epoch evaluation gap identified, `1e-3` reuse from L.10's `emb128x32_seedA_cap25k_cal`, multidimensional HPO roadmap recorded.** Documentation-only design-freeze task, under unchanged commit `9b3b56f7dd68e876c9d02c8a6e5993698b0a9437` (confirmed against local `HEAD` and `origin/master` before this update; clean tracked tree). Full decision text: `docs/decision_log.md`'s 2026-08-08 entry; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s 2026-08-08 section.
+
+*Design (frozen, not launched).* Five learning-rate candidates — `1e-4`, `3e-4`, `1e-3`, `3e-3`, `1e-2` — all other settings frozen at the `[128,32]`/Seed-A/25k-cap configuration established by L.10-L.11, fixed six-epoch budget for every candidate regardless of trajectory shape, checkpoint every epoch. Purpose: characterize the useful LR region around 0.001 and inform later checkpoint-cadence/objective design for Phase B — not final LR optimization, not a five-candidate tournament.
+
+*All-epoch evaluation audit finding.* `pilot_screening_eval.evaluate_screening_checkpoint()` structurally rejects off-cadence epochs (1, 2, 4, 5); the underlying `pilot_orchestration.ensure_validation_results()` and `nh_seed_evaluation.raw_space_metrics_for_run_period()` are epoch-agnostic and can be called directly for any epoch without touching early-stopping state (`record_screening_event()` is unreachable outside the official chunk-boundary loop). No committed helper does this today — a small, additive diagnostic-evaluation function is the one identified implementation gap; see the decision_log entry for the full plan.
+
+*Reuse.* `emb128x32_seedA_cap25k_cal` (L.10) is adopted as the LR-A `1e-3` reference without retraining — verified field-for-field scientific equivalence, zero relevant code/config drift since `5aba586` (`git log` confirms no commits touched the eight relevant files between `5aba586` and current `HEAD`).
+
+*Naming.* `emb128x32_seedA_lr1em4_cap25k_cal`, `emb128x32_seedA_lr3em4_cap25k_cal`, `emb128x32_seedA_lr3em3_cap25k_cal`, `emb128x32_seedA_lr1em2_cap25k_cal`; campaign `lr_range_seedA_25k_v001`; closure-splice pattern following `run_stage1_cap50k_closure.py`.
+
+*Minimum implementation plan (not implemented by this entry).* Optional `learning_rate` override field on `PilotRunSpec` plus a post-profile-merge override in `nh_config_generation.py` (preferred over duplicating named profiles); a new diagnostic-evaluation helper closing the gap above; a new closure-splice launcher pair (`CLOSURE_MAX_TARGET_EPOCH=6`); promotion/generalization of the ad hoc paired-comparison CSV-join helper to N-candidates-vs-1-reference.
+
+*Future roadmap (recorded, not implemented).* Phase A (this design, 1D range characterization, non-binding, axes LR/hidden size/embedding dropout/output dropout) → Phase B (joint multidimensional HPO, capped-fidelity screening → interaction inspection → higher-fidelity promotion → optional adaptive search → Seed-B confirmation → uncapped finalists), with W&B reserved as a future search/index layer, never a scientific authority.
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no LR-A candidate launched, no W&B Sweep/HPO framework implemented.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

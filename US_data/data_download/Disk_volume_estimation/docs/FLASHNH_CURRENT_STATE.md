@@ -1,19 +1,30 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-06 (50k Seed-A embedding-shape comparison closed —
-`[128,32]` (challenger) adopted as the working default embedding shape over
-`[128,64]` (incumbent); official raw-space median NSE and true per-basin
-paired comparison both show a small, directionally consistent `[128,32]`
-edge at epochs 3/6/9, weakening at epoch 12; further embedding width/depth
-exploration is paused as low expected value, not permanently closed; bounded
-learning-rate calibration around the current 0.001 baseline is approved as
-the next scientific phase, with `[128,32]` fixed and exact candidate values
-not yet frozen. Documentation-only closure — no Moriah access, no Slurm
-submission, no training/evaluation, no new experiment launch in this update.
-See the section immediately below for detail; see further below for the
-preceding 25k neighborhood-screening closure, `max_updates_per_epoch`
-calibration, W&B qualification, `emb128x64_seedA` hydrograph-atlas
-evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-08 (LR-A — bounded learning-rate range-characterization
+design frozen: five candidates `1e-4`/`3e-4`/`1e-3`/`3e-3`/`1e-2` around the
+`[128,32]` Seed-A working default; all-epoch (1-6) whole-trajectory
+evaluation required with no single decision statistic; the existing
+`emb128x32_seedA_cap25k_cal` candidate reused as the `1e-3` reference
+without retraining; minimum implementation plan and future multidimensional
+HPO roadmap (Phase A/Phase B) recorded. Documentation-only design freeze —
+no Moriah access, no Slurm submission, no training/evaluation, no
+experiment launch in this update. See the section immediately below for
+detail; see further below for the preceding 50k embedding-shape closure,
+25k neighborhood screening, `max_updates_per_epoch` calibration, W&B
+qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and
+post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — LR-A (bounded learning-rate range characterization) design frozen: five-candidate range, all-epoch evaluation gap identified and planned, `1e-3` reuse from existing candidate, multidimensional HPO roadmap recorded (2026-08-08)
+
+Documentation-only design-freeze task (no Moriah access, no Slurm submission, no training/evaluation, no experiment launch in this task), performed under unchanged commit `9b3b56f7dd68e876c9d02c8a6e5993698b0a9437` (verified against local `HEAD` and `origin/master` before this update; clean tracked tree, only pre-existing untracked scratch/report artifacts present). Full technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.12; decision text: `docs/decision_log.md`'s 2026-08-08 entry; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s 2026-08-08 section.
+
+**Design frozen.** Five learning-rate candidates (`1e-4`, `3e-4`, `1e-3`, `3e-3`, `1e-2`), `[128,32]` embedding fixed, Seed A, `max_updates_per_epoch=25000`, fixed six-epoch budget per candidate regardless of trajectory shape, checkpoint every epoch, evaluated at every epoch 1-6 on the existing fixed 400-basin screening set. Purpose: characterize the useful LR region around the current 0.001 baseline and inform checkpoint-cadence/objective design for a later multidimensional HPO phase — explicitly not final LR optimization and not a five-candidate tournament decided by any single statistic.
+
+**Evaluation-path audit.** The official screening wrapper rejects off-cadence epochs (1, 2, 4, 5) by design; the lower-level evaluation primitives it is built from are epoch-agnostic and safely reusable for all six epochs without touching early-stopping state. This is a real but small implementation gap — a diagnostic-evaluation helper — planned but not built by this entry.
+
+**Reuse decision.** The existing `emb128x32_seedA_cap25k_cal` candidate (2026-08-05 embedding-shape neighborhood screening) is reused as the LR-A `1e-3` reference without retraining, on the strength of a field-by-field scientific-equivalence audit and confirmed zero code/config drift since it was generated.
+
+**Not launched by this entry.** No LR candidate has been trained, no Slurm job submitted, no code changed — this is a design freeze only. The four new candidates, the diagnostic-evaluation helper, the closure-splice launcher, and the generalized paired-comparison tool remain to be implemented and then executed in a later, separate milestone.
 
 ## Stage 1 — 50k Seed-A embedding-shape comparison closed: `[128,32]` adopted as working default, further embedding-shape exploration paused, bounded learning-rate calibration approved next (2026-08-06)
 

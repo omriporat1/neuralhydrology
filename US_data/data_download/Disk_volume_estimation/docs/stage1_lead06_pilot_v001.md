@@ -1021,3 +1021,29 @@ Computed by a new minimal untracked helper (`tmp/paired_basin_csv_join.py`, pure
 **Evidence.** Moriah `/sci/labs/efratmorin/omripo/Flash-NH/evidence/cap50k_closure_comparison_audit_2026-08-06/`; archive `cap50k_closure_comparison_audit_2026-08-06.tar.gz` (SHA256 `9ff1960bf7537da78ea62e5046805c28c0436bd1804395086e12c13c1a347207`, independently re-verified locally against `MANIFEST.csv`, 38/38 files, 0 mismatches); local extracted copy (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/cap50k_closure_comparison_audit_2026-08-06/`.
 
 **Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout data accessed, no learning-rate experiment implemented or launched.
+
+## LR-A (bounded learning-rate range characterization) design frozen, not launched (2026-08-08)
+
+Documentation-only design-freeze section (no Moriah/h2o access, no Slurm submission, no training or evaluation in this task). Full detail: `docs/stage1_validation_optimization_foundation.md` Part L.12; full decision text: `docs/decision_log.md`'s 2026-08-08 entry. **No run described in this section has been launched.**
+
+**Frozen design.** Five learning-rate candidates, all sharing the `[128,32]`/Seed-A/25k-cap configuration established by the 2026-08-05/06 sections above:
+
+| run_id | learning_rate | status |
+|---|---|---|
+| `emb128x32_seedA_lr1em4_cap25k_cal` | 1e-4 | not launched |
+| `emb128x32_seedA_lr3em4_cap25k_cal` | 3e-4 | not launched |
+| `emb128x32_seedA_cap25k_cal` | 1e-3 | **reused reference** — already trained and closed, 2026-08-05 section above; not retrained under this campaign |
+| `emb128x32_seedA_lr3em3_cap25k_cal` | 3e-3 | not launched |
+| `emb128x32_seedA_lr1em2_cap25k_cal` | 1e-2 | not launched |
+
+All five share: Seed A (967139), `hidden_size=128`, tanh embedding activation, embedding dropout 0.1, output dropout 0.25, Adam optimizer, no scheduler, NSE training loss, `seq_length=24`, target `qobs_mm_per_h_lead06`, lead 6h, the fixed 2,307-basin training population, the fixed 400-basin development-validation screening subset, `max_updates_per_epoch=25000`, exactly six training epochs, checkpoint every epoch. Campaign/policy name: `lr_range_seedA_25k_v001` (closure-splice pattern following `run_stage1_cap50k_closure.py` — four new hand-built `PilotRunSpec` entries spliced onto the validated pilot policy; the reused `1e-3` reference is not part of the splice — it keeps its original `embedding_shape_neighborhood_seedA_25k_v001` policy identity).
+
+**Fixed-budget fairness rule.** Every candidate receives exactly six epochs; none may be continued further within this campaign merely because its trajectory looks promising.
+
+**Evaluation design.** All six checkpoints (epochs 1-6) per candidate are evaluated on the 400-basin screening set using the existing raw-space evaluation primitives (`ensure_validation_results()` + `raw_space_metrics_for_run_period()`), called directly rather than through `pilot_screening_eval.evaluate_screening_checkpoint()` for the off-cadence epochs 1, 2, 4, 5 (which structurally rejects them). This never mutates early-stopping/checkpoint-selection state. No continuation boundary is required — a single uninterrupted `start_run()` segment through epoch 6 already produces all six checkpoints.
+
+**Decision statistic.** None frozen. The evidence packet must report the full per-epoch distributional/paired-comparison diagnostics listed in the 2026-08-08 decision_log entry; no automatic composite score is authorized.
+
+**Implementation not yet done.** The `learning_rate` override field on `PilotRunSpec`, the corresponding override in `nh_config_generation.py`, the diagnostic-evaluation helper for off-cadence epochs, the `lr_range` closure-splice launcher (`scripts/run_stage1_lr_range_closure.py` + `..._moriah.sbatch`, `CLOSURE_MAX_TARGET_EPOCH=6`), and the generalized N-candidate paired-comparison tool are all planned but not implemented by this section.
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no production code/tests/config/policy-YAML change, no LR candidate launched.
