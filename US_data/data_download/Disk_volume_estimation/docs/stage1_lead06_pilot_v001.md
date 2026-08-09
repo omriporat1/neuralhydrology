@@ -1069,3 +1069,31 @@ Implementation task following the design freeze immediately above. Full decision
 **Tests.** `tests/test_checkpoint_comparison.py` (32), `tests/test_pilot_diagnostic_eval.py` (11), `tests/test_run_stage1_lr_range_seedA_closure_cli.py` (46), `tests/test_lr_range_seedA_closure_sbatch_launcher.py` (44), `tests/test_lr_range_seedA_closure_preparation.py` (15) — all passing, plus a clean combined regression against the pre-existing pilot/config-generation test suites.
 
 **Not done by this entry.** No LR candidate launched, no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation call, no W&B Sweep, no scientific-design change, no full-population validation, no hydrograph package, nothing committed automatically.
+
+## LR-A closed: range evidence recorded, `3e-4` adopted as provisional Phase-A working anchor, no final learning-rate selection (2026-08-09)
+
+Documentation-only closure of the campaign implemented in the section immediately above. All four new candidates completed training and evaluation on Moriah; the `1e-3` candidate remains the reused reference. Full decision text: `docs/decision_log.md`'s 2026-08-09 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.14.
+
+**Final status table.**
+
+| run_id | learning_rate | status | epoch-6 median NSE | best_observed_epoch |
+|---|---|---|---|---|
+| `emb128x32_seedA_lr1em4_cap25k_cal` | 1e-4 | completed, closed | 0.259 | 2 |
+| `emb128x32_seedA_lr3em4_cap25k_cal` | 3e-4 | completed, closed — **provisional Phase-A working anchor** | 0.268 | 5 |
+| `emb128x32_seedA_cap25k_cal` | 1e-3 | **reused reference** — trained and closed 2026-08-05, not retrained under this campaign | 0.253 | 4 |
+| `emb128x32_seedA_lr3em3_cap25k_cal` | 3e-3 | completed, closed | 0.178 | 1 |
+| `emb128x32_seedA_lr1em2_cap25k_cal` | 1e-2 | completed, closed | 0.021 | 1 |
+
+**Result (range characterization, not final selection).** Epoch-6 median raw-space NSE ordering across the 400-basin canonical screening subset: `3e-4 > 1e-4 > 1e-3 > 3e-3 > 1e-2` (values above). `3e-4` shows a positive median paired NSE difference against the `1e-3` reference at all six epochs and is better on approximately 55-68% of the exactly-matched 400 basins depending on epoch (all 24 paired-comparison rows use exact 400/400 basin matching, per candidate per epoch, four challengers × six epochs). `3e-3` and `1e-2` are worse than the reference at every epoch (`1e-3` better on ~76-92% of basins). Training-loss trajectories corroborate this: `1e-4`/`3e-4`/`1e-3` decrease normally; `3e-3` and especially `1e-2` are non-monotonic/elevated, consistent with too-large step sizes. **Adopted:** the scientifically useful LR region for this model family, at this fidelity, is approximately `1e-4`-`1e-3`; `3e-4` is the strongest tested interior point and is adopted as the **provisional Phase-A working anchor**, not a final selected learning rate; `1e-4` is broadly competitive with `1e-3` but plateaus early; `3e-3` is clearly too high at this fidelity; `1e-2` is decisively poor/unstable. No evidence supports extending the interval below `1e-4` or above `1e-2`. **This is not proof that `3e-4` is globally optimal** — Phase B will revisit learning rate jointly with other hyperparameters rather than freezing `3e-4` permanently.
+
+**Cadence finding.** A 3/6-only evaluation cadence (the standard on-cadence schedule) would have missed the true best-observed checkpoint for all 5/5 candidates in this sweep — none of the `best_observed_epoch` values above fall on 3 or 6. A denser 2/4/6 cadence recovers the true best-observed epoch for only 2/5 candidates (`emb128x32_seedA_lr1em4_cap25k_cal`, the `1e-3` reference). This does not imply every future run must evaluate every epoch; it does imply a 3/6-only cadence is too sparse for short 25k-update screening trajectories whenever checkpoint localization or trajectory shape matters.
+
+**W&B operational finding.** All four new runs used the committed default tracking policy (`enabled: false`, `mode: disabled`) with launcher `WANDB_MODE=offline` and no `WANDB_POLICY_PATH` offline-enabled override — backend `null`, no real W&B run IDs created. This is an operational tracking omission with no effect on scientific validity; not fixed by this entry.
+
+**Audit incidents (resolved).** A first diagnostic-evaluation sbatch attempt omitted `cd "$REPO"` and failed all five jobs within ~9s before any inference began; corrected and resubmitted successfully. The evidence-builder script initially read the per-epoch median via the wrong key (`"median"` instead of `"p50"`), producing invalid `None` summaries; corrected and the full build+plot pipeline re-run. Both are resolved workflow/audit issues internal to evidence assembly, with no contamination of the final scientific evidence.
+
+**Evidence packet.** Durable local copy (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/lr_a_five_lr_evidence_v001/` and `lr_a_five_lr_evidence_v001.tar.gz` (SHA256 `624c5df4e1823e00b00a303a1c577790c3a72005cc217fcee5dc3e65f186f61c`); manifest verification 23/23 files OK.
+
+**LR-A closed.** No further LR-A runs are planned. Next: a small W&B offline-tracking launch-contract fix/qualification, then the next Phase-A one-dimensional range characterization (likely hidden size), then joint Phase B multidimensional HPO later. No final Stage 1 learning-rate selection is made by this entry.
+
+**Not done by this entry.** No training, evaluation, Slurm job, W&B sync, package generation, or new analysis was run; no source code was modified; no generated evidence was staged or committed; no final Stage 1 learning-rate selection.

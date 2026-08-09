@@ -1,17 +1,34 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-08 (LR-A implementation and preparation-only
-validation complete — `learning_rate` override on `PilotRunSpec` +
-`nh_config_generation`, all-checkpoint diagnostic evaluation helper with
-explicit retrospective/official tagging, closure-splice launcher pair for
-the four new candidates, N-vs-1-reference comparison + trajectory/cadence
-derived views with no composite score, and real (unmocked) preparation-only
-config validation for all four candidates. No Slurm job submitted, no real
-training/evaluation run, nothing launched. See the section immediately
-below for detail; see further below for the preceding design freeze, 50k
-embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
-calibration, W&B qualification, `emb128x64_seedA` hydrograph-atlas
-evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-09 (LR-A (bounded learning-rate range
+characterization) closed — four new 25k runs plus the reused `1e-3`
+reference completed on Moriah, 30/30 checkpoint-evaluation matrix
+complete, `3e-4` adopted as the provisional Phase-A working anchor over
+the carried-forward `1e-4`-`1e-3` range, cadence and W&B operational
+findings documented, compact evidence packet checksum-verified locally
+under `.scratch_local/`. No training, evaluation, or new analysis was run
+by this closure task; no final Stage 1 learning-rate selection is made.
+See the section immediately below for detail; see further below for the
+preceding implementation task, design freeze, 50k embedding-shape closure,
+25k neighborhood screening, `max_updates_per_epoch` calibration, W&B
+qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and
+post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — LR-A (bounded learning-rate range characterization) closed: range evidence recorded, `3e-4` adopted as provisional Phase-A working anchor (2026-08-09)
+
+Documentation-only closure task recording the completed, Moriah-executed LR-A campaign (design freeze `f300cb9`, implementation `bc8f253bed9231fc4a98233ffb2b92b16af8f743`, both already merged). No training, evaluation, Slurm job, W&B sync, package generation, or new analysis was run by this task; no source code was modified. Full decision text: `docs/decision_log.md`'s 2026-08-09 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.14; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s final 2026-08-09 closing section.
+
+**Runs complete.** Four new candidates (`1e-4`, `3e-4`, `3e-3`, `1e-2`) trained on Moriah under the frozen contract (`[128,32]` embedding, Seed A, `max_updates_per_epoch=25000`, six epochs, 150,000 cumulative optimizer updates each); the `1e-3` candidate is the reused historical reference (`emb128x32_seedA_cap25k_cal`), never retrained. All five evaluated at all six epochs (30/30 cells).
+
+**Result (range characterization, not final selection).** Epoch-6 median NSE ordering: `3e-4 (0.268) > 1e-4 (0.259) > 1e-3 (0.253) > 3e-3 (0.178) > 1e-2 (0.021)`. Useful LR region approximately `1e-4`-`1e-3`; `3e-4` adopted as the **provisional Phase-A working anchor** (not a final selected learning rate); `3e-3`/`1e-2` clearly too high for this model family at this fidelity. This is not proof `3e-4` is globally optimal — Phase B will revisit learning rate jointly with other hyperparameters.
+
+**Cadence finding.** A 3/6-only evaluation cadence would have missed the true best-observed checkpoint for all 5/5 candidates; a 2/4/6 cadence recovered it for only 2/5. Future broad HPO should use denser evaluation or a sustained-performance objective, not a single endpoint.
+
+**W&B finding.** All four new runs ran with tracking disabled (default policy, no offline-enabled override supplied) — an operational tracking omission with no effect on scientific validity. Fix planned as the next small increment, not implemented here.
+
+**Evidence.** Durable local copy (untracked, gitignored, never staged): `.scratch_local/moriah_evidence/lr_a_five_lr_evidence_v001/` and `lr_a_five_lr_evidence_v001.tar.gz` (SHA256 `624c5df4e1823e00b00a303a1c577790c3a72005cc217fcee5dc3e65f186f61c`); manifest verification 23/23 files OK.
+
+**Not done by this entry.** No training/evaluation/Slurm/W&B/package-generation work; no source-code change; no generated evidence staged or committed; no final Stage 1 learning-rate selection.
 
 ## Stage 1 — LR-A implementation and preparation-only validation complete, ready for Moriah launch review (2026-08-08)
 
