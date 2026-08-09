@@ -576,6 +576,16 @@ class GeneratedConfigBundle:
     # loosely against a differently-resolved value for the same run identity
     # (see pilot_orchestration's LR resume-contradiction guard).
     learning_rate: "float | None" = None
+    # Optional per-candidate LSTM hidden-size override (Hidden-size-A range-
+    # characterization campaign; see docs/decision_log.md and
+    # pilot_lead06_config.PilotRunSpec.hidden_size). None (the default) means
+    # "use whatever the named run_profile already specifies" -- byte-
+    # identical to every pre-existing caller. An int override is this
+    # candidate's frozen hidden-size identity for its entire lifetime; never
+    # mutated after a bundle is built, and never adopted/compared loosely
+    # against a differently-resolved value for the same run identity (see
+    # pilot_orchestration.enforce_pilot_hidden_size_identity).
+    hidden_size: "int | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +911,7 @@ def build_nh_config_mapping(
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
     max_updates_per_epoch: "int | None" = None,
     learning_rate: "float | None" = None,
+    hidden_size: "int | None" = None,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
@@ -929,7 +940,15 @@ def build_nh_config_mapping(
     untouched, so every pre-existing caller is byte-for-byte unaffected. When
     given, it is applied AFTER the profile merge so it always wins -- a
     learning-rate override is a per-candidate identity, never part of a
-    shared named profile."""
+    shared named profile.
+
+    ``hidden_size`` (default ``None``) is this candidate's optional
+    per-candidate LSTM hidden-size override (Hidden-size-A range-
+    characterization campaign; see :func:`validate_hidden_size_override`).
+    When ``None`` the profile's own ``hidden_size`` entry (merged in below)
+    is left untouched, so every pre-existing caller is byte-for-byte
+    unaffected. When given, it is applied AFTER the profile merge so it
+    always wins -- the same always-wins pattern as ``learning_rate``."""
     if run_profile_name not in _RUN_PROFILES:
         raise NHConfigGenerationError(
             f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
@@ -938,6 +957,8 @@ def build_nh_config_mapping(
         validate_max_updates_per_epoch(max_updates_per_epoch)
     if learning_rate is not None:
         validate_learning_rate_override(learning_rate)
+    if hidden_size is not None:
+        validate_hidden_size_override(hidden_size)
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -976,6 +997,8 @@ def build_nh_config_mapping(
         mapping["max_updates_per_epoch"] = max_updates_per_epoch
     if learning_rate is not None:
         mapping["learning_rate"] = learning_rate
+    if hidden_size is not None:
+        mapping["hidden_size"] = hidden_size
     return mapping
 
 
@@ -1011,6 +1034,22 @@ def validate_learning_rate_override(value) -> None:
     if not math.isfinite(value) or value <= 0:
         raise NHConfigGenerationError(
             f"learning_rate override must be a positive finite number or None, got {value!r}"
+        )
+
+
+def validate_hidden_size_override(value) -> None:
+    """Reject anything but a positive Python int (bools rejected even though
+    ``bool`` is an ``int`` subclass, per this codebase's established
+    positive-int idiom -- see :func:`validate_max_updates_per_epoch`).
+    ``None`` (no override, use the profile's own value) is never passed to
+    this function -- callers only call it once they already know an override
+    was requested; see :func:`build_nh_config_mapping`. This intentionally
+    does not enforce any campaign-specific allowlist (e.g. Hidden-size-A's
+    ``{64,128,256,512}``) -- that closed set is enforced by the campaign
+    launcher, not this general-purpose structural validator."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise NHConfigGenerationError(
+            f"hidden_size override must be a positive int or None, got {value!r}"
         )
 
 
@@ -1081,6 +1120,7 @@ def generate_stage1_nh_config(
     run_profile_name: str = COMPACT_SMOKE_RUN_PROFILE_NAME,
     max_updates_per_epoch: "int | None" = None,
     learning_rate: "float | None" = None,
+    hidden_size: "int | None" = None,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
@@ -1126,6 +1166,7 @@ def generate_stage1_nh_config(
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
+        hidden_size=hidden_size,
     )
 
     package_manifest_identity = {
@@ -1154,6 +1195,7 @@ def generate_stage1_nh_config(
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
+        hidden_size=hidden_size,
     )
 
 
@@ -1488,6 +1530,8 @@ def write_generated_config(
         "max_updates_per_epoch": bundle.max_updates_per_epoch,
         "learning_rate_override": bundle.learning_rate,
         "resolved_learning_rate": full_mapping.get("learning_rate"),
+        "hidden_size_override": bundle.hidden_size,
+        "resolved_hidden_size": full_mapping.get("hidden_size"),
         "artifact_sha256": artifact_sha256,
     }
     manifest_path = out_dir / "generation_manifest.json"

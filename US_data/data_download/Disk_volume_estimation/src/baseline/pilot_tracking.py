@@ -309,6 +309,18 @@ def build_pilot_run_identity(
         # any Slurm resumption of the same run directory.
         "learning_rate_override": bundle.learning_rate,
         "resolved_learning_rate": bundle.config_mapping.get("learning_rate"),
+        # Explicit per-candidate hidden-size identity (Hidden-size-A range-
+        # characterization campaign; see docs/decision_log.md and
+        # nh_config_generation.validate_hidden_size_override). Mirrors
+        # "learning_rate_override"/"resolved_learning_rate" above exactly --
+        # None for every pre-existing pilot run; non-None only for a
+        # Hidden-size-A candidate that explicitly overrode its
+        # run_profile_name's own hidden_size. See pilot_orchestration.
+        # enforce_pilot_hidden_size_identity for the continuation-time
+        # safeguard that keeps this value frozen across any Slurm resumption
+        # of the same run directory.
+        "hidden_size_override": bundle.hidden_size,
+        "resolved_hidden_size": bundle.config_mapping.get("hidden_size"),
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
         # Whichever W&B policy file actually took effect for this invocation
@@ -340,7 +352,11 @@ def build_pilot_hyperparameters(bundle: GeneratedConfigBundle) -> dict:
 
 
 def init_pilot_tracking_run(
-    pilot_policy: PilotPolicy, run_identity: dict, nh_run_dir: "str | Path | None" = None
+    pilot_policy: PilotPolicy,
+    run_identity: dict,
+    nh_run_dir: "str | Path | None" = None,
+    *,
+    require_tracking: bool = False,
 ) -> TrackingRun:
     """Load this pilot's W&B policy (``pilot_policy.wandb_policy_path`` --
     disabled by default, see config/stage1_wandb_tracking_policy_v001.yaml)
@@ -354,14 +370,39 @@ def init_pilot_tracking_run(
     below (an identity contradiction is a real bug, not an ordinary
     init failure).
 
-    Any *other* failure to actually start a real W&B run (package missing,
-    network outage, auth failure in "online" mode) is caught and downgraded
-    to the wrapper's own local-only null sink with a warning -- tracking is
-    never allowed to block or crash pilot training."""
+    By default (``require_tracking=False``, preserving every pre-existing
+    caller's behavior byte-for-byte), any *other* failure to actually start a
+    real W&B run (package missing, network outage, auth failure in "online"
+    mode) is caught and downgraded to the wrapper's own local-only null sink
+    with a warning -- tracking is never allowed to block or crash pilot
+    training.
+
+    ``require_tracking=True`` (adopted for the Hidden-size-A campaign launcher
+    and any future launcher with the same strict contract -- see
+    docs/decision_log.md's 2026-08-09 Hidden-size-A design-freeze entry) makes
+    tracking failure fatal instead: (1) if the resolved policy is not active
+    (``enabled=False`` or ``mode="disabled"``), :class:`TrackingError` is
+    raised immediately, before attempting init; (2) if ``init_tracking_run``
+    itself raises, :class:`TrackingError` is raised wrapping the original
+    exception instead of downgrading to a null sink; (3) as defense in depth,
+    if the resulting run somehow still has ``backend == "null"`` or a
+    ``None`` ``wandb_run_id``, :class:`TrackingError` is raised rather than
+    returning a silently-untracked run. Callers that want a real launch to
+    proceed untracked must do so via an explicit, documented waiver that
+    passes ``require_tracking=False`` -- this function never chooses that on
+    its own when ``require_tracking=True`` was requested."""
     policy = load_tracking_policy(pilot_policy.wandb_policy_path)
     # Disabled/null-mode policy never touches wandb at all -- don't persist
     # an identity-record file on disk for a run that never used W&B.
     policy_active = bool(policy.get("enabled", False)) and policy["mode"] != "disabled"
+    if require_tracking and not policy_active:
+        raise TrackingError(
+            "require_tracking=True but the resolved W&B tracking policy "
+            f"({pilot_policy.wandb_policy_path!r}) is inactive (enabled="
+            f"{policy.get('enabled', False)!r}, mode={policy.get('mode')!r}) -- "
+            "a real tracked launch requires an explicit reviewed offline-enabled "
+            "policy, or an explicit waiver (require_tracking=False)"
+        )
     wandb_run_id = resolve_pilot_wandb_run_id(
         pilot_policy_name=run_identity.get("pilot_policy_name"),
         run_id=run_identity.get("run_id"),
@@ -369,8 +410,13 @@ def init_pilot_tracking_run(
         nh_run_dir=nh_run_dir if policy_active else None,
     )
     try:
-        return init_tracking_run(policy, run_identity, run_id=wandb_run_id, resume="allow")
-    except Exception as exc:  # noqa: BLE001 -- deliberately broad: tracking must never be fatal
+        run = init_tracking_run(policy, run_identity, run_id=wandb_run_id, resume="allow")
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: tracking must never be fatal by default
+        if require_tracking:
+            raise TrackingError(
+                f"require_tracking=True but W&B tracking init failed ({exc!r}); "
+                "a real tracked launch must fail rather than silently continuing untracked"
+            ) from exc
         warnings.warn(
             f"W&B tracking init failed ({exc!r}); continuing with a local-only null "
             "tracking sink so pilot training is unaffected"
@@ -380,6 +426,13 @@ def init_pilot_tracking_run(
             max_artifact_reference_bytes=policy["max_artifact_reference_bytes"],
             run_identity=run_identity,
         )
+    if require_tracking and (run.backend == "null" or run.wandb_run_id is None):
+        raise TrackingError(
+            "require_tracking=True but tracking resolved to an untracked run "
+            f"(backend={run.backend!r}, wandb_run_id={run.wandb_run_id!r}) -- "
+            "a real tracked launch must not silently fall back to backend 'null'"
+        )
+    return run
 
 
 def log_pilot_screening_event(

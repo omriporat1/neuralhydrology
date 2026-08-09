@@ -105,6 +105,58 @@ def test_build_pilot_run_identity_flags_workflow_qualification_run(bundle_and_ef
     assert identity["is_workflow_qualification_run"] is True
 
 
+def test_build_pilot_run_identity_carries_no_override_learning_rate_and_hidden_size(bundle_and_effective_policy):
+    # For every pre-existing pilot run (no learning_rate/hidden_size override
+    # declared on its PilotRunSpec), the *_override fields must be None while
+    # the resolved_* fields must still carry the run's actual profile-derived
+    # values -- these are never omitted/None for a real generated config.
+    policy, bundle, effective, _ = bundle_and_effective_policy
+    run_spec = resolve_pilot_run_spec(policy, "raw_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["learning_rate_override"] is None
+    assert identity["resolved_learning_rate"] is not None
+    assert identity["hidden_size_override"] is None
+    assert identity["resolved_hidden_size"] == 128
+
+
+def test_build_pilot_run_identity_carries_explicit_hidden_size_override(tmp_path, pilot_policy):
+    # Hidden-size-A range-characterization campaign: a run_id whose
+    # PilotRunSpec explicitly overrides hidden_size must surface that value
+    # in both build_pilot_run_identity's hidden_size_override (the raw
+    # override) and resolved_hidden_size (the value actually written into
+    # this run's config.yaml) -- see nh_config_generation.
+    # validate_hidden_size_override and pilot_orchestration.
+    # enforce_pilot_hidden_size_identity, which key off exactly these fields.
+    import dataclasses
+
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:350])
+    overridden_run_spec = dataclasses.replace(pilot_policy.runs["raw_seedA"], hidden_size=256)
+    overridden_runs = dict(pilot_policy.runs)
+    overridden_runs["raw_seedA"] = overridden_run_spec
+    policy = dataclasses.replace(
+        pilot_policy,
+        runs=overridden_runs,
+        screening_basin_ids_path=str(screening_path),
+        screening_expected_count=350,
+        screening_expected_sha256=sha256_of(screening_path),
+    )
+    bundle = build_pilot_bundle(
+        pilot_policy=policy, run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+    )
+    effective = build_effective_policy(policy)
+    run_spec = resolve_pilot_run_spec(policy, "raw_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["hidden_size_override"] == 256
+    assert identity["resolved_hidden_size"] == 256
+
+
 def test_build_pilot_hyperparameters_subset(bundle_and_effective_policy):
     _, bundle, _, _ = bundle_and_effective_policy
     hyperparams = build_pilot_hyperparameters(bundle)
@@ -147,6 +199,123 @@ def test_init_pilot_tracking_run_downgrades_on_enabled_but_wandb_missing(tmp_pat
         run = init_pilot_tracking_run(policy, run_identity={"run_id": "raw_seedA"})
     assert run.backend == "null"
     assert any("W&B tracking init failed" in str(w.message) for w in caught)
+
+
+# --- init_pilot_tracking_run: require_tracking strict launch contract ------
+# (Hidden-size-A campaign's W&B launch contract -- see
+# docs/decision_log.md's 2026-08-09 Hidden-size-A design-freeze entry and
+# init_pilot_tracking_run's own docstring. Default require_tracking=False
+# preserves every above test's null-fallback behavior unchanged; these tests
+# cover the opt-in require_tracking=True hard-fail contract.)
+
+def test_init_pilot_tracking_run_require_tracking_true_raises_when_policy_disabled(pilot_policy):
+    # the real committed default pilot policy is disabled -- require_tracking=True
+    # must raise immediately, before attempting any init call at all.
+    with pytest.raises(TrackingError):
+        init_pilot_tracking_run(
+            pilot_policy, run_identity={"run_id": "raw_seedA"}, require_tracking=True
+        )
+
+
+def test_init_pilot_tracking_run_require_tracking_true_raises_on_init_failure(tmp_path, pilot_policy):
+    # same enabled-but-wandb-missing policy as
+    # test_init_pilot_tracking_run_downgrades_on_enabled_but_wandb_missing --
+    # with require_tracking=True, this must now raise (wrapping the original
+    # failure) instead of downgrading to a null sink.
+    import dataclasses
+
+    enabled_policy_raw = {
+        "policy_name": "test_enabled_wandb_policy",
+        "enabled": True,
+        "mode": "online",
+        "project": "flashnh-stage1-test",
+        "entity": None,
+        "tags": ["test"],
+        "max_artifact_reference_bytes": 1048576,
+    }
+    enabled_policy_path = tmp_path / "enabled_wandb_policy.yaml"
+    enabled_policy_path.write_text(yaml.safe_dump(enabled_policy_raw), encoding="utf-8")
+    policy = dataclasses.replace(pilot_policy, wandb_policy_path=str(enabled_policy_path))
+
+    with pytest.raises(TrackingError):
+        init_pilot_tracking_run(policy, run_identity={"run_id": "raw_seedA"}, require_tracking=True)
+
+
+def test_init_pilot_tracking_run_require_tracking_true_raises_when_resolved_backend_null(
+    tmp_path, pilot_policy, monkeypatch
+):
+    # Defense-in-depth: even if init_tracking_run itself succeeds but somehow
+    # still resolves to a null/untracked run, require_tracking=True must
+    # raise rather than silently returning it.
+    import dataclasses
+
+    import src.baseline.pilot_tracking as pilot_tracking_module
+
+    enabled_policy_raw = {
+        "policy_name": "test_enabled_wandb_policy",
+        "enabled": True,
+        "mode": "online",
+        "project": "flashnh-stage1-test",
+        "entity": None,
+        "tags": ["test"],
+        "max_artifact_reference_bytes": 1048576,
+    }
+    enabled_policy_path = tmp_path / "enabled_wandb_policy.yaml"
+    enabled_policy_path.write_text(yaml.safe_dump(enabled_policy_raw), encoding="utf-8")
+    policy = dataclasses.replace(pilot_policy, wandb_policy_path=str(enabled_policy_path))
+
+    def _fake_init_tracking_run(resolved_policy, run_identity, *, run_id, resume):
+        from src.baseline.wandb_tracking import TrackingRun
+
+        return TrackingRun(
+            backend="null",
+            max_artifact_reference_bytes=resolved_policy["max_artifact_reference_bytes"],
+            run_identity=run_identity,
+        )
+
+    monkeypatch.setattr(pilot_tracking_module, "init_tracking_run", _fake_init_tracking_run)
+
+    with pytest.raises(TrackingError):
+        init_pilot_tracking_run(policy, run_identity={"run_id": "raw_seedA"}, require_tracking=True)
+
+
+def test_init_pilot_tracking_run_require_tracking_true_succeeds_with_real_run(
+    tmp_path, pilot_policy, monkeypatch
+):
+    # Positive path: a real (non-null, wandb_run_id-bearing) resolved run
+    # must be returned normally, without raising, even with require_tracking=True.
+    import dataclasses
+
+    import src.baseline.pilot_tracking as pilot_tracking_module
+
+    enabled_policy_raw = {
+        "policy_name": "test_enabled_wandb_policy",
+        "enabled": True,
+        "mode": "offline",
+        "project": "flashnh-stage1-test",
+        "entity": None,
+        "tags": ["test"],
+        "max_artifact_reference_bytes": 1048576,
+    }
+    enabled_policy_path = tmp_path / "enabled_wandb_policy.yaml"
+    enabled_policy_path.write_text(yaml.safe_dump(enabled_policy_raw), encoding="utf-8")
+    policy = dataclasses.replace(pilot_policy, wandb_policy_path=str(enabled_policy_path))
+
+    def _fake_init_tracking_run(resolved_policy, run_identity, *, run_id, resume):
+        from src.baseline.wandb_tracking import TrackingRun
+
+        return TrackingRun(
+            backend="wandb",
+            max_artifact_reference_bytes=resolved_policy["max_artifact_reference_bytes"],
+            run_identity=run_identity,
+            wandb_run_id=run_id or "fake_wandb_run_id",
+        )
+
+    monkeypatch.setattr(pilot_tracking_module, "init_tracking_run", _fake_init_tracking_run)
+
+    run = init_pilot_tracking_run(policy, run_identity={"run_id": "raw_seedA"}, require_tracking=True)
+    assert run.backend == "wandb"
+    assert run.wandb_run_id is not None
 
 
 # --- log_pilot_screening_event: scope assertion + metric shaping -----------

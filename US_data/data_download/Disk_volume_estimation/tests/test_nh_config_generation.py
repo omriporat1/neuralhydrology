@@ -34,6 +34,7 @@ from src.baseline.nh_config_generation import (
     validate_basin_membership,
     validate_dynamic_inputs,
     validate_lead_hours,
+    validate_hidden_size_override,
     validate_learning_rate_override,
     validate_max_updates_per_epoch,
     validate_seq_length,
@@ -740,6 +741,72 @@ def test_build_nh_config_mapping_rejects_invalid_learning_rate_override():
         build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=-1e-3))
     with pytest.raises(NHConfigGenerationError):
         build_nh_config_mapping(**_build_mapping_kwargs(learning_rate=float("nan")))
+
+
+# ---------------------------------------------------------------------------
+# hidden_size: Hidden-size-A range-characterization campaign's per-candidate
+# hidden-size override (see docs/decision_log.md's 2026-08-09 Hidden-size-A
+# design-freeze entry and validate_hidden_size_override's own docstring).
+# Mirrors the learning_rate test block above field-for-field.
+#
+# validate_hidden_size_override(value) itself only ever receives a non-None
+# override (its docstring: same "None ... is never passed to this function"
+# design already established by validate_learning_rate_override/
+# validate_max_updates_per_epoch above). The hidden-size-override *feature*'s
+# tolerance of "no override" is therefore exercised at
+# build_nh_config_mapping's level (see
+# test_build_nh_config_mapping_omits_hidden_size_key_when_no_override
+# below), not by asserting validate_hidden_size_override(None) succeeds.
+# ---------------------------------------------------------------------------
+
+_HIDDEN_SIZE_A_CANDIDATE_HIDDEN_SIZES = [64, 128, 256, 512]
+
+
+@pytest.mark.parametrize("value", _HIDDEN_SIZE_A_CANDIDATE_HIDDEN_SIZES)
+def test_validate_hidden_size_override_accepts_hidden_size_a_candidate_values(value):
+    validate_hidden_size_override(value)  # must not raise
+
+
+@pytest.mark.parametrize("value", [1, 16, 1024])
+def test_validate_hidden_size_override_accepts_other_positive_ints(value):
+    validate_hidden_size_override(value)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -1, -128, 1.5, "128", [], {}, None],
+)
+def test_validate_hidden_size_override_rejects_invalid_values(value):
+    with pytest.raises(NHConfigGenerationError, match="hidden_size override"):
+        validate_hidden_size_override(value)
+
+
+def test_build_nh_config_mapping_omits_hidden_size_key_when_no_override():
+    # "Accepted: None" at the hidden-size-override *feature* level (see the
+    # validate_hidden_size_override test block above): no override means the
+    # profile's own hidden_size is left completely untouched, and the
+    # validator is never invoked at all.
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs())
+    default_mapping = build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=None))
+    assert mapping == default_mapping
+    assert "hidden_size" in mapping  # the profile's own default value
+
+
+@pytest.mark.parametrize("value", _HIDDEN_SIZE_A_CANDIDATE_HIDDEN_SIZES)
+def test_build_nh_config_mapping_applies_hidden_size_override(value):
+    mapping = build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=value))
+    assert mapping["hidden_size"] == value
+
+
+def test_build_nh_config_mapping_rejects_invalid_hidden_size_override():
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=True))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=0))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=-64))
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=64.0))
 
 
 def test_generate_stage1_nh_config_uncapped_default_omits_key_everywhere(tmp_path):

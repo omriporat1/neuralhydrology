@@ -38,6 +38,7 @@ import xarray as xr
 from src.baseline.pilot_orchestration import (
     ACCEPTED_CONTINUATION_FILENAME,
     CAP_IDENTITY_STATE_FILENAME,
+    HIDDEN_SIZE_IDENTITY_STATE_FILENAME,
     LR_IDENTITY_STATE_FILENAME,
     PREPARATION_RESULT_FILENAME,
     EvaluationRequest,
@@ -51,6 +52,7 @@ from src.baseline.pilot_orchestration import (
     discover_physical_checkpoints,
     ensure_validation_results,
     enforce_pilot_cap_identity,
+    enforce_pilot_hidden_size_identity,
     enforce_pilot_learning_rate_identity,
     load_accepted_continuation_manifest,
     prepare_pilot_run,
@@ -2522,3 +2524,205 @@ def test_run_pilot_enforces_lr_identity_across_calls_with_changed_lr(run_pilot_f
 
     with pytest.raises(PilotOrchestrationError, match="learning-rate identity"):
         run_pilot(commands_used=["call 3 (changed learning_rate) -- must be rejected"], **common_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# hidden_size: Hidden-size-A range-characterization campaign's resume-
+# contradiction safeguard (enforce_pilot_hidden_size_identity), mirroring
+# enforce_pilot_learning_rate_identity's own test block above field-for-field
+# (see docs/decision_log.md's 2026-08-09 Hidden-size-A design-freeze entry
+# and this function's own docstring).
+# ---------------------------------------------------------------------------
+
+def _hidden_size_identity(
+    *, pilot_policy_name="stage1_lead06_pilot_policy", run_id="raw_seedA", resolved_hidden_size=128
+):
+    return {
+        "pilot_policy_name": pilot_policy_name,
+        "run_id": run_id,
+        "resolved_hidden_size": resolved_hidden_size,
+    }
+
+
+def test_enforce_pilot_hidden_size_identity_noop_when_nh_run_dir_is_none():
+    # must not raise, must not touch the filesystem
+    enforce_pilot_hidden_size_identity(run_identity=_hidden_size_identity(), nh_run_dir=None)
+
+
+def test_enforce_pilot_hidden_size_identity_noop_when_nh_run_dir_does_not_exist(tmp_path):
+    missing = tmp_path / "does_not_exist_yet"
+    enforce_pilot_hidden_size_identity(run_identity=_hidden_size_identity(), nh_run_dir=missing)
+    assert not missing.exists()
+
+
+def test_enforce_pilot_hidden_size_identity_first_call_persists_record(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_hidden_size_identity(
+        run_identity=_hidden_size_identity(resolved_hidden_size=64), nh_run_dir=nh_run_dir
+    )
+
+    state_path = nh_run_dir / HIDDEN_SIZE_IDENTITY_STATE_FILENAME
+    assert state_path.is_file()
+    record = json.loads(state_path.read_text())
+    assert record == {
+        "pilot_policy_name": "stage1_lead06_pilot_policy",
+        "run_id": "raw_seedA",
+        "resolved_hidden_size": 64,
+    }
+
+
+def test_enforce_pilot_hidden_size_identity_matching_repeat_call_succeeds(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    identity = _hidden_size_identity(resolved_hidden_size=128)
+    enforce_pilot_hidden_size_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+    # a second, identical call must be a no-op success, not a re-raise
+    enforce_pilot_hidden_size_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_hidden_size_identity_mismatched_hidden_size_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_hidden_size_identity(
+        run_identity=_hidden_size_identity(resolved_hidden_size=128), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="hidden-size identity"):
+        enforce_pilot_hidden_size_identity(
+            run_identity=_hidden_size_identity(resolved_hidden_size=256), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_hidden_size_identity_mismatched_run_id_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_hidden_size_identity(
+        run_identity=_hidden_size_identity(run_id="emb128x32_seedA_h64_lr3em4_cap25k_cal"), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="hidden-size identity"):
+        enforce_pilot_hidden_size_identity(
+            run_identity=_hidden_size_identity(run_id="emb128x32_seedA_h128_lr3em4_cap25k_cal"),
+            nh_run_dir=nh_run_dir,
+        )
+
+
+def test_enforce_pilot_hidden_size_identity_mismatched_policy_name_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_hidden_size_identity(
+        run_identity=_hidden_size_identity(pilot_policy_name="hidden_size_range_seedA_25k_v001"),
+        nh_run_dir=nh_run_dir,
+    )
+    with pytest.raises(PilotOrchestrationError, match="hidden-size identity"):
+        enforce_pilot_hidden_size_identity(
+            run_identity=_hidden_size_identity(pilot_policy_name="stage1_lead06_pilot_policy"),
+            nh_run_dir=nh_run_dir,
+        )
+
+
+def test_enforce_pilot_hidden_size_identity_unset_override_and_equal_explicit_override_are_same_identity(
+    tmp_path,
+):
+    """Per this function's own docstring: it compares only
+    run_identity["resolved_hidden_size"], never hidden_size_override -- an
+    unset override that resolves to a profile's own hidden_size, and an
+    explicit override that resolves to that identical value, are the same
+    training identity and must not conflict. Both calls below use
+    resolved_hidden_size=128 -- one standing in for "no override, profile
+    default is 128" and the other for "explicit override=128" -- the guard
+    cannot and must not distinguish them."""
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    unset_override_identity = _hidden_size_identity(resolved_hidden_size=128)
+    explicit_override_identity = _hidden_size_identity(resolved_hidden_size=128)
+    enforce_pilot_hidden_size_identity(run_identity=unset_override_identity, nh_run_dir=nh_run_dir)
+    enforce_pilot_hidden_size_identity(run_identity=explicit_override_identity, nh_run_dir=nh_run_dir)
+
+
+def test_run_pilot_enforces_hidden_size_identity_across_calls_with_changed_hidden_size(run_pilot_fixture):
+    """Hidden-size-A analogue of test_run_pilot_enforces_lr_identity_across_calls_with_changed_lr:
+    a run_pilot() call against an NH run directory whose persisted hidden-
+    size identity was already recorded on an earlier call must be rejected
+    if its freshly-resolved run_spec now declares a different hidden_size.
+    Same three-call shape: (1) creates the run directory
+    (enforce_pilot_hidden_size_identity is a no-op, nothing persisted yet),
+    (2) persists the run_spec's resolved hidden size now that the directory
+    exists, (3) a changed hidden_size contradicts it."""
+    fx = run_pilot_fixture
+    common_kwargs = dict(
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+    )
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 1 (creates run dir)"], **common_kwargs)
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 2 (persists hidden-size identity)"], **common_kwargs)
+
+    changed_hidden_size_run_spec = dataclasses.replace(fx["pilot_policy"].runs["raw_seedA"], hidden_size=256)
+    changed_hidden_size_runs = dict(fx["pilot_policy"].runs)
+    changed_hidden_size_runs["raw_seedA"] = changed_hidden_size_run_spec
+    changed_hidden_size_policy = dataclasses.replace(fx["pilot_policy"], runs=changed_hidden_size_runs)
+    common_kwargs["pilot_policy"] = changed_hidden_size_policy
+
+    with pytest.raises(PilotOrchestrationError, match="hidden-size identity"):
+        run_pilot(commands_used=["call 3 (changed hidden_size) -- must be rejected"], **common_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# require_tracking: Hidden-size-A campaign's strict W&B launch contract --
+# run_pilot(require_tracking=True) must thread through to
+# init_pilot_tracking_run and hard-fail rather than silently downgrading to
+# an untracked null run, while the default (False) preserves every existing
+# caller's untracked-fallback behavior (see
+# pilot_tracking.init_pilot_tracking_run's require_tracking parameter and
+# docs/decision_log.md's 2026-08-09 Hidden-size-A design-freeze entry).
+# ---------------------------------------------------------------------------
+
+def test_run_pilot_default_require_tracking_false_preserves_null_fallback(run_pilot_fixture):
+    """The disabled-by-default committed W&B policy resolves to backend
+    'null' -- with the default require_tracking=False, run_pilot() must
+    complete normally rather than raising, exactly as it always has."""
+    fx = run_pilot_fixture
+    result = run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        run_id="raw_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        train_chunk_fn=fx["fake_train"],
+        evaluate_checkpoint_fn=fx["fake_evaluate"],
+        commands_used=["require_tracking default False, disabled policy"],
+    )
+    assert result["nh_run_dir"] is not None
+
+
+def test_run_pilot_require_tracking_true_raises_when_policy_disabled(run_pilot_fixture):
+    """With require_tracking=True, run_pilot() must fail fast (via
+    init_pilot_tracking_run's policy_active guard) when the effective W&B
+    policy is disabled, rather than silently training untracked."""
+    from src.baseline.wandb_tracking import TrackingError
+
+    fx = run_pilot_fixture
+    with pytest.raises(TrackingError):
+        run_pilot(
+            pilot_policy=fx["pilot_policy"],
+            run_id="raw_seedA",
+            baseline_policy_path=BASELINE_POLICY_PATH,
+            package_root=fx["package_root"],
+            splits_dir=SPLITS_DIR,
+            config_out_dir=fx["config_out_dir"],
+            evidence_out_dir=fx["evidence_out_dir"],
+            screening_basin_ids=fx["basins"],
+            train_chunk_fn=fx["fake_train"],
+            evaluate_checkpoint_fn=fx["fake_evaluate"],
+            commands_used=["require_tracking True, disabled policy -- must raise"],
+            require_tracking=True,
+        )

@@ -254,6 +254,8 @@ __all__ = [
     "enforce_pilot_cap_identity",
     "LR_IDENTITY_STATE_FILENAME",
     "enforce_pilot_learning_rate_identity",
+    "HIDDEN_SIZE_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_hidden_size_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -280,6 +282,14 @@ CAP_IDENTITY_STATE_FILENAME = "pilot_cap_identity.json"
 # (W&B-independent) safeguard mirroring CAP_IDENTITY_STATE_FILENAME/
 # enforce_pilot_cap_identity; see enforce_pilot_learning_rate_identity.
 LR_IDENTITY_STATE_FILENAME = "pilot_lr_identity.json"
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id, resolved_hidden_size)
+# identity this run directory was first used for -- an always-active
+# (W&B-independent) safeguard mirroring CAP_IDENTITY_STATE_FILENAME/
+# LR_IDENTITY_STATE_FILENAME; see enforce_pilot_hidden_size_identity. Adopted
+# for the Hidden-size-A range-characterization campaign.
+HIDDEN_SIZE_IDENTITY_STATE_FILENAME = "pilot_hidden_size_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -1078,6 +1088,80 @@ def enforce_pilot_learning_rate_identity(*, run_identity: dict, nh_run_dir: "str
         )
 
 
+def _load_hidden_size_identity_record(nh_run_dir) -> "dict | None":
+    path = Path(nh_run_dir) / HIDDEN_SIZE_IDENTITY_STATE_FILENAME
+    if not path.is_file():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_hidden_size_identity_record(nh_run_dir, record: dict) -> None:
+    path = Path(nh_run_dir) / HIDDEN_SIZE_IDENTITY_STATE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+
+def enforce_pilot_hidden_size_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard for the Hidden-size-A range-
+    characterization campaign: a candidate's resolved hidden size is this run
+    directory's frozen identity for its entire on-disk lifetime, exactly like
+    ``pilot_policy_name``/``run_id`` and mirroring
+    :func:`enforce_pilot_cap_identity`/:func:`enforce_pilot_learning_rate_identity`'s
+    design (a hidden-size-identity contradiction is a training-safety
+    concern, not a tracking concern, so it must be caught even when W&B
+    tracking is disabled -- this pilot's default).
+
+    Compares ``run_identity["resolved_hidden_size"]`` (see
+    ``pilot_tracking.build_pilot_run_identity``), never the
+    ``hidden_size_override`` field alone -- an override and an
+    unset-override-that-resolves-to-the-same-profile-value are the same
+    training identity, but two different resolved values (whether from
+    different overrides, or an override vs. a differing profile default) are
+    always a contradiction.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id, resolved_hidden_size)``
+    triple; every later call for the same directory must match it exactly,
+    or :class:`PilotOrchestrationError` is raised -- before any further
+    tracking or training call. See this function's call site in
+    :func:`run_pilot`, immediately alongside ``enforce_pilot_cap_identity``
+    and ``enforce_pilot_learning_rate_identity``."""
+    if nh_run_dir is None:
+        return
+    nh_run_dir = Path(nh_run_dir)
+    if not nh_run_dir.is_dir():
+        return
+
+    current = {
+        "pilot_policy_name": run_identity["pilot_policy_name"],
+        "run_id": run_identity["run_id"],
+        "resolved_hidden_size": run_identity["resolved_hidden_size"],
+    }
+    record = _load_hidden_size_identity_record(nh_run_dir)
+    if record is None:
+        _save_hidden_size_identity_record(nh_run_dir, current)
+        return
+
+    if record != current:
+        raise PilotOrchestrationError(
+            f"NH run directory {nh_run_dir} already has a persisted hidden-size "
+            f"identity {record!r}, which contradicts this call's identity {current!r} "
+            "-- resolved_hidden_size must never change across a continuation of "
+            "the same run directory"
+        )
+
+
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
     """The sequence of epoch counts each bounded training chunk trains up TO
     (inclusive). The first chunk always ends at
@@ -1686,6 +1770,7 @@ def run_pilot(
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
     max_target_epoch: "int | None" = None,
+    require_tracking: bool = False,
 ) -> dict:
     """Top-level pilot orchestration for one ``run_id``: prepare the config,
     train in bounded chunks via NH's own ``start_run``/``continue_run``
@@ -1730,6 +1815,14 @@ def run_pilot(
     later targets are attempted within this same call -- a later call with a
     higher (or absent) ``max_target_epoch`` resumes exactly where this one
     left off, through the same idempotent-resume path as any other restart.
+
+    ``require_tracking`` (default ``False``, preserving all existing callers'
+    behavior) is passed straight through to
+    :func:`src.baseline.pilot_tracking.init_pilot_tracking_run` -- see that
+    function's docstring for the Hidden-size-A campaign's strict launch
+    contract (tracking init failure or a resolved null/untracked run is
+    fatal rather than silently downgraded) that this parameter opts into
+    when set ``True``.
     """
     run_spec, bundle, config_dir, experiment_name = prepare_pilot_run(
         pilot_policy=pilot_policy,
@@ -1777,8 +1870,13 @@ def run_pilot(
     # Likewise always active: see enforce_pilot_learning_rate_identity's
     # docstring (LR-A range-characterization campaign).
     enforce_pilot_learning_rate_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    # Likewise always active: see enforce_pilot_hidden_size_identity's
+    # docstring (Hidden-size-A range-characterization campaign).
+    enforce_pilot_hidden_size_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
-    tracking_run = init_pilot_tracking_run(pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir)
+    tracking_run = init_pilot_tracking_run(
+        pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir, require_tracking=require_tracking
+    )
 
     targets = chunk_epoch_targets(pilot_policy, effective_policy["max_epoch_budget"])
     if not targets:
