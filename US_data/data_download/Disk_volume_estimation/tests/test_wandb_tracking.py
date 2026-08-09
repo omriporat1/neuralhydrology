@@ -34,6 +34,7 @@ from src.baseline.wandb_tracking import (
 )
 
 _REAL_POLICY_PATH = "config/stage1_wandb_tracking_policy_v001.yaml"
+_REAL_OFFLINE_POLICY_PATH = "config/stage1_wandb_tracking_policy_offline_v001.yaml"
 
 
 def _policy(**overrides):
@@ -151,6 +152,26 @@ def test_load_tracking_policy_real_config():
     assert policy["enabled"] is False
     assert policy["mode"] == "disabled"
     assert policy["max_artifact_reference_bytes"] > 0
+
+
+def test_load_tracking_policy_real_offline_config():
+    """The reviewed offline-enabled override (config/
+    stage1_wandb_tracking_policy_offline_v001.yaml) must resolve as a real
+    enabled offline policy, and must otherwise match the committed disabled
+    default's project/tags/artifact-size conventions -- see docs/
+    decision_log.md, 2026-08-09 LR-A closure entry, item (12)(i)."""
+    default_policy = load_tracking_policy(_REAL_POLICY_PATH)
+    offline_policy = load_tracking_policy(_REAL_OFFLINE_POLICY_PATH)
+    assert offline_policy["enabled"] is True
+    assert offline_policy["mode"] == "offline"
+    assert offline_policy["project"] == default_policy["project"]
+    assert offline_policy["entity"] == default_policy["entity"]
+    assert offline_policy["tags"] == default_policy["tags"]
+    assert offline_policy["max_artifact_reference_bytes"] == default_policy["max_artifact_reference_bytes"]
+    # The committed default must stay disabled -- this override must never
+    # change it.
+    assert default_policy["enabled"] is False
+    assert default_policy["mode"] == "disabled"
 
 
 def test_load_tracking_policy_missing_file():

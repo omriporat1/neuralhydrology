@@ -1,0 +1,35 @@
+# Flash-NH Stage 1 -- W&B tracking operational policy configuration
+# policy_name: stage1_wandb_tracking_policy_offline_v001
+#
+# Reviewed, offline-ENABLED override of the committed disabled default
+# (config/stage1_wandb_tracking_policy_v001.yaml, which stays unchanged and
+# remains what any launcher uses unless it is explicitly pointed at this
+# file via WANDB_POLICY_PATH / --wandb-policy-path). Implements the launch-
+# contract fix recorded in docs/decision_log.md, 2026-08-09 LR-A closure
+# entry, item (12)(i): "an explicit reviewed offline-enabled W&B policy
+# override... adopted before the next experiment launch."
+#
+# Portable policy ONLY: no machine paths, no credentials. Offline mode makes
+# no network calls and requires no WANDB_API_KEY.
+
+policy_name: stage1_wandb_tracking_policy_offline_v001
+policy_version: "1"
+created: "2026-08-09"
+
+# Master switch. ON: this policy exists specifically to be pointed at by a
+# launcher that wants real (offline) W&B tracking instead of the null sink.
+enabled: true
+
+# "offline": wandb's local offline mode -- no network calls, no login. This
+# policy never selects "online" (that remains unqualified for this project;
+# see docs/stage1_wandb_user_guide.md status item 3).
+mode: offline
+
+# Same project/entity/tagging conventions as the committed default policy.
+project: flashnh-stage1
+entity: null
+tags: ["stage1", "baseline"]
+
+# Same artifact-reference size ceiling as the committed default policy --
+# see config/stage1_wandb_tracking_policy_v001.yaml for the rationale.
+max_artifact_reference_bytes: 1048576
