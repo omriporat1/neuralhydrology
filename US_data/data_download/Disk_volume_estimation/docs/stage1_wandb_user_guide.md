@@ -48,6 +48,34 @@ whole basis for what "qualified" means below:**
    reconciliation case described in §12 (each synced run had exactly one
    local offline directory) -- that remains unverified until a
    multi-Slurm-job candidate is synced.
+6. **Launch-contract (env/CLI policy selection): qualified, both locally
+   and on Moriah.** Item 2 above proved the tracking *wrapper*; it never
+   went through a real launcher's own policy-selection plumbing (`--wandb-
+   policy-path` / `WANDB_POLICY_PATH`, the same env-or-flag contract every
+   Stage 1 sbatch launcher uses). `scripts/
+   wandb_offline_launch_contract_qualification.py` closes that gap: it
+   resolves the policy path the same way a real launcher does, loads it
+   with the real `load_tracking_policy`, and starts a real tracked run via
+   the generic `init_tracking_run` -- tagged unmistakably non-scientific
+   (`qualification_kind: "wandb_offline_launch_contract"`,
+   `launch_contract_qualification: true`) so it can never be confused with
+   real Flash-NH evidence. Qualified against the reviewed offline-enabled
+   override `config/stage1_wandb_tracking_policy_offline_v001.yaml`
+   (`enabled: true`, `mode: offline`; the committed disabled default,
+   `config/stage1_wandb_tracking_policy_v001.yaml`, is unchanged and stays
+   what any launcher uses unless explicitly pointed elsewhere) in two
+   separate real-`wandb` runs: locally (Windows, ephemeral venv, `wandb`
+   0.28.1, run id `em21le9y`) and on Moriah (`glacier` partition, CPU-only,
+   Slurm job `45775192`, commit `fb2d6ae773993e8dd5a8cde65894fda14f5b4df7`,
+   ephemeral venv, run id `8hhayk8n`). Both runs: `backend="wandb"`,
+   `mode="offline"`, non-null W&B run id, real local offline run files
+   created, no network dependency, all 9 automated checks true. Moriah
+   evidence transferred locally via `scp -O` to `.scratch_local/
+   moriah_evidence/wandb_offline_launch_contract_qualification_45775192/`
+   and checksum-verified byte-identical (6/6 files). See
+   `docs/decision_log.md`, 2026-08-09 entry, for the full record. This
+   qualifies the launch-contract plumbing only, in a single process each --
+   it does not repeat item 2's multi-process continuation-resume proof.
 
 Every screen this guide describes below is a description of what W&B will
 show once tracking is actually enabled for a real candidate -- not a
