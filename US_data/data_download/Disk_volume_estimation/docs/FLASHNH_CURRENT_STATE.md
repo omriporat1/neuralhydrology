@@ -1,17 +1,37 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-09 (W&B offline tracking launch-contract
-qualification implemented and qualified, both locally and on Moriah,
-closing item 12(i) of the LR-A closure entry below — a reviewed
-offline-enabled W&B policy override plus a generic, pilot-independent
-qualification script/sbatch, both real-`wandb`-backed runs passing all 9
-checks with non-null run ids, checksum-verified evidence transferred
-locally. No hidden-size or other HPO screening started; LR-A's launcher
-untouched. See the section immediately below for detail; see further below
-for the LR-A closure, implementation task, design freeze, 50k
-embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
-calibration, prior W&B qualification, `emb128x64_seedA` hydrograph-atlas
-evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-09 (Hidden-size range characterization (Phase-A)
+design frozen — documentation-only. Four NEW candidates,
+`hidden_size` in `{64,128,256,512}`, LR fixed at LR-A's provisional
+anchor `3e-4`, `[128,32]` embedding unscaled, Seed A, 25k-cap/six-epoch
+contract; campaign `hidden_size_range_seedA_25k_v001`. The historical
+`emb128x32_seedA_lr3em4_cap25k_cal` (LR-A's own H=128 candidate) is kept
+strictly as a read-only, non-pooled reproducibility comparator, not a
+campaign member — a fresh H=128 candidate is trained instead. Mandatory
+offline-tracked W&B launch contract (hard-fail on tracking failure unless
+waived). No implementation, no Slurm submission, no training launched by
+this entry. See the section immediately below for detail; see further
+below for the W&B launch-contract qualification, LR-A closure,
+implementation task, design freeze, 50k embedding-shape closure, 25k
+neighborhood screening, `max_updates_per_epoch` calibration, prior W&B
+qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and
+post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — Hidden-size range characterization (Phase-A) design frozen, ready for implementation (2026-08-09)
+
+Documentation-only design-freeze task, under unchanged commit `785e631f0111fd352035b5b234aec4a774f4aa97` (verified against local `HEAD` and `origin/master` before this update; clean tracked tree). Full decision text: `docs/decision_log.md`'s 2026-08-09 entry (the newest, above the W&B qualification entry); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.15; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-09 section.
+
+**Design frozen.** Four new run_ids — `emb128x32_seedA_h64_lr3em4_cap25k_cal`, `emb128x32_seedA_h128_lr3em4_cap25k_cal`, `emb128x32_seedA_h256_lr3em4_cap25k_cal`, `emb128x32_seedA_h512_lr3em4_cap25k_cal` — varying only `hidden_size` (`{64,128,256,512}`). Everything else frozen at LR-A's contract: `[128,32]` embedding (not scaled with hidden size), Seed A (967139), `learning_rate=3e-4` fixed for all four (not re-tuned per hidden size), `seq_length=24`, output dropout 0.25, Adam, no scheduler, target `qobs_mm_per_h_lead06`, lead 6h, the fixed 2,307-basin training population, the fixed 400-basin screening subset, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, no continuation beyond epoch 6. Campaign: `hidden_size_range_seedA_25k_v001`.
+
+**Fresh H=128, not reused (corrects an earlier proposal).** The campaign trains a fresh `emb128x32_seedA_h128_lr3em4_cap25k_cal` rather than reusing the historical LR-A `3e-4` candidate (which also has `hidden_size=128`) — for uniform campaign identity/provenance/tracking, since the historical run predates this campaign's mandatory tracked-W&B contract and ran with tracking disabled. The historical run is retained read-only as a non-pooled reproducibility comparator only; that comparison is explicitly deferred until after the fresh H=128 run completes.
+
+**W&B contract (new, strict).** The campaign launcher must default to the reviewed offline-enabled policy and must hard-fail a real launch if tracking initialization fails or resolves to backend `null`, unless an explicit human waiver is given — closing LR-A's item (9) operational gap for this campaign going forward.
+
+**Evaluation design.** Official cadence epochs 3/6; retrospective epochs 1/2/4/5 via LR-A's already-qualified `pilot_diagnostic_eval.py`, reused unmodified. Full epoch 1-6 trajectories required in the final packet; no 3/6-only interpretation.
+
+**Caveats recorded.** LR×hidden-size interaction is deliberately untested and deferred to Phase B (LR held fixed, not tuned per hidden size); the fixed `[128,32]` embedding's capacity relative to the recurrent pathway changes across the sweep (not scaled with H) — a deliberate simplification, not an oversight.
+
+**Not launched by this entry.** No hidden-size candidate has been trained, no Slurm job submitted, no code changed — design freeze only. The `hidden_size` override plumbing, continuation-identity guard, `require_tracking` hard-fail contract, and closure-splice launcher/sbatch remain to be implemented in a later, separate task.
 
 ## Stage 1 — W&B offline tracking launch-contract qualification implemented and qualified, closing item 12(i) of the LR-A closure entry (2026-08-09)
 

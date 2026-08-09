@@ -1097,3 +1097,28 @@ Documentation-only closure of the campaign implemented in the section immediatel
 **LR-A closed.** No further LR-A runs are planned. Next: a small W&B offline-tracking launch-contract fix/qualification, then the next Phase-A one-dimensional range characterization (likely hidden size), then joint Phase B multidimensional HPO later. No final Stage 1 learning-rate selection is made by this entry.
 
 **Not done by this entry.** No training, evaluation, Slurm job, W&B sync, package generation, or new analysis was run; no source code was modified; no generated evidence was staged or committed; no final Stage 1 learning-rate selection.
+
+## Hidden-size range characterization (Phase-A) design frozen, not launched (2026-08-09)
+
+Documentation-only design freeze for the next Phase-A one-dimensional range characterization, following LR-A's closure (immediately above). Full decision text: `docs/decision_log.md`'s newest (topmost) 2026-08-09 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.15.
+
+**Frozen candidate set.** Four new run_ids, varying only `hidden_size`:
+
+| run_id | hidden_size | learning_rate | status |
+|---|---|---|---|
+| `emb128x32_seedA_h64_lr3em4_cap25k_cal` | 64 | 3e-4 (fixed) | design-frozen, not launched |
+| `emb128x32_seedA_h128_lr3em4_cap25k_cal` | 128 | 3e-4 (fixed) | design-frozen, not launched — **fresh**, not a reuse |
+| `emb128x32_seedA_h256_lr3em4_cap25k_cal` | 256 | 3e-4 (fixed) | design-frozen, not launched |
+| `emb128x32_seedA_h512_lr3em4_cap25k_cal` | 512 | 3e-4 (fixed) | design-frozen, not launched |
+
+Everything else frozen at LR-A's contract: `[128,32]` learned static embedding (tanh, dropout 0.1, not scaled with hidden size), Seed A (967139), `seq_length=24`, output dropout 0.25, Adam, no scheduler, target `qobs_mm_per_h_lead06`, lead 6h, the fixed 2,307-basin training population, the fixed 400-basin screening subset, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, no continuation beyond epoch 6. Campaign name: `hidden_size_range_seedA_25k_v001`.
+
+**Fresh H=128, historical run kept read-only.** The historical LR-A `3e-4` candidate (`emb128x32_seedA_lr3em4_cap25k_cal`, itself `hidden_size=128`, listed in the LR-A tables above) is **not** the campaign's H=128 point — a fresh candidate is trained instead, for uniform campaign identity/provenance/tracking (the historical run predates this campaign's mandatory tracked-W&B contract and ran with tracking disabled). The historical run remains a read-only, non-pooled reproducibility comparator; that comparison is deferred until after the fresh H=128 run completes.
+
+**W&B contract.** The campaign launcher must default to the reviewed offline-enabled policy and hard-fail a real launch on tracking failure or null-backend resolution, unless explicitly waived.
+
+**Evaluation plan.** Official cadence epochs 3/6; retrospective epochs 1/2/4/5 via the existing `pilot_diagnostic_eval.py`; full epoch 1-6 trajectories required for all four candidates.
+
+**Caveats.** LR×hidden-size interaction untested, deferred to Phase B; `[128,32]` embedding not scaled with hidden size (capacity relative to the recurrent pathway changes across the sweep).
+
+**Not launched by this entry.** No candidate trained, no Slurm job submitted, no code changed. The `hidden_size` override plumbing, continuation-identity guard, `require_tracking` hard-fail contract, and closure-splice launcher/sbatch remain to be implemented in a later, separate task.
