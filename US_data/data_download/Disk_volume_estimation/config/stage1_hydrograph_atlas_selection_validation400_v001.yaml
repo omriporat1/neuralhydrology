@@ -1,0 +1,144 @@
+# Flash-NH Stage 1 -- Phase-A validation-compatible hydrograph panel selection
+# selection_name: stage1_hydrograph_atlas_selection_validation400_v001
+#
+# Machine-readable design input for
+# scripts/generate_stage1_validation400_hydrograph_panel_selection.py.
+#
+# Purpose (closure milestone: "Phase-A validation-compatible fixed 8-basin
+# hydrograph panel v001"): the existing hydrograph atlas
+# (config/stage1_hydrograph_atlas_selection_v001.yaml, target_count=24) is
+# drawn from the full non-California development_train pool (2,307 basins)
+# and is NOT restricted to the 400-basin screening-validation population that
+# src/baseline/pilot_diagnostic_eval.py's qualified diagnostic-eval path
+# evaluates (period="validation", hard-pinned). That mismatch made every
+# Phase-A campaign's hydrograph panel unrenderable (see
+# reports/hidden_size_range_seedA_25k_evidence_v001/stage9_gap_finding.md).
+#
+# This policy is a NEW, separate, frozen selection: identical algorithm
+# (stage1_hydrograph_atlas_skill_area_geo_quota_selection_v1, unchanged code,
+# src/baseline/hydrograph_atlas_selection.py), identical geography/macro-
+# region mapping, but (a) target_count=8 (selected directly, not a 24-then-8
+# greedy down-select) and (b) selection_universe restricted to the 400 basins
+# in reports/stage1_validation_optimization_foundation_v001/part_d_screening_subset/
+# selection_v001/screening_subset_basin_selection.csv -- the exact basin
+# population src/baseline/pilot_diagnostic_eval.py's result pickles contain.
+#
+# Portable policy ONLY: no machine paths (h2o/Moriah/local absolute paths),
+# no credentials, no Slurm resources, no run-specific output paths.
+
+selection_name: stage1_hydrograph_atlas_selection_validation400_v001
+policy_version: "1"
+created: "2026-08-10"
+revised: "2026-08-10"
+purpose: >
+  Deterministic selection of a fixed 8-basin subset drawn strictly from the
+  canonical 400-basin development-validation screening population (itself
+  already non-California, non-holdout, development_train-role only),
+  stratified by skill quartile x area-class x east/west geographic side, for
+  Phase-A compact-hydrograph-panel rendering only. Not a favorable-example
+  selection: no visual preference, no prediction-error inspection beyond the
+  supplied neutral baseline NSE, and no candidate-specific (hidden-size/LR)
+  performance signal may influence the pick. Does not build NH packages,
+  does not train models, does not select or freeze a training checkpoint.
+
+algorithm_id: stage1_hydrograph_atlas_skill_area_geo_quota_selection_v1
+algorithm_version: 1
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Target count -- exactly 8 (the fixed compact-panel size), selected directly
+# by the quota algorithm rather than a 24-basin atlas plus a further greedy
+# compact-8 down-select (unnecessary extra step given the already-small
+# 400-basin population).
+# ---------------------------------------------------------------------------
+target_count: 8
+min_target_count: 6
+max_target_count: 10
+
+# ---------------------------------------------------------------------------
+# Selection universe (required input): the frozen 400-basin screening
+# population, NOT the full split_assignment.csv development_train pool. This
+# file is itself already filtered to non-California, non-holdout,
+# development_train-role basins by
+# scripts/generate_stage1_screening_subset.py (see its own selection_manifest
+# for that upstream provenance) -- this policy's driver script re-verifies
+# this membership rather than re-deriving it.
+# ---------------------------------------------------------------------------
+selection_universe:
+  source: reports/stage1_validation_optimization_foundation_v001/part_d_screening_subset/selection_v001/screening_subset_basin_selection.csv
+  source_basin_ids: reports/stage1_validation_optimization_foundation_v001/part_d_screening_subset/selection_v001/screening_subset_basin_ids.txt
+  required_canonical_basin_role: development_train
+  expected_count: 400
+  required_columns:
+    - gauge_id
+    - canonical_basin_role
+    - huc02
+    - area_class
+    - hydro_class
+
+# ---------------------------------------------------------------------------
+# Primary stratification: skill_stratum x area_class. skill_stratum quartile
+# edges are recomputed FRESH within the 400-basin population (not reused from
+# the screening-subset CSV's own skill_stratum field, which was computed
+# against the full 2,307-basin development pool for a different purpose) --
+# see skill_stratum section below for the NSE source.
+# ---------------------------------------------------------------------------
+stratification:
+  cell_dims: [skill_stratum, area_class]
+  area_class_valid_values: [low, middle, high]
+  skill_stratum_valid_values:
+    - severe_failure_lower_tail
+    - weak
+    - typical
+    - strong
+  min_quota_per_nonempty_cell: 1
+
+# ---------------------------------------------------------------------------
+# Skill-stratum definition. Quartile edges (p25/p50/p75) are computed fresh,
+# at selection time, from the 400-basin population's own "nse" column in
+# screening_subset_basin_selection.csv -- which is itself the certified seed
+# run's epoch009 per-basin raw-space NSE
+# (reports/seed_validation_review_v001/per_basin/epoch009/epoch009_per_basin_metrics.csv,
+# per that CSV's own selection_manifest.json). This is a pre-existing,
+# candidate-independent neutral baseline: it has no relationship to any
+# hidden-size (H=64/128/256/512) or LR-A (LR=1e-4/3e-4/1e-3/3e-3/1e-2)
+# candidate evaluated in this or any other Phase-A campaign.
+# ---------------------------------------------------------------------------
+skill_stratum:
+  quantile_edges: [0.25, 0.5, 0.75]
+  labels:
+    below_p25: severe_failure_lower_tail
+    p25_to_p50: weak
+    p50_to_p75: typical
+    at_or_above_p75: strong
+
+# ---------------------------------------------------------------------------
+# Geographic breadth: reused verbatim from
+# config/stage1_hydrograph_atlas_selection_v001.yaml's geography section
+# (itself reused verbatim from config/stage1_compact_package_selection_v001.yaml)
+# -- identical HUC02 -> macro-region -> east/west mapping, never re-derived.
+# ---------------------------------------------------------------------------
+geography:
+  distinct_huc02_soft_minimum: 4
+  macro_region_map_version: 1
+  macro_regions:
+    northeast_mid_atlantic: ["01", "02"]
+    southeast: ["03"]
+    great_lakes_ohio_tennessee: ["04", "05", "06"]
+    mississippi: ["07", "08"]
+    plains_missouri_south_central: ["09", "10U", "10L", "11", "12", "13"]
+    colorado_great_basin: ["14", "15", "16"]
+    pacific_northwest_california: ["17", "18"]
+    alaska_hawaii_other: ["19", "20", "21"]
+  east_macro_regions:
+    - northeast_mid_atlantic
+    - southeast
+    - great_lakes_ohio_tennessee
+    - mississippi
+  west_macro_regions:
+    - plains_missouri_south_central
+    - colorado_great_basin
+    - pacific_northwest_california
+
+output:
+  default_subdir_name: phase_a_validation_hydrograph_panel_v001
