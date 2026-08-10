@@ -1,21 +1,40 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-09 (Hidden-size range characterization (Phase-A)
-design frozen — documentation-only. Four NEW candidates,
-`hidden_size` in `{64,128,256,512}`, LR fixed at LR-A's provisional
-anchor `3e-4`, `[128,32]` embedding unscaled, Seed A, 25k-cap/six-epoch
-contract; campaign `hidden_size_range_seedA_25k_v001`. The historical
-`emb128x32_seedA_lr3em4_cap25k_cal` (LR-A's own H=128 candidate) is kept
-strictly as a read-only, non-pooled reproducibility comparator, not a
-campaign member — a fresh H=128 candidate is trained instead. Mandatory
-offline-tracked W&B launch contract (hard-fail on tracking failure unless
-waived). No implementation, no Slurm submission, no training launched by
-this entry. See the section immediately below for detail; see further
-below for the W&B launch-contract qualification, LR-A closure,
-implementation task, design freeze, 50k embedding-shape closure, 25k
-neighborhood screening, `max_updates_per_epoch` calibration, prior W&B
-qualification, `emb128x64_seedA` hydrograph-atlas evaluation, and
-post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-10 (Hidden-size range characterization (Phase-A)
+CLOSED. H=128 adopted as the provisional Phase-A working anchor (not a
+final winner); H=64 kept as a live alternative for Phase-B joint HPO;
+H=256 a plausible upper useful capacity point; H=512 dropped from the
+default Phase-B search space (no demonstrated validation benefit at this
+fidelity). Preferred Phase-B hidden-size support: `{64,128,256}`. Fresh-
+vs-historical H=128 reproducibility confirmed exact/deterministic under
+the nominally equivalent Seed-A config — not evidence of cross-seed
+stability. LR×hidden-size interaction remains unresolved, deferred to
+Phase B. Separately, the validation-compatible fixed 8-basin hydrograph
+panel v001 (`phase_a_validation_hydrograph_panel_v001`) is accepted after
+human visual review and its selection frozen (status `"frozen"`, was
+`"candidate"`); a standing Phase-A hydrograph-review rule is adopted for
+future one-dimensional milestones. A benign self-referential checksum bug
+in the panel's evidence-assembly script was fixed (packaging only, no
+scientific data changed). No training, HPO, or sealed-set access in this
+closure task. Next: embedding-dropout design survey. See the section
+immediately below for detail; see further below for the design freeze,
+W&B launch-contract qualification, LR-A closure, implementation task,
+design freeze, 50k embedding-shape closure, 25k neighborhood screening,
+`max_updates_per_epoch` calibration, prior W&B qualification,
+`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
+roadmap entries it builds on.)
+
+## Stage 1 — Hidden-size range characterization (Phase-A) closed; validation-compatible fixed 8-basin hydrograph panel v001 frozen and accepted (2026-08-10)
+
+Documentation-only closure task recording the completed Moriah-executed hidden-size campaign (design freeze `785e631`, four real training runs) and a separately-executed, human-reviewed hydrograph sanity-check panel. No training, evaluation, Slurm job, config/HPO change, or basin reselection performed by this task; only change is a one-line fix to an untracked evidence-assembly script plus a metadata-only `status` field update in an already-committed selection driver script. Full decision text: `docs/decision_log.md`'s 2026-08-10 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.16; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s 2026-08-10 closing sections.
+
+**Result.** Hidden size is not sharply sensitive over `{64,128,256,512}` at this Seed-A/LR=3e-4/25k-cap/6-epoch fidelity (epochs-4-6 median-of-medians NSE spans only ~0.255-0.278, non-monotonic in hidden size). H=128 is the provisional working anchor (not a final winner); H=64 is a genuine near-tie and a live Phase-B alternative (single best observed median NSE in the campaign, 0.2922 at epoch 6); H=256 a plausible upper useful capacity point; H=512 shows no demonstrated validation benefit and is dropped from the default Phase-B search space. Preferred Phase-B hidden-size support: `{64,128,256}`. Fresh-vs-historical H=128 audit: exact/deterministic reproducibility under the nominally equivalent Seed-A config (not cross-seed evidence). LR×hidden-size interaction unresolved, deferred to Phase B.
+
+**Hydrograph panel.** `phase_a_validation_hydrograph_panel_v001` — 8 frozen basins (`01315000, 06894200, 07165565, 07261000, 08061540, 08072300, 12210900, 14301500`), built from the canonical 400-basin screening-validation population, distinct from the broader train-pool hydrograph atlas. Accepted findings: no systematic H64-vs-H128 hydrological superiority (consistent with the near-tie); modest LR=3e-4 edge over LR=1e-3; shared (not candidate-specific) limitations at basins 01315000/07165565/14301500 and systematic extreme-peak underprediction — none overturn the numerical conclusions. Geographically imbalanced (5/8 basins in `plains_missouri_south_central`), **not** CONUS-representative, not a second optimization objective. Selection status now `"frozen"` (was `"candidate"`); membership/windows unchanged. Standing rule adopted: render this same panel after each future one-dimensional Phase-A milestone as a sanity check only.
+
+**Evidence-manifest bug fixed.** Self-referential checksum entry in `MANIFEST_SHA256.txt` (cosmetic; 72/73 real files always verified clean) fixed by excluding the manifest from its own `find` listing. Corrected packet: 72/72 OK, archive SHA256 `d88990b30b9452080acf44f46b127c8ad042bdab6b73f604f3ae173cc126d104`. Evidence (untracked, gitignored): `.scratch_local/moriah_evidence/phase_a_validation_hydrograph_panel_v001/` and `.tar.gz`.
+
+**Not done.** No sealed-set access, no final Stage 1 hyperparameter selection, no basin reselection, no embedding-dropout implementation or training. **Next:** embedding-dropout design survey; Phase B later revisits LR×hidden-size×dropout jointly.
 
 ## Stage 1 — Hidden-size range characterization (Phase-A) design frozen, ready for implementation (2026-08-09)
 

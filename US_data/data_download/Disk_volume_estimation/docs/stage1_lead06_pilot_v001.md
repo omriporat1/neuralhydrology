@@ -1122,3 +1122,32 @@ Everything else frozen at LR-A's contract: `[128,32]` learned static embedding (
 **Caveats.** LR×hidden-size interaction untested, deferred to Phase B; `[128,32]` embedding not scaled with hidden size (capacity relative to the recurrent pathway changes across the sweep).
 
 **Not launched by this entry.** No candidate trained, no Slurm job submitted, no code changed. The `hidden_size` override plumbing, continuation-identity guard, `require_tracking` hard-fail contract, and closure-splice launcher/sbatch remain to be implemented in a later, separate task.
+
+## Hidden-size range characterization (Phase-A) closed: H=128 provisional anchor, H=64 live alternative, Phase-B support `{64,128,256}` (2026-08-10)
+
+All four candidates from the table above completed six-epoch/25k-cap training on Moriah and were evaluated at all six epochs. Full decision text: `docs/decision_log.md`'s 2026-08-10 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.16.
+
+| run_id | hidden_size | epoch-6 median NSE | epochs-4-6 median-of-medians | late-window range |
+|---|---|---|---|---|
+| `emb128x32_seedA_h64_lr3em4_cap25k_cal` | 64 | 0.2922 (best in campaign) | 0.2678 | 0.0380 |
+| `emb128x32_seedA_h128_lr3em4_cap25k_cal` (fresh) | 128 | 0.2680 | 0.2777 (best late-window) | 0.0219 (tightest) |
+| `emb128x32_seedA_h256_lr3em4_cap25k_cal` | 256 | 0.2621 | 0.2618 | 0.0006 |
+| `emb128x32_seedA_h512_lr3em4_cap25k_cal` | 512 | 0.2707 | 0.2552 (weakest late-window) | 0.0157 |
+
+**Result.** Hidden size is not sharply sensitive over `{64,128,256,512}` at this fidelity — non-monotonic ordering, all four in a ~0.255-0.278 late-window band. **H=128 is the provisional working anchor** (not a final winner). **H=64 is a live alternative**, carried into Phase-B joint HPO. **H=256** remains a plausible upper useful capacity point. **H=512** showed no demonstrated validation benefit and is dropped from the default Phase-B search space unless later joint evidence justifies revisiting it. **Preferred Phase-B hidden-size support: `{64, 128, 256}`.**
+
+**H=128 reproducibility (limited scope).** Fresh vs. historical H=128 (`emb128x32_seedA_lr3em4_cap25k_cal`) are exactly/deterministically reproducible under the nominally equivalent Seed-A configuration (identical median NSE, zero paired diff, byte-identical training loss/optimizer-update counts every epoch) — confirms determinism only, not cross-seed statistical stability.
+
+**LR×hidden-size interaction** remains unresolved, deferred to Phase-B joint HPO.
+
+### Validation-compatible fixed 8-basin hydrograph panel v001 — accepted (2026-08-10)
+
+`phase_a_validation_hydrograph_panel_v001` (built separately from the canonical 400-basin development-validation screening population, distinct from the broader train-pool hydrograph atlas above) was rendered for the H=128-vs-H=64 hidden-size comparison and the LR-A `3e-4`-vs-`1e-3` comparison, and accepted by human visual review. Frozen basin IDs (do not reopen or regenerate): `01315000, 06894200, 07165565, 07261000, 08061540, 08072300, 12210900, 14301500`. Selection driver's manifest `status` is now `"frozen"` (was `"candidate"`); basin membership/event windows unchanged.
+
+Accepted findings: H=64 vs H=128 hydrographs show no systematic hydrological superiority, consistent with the quantitative near-tie; LR=3e-4 shows a modest/non-dominant visual edge over LR=1e-3; shared (not candidate-specific) model-family limitations visible at basins 01315000 (severe failure, likely regulated/stepped record), 07165565 (flashy-peak flattening), and 14301500 (double-peak artifact), plus systematic extreme-peak underprediction across all four candidates. None of these overturn the numerical conclusions above. The panel is a compact sanity-check artifact only — geographically imbalanced (5/8 basins in `plains_missouri_south_central`, 7/8 on the `west` geo_side) and **not** CONUS-representative or a second optimization objective.
+
+**Standing Phase-A hydrograph rule (adopted).** After each future one-dimensional Phase-A milestone: identify a provisionally strongest configuration only if the quantitative evidence supports one; render this same frozen 8-basin panel for it (with a matched reference comparison where useful) as a sanity/interpretability check, not an informal second optimization criterion; preserve the same basin IDs/windows across milestones.
+
+**Evidence.** `.scratch_local/moriah_evidence/phase_a_validation_hydrograph_panel_v001/` and `.tar.gz` (untracked, gitignored); manifest packaging bug fixed (self-referential checksum entry removed), corrected manifest 72/72 OK, archive SHA256 `d88990b30b9452080acf44f46b127c8ad042bdab6b73f604f3ae173cc126d104`.
+
+**Not done.** No sealed-set access, no final Stage 1 hyperparameter selection, no basin reselection, no embedding-dropout work started. **Next:** embedding-dropout design survey; Phase B later revisits LR×hidden-size×dropout jointly.
