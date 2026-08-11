@@ -35,6 +35,7 @@ from src.baseline.nh_config_generation import (
     validate_dynamic_inputs,
     validate_lead_hours,
     validate_hidden_size_override,
+    validate_embedding_dropout_override,
     validate_learning_rate_override,
     validate_max_updates_per_epoch,
     validate_seq_length,
@@ -807,6 +808,146 @@ def test_build_nh_config_mapping_rejects_invalid_hidden_size_override():
         build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=-64))
     with pytest.raises(NHConfigGenerationError):
         build_nh_config_mapping(**_build_mapping_kwargs(hidden_size=64.0))
+
+
+# ---------------------------------------------------------------------------
+# embedding_dropout: Embedding-Dropout-A range-characterization campaign's
+# per-candidate embedding-dropout override (see docs/decision_log.md's
+# Embedding-Dropout-A design-freeze entry and
+# validate_embedding_dropout_override's own docstring). Mirrors the
+# hidden_size test block above field-for-field, plus explicit 0.0-vs-None
+# coverage (the drop00 candidate) and the raw-pathway rejection this override
+# is unique in needing (a hidden_size/learning_rate override applies
+# regardless of pathway; embedding_dropout only makes sense when the
+# profile's mapping actually has a statics_embedding section).
+#
+# validate_embedding_dropout_override(value) itself only ever receives a
+# non-None override -- same "None is never passed to this function" design
+# already established by validate_hidden_size_override/
+# validate_learning_rate_override above. The embedding-dropout-override
+# *feature*'s tolerance of "no override" is therefore exercised at
+# build_nh_config_mapping's level (see
+# test_build_nh_config_mapping_omits_embedding_dropout_key_when_no_override
+# below), not by asserting validate_embedding_dropout_override(None)
+# succeeds.
+# ---------------------------------------------------------------------------
+
+_EMBEDDING_DROPOUT_A_CANDIDATE_VALUES = [0.00, 0.05, 0.10, 0.20, 0.40]
+
+
+@pytest.mark.parametrize("value", _EMBEDDING_DROPOUT_A_CANDIDATE_VALUES)
+def test_validate_embedding_dropout_override_accepts_embedding_dropout_a_candidate_values(value):
+    validate_embedding_dropout_override(value)  # must not raise
+
+
+def test_validate_embedding_dropout_override_accepts_explicit_zero_not_confused_with_falsy():
+    # 0.0 (the drop00 candidate) must be accepted like any other in-range
+    # value -- this is a plain numeric-range check, never a truthiness check.
+    validate_embedding_dropout_override(0.0)  # must not raise
+
+
+@pytest.mark.parametrize("value", [0.15, 0.3, 0.999, 1e-9])
+def test_validate_embedding_dropout_override_accepts_other_in_range_reals(value):
+    validate_embedding_dropout_override(value)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 1.0, 1.5, -0.001, -1, "0.1", [], {}, float("nan"), float("inf"), float("-inf")],
+)
+def test_validate_embedding_dropout_override_rejects_invalid_values(value):
+    with pytest.raises(NHConfigGenerationError, match="embedding_dropout override"):
+        validate_embedding_dropout_override(value)
+
+
+def test_validate_embedding_dropout_override_rejects_none_directly_by_design():
+    # By design (see this test block's header comment): the validator itself
+    # never accepts None -- only build_nh_config_mapping's None-means-
+    # "no override" short-circuit does, without ever calling this function.
+    with pytest.raises(NHConfigGenerationError, match="embedding_dropout override"):
+        validate_embedding_dropout_override(None)
+
+
+def test_build_nh_config_mapping_omits_embedding_dropout_key_when_no_override():
+    # "Accepted: None" at the embedding-dropout-override *feature* level (see
+    # the validate_embedding_dropout_override test block above): no override
+    # means the profile's own statics_embedding.dropout is left completely
+    # untouched, and the validator is never invoked at all.
+    kwargs = _build_mapping_kwargs(run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME)
+    mapping = build_nh_config_mapping(**kwargs)
+    default_mapping = build_nh_config_mapping(**{**kwargs, "embedding_dropout": None})
+    assert mapping == default_mapping
+    assert mapping["statics_embedding"]["dropout"] == 0.1  # the profile's own default value
+
+
+@pytest.mark.parametrize("value", _EMBEDDING_DROPOUT_A_CANDIDATE_VALUES)
+def test_build_nh_config_mapping_applies_embedding_dropout_override(value):
+    mapping = build_nh_config_mapping(
+        **_build_mapping_kwargs(
+            run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=value
+        )
+    )
+    assert mapping["statics_embedding"]["dropout"] == pytest.approx(value)
+
+
+def test_build_nh_config_mapping_applies_embedding_dropout_override_leaves_shape_and_activation_untouched():
+    mapping = build_nh_config_mapping(
+        **_build_mapping_kwargs(
+            run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=0.40
+        )
+    )
+    assert mapping["statics_embedding"]["hiddens"] == [128, 32]
+    assert mapping["statics_embedding"]["activation"] == "tanh"
+
+
+def test_build_nh_config_mapping_embedding_dropout_override_does_not_mutate_shared_profile_registry():
+    # Copy-before-mutate safety: applying an override must never permanently
+    # corrupt the module-level _RUN_PROFILES registry for later callers that
+    # reuse the same run_profile_name (see build_nh_config_mapping's own
+    # copy-before-mutate comment).
+    from src.baseline import nh_config_generation as _nh_config_generation_module
+
+    before = dict(
+        _nh_config_generation_module._RUN_PROFILES[PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME]["statics_embedding"]
+    )
+    build_nh_config_mapping(
+        **_build_mapping_kwargs(
+            run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=0.40
+        )
+    )
+    after = _nh_config_generation_module._RUN_PROFILES[PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME]["statics_embedding"]
+    assert after == before
+    assert after["dropout"] == 0.1
+
+
+def test_build_nh_config_mapping_rejects_invalid_embedding_dropout_override():
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(
+            **_build_mapping_kwargs(
+                run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=True
+            )
+        )
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(
+            **_build_mapping_kwargs(
+                run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=1.0
+            )
+        )
+    with pytest.raises(NHConfigGenerationError):
+        build_nh_config_mapping(
+            **_build_mapping_kwargs(
+                run_profile_name=PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME, embedding_dropout=-0.1
+            )
+        )
+
+
+def test_build_nh_config_mapping_rejects_embedding_dropout_override_on_raw_pathway_profile():
+    # embedding_dropout only makes sense when the profile's mapping actually
+    # has a statics_embedding section to override -- unlike hidden_size/
+    # learning_rate, which apply regardless of static pathway. Uses the
+    # default (raw, no statics_embedding) run_profile_name.
+    with pytest.raises(NHConfigGenerationError, match="statics_embedding"):
+        build_nh_config_mapping(**_build_mapping_kwargs(embedding_dropout=0.10))
 
 
 def test_generate_stage1_nh_config_uncapped_default_omits_key_everywhere(tmp_path):

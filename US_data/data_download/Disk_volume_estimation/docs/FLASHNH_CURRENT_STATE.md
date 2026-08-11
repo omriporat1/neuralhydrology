@@ -1,31 +1,49 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-11 (Embedding-dropout range characterization
-(Phase-A), "Embedding-Dropout-A", DESIGN FROZEN, ready for implementation
-— not launched. Five new run_ids varying only `embedding_dropout`
-(`0.00,0.05,0.10,0.20,0.40`) at the LR-A/Hidden-size-A anchors
-(`learning_rate=3e-4`, `hidden_size=128`); all five are fresh campaign
-members, including `0.10` — no reuse of any historical dropout=0.10 run.
-The fresh Hidden-size-A H=128 run (`embedding_dropout=0.10` already)
-is retained strictly as an optional, read-only reproducibility comparator,
-never a sixth candidate. Campaign: `embedding_dropout_range_seedA_25k_v001`.
-Reuses the existing 25k-cap/6-epoch/Seed-A fidelity unchanged, with a new
-dropout-specific caveat: poor performance at this fidelity reflects this
-fidelity only, since dropout can affect optimization speed differently
-than LR/hidden size — full six-epoch trajectories matter more here.
-Raw-space median NSE remains primary; the 400-basin screening subset
-remains non-authoritative; no composite winner score. W&B contract adopts
-the Hidden-size-A offline/`require_tracking` standard. Standing hydrograph
-panel rule reaffirmed but not rendered by this entry; Monte-Carlo dropout
-and inference-time-dropout experiments explicitly out of scope. A 7-item
-minimum implementation plan is recorded, not implemented. No training,
-Slurm, or sealed-set access in this documentation-only task. See the
-section immediately below for detail; see further below for the
-hidden-size closure, hidden-size design freeze, W&B launch-contract
-qualification, LR-A closure, implementation task, design freeze, 50k
-embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
-calibration, prior W&B qualification, `emb128x64_seedA` hydrograph-atlas
-evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-11 (Embedding-Dropout-A IMPLEMENTATION COMPLETE,
+preparation-only validated, ready for Moriah launch review — still not
+launched. All 8 planned implementation items built: `PilotRunSpec.
+embedding_dropout` override field; per-profile `statics_embedding.dropout`
+`0.1` gate in `load_pilot_policy()` made override-aware (the top-level,
+policy-wide `embedding_dropout: 0.1` gate is deliberately left strict and
+unchanged — see the implementation entry below for rationale);
+`validate_embedding_dropout_override()` +
+`build_nh_config_mapping()` threading (bound `[0,1)`, `0.00` recorded as
+explicit `0.0` never confused with "no override"); manifest/run-identity
+provenance (`embedding_dropout_override`/`resolved_embedding_dropout`);
+`enforce_pilot_embedding_dropout_identity()` continuation-safety guard;
+closure-splice launcher `scripts/run_stage1_embedding_dropout_range_
+seedA_closure.py` + matching `.sbatch` (5 trainable run_ids, historical
+H=128/dropout=0.10 comparator reachable only via `--status-only`); tests
+across all 8 planned categories. Preparation-only validated two ways: the
+pytest suite's real `prepare_pilot_run_only()` calls against a synthetic
+full-union package, plus a standalone non-pytest CLI-subprocess audit for
+all five candidates — both confirm `resolved_embedding_dropout` matches
+each candidate exactly (`0.0/0.05/0.1/0.2/0.4`) with every other frozen
+invariant (`hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`,
+seed 967139, `seq_length=24`) identical across candidates. Full local
+regression suite (minus 6 pre-existing torch/neuralhydrology collection
+errors unrelated to this task): 2070 passed, 5 skipped, 1 pre-existing
+Windows-file-locking flake unrelated to this task. No training launched,
+no Slurm job submitted, nothing committed. See the section immediately
+below for detail; see further below for the design freeze, hidden-size
+closure, hidden-size design freeze, W&B launch-contract qualification,
+LR-A closure, implementation task, design freeze, 50k embedding-shape
+closure, 25k neighborhood screening, `max_updates_per_epoch` calibration,
+prior W&B qualification, `emb128x64_seedA` hydrograph-atlas evaluation,
+and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — Embedding-Dropout-A implementation complete, preparation-only validated, ready for Moriah launch review (2026-08-11)
+
+Implementation and local/preparation-only validation task, under unchanged commit `eea9f4c09bbfdb92b757ec4165b0bb61a7b466ba` (branch `master`), following the design freeze immediately below. Full decision text: `docs/decision_log.md`'s topmost 2026-08-11 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.18; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new implementation subsection.
+
+**Implemented, all 8 items of the design freeze's minimum implementation plan.** `PilotRunSpec.embedding_dropout` override field (additive, default-preserving); `load_pilot_policy()`'s per-profile `statics_embedding.dropout` `0.1` gate made override-aware — **deliberate deviation from the design-freeze plan's wording:** the top-level, policy-wide `embedding_dropout: 0.1` gate remains strict and unchanged (not made override-aware), preferred on independent review as safer since it keeps all non-overridden policy behavior identical; explicit candidate variation reaches the generated config only through `PilotRunSpec.embedding_dropout`, and Embedding-Dropout-A's five new run specs are spliced into the already-loaded/validated base policy in memory, so the committed policy-wide default is never exercised against a dropout-varying entry; `validate_embedding_dropout_override()` + `build_nh_config_mapping()` threading (`[0,1)` bound, `0.00` recorded as explicit `0.0`); `GeneratedConfigBundle`/manifest provenance (`embedding_dropout_override`/`resolved_embedding_dropout`); `build_pilot_run_identity()` extension; `enforce_pilot_embedding_dropout_identity()` continuation-safety guard (persist-on-first-call, compare-and-raise-on-mismatch), following `enforce_pilot_hidden_size_identity()`'s template; closure-splice launcher `scripts/run_stage1_embedding_dropout_range_seedA_closure.py` + `..._moriah.sbatch` (`EMBEDDING_DROPOUT_A_MAX_TARGET_EPOCH=6` fixed, exactly five trainable run_ids, `REFERENCE_RUN_ID` reachable only via `--status-only`); tests across all 8 planned categories.
+
+**Preparation-only validation (real, unmocked, two layers).** The pytest suite's real `prepare_pilot_run_only()` calls for all five candidates against a synthetic package covering the full 2,557-basin development/spatial-holdout union, plus a standalone non-pytest CLI-subprocess audit invoking the real closure-launcher script with `--prepare-only` for all five run_ids. Both confirm: `resolved_embedding_dropout` exactly matches each candidate (`0.0/0.05/0.1/0.2/0.4`); `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, seed 967139, `seq_length=24` identical across all five; pairwise config diffs limited to `experiment_name`/basin-list paths/`run_dir`/`statics_embedding`; `training_started`/`evaluation_started`/`wandb_backend_initialized` all `False`.
+
+**Tests.** Focused suites (`test_nh_config_generation.py` 154, `test_pilot_tracking.py` 42, `test_pilot_orchestration.py` 102/5 skipped, `test_pilot_lead06_config.py` 52), 3 dedicated campaign test files (130 passed), wider related-suite (455 passed/17 files), full local regression suite excluding 6 pre-existing torch/neuralhydrology collection-error files: 2070 passed, 5 skipped, 1 pre-existing unrelated Windows file-locking flake (`test_package_audit.py`, `os.rename`/`WinError 5`).
+
+**Not done by this entry.** No embedding-dropout candidate launched, no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation, no W&B Sweep, no scientific-design change, no hydrograph panel rendered, nothing committed.
 
 ## Stage 1 — Embedding-dropout range characterization (Phase-A) design frozen, ready for implementation (2026-08-11)
 

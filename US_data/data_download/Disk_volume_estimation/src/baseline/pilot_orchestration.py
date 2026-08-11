@@ -256,6 +256,8 @@ __all__ = [
     "enforce_pilot_learning_rate_identity",
     "HIDDEN_SIZE_IDENTITY_STATE_FILENAME",
     "enforce_pilot_hidden_size_identity",
+    "EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_embedding_dropout_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -290,6 +292,16 @@ LR_IDENTITY_STATE_FILENAME = "pilot_lr_identity.json"
 # LR_IDENTITY_STATE_FILENAME; see enforce_pilot_hidden_size_identity. Adopted
 # for the Hidden-size-A range-characterization campaign.
 HIDDEN_SIZE_IDENTITY_STATE_FILENAME = "pilot_hidden_size_identity.json"
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id,
+# resolved_embedding_dropout) identity this run directory was first used for
+# -- an always-active (W&B-independent) safeguard mirroring
+# CAP_IDENTITY_STATE_FILENAME/LR_IDENTITY_STATE_FILENAME/
+# HIDDEN_SIZE_IDENTITY_STATE_FILENAME; see
+# enforce_pilot_embedding_dropout_identity. Adopted for the
+# Embedding-Dropout-A range-characterization campaign.
+EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME = "pilot_embedding_dropout_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -1162,6 +1174,86 @@ def enforce_pilot_hidden_size_identity(*, run_identity: dict, nh_run_dir: "str |
         )
 
 
+def _load_embedding_dropout_identity_record(nh_run_dir) -> "dict | None":
+    path = Path(nh_run_dir) / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
+    if not path.is_file():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_embedding_dropout_identity_record(nh_run_dir, record: dict) -> None:
+    path = Path(nh_run_dir) / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+
+def enforce_pilot_embedding_dropout_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard for the Embedding-Dropout-A
+    range-characterization campaign: a candidate's resolved
+    ``statics_embedding`` dropout is this run directory's frozen identity for
+    its entire on-disk lifetime, exactly like ``pilot_policy_name``/``run_id``
+    and mirroring
+    :func:`enforce_pilot_cap_identity`/:func:`enforce_pilot_learning_rate_identity`/
+    :func:`enforce_pilot_hidden_size_identity`'s design (an embedding-dropout-
+    identity contradiction is a training-safety concern, not a tracking
+    concern, so it must be caught even when W&B tracking is disabled -- this
+    pilot's default).
+
+    Compares ``run_identity["resolved_embedding_dropout"]`` (see
+    ``pilot_tracking.build_pilot_run_identity``), never the
+    ``embedding_dropout_override`` field alone -- an override and an
+    unset-override-that-resolves-to-the-same-profile-value are the same
+    training identity, but two different resolved values (whether from
+    different overrides, or an override vs. a differing profile default) are
+    always a contradiction. ``0.0`` (the drop00 candidate) is a valid,
+    distinct-from-``None`` resolved value here -- the comparison below is a
+    plain dict-equality check, never a truthiness check, so it is never
+    confused with an unset/omitted value.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id,
+    resolved_embedding_dropout)`` triple; every later call for the same
+    directory must match it exactly, or :class:`PilotOrchestrationError` is
+    raised -- before any further tracking or training call. See this
+    function's call site in :func:`run_pilot`, immediately alongside
+    ``enforce_pilot_cap_identity``, ``enforce_pilot_learning_rate_identity``,
+    and ``enforce_pilot_hidden_size_identity``."""
+    if nh_run_dir is None:
+        return
+    nh_run_dir = Path(nh_run_dir)
+    if not nh_run_dir.is_dir():
+        return
+
+    current = {
+        "pilot_policy_name": run_identity["pilot_policy_name"],
+        "run_id": run_identity["run_id"],
+        "resolved_embedding_dropout": run_identity["resolved_embedding_dropout"],
+    }
+    record = _load_embedding_dropout_identity_record(nh_run_dir)
+    if record is None:
+        _save_embedding_dropout_identity_record(nh_run_dir, current)
+        return
+
+    if record != current:
+        raise PilotOrchestrationError(
+            f"NH run directory {nh_run_dir} already has a persisted embedding-dropout "
+            f"identity {record!r}, which contradicts this call's identity {current!r} "
+            "-- resolved_embedding_dropout must never change across a continuation of "
+            "the same run directory"
+        )
+
+
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
     """The sequence of epoch counts each bounded training chunk trains up TO
     (inclusive). The first chunk always ends at
@@ -1873,6 +1965,9 @@ def run_pilot(
     # Likewise always active: see enforce_pilot_hidden_size_identity's
     # docstring (Hidden-size-A range-characterization campaign).
     enforce_pilot_hidden_size_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    # Likewise always active: see enforce_pilot_embedding_dropout_identity's
+    # docstring (Embedding-Dropout-A range-characterization campaign).
+    enforce_pilot_embedding_dropout_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
     tracking_run = init_pilot_tracking_run(
         pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir, require_tracking=require_tracking

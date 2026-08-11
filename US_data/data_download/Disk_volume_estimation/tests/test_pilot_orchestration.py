@@ -38,6 +38,7 @@ import xarray as xr
 from src.baseline.pilot_orchestration import (
     ACCEPTED_CONTINUATION_FILENAME,
     CAP_IDENTITY_STATE_FILENAME,
+    EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME,
     HIDDEN_SIZE_IDENTITY_STATE_FILENAME,
     LR_IDENTITY_STATE_FILENAME,
     PREPARATION_RESULT_FILENAME,
@@ -52,6 +53,7 @@ from src.baseline.pilot_orchestration import (
     discover_physical_checkpoints,
     ensure_validation_results,
     enforce_pilot_cap_identity,
+    enforce_pilot_embedding_dropout_identity,
     enforce_pilot_hidden_size_identity,
     enforce_pilot_learning_rate_identity,
     load_accepted_continuation_manifest,
@@ -2671,6 +2673,205 @@ def test_run_pilot_enforces_hidden_size_identity_across_calls_with_changed_hidde
 
     with pytest.raises(PilotOrchestrationError, match="hidden-size identity"):
         run_pilot(commands_used=["call 3 (changed hidden_size) -- must be rejected"], **common_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# embedding_dropout: Embedding-Dropout-A range-characterization campaign's
+# resume-contradiction safeguard (enforce_pilot_embedding_dropout_identity),
+# mirroring enforce_pilot_hidden_size_identity's own test block above
+# field-for-field (see docs/decision_log.md's Embedding-Dropout-A
+# design-freeze entry and this function's own docstring). The
+# resolved_embedding_dropout=0.0 cases below exist specifically to prove the
+# guard never confuses an explicit 0.0 with an unset/None value (a plain
+# dict-equality comparison, never a truthiness check).
+# ---------------------------------------------------------------------------
+
+def _embedding_dropout_identity(
+    *, pilot_policy_name="stage1_lead06_pilot_policy", run_id="raw_seedA", resolved_embedding_dropout=0.10
+):
+    return {
+        "pilot_policy_name": pilot_policy_name,
+        "run_id": run_id,
+        "resolved_embedding_dropout": resolved_embedding_dropout,
+    }
+
+
+def test_enforce_pilot_embedding_dropout_identity_noop_when_nh_run_dir_is_none():
+    # must not raise, must not touch the filesystem
+    enforce_pilot_embedding_dropout_identity(run_identity=_embedding_dropout_identity(), nh_run_dir=None)
+
+
+def test_enforce_pilot_embedding_dropout_identity_noop_when_nh_run_dir_does_not_exist(tmp_path):
+    missing = tmp_path / "does_not_exist_yet"
+    enforce_pilot_embedding_dropout_identity(run_identity=_embedding_dropout_identity(), nh_run_dir=missing)
+    assert not missing.exists()
+
+
+def test_enforce_pilot_embedding_dropout_identity_first_call_persists_record(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.05), nh_run_dir=nh_run_dir
+    )
+
+    state_path = nh_run_dir / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
+    assert state_path.is_file()
+    record = json.loads(state_path.read_text())
+    assert record == {
+        "pilot_policy_name": "stage1_lead06_pilot_policy",
+        "run_id": "raw_seedA",
+        "resolved_embedding_dropout": 0.05,
+    }
+
+
+def test_enforce_pilot_embedding_dropout_identity_first_call_persists_explicit_zero_not_none(tmp_path):
+    """The drop00 candidate's resolved_embedding_dropout=0.0 must be
+    persisted and compared as the real float 0.0, never dropped/omitted as
+    if it were an unset/None value."""
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.0), nh_run_dir=nh_run_dir
+    )
+
+    state_path = nh_run_dir / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
+    assert state_path.is_file()
+    record = json.loads(state_path.read_text())
+    assert record["resolved_embedding_dropout"] == 0.0
+    assert record["resolved_embedding_dropout"] is not None
+
+
+def test_enforce_pilot_embedding_dropout_identity_matching_repeat_call_succeeds(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    identity = _embedding_dropout_identity(resolved_embedding_dropout=0.20)
+    enforce_pilot_embedding_dropout_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+    # a second, identical call must be a no-op success, not a re-raise
+    enforce_pilot_embedding_dropout_identity(run_identity=identity, nh_run_dir=nh_run_dir)
+
+
+def test_enforce_pilot_embedding_dropout_identity_mismatched_dropout_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.10), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="embedding-dropout identity"):
+        enforce_pilot_embedding_dropout_identity(
+            run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.40), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_embedding_dropout_identity_zero_vs_nonzero_mismatch_raises(tmp_path):
+    """The 0.0-vs-nonzero pairing specifically: 0.0 must be treated as a
+    real, distinct value, not silently equal to any other resolved dropout
+    via a truthiness bug."""
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.0), nh_run_dir=nh_run_dir
+    )
+    with pytest.raises(PilotOrchestrationError, match="embedding-dropout identity"):
+        enforce_pilot_embedding_dropout_identity(
+            run_identity=_embedding_dropout_identity(resolved_embedding_dropout=0.05), nh_run_dir=nh_run_dir
+        )
+
+
+def test_enforce_pilot_embedding_dropout_identity_mismatched_run_id_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(run_id="emb128x32_seedA_drop00_h128_lr3em4_cap25k_cal"),
+        nh_run_dir=nh_run_dir,
+    )
+    with pytest.raises(PilotOrchestrationError, match="embedding-dropout identity"):
+        enforce_pilot_embedding_dropout_identity(
+            run_identity=_embedding_dropout_identity(run_id="emb128x32_seedA_drop05_h128_lr3em4_cap25k_cal"),
+            nh_run_dir=nh_run_dir,
+        )
+
+
+def test_enforce_pilot_embedding_dropout_identity_mismatched_policy_name_raises(tmp_path):
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    enforce_pilot_embedding_dropout_identity(
+        run_identity=_embedding_dropout_identity(pilot_policy_name="embedding_dropout_range_seedA_25k_v001"),
+        nh_run_dir=nh_run_dir,
+    )
+    with pytest.raises(PilotOrchestrationError, match="embedding-dropout identity"):
+        enforce_pilot_embedding_dropout_identity(
+            run_identity=_embedding_dropout_identity(pilot_policy_name="stage1_lead06_pilot_policy"),
+            nh_run_dir=nh_run_dir,
+        )
+
+
+def test_enforce_pilot_embedding_dropout_identity_unset_override_and_equal_explicit_override_are_same_identity(
+    tmp_path,
+):
+    """Per this function's own docstring: it compares only
+    run_identity["resolved_embedding_dropout"], never
+    embedding_dropout_override -- an unset override that resolves to a
+    profile's own embedding_dropout, and an explicit override that resolves
+    to that identical value, are the same training identity and must not
+    conflict."""
+    nh_run_dir = tmp_path / "run"
+    nh_run_dir.mkdir()
+    unset_override_identity = _embedding_dropout_identity(resolved_embedding_dropout=0.10)
+    explicit_override_identity = _embedding_dropout_identity(resolved_embedding_dropout=0.10)
+    enforce_pilot_embedding_dropout_identity(run_identity=unset_override_identity, nh_run_dir=nh_run_dir)
+    enforce_pilot_embedding_dropout_identity(run_identity=explicit_override_identity, nh_run_dir=nh_run_dir)
+
+
+def test_run_pilot_enforces_embedding_dropout_identity_across_calls_with_changed_embedding_dropout(
+    run_pilot_fixture,
+):
+    """Embedding-Dropout-A analogue of
+    test_run_pilot_enforces_hidden_size_identity_across_calls_with_changed_hidden_size:
+    a run_pilot() call against an NH run directory whose persisted
+    embedding-dropout identity was already recorded on an earlier call must
+    be rejected if its freshly-resolved run_spec now declares a different
+    embedding_dropout. Same three-call shape: (1) creates the run directory
+    (enforce_pilot_embedding_dropout_identity is a no-op, nothing persisted
+    yet), (2) persists the run_spec's resolved embedding dropout now that
+    the directory exists, (3) a changed embedding_dropout contradicts it.
+    Uses run_id="emb128x64_seedA" rather than the other identity-guard
+    tests' "raw_seedA" -- embedding_dropout only applies to the
+    learned-static embedding pathway (raw_seedA's profile has no
+    statics_embedding section to override). run_pilot_fixture's shared
+    fake_train/fake_evaluate are closed over "raw_seedA"'s experiment_name,
+    so this test builds its own pair bound to emb128x64_seedA's instead."""
+    fx = run_pilot_fixture
+    experiment_name = "stage1_lead06_pilot_emb128x64_seedA_v001"
+    fake_train = _make_fake_train_chunk_fn(fx["package_root"], fx["basins"], experiment_name)
+    fake_evaluate = _make_fake_evaluate_checkpoint_fn(fx["package_root"], fx["basins"])
+    common_kwargs = dict(
+        run_id="emb128x64_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH,
+        package_root=fx["package_root"],
+        splits_dir=SPLITS_DIR,
+        config_out_dir=fx["config_out_dir"],
+        evidence_out_dir=fx["evidence_out_dir"],
+        screening_basin_ids=fx["basins"],
+        train_chunk_fn=fake_train,
+        evaluate_checkpoint_fn=fake_evaluate,
+    )
+    run_pilot(pilot_policy=fx["pilot_policy"], commands_used=["call 1 (creates run dir)"], **common_kwargs)
+    run_pilot(
+        pilot_policy=fx["pilot_policy"],
+        commands_used=["call 2 (persists embedding-dropout identity)"],
+        **common_kwargs,
+    )
+
+    changed_dropout_run_spec = dataclasses.replace(
+        fx["pilot_policy"].runs["emb128x64_seedA"], embedding_dropout=0.30
+    )
+    changed_dropout_runs = dict(fx["pilot_policy"].runs)
+    changed_dropout_runs["emb128x64_seedA"] = changed_dropout_run_spec
+    changed_dropout_policy = dataclasses.replace(fx["pilot_policy"], runs=changed_dropout_runs)
+    common_kwargs["pilot_policy"] = changed_dropout_policy
+
+    with pytest.raises(PilotOrchestrationError, match="embedding-dropout identity"):
+        run_pilot(commands_used=["call 3 (changed embedding_dropout) -- must be rejected"], **common_kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,7 @@ __all__ = [
     "validate_basin_membership",
     "validate_full_population_basin_membership",
     "build_nh_config_mapping",
+    "validate_embedding_dropout_override",
     "generate_stage1_nh_config",
     "generate_stage1_full_population_nh_config_bundles",
     "write_generated_config",
@@ -586,6 +587,18 @@ class GeneratedConfigBundle:
     # against a differently-resolved value for the same run identity (see
     # pilot_orchestration.enforce_pilot_hidden_size_identity).
     hidden_size: "int | None" = None
+    # Optional per-candidate statics_embedding dropout override (Embedding-
+    # Dropout-A range-characterization campaign; see docs/decision_log.md
+    # and pilot_lead06_config.PilotRunSpec.embedding_dropout). None (the
+    # default) means "use whatever the named run_profile already
+    # specifies" -- byte-identical to every pre-existing caller. A float
+    # override (including 0.0, always checked with "is not None", never
+    # truthiness) is this candidate's frozen embedding-dropout identity for
+    # its entire lifetime; never mutated after a bundle is built, and never
+    # adopted/compared loosely against a differently-resolved value for the
+    # same run identity (see pilot_orchestration.
+    # enforce_pilot_embedding_dropout_identity).
+    embedding_dropout: "float | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +925,7 @@ def build_nh_config_mapping(
     max_updates_per_epoch: "int | None" = None,
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
+    embedding_dropout: "float | None" = None,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
@@ -948,7 +962,21 @@ def build_nh_config_mapping(
     When ``None`` the profile's own ``hidden_size`` entry (merged in below)
     is left untouched, so every pre-existing caller is byte-for-byte
     unaffected. When given, it is applied AFTER the profile merge so it
-    always wins -- the same always-wins pattern as ``learning_rate``."""
+    always wins -- the same always-wins pattern as ``learning_rate``.
+
+    ``embedding_dropout`` (default ``None``) is this candidate's optional
+    per-candidate ``statics_embedding.dropout`` override (Embedding-Dropout-A
+    range-characterization campaign; see
+    :func:`validate_embedding_dropout_override`). When ``None`` the profile's
+    own ``statics_embedding.dropout`` entry (merged in below) is left
+    untouched, so every pre-existing caller is byte-for-byte unaffected. When
+    given (including ``0.0``, always checked with ``is not None``, never
+    truthiness), it is applied AFTER the profile merge so it always wins --
+    the same always-wins pattern as ``learning_rate``/``hidden_size``. A
+    profile with no ``statics_embedding`` section (the raw-static pathway)
+    has nothing to override, so an explicit override against such a profile
+    is rejected rather than silently ignored or silently creating a new
+    ``statics_embedding`` section."""
     if run_profile_name not in _RUN_PROFILES:
         raise NHConfigGenerationError(
             f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
@@ -959,6 +987,8 @@ def build_nh_config_mapping(
         validate_learning_rate_override(learning_rate)
     if hidden_size is not None:
         validate_hidden_size_override(hidden_size)
+    if embedding_dropout is not None:
+        validate_embedding_dropout_override(embedding_dropout)
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -992,7 +1022,22 @@ def build_nh_config_mapping(
     # nan_handling_method deliberately absent: hard-exclusion baseline
     # (accepted finding #7); never set as a defensive backstop here.
     if "statics_embedding" in mapping:
+        if embedding_dropout is not None:
+            # Copy-before-mutate: mapping["statics_embedding"] is still the
+            # exact same dict object as _RUN_PROFILES[run_profile_name]
+            # ["statics_embedding"] after dict.update() above (a shallow
+            # copy) -- mutating it in place would permanently corrupt the
+            # shared module-level profile registry for every future caller
+            # that reuses this run_profile_name. Copy first so this
+            # candidate's override is local to this one mapping.
+            mapping["statics_embedding"] = dict(mapping["statics_embedding"])
+            mapping["statics_embedding"]["dropout"] = embedding_dropout
         validate_statics_embedding_spec(mapping["statics_embedding"])
+    elif embedding_dropout is not None:
+        raise NHConfigGenerationError(
+            f"embedding_dropout override given ({embedding_dropout!r}) but run_profile_name "
+            f"{run_profile_name!r} has no statics_embedding section (raw-static pathway) to override"
+        )
     if max_updates_per_epoch is not None:
         mapping["max_updates_per_epoch"] = max_updates_per_epoch
     if learning_rate is not None:
@@ -1050,6 +1095,32 @@ def validate_hidden_size_override(value) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise NHConfigGenerationError(
             f"hidden_size override must be a positive int or None, got {value!r}"
+        )
+
+
+def validate_embedding_dropout_override(value) -> None:
+    """Reject anything but a finite real number in ``[0, 1)`` (bools rejected
+    even though ``bool`` is an ``int`` subclass, per this codebase's
+    established numeric-override idiom -- see
+    :func:`validate_learning_rate_override`). ``0.0`` is a valid, distinct-
+    from-``None`` value (the Embedding-Dropout-A ``drop00`` candidate) --
+    this validator does not treat it as falsy/absent. ``None`` (no override,
+    use the profile's own value) is never passed to this function -- callers
+    only call it once they already know an override was requested; see
+    :func:`build_nh_config_mapping`. The bound matches
+    :func:`validate_statics_embedding_spec`'s own ``dropout`` range check, so
+    an override that passes here is guaranteed to also pass that structural
+    check once merged in. This intentionally does not enforce any campaign-
+    specific allowlist (e.g. Embedding-Dropout-A's ``{0.0, 0.05, 0.1, 0.2,
+    0.4}``) -- that closed set is enforced by the campaign launcher, not this
+    general-purpose structural validator."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise NHConfigGenerationError(
+            f"embedding_dropout override must be a real number in [0, 1) or None, got {value!r}"
+        )
+    if not math.isfinite(value) or not (0 <= value < 1):
+        raise NHConfigGenerationError(
+            f"embedding_dropout override must be in [0, 1), got {value!r}"
         )
 
 
@@ -1121,6 +1192,7 @@ def generate_stage1_nh_config(
     max_updates_per_epoch: "int | None" = None,
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
+    embedding_dropout: "float | None" = None,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
@@ -1167,6 +1239,7 @@ def generate_stage1_nh_config(
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
         hidden_size=hidden_size,
+        embedding_dropout=embedding_dropout,
     )
 
     package_manifest_identity = {
@@ -1196,6 +1269,7 @@ def generate_stage1_nh_config(
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
         hidden_size=hidden_size,
+        embedding_dropout=embedding_dropout,
     )
 
 
@@ -1532,6 +1606,12 @@ def write_generated_config(
         "resolved_learning_rate": full_mapping.get("learning_rate"),
         "hidden_size_override": bundle.hidden_size,
         "resolved_hidden_size": full_mapping.get("hidden_size"),
+        "embedding_dropout_override": bundle.embedding_dropout,
+        "resolved_embedding_dropout": (
+            full_mapping["statics_embedding"]["dropout"]
+            if isinstance(full_mapping.get("statics_embedding"), dict)
+            else None
+        ),
         "artifact_sha256": artifact_sha256,
     }
     manifest_path = out_dir / "generation_manifest.json"

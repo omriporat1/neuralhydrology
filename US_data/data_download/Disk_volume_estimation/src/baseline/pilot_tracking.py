@@ -321,6 +321,26 @@ def build_pilot_run_identity(
         # of the same run directory.
         "hidden_size_override": bundle.hidden_size,
         "resolved_hidden_size": bundle.config_mapping.get("hidden_size"),
+        # Explicit per-candidate statics_embedding-dropout identity
+        # (Embedding-Dropout-A range-characterization campaign; see
+        # docs/decision_log.md and nh_config_generation.
+        # validate_embedding_dropout_override). Mirrors
+        # "learning_rate_override"/"resolved_learning_rate" and
+        # "hidden_size_override"/"resolved_hidden_size" above exactly --
+        # None for every pre-existing pilot run; non-None only for an
+        # Embedding-Dropout-A candidate that explicitly overrode its
+        # run_profile_name's own statics_embedding.dropout. 0.0 (the
+        # drop00 candidate) is a valid, distinct-from-None override --
+        # never collapsed by truthiness. See pilot_orchestration.
+        # enforce_pilot_embedding_dropout_identity for the continuation-
+        # time safeguard that keeps this value frozen across any Slurm
+        # resumption of the same run directory.
+        "embedding_dropout_override": bundle.embedding_dropout,
+        "resolved_embedding_dropout": (
+            bundle.config_mapping["statics_embedding"]["dropout"]
+            if isinstance(bundle.config_mapping.get("statics_embedding"), dict)
+            else None
+        ),
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
         # Whichever W&B policy file actually took effect for this invocation

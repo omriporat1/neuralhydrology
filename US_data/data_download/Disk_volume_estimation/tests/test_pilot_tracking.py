@@ -157,6 +157,97 @@ def test_build_pilot_run_identity_carries_explicit_hidden_size_override(tmp_path
     assert identity["resolved_hidden_size"] == 256
 
 
+def test_build_pilot_run_identity_carries_no_override_embedding_dropout_on_raw_pathway(
+    bundle_and_effective_policy,
+):
+    # raw_seedA's profile has no statics_embedding section at all -- both the
+    # override and resolved fields must be None (never a stray 0.0 or a
+    # KeyError), distinguishing "no embedding pathway" from "embedding
+    # pathway with dropout=0.0" (the drop00 candidate).
+    policy, bundle, effective, _ = bundle_and_effective_policy
+    run_spec = resolve_pilot_run_spec(policy, "raw_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["embedding_dropout_override"] is None
+    assert identity["resolved_embedding_dropout"] is None
+
+
+def test_build_pilot_run_identity_carries_no_override_embedding_dropout_on_embedding_pathway(tmp_path, pilot_policy):
+    # emb128x64_seedA's profile does have a statics_embedding section -- with
+    # no override declared, embedding_dropout_override must be None while
+    # resolved_embedding_dropout must still carry the profile's own dropout
+    # (0.1, the frozen untuned value -- see config/stage1_lead06_pilot_v001.yaml).
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:350])
+    import dataclasses
+
+    policy = dataclasses.replace(
+        pilot_policy,
+        screening_basin_ids_path=str(screening_path),
+        screening_expected_count=350,
+        screening_expected_sha256=sha256_of(screening_path),
+    )
+    bundle = build_pilot_bundle(
+        pilot_policy=policy, run_id="emb128x64_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+    )
+    effective = build_effective_policy(policy)
+    run_spec = resolve_pilot_run_spec(policy, "emb128x64_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["embedding_dropout_override"] is None
+    assert identity["resolved_embedding_dropout"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("override_value", [0.0, 0.05, 0.10, 0.20, 0.40])
+def test_build_pilot_run_identity_carries_explicit_embedding_dropout_override(
+    tmp_path, pilot_policy, override_value
+):
+    # Embedding-Dropout-A range-characterization campaign: a run_id whose
+    # PilotRunSpec explicitly overrides embedding_dropout must surface that
+    # value in both build_pilot_run_identity's embedding_dropout_override
+    # (the raw override) and resolved_embedding_dropout (the value actually
+    # written into this run's config.yaml) -- see nh_config_generation.
+    # validate_embedding_dropout_override and pilot_orchestration.
+    # enforce_pilot_embedding_dropout_identity, which key off exactly these
+    # fields. Parametrized over all five Embedding-Dropout-A candidate
+    # values, including the drop00 candidate's explicit 0.0 -- proving it is
+    # never lost/confused with the "no override" None case exercised above.
+    import dataclasses
+
+    package_root = tmp_path / "package"
+    build_full_union_package(package_root)
+    screening_path = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:350])
+    overridden_run_spec = dataclasses.replace(
+        pilot_policy.runs["emb128x64_seedA"], embedding_dropout=override_value
+    )
+    overridden_runs = dict(pilot_policy.runs)
+    overridden_runs["emb128x64_seedA"] = overridden_run_spec
+    policy = dataclasses.replace(
+        pilot_policy,
+        runs=overridden_runs,
+        screening_basin_ids_path=str(screening_path),
+        screening_expected_count=350,
+        screening_expected_sha256=sha256_of(screening_path),
+    )
+    bundle = build_pilot_bundle(
+        pilot_policy=policy, run_id="emb128x64_seedA",
+        baseline_policy_path=BASELINE_POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+    )
+    effective = build_effective_policy(policy)
+    run_spec = resolve_pilot_run_spec(policy, "emb128x64_seedA")
+    identity = build_pilot_run_identity(
+        pilot_policy=policy, run_spec=run_spec, bundle=bundle, effective_early_stopping_policy=effective,
+    )
+    assert identity["embedding_dropout_override"] == pytest.approx(override_value)
+    assert identity["resolved_embedding_dropout"] == pytest.approx(override_value)
+    assert identity["embedding_dropout_override"] is not None
+    assert identity["resolved_embedding_dropout"] is not None
+
+
 def test_build_pilot_hyperparameters_subset(bundle_and_effective_policy):
     _, bundle, _, _ = bundle_and_effective_policy
     hyperparams = build_pilot_hyperparameters(bundle)

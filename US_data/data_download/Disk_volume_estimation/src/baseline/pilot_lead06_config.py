@@ -61,6 +61,7 @@ from .nh_config_generation import (
     validate_max_updates_per_epoch,
     validate_learning_rate_override,
     validate_hidden_size_override,
+    validate_embedding_dropout_override,
     _get_git_commit,
 )
 from datetime import datetime, timezone
@@ -156,6 +157,19 @@ class PilotRunSpec:
     # time (see pilot_orchestration's enforce_pilot_hidden_size_identity,
     # which mirrors enforce_pilot_cap_identity's always-active design).
     hidden_size: "int | None" = None
+    # Optional per-candidate statics_embedding dropout override (Embedding-
+    # Dropout-A range-characterization campaign; see nh_config_generation.
+    # validate_embedding_dropout_override and docs/decision_log.md). None
+    # (the default) means "use whatever the named run_profile_name already
+    # specifies" -- byte-identical to every pre-existing pilot run, including
+    # the closed six-run matrix and the LR-A/Hidden-size-A/cap25k/cap50k
+    # closure candidates. Frozen for this run's entire lifetime; never
+    # mutated or overridden at launch time (see pilot_orchestration's
+    # enforce_pilot_embedding_dropout_identity, which mirrors
+    # enforce_pilot_cap_identity's always-active design). 0.0 is a valid,
+    # distinct-from-None override (the drop00 candidate) -- always checked
+    # with "is not None", never truthiness.
+    embedding_dropout: "float | None" = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +252,19 @@ def load_pilot_policy(path) -> PilotPolicy:
         static_pathway = entry["static_pathway"]
         embedding_hiddens = entry.get("embedding_hiddens")
 
+        # Optional per-run embedding-dropout override (Embedding-Dropout-A
+        # range-characterization campaign): read before the semantics checks
+        # below so the profile-resolved dropout check can reconcile against
+        # it instead of the frozen 0.1 default when present. None of the
+        # committed policy's six real run entries declare this key today, so
+        # this is purely additive -- every existing entry resolves
+        # embedding_dropout=None here exactly as before. Explicit "is not
+        # None" (never truthiness) so a hypothetical explicit 0.0 entry is
+        # not silently treated as "no override".
+        run_embedding_dropout = entry.get("embedding_dropout")
+        if run_embedding_dropout is not None:
+            validate_embedding_dropout_override(run_embedding_dropout)
+
         expected_semantics = _EXPECTED_RUN_SEMANTICS[run_id]
         if static_pathway != expected_semantics["static_pathway"]:
             raise PilotConfigError(
@@ -286,7 +313,18 @@ def load_pilot_policy(path) -> PilotPolicy:
                     f"defines statics_embedding activation {embedding_spec.get('activation')!r}, "
                     f"expected {_EXPECTED_EMBEDDING_ACTIVATION!r}"
                 )
-            if embedding_spec.get("dropout") != _EXPECTED_EMBEDDING_DROPOUT:
+            # No explicit per-run embedding_dropout override (every real
+            # committed run today): preserve the old strict check exactly --
+            # the named profile itself must still declare the frozen 0.1.
+            # Explicit override present: the profile's own declared dropout
+            # is no longer required to equal 0.1 -- build_nh_config_mapping
+            # replaces it with the override value after profile merge (see
+            # nh_config_generation.build_nh_config_mapping's embedding_dropout
+            # parameter), so this profile-identity check is not meaningful
+            # for an overridden run and is skipped; validate_embedding_
+            # dropout_override above already checked the override's own
+            # numeric validity.
+            if run_embedding_dropout is None and embedding_spec.get("dropout") != _EXPECTED_EMBEDDING_DROPOUT:
                 raise PilotConfigError(
                     f"pilot policy {p}: run_id {run_id!r} profile {entry['run_profile_name']!r} "
                     f"defines statics_embedding dropout {embedding_spec.get('dropout')!r}, "
@@ -321,6 +359,7 @@ def load_pilot_policy(path) -> PilotPolicy:
             max_updates_per_epoch=max_updates_per_epoch,
             learning_rate=learning_rate,
             hidden_size=hidden_size,
+            embedding_dropout=run_embedding_dropout,
         )
 
     known_run_ids = set(PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME)
@@ -433,6 +472,7 @@ def build_pilot_bundle_with_validation_scope(
     max_updates_per_epoch: "int | None" = None,
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
+    embedding_dropout: "float | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
     bundle (task item 1) and ``pilot_full_validation.py``'s full-population
@@ -494,6 +534,7 @@ def build_pilot_bundle_with_validation_scope(
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
         hidden_size=hidden_size,
+        embedding_dropout=embedding_dropout,
     )
 
     package_manifest_identity = {
@@ -528,6 +569,7 @@ def build_pilot_bundle_with_validation_scope(
         max_updates_per_epoch=max_updates_per_epoch,
         learning_rate=learning_rate,
         hidden_size=hidden_size,
+        embedding_dropout=embedding_dropout,
     )
 
 
@@ -569,6 +611,7 @@ def build_pilot_bundle(
         max_updates_per_epoch=run_spec.max_updates_per_epoch,
         learning_rate=run_spec.learning_rate,
         hidden_size=run_spec.hidden_size,
+        embedding_dropout=run_spec.embedding_dropout,
     )
 
 
