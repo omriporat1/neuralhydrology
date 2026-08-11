@@ -1,28 +1,49 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-10 (Hidden-size range characterization (Phase-A)
-CLOSED. H=128 adopted as the provisional Phase-A working anchor (not a
-final winner); H=64 kept as a live alternative for Phase-B joint HPO;
-H=256 a plausible upper useful capacity point; H=512 dropped from the
-default Phase-B search space (no demonstrated validation benefit at this
-fidelity). Preferred Phase-B hidden-size support: `{64,128,256}`. Fresh-
-vs-historical H=128 reproducibility confirmed exact/deterministic under
-the nominally equivalent Seed-A config — not evidence of cross-seed
-stability. LR×hidden-size interaction remains unresolved, deferred to
-Phase B. Separately, the validation-compatible fixed 8-basin hydrograph
-panel v001 (`phase_a_validation_hydrograph_panel_v001`) is accepted after
-human visual review and its selection frozen (status `"frozen"`, was
-`"candidate"`); a standing Phase-A hydrograph-review rule is adopted for
-future one-dimensional milestones. A benign self-referential checksum bug
-in the panel's evidence-assembly script was fixed (packaging only, no
-scientific data changed). No training, HPO, or sealed-set access in this
-closure task. Next: embedding-dropout design survey. See the section
-immediately below for detail; see further below for the design freeze,
-W&B launch-contract qualification, LR-A closure, implementation task,
-design freeze, 50k embedding-shape closure, 25k neighborhood screening,
-`max_updates_per_epoch` calibration, prior W&B qualification,
-`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
-roadmap entries it builds on.)
+Last updated: 2026-08-11 (Embedding-dropout range characterization
+(Phase-A), "Embedding-Dropout-A", DESIGN FROZEN, ready for implementation
+— not launched. Five new run_ids varying only `embedding_dropout`
+(`0.00,0.05,0.10,0.20,0.40`) at the LR-A/Hidden-size-A anchors
+(`learning_rate=3e-4`, `hidden_size=128`); all five are fresh campaign
+members, including `0.10` — no reuse of any historical dropout=0.10 run.
+The fresh Hidden-size-A H=128 run (`embedding_dropout=0.10` already)
+is retained strictly as an optional, read-only reproducibility comparator,
+never a sixth candidate. Campaign: `embedding_dropout_range_seedA_25k_v001`.
+Reuses the existing 25k-cap/6-epoch/Seed-A fidelity unchanged, with a new
+dropout-specific caveat: poor performance at this fidelity reflects this
+fidelity only, since dropout can affect optimization speed differently
+than LR/hidden size — full six-epoch trajectories matter more here.
+Raw-space median NSE remains primary; the 400-basin screening subset
+remains non-authoritative; no composite winner score. W&B contract adopts
+the Hidden-size-A offline/`require_tracking` standard. Standing hydrograph
+panel rule reaffirmed but not rendered by this entry; Monte-Carlo dropout
+and inference-time-dropout experiments explicitly out of scope. A 7-item
+minimum implementation plan is recorded, not implemented. No training,
+Slurm, or sealed-set access in this documentation-only task. See the
+section immediately below for detail; see further below for the
+hidden-size closure, hidden-size design freeze, W&B launch-contract
+qualification, LR-A closure, implementation task, design freeze, 50k
+embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
+calibration, prior W&B qualification, `emb128x64_seedA` hydrograph-atlas
+evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — Embedding-dropout range characterization (Phase-A) design frozen, ready for implementation (2026-08-11)
+
+Documentation-only design-freeze task, under unchanged commit `e5c6679464160e89d597363d1e1ae24d58310893` (verified against local `HEAD` and `origin/master` before this update; clean tracked tree), following the accepted read-only Embedding-Dropout Design Survey earlier in this session. Full decision text: `docs/decision_log.md`'s 2026-08-11 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.17; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-11 section.
+
+**Design frozen.** Five new run_ids — `emb128x32_seedA_drop00_h128_lr3em4_cap25k_cal`, `emb128x32_seedA_drop05_h128_lr3em4_cap25k_cal`, `emb128x32_seedA_drop10_h128_lr3em4_cap25k_cal`, `emb128x32_seedA_drop20_h128_lr3em4_cap25k_cal`, `emb128x32_seedA_drop40_h128_lr3em4_cap25k_cal` — varying only `embedding_dropout` (`{0.00,0.05,0.10,0.20,0.40}`). Endpoint meaning: `0.00` = no-regularization control; `0.05` = light; `0.10` = inherited historical default (never itself evidence-selected); `0.20` = moderate; `0.40` = a deliberate high boundary intended to probe whether stronger embedding regularization becomes harmful at this Phase-A fidelity — a range characterization, **not** an optimized search grid. Everything else frozen at the LR-A/Hidden-size-A contract: `[128,32]` embedding (tanh activation, shape unchanged), Seed A (967139), `learning_rate=3e-4` fixed, `hidden_size=128` fixed, output dropout 0.25 (untouched), `seq_length=24`, Adam, no scheduler, target `qobs_mm_per_h_lead06`, lead 6h, the fixed 2,307-basin training population, the fixed 400-basin screening subset, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, no continuation beyond epoch 6. Campaign: `embedding_dropout_range_seedA_25k_v001`.
+
+**All five candidates fresh, including `0.10` (binding).** Unlike LR-A's reused `1e-3` reference, no candidate here reuses a historical run — the inherited `0.10` default is retrained fresh for uniform campaign identity/provenance/tracking. The fresh Hidden-size-A H=128 run (`emb128x32_seedA_h128_lr3em4_cap25k_cal`, `embedding_dropout=0.10` already, trained under the tracked-W&B contract) is retained strictly as an optional, read-only reproducibility comparator against the fresh `drop10` candidate — never a sixth member, never a substitute.
+
+**Fidelity reuse + dropout-specific caveat.** Reuses the existing 25k-cap/6-epoch/Seed-A fidelity unchanged. New caveat: dropout can affect optimization speed differently than LR/hidden size, so poor performance at this fidelity is evidence "at this fidelity" only, not absolute rejection — full six-epoch trajectories matter more here than in prior Phase-A axes.
+
+**Evaluation design.** Raw-space median NSE (400-basin screening subset) primary, unchanged; subset remains non-authoritative. Official cadence epochs 3/6; retrospective epochs 1/2/4/5 via the already-qualified `pilot_diagnostic_eval.py`, reused unmodified. Full epoch 1-6 trajectories required for all five candidates. No composite "winner score" and no predefined single winner-selection statistic — consistent with the standing "no single decision statistic" rule.
+
+**Hydrograph rule + explicit non-goal.** The frozen 8-basin `phase_a_validation_hydrograph_panel_v001` panel remains the standing Phase-A sanity check, to be rendered in a later closure task for the provisionally strongest dropout value — not rendered by this entry. Monte-Carlo dropout, stochastic repeated inference, and inference-time-dropout experiments are explicitly out of scope: this campaign characterizes `embedding_dropout` as a training-time hyperparameter only.
+
+**W&B contract.** Adopts the Hidden-size-A standard: default to the reviewed offline-enabled policy, hard-fail a real launch on tracking failure or null-backend resolution, unless explicitly waived.
+
+**Not launched by this entry.** No dropout candidate has been trained, no Slurm job submitted, no code changed — design freeze only. The `embedding_dropout` override plumbing (including making `load_pilot_policy()`'s two hard-equality gates override-aware), continuation-identity guard, and closure-splice launcher/sbatch remain to be implemented in a later, separate task.
 
 ## Stage 1 — Hidden-size range characterization (Phase-A) closed; validation-compatible fixed 8-basin hydrograph panel v001 frozen and accepted (2026-08-10)
 

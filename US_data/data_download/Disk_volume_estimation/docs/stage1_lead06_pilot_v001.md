@@ -1151,3 +1151,31 @@ Accepted findings: H=64 vs H=128 hydrographs show no systematic hydrological sup
 **Evidence.** `.scratch_local/moriah_evidence/phase_a_validation_hydrograph_panel_v001/` and `.tar.gz` (untracked, gitignored); manifest packaging bug fixed (self-referential checksum entry removed), corrected manifest 72/72 OK, archive SHA256 `d88990b30b9452080acf44f46b127c8ad042bdab6b73f604f3ae173cc126d104`.
 
 **Not done.** No sealed-set access, no final Stage 1 hyperparameter selection, no basin reselection, no embedding-dropout work started. **Next:** embedding-dropout design survey; Phase B later revisits LR×hidden-size×dropout jointly.
+
+## Embedding-dropout range characterization (Phase-A) design frozen, not launched (2026-08-11)
+
+Documentation-only design freeze for the next Phase-A one-dimensional range characterization, following Hidden-size-A's closure (immediately above) and the accepted read-only Embedding-Dropout Design Survey earlier in this session. Full decision text: `docs/decision_log.md`'s newest (topmost) 2026-08-11 entry; technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.17.
+
+**Frozen candidate set.** Five new run_ids, varying only `embedding_dropout` (the learned static embedding's `statics_embedding.dropout` field):
+
+| run_id | embedding_dropout | endpoint/interior meaning | hidden_size | learning_rate | status |
+|---|---|---|---|---|---|
+| `emb128x32_seedA_drop00_h128_lr3em4_cap25k_cal` | 0.00 | no-regularization control | 128 (fixed) | 3e-4 (fixed) | design-frozen, not launched — **fresh** |
+| `emb128x32_seedA_drop05_h128_lr3em4_cap25k_cal` | 0.05 | light regularization | 128 (fixed) | 3e-4 (fixed) | design-frozen, not launched — **fresh** |
+| `emb128x32_seedA_drop10_h128_lr3em4_cap25k_cal` | 0.10 | inherited historical default | 128 (fixed) | 3e-4 (fixed) | design-frozen, not launched — **fresh, not a reuse** |
+| `emb128x32_seedA_drop20_h128_lr3em4_cap25k_cal` | 0.20 | moderate regularization | 128 (fixed) | 3e-4 (fixed) | design-frozen, not launched — **fresh** |
+| `emb128x32_seedA_drop40_h128_lr3em4_cap25k_cal` | 0.40 | deliberate high boundary; probes strong regularization | 128 (fixed) | 3e-4 (fixed) | design-frozen, not launched — **fresh** |
+
+A range characterization, not an optimized search grid — no interpolation or added values authorized. Everything else frozen at the LR-A/Hidden-size-A contract: `[128,32]` learned static embedding (tanh activation, shape unchanged — only `dropout` varies), Seed A (967139), `seq_length=24`, output dropout 0.25 (untouched, unrelated regularization axis), Adam, no scheduler, target `qobs_mm_per_h_lead06`, lead 6h, the fixed 2,307-basin training population, the fixed 400-basin screening subset, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, no continuation beyond epoch 6. Campaign name: `embedding_dropout_range_seedA_25k_v001`.
+
+**All five fresh, including `0.10` — historical H=128 run kept read-only.** Unlike LR-A's reused `1e-3` reference, no candidate here is reused from history — not even `drop10`, despite `0.10` being the inherited default already trained inside every prior campaign. The fresh Hidden-size-A H=128 run (`emb128x32_seedA_h128_lr3em4_cap25k_cal`, listed in the Hidden-size-A tables above, `embedding_dropout=0.10` already, trained under the mandatory tracked-W&B contract) is the closest nominally-equivalent historical run and remains a read-only, non-pooled, non-substitute reproducibility comparator against `drop10` only — never a sixth candidate. That comparison is deferred until after the fresh `drop10` run completes.
+
+**Fidelity reuse + dropout-specific caveat.** Reuses the existing 25k-cap/6-epoch/Seed-A fidelity unchanged. New: dropout can affect optimization speed differently than LR/hidden size, so poor performance at this fidelity reflects this fidelity only, not absolute rejection — full six-epoch trajectories matter more here than for LR-A or Hidden-size-A.
+
+**W&B contract.** Adopts the Hidden-size-A standard: the campaign launcher must default to the reviewed offline-enabled policy and hard-fail a real launch on tracking failure or null-backend resolution, unless explicitly waived.
+
+**Evaluation plan.** Raw-space median NSE (400-basin subset) primary, subset non-authoritative. Official cadence epochs 3/6; retrospective epochs 1/2/4/5 via the existing `pilot_diagnostic_eval.py`; full epoch 1-6 trajectories required for all five candidates. No composite winner score.
+
+**Hydrograph rule + non-goal.** The frozen 8-basin `phase_a_validation_hydrograph_panel_v001` panel remains the standing sanity check, to be rendered in a later closure task for the strongest tested dropout value — **not rendered by this entry**. Monte-Carlo dropout / stochastic repeated inference / inference-time-dropout experiments are explicitly out of scope; this campaign characterizes `embedding_dropout` as a training-time hyperparameter only.
+
+**Not launched by this entry.** No candidate trained, no Slurm job submitted, no code changed. The `embedding_dropout` override plumbing (including making `load_pilot_policy()`'s two hard-equality gates override-aware), continuation-identity guard, `require_tracking` hard-fail contract, and closure-splice launcher/sbatch remain to be implemented in a later, separate task.
