@@ -1,37 +1,42 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-11 (Embedding-Dropout-A IMPLEMENTATION COMPLETE,
-preparation-only validated, ready for Moriah launch review — still not
-launched. All 8 planned implementation items built: `PilotRunSpec.
-embedding_dropout` override field; per-profile `statics_embedding.dropout`
-`0.1` gate in `load_pilot_policy()` made override-aware (the top-level,
-policy-wide `embedding_dropout: 0.1` gate is deliberately left strict and
-unchanged — see the implementation entry below for rationale);
-`validate_embedding_dropout_override()` +
-`build_nh_config_mapping()` threading (bound `[0,1)`, `0.00` recorded as
-explicit `0.0` never confused with "no override"); manifest/run-identity
-provenance (`embedding_dropout_override`/`resolved_embedding_dropout`);
-`enforce_pilot_embedding_dropout_identity()` continuation-safety guard;
-closure-splice launcher `scripts/run_stage1_embedding_dropout_range_
-seedA_closure.py` + matching `.sbatch` (5 trainable run_ids, historical
-H=128/dropout=0.10 comparator reachable only via `--status-only`); tests
-across all 8 planned categories. Preparation-only validated two ways: the
-pytest suite's real `prepare_pilot_run_only()` calls against a synthetic
-full-union package, plus a standalone non-pytest CLI-subprocess audit for
-all five candidates — both confirm `resolved_embedding_dropout` matches
-each candidate exactly (`0.0/0.05/0.1/0.2/0.4`) with every other frozen
-invariant (`hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`,
-seed 967139, `seq_length=24`) identical across candidates. Full local
-regression suite (minus 6 pre-existing torch/neuralhydrology collection
-errors unrelated to this task): 2070 passed, 5 skipped, 1 pre-existing
-Windows-file-locking flake unrelated to this task. No training launched,
-no Slurm job submitted, nothing committed. See the section immediately
-below for detail; see further below for the design freeze, hidden-size
-closure, hidden-size design freeze, W&B launch-contract qualification,
-LR-A closure, implementation task, design freeze, 50k embedding-shape
-closure, 25k neighborhood screening, `max_updates_per_epoch` calibration,
-prior W&B qualification, `emb128x64_seedA` hydrograph-atlas evaluation,
-and post-`emb128x64_seedA` roadmap entries it builds on.)
+Last updated: 2026-08-13 (Embedding-Dropout-A CLOSED — documentation-only
+closure of the already-complete campaign: five real Moriah training runs
+(`drop00`/`drop05`/`drop10`/`drop20`/`drop40`, `embedding_dropout`
+0.00/0.05/0.10/0.20/0.40, all other settings frozen at the LR-A/
+Hidden-size-A contract), quantitative analysis, reproducibility audit
+against the historical H=128/dropout=0.10 comparator, and the standing
+fixed 8-basin hydrograph sanity check. Embedding dropout is weakly
+sensitive across `0.00`-`0.40` at this fidelity; no candidate robustly
+dominates; `embedding_dropout=0.10` remains the provisional working
+anchor (not proven optimal); final selection deferred to Phase B joint
+HPO. Hydrograph review found no repeated candidate-specific pathology.
+Revised optimization roadmap adopted: (1) reusable Phase-A/HPO campaign
+infrastructure consolidation (with a new durable artifact/evidence
+identity requirement), (2) Sequence-Length-A (`seq_length=
+{12,24,48,72}`, now a bounded/calibratable model parameter, superseding
+earlier wording that permanently excluded it), (3) dynamic-input family
+characterization, (4) Phase B joint HPO. No training, evaluation,
+rendering, or Moriah/h2o compute performed by this entry — closure only.
+See the section immediately below for detail; see further below for the
+implementation task, design freeze, hidden-size closure, hidden-size
+design freeze, W&B launch-contract qualification, LR-A closure,
+50k embedding-shape closure, 25k neighborhood screening,
+`max_updates_per_epoch` calibration, prior W&B qualification,
+`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
+roadmap entries it builds on.)
+
+## Stage 1 — Embedding-Dropout-A closed: weak sensitivity over `0.00`-`0.40`, `drop10` retained as provisional anchor, hydrograph sanity check clean, revised Phase-A/Phase-B roadmap adopted (2026-08-13)
+
+Documentation-only closure task recording the completed L.17/L.18 campaign (five real Moriah training runs — `drop10` job 45789423, `drop00` job 45790661, `drop05` job 45790662, `drop20` job 45790663, `drop40` job 45790664 — plus retrospective diagnostic-evaluation jobs 45790996-45791000 and optimizer/update verification job 45791007) and the separately-executed, human-reviewed fixed 8-basin hydrograph sanity check (job 45791211). No training, evaluation, rendering, Moriah/h2o compute, or new analysis performed by this task. Full decision text: `docs/decision_log.md`'s 2026-08-13 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.19; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-13 closing section.
+
+**Result.** Embedding dropout is weakly sensitive over `{0.00,0.05,0.10,0.20,0.40}` at this Seed-A/25k-cap/6-epoch fidelity; no candidate robustly dominates across epoch-6 median NSE, late-window behavior, paired-basin differences, or the hydrograph review; ranking is cadence-sensitive (`drop00` leads epoch 6, `drop10` has the strongest late-window summary and best single checkpoint, `drop20` is among the most stable late-window candidates); `drop40` shows no validation-performance cliff. Fresh `drop10` and the historical H=128/dropout=0.10 comparator are exactly/deterministically reproducible. `embedding_dropout=0.10` remains the provisional working anchor — not proven optimal, retained because it sits safely inside the broad viable region, has a strong late-window result, and exactly reproduces the historical run. Final selection deferred to Phase B; the tested range must not be aggressively narrowed.
+
+**Hydrograph sanity check.** Frozen 8-basin panel rendered for `drop00`/epoch6, `drop10`/epoch5, `drop20`/epoch6; broad similarity across most basins, basin/event-specific divergences at 3 of 8 basins each implicating a different candidate, no repeated candidate-specific pathology, no contradiction of the quantitative near-tie.
+
+**Revised roadmap (supersedes older wording that permanently excluded sequence length from calibration — see the forward-pointing notes added at this document's 2026-08-05 entry, `docs/decision_log.md`'s 2026-08-05 entry, and `docs/stage1_validation_optimization_foundation.md` Part L.1/L.10; all preserved as historical).** (1) Reusable Phase-A/HPO campaign infrastructure consolidation, including a new durable artifact/evidence self-identification requirement discovered while reviewing this closure's hydrograph evidence (generic filenames/titles become ambiguous once separated from their parent directory — not a defect in, and no regeneration required of, existing evidence). (2) Sequence-Length-A: `seq_length={12,24,48,72}` at the best-supported anchor, now a bounded/calibratable structural parameter. (3) Dynamic-input family characterization. (4) Phase B joint HPO (LR × hidden size × embedding dropout × output dropout).
+
+**Not done by this entry.** No Moriah/h2o access, no Slurm submission, no training or evaluation, no rendering, no production code/tests/config/policy-YAML change, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout/California data accessed, no final Stage 1 embedding-dropout selection.
 
 ## Stage 1 — Embedding-Dropout-A implementation complete, preparation-only validated, ready for Moriah launch review (2026-08-11)
 
@@ -198,7 +203,7 @@ Documentation-only closure (no Moriah access, no Slurm submission, no training/e
 
 **Next approved structural phase (not yet started): existing Seed-A `[128,64]` trajectory continued to 50k vs. new Seed-A `[128,32]` trajectory at 50k.** Design: `max_updates_per_epoch=50000`, target up to epoch 12, official screening at epochs 3/6/9/12, existing early-stopping policy authoritative (stopping-eligible from epoch 6, minimum improvement 0.005, patience 3 eligible screening events), every epoch saved, retrospective checkpoint evaluation usable diagnostically, no cross-fidelity checkpoint reuse. The new `[128,32]` 50k candidate starts from the original Seed-A initialization; the existing `[128,64]` 50k candidate (`emb128x64_seedA_cap_low_cal`) may continue only within its own unchanged candidate identity and fidelity. **Not launched by this entry.**
 
-**Sequence length reframed (adopted, binding for the current model family).** Sequence length is fixed at 24 for the current model family and is **not** an ordinary near-term tuning-funnel hyperparameter — alternative sequence lengths define separate temporal-context model families (different scientific information, antecedent-memory assumptions, input construction, compute/memory cost, and cross-basin response-time interpretation). A later sequence-length study may compare alternative model families against a mature 24-hour model, but that is not part of the current hyperparameter phase. `docs/stage1_validation_optimization_foundation.md` Part L.1's Stage B dimension list is corrected accordingly.
+**Sequence length reframed (adopted, binding for the current model family).** Sequence length is fixed at 24 for the current model family and is **not** an ordinary near-term tuning-funnel hyperparameter — alternative sequence lengths define separate temporal-context model families (different scientific information, antecedent-memory assumptions, input construction, compute/memory cost, and cross-basin response-time interpretation). A later sequence-length study may compare alternative model families against a mature 24-hour model, but that is not part of the current hyperparameter phase. `docs/stage1_validation_optimization_foundation.md` Part L.1's Stage B dimension list is corrected accordingly. **Further revised (2026-08-13, see this document's 2026-08-13 entry and `docs/stage1_validation_optimization_foundation.md` Part L.19):** the Embedding-Dropout-A closure schedules a dedicated Sequence-Length-A characterization (`seq_length={12,24,48,72}`), reframing sequence length as a bounded, structural/calibratable model parameter — this passage is preserved as historical, not rewritten.
 
 **Revised hyperparameter order within the fixed `seq_length=24` model family:** (1) close embedding structure at 50k (`[128,32]` vs. `[128,64]`); (2) learning rate (bounded contrast around 0.001, exact values not yet authorized); (3) LSTM hidden size (bounded capacity contrast, exact candidates not yet authorized); (4) embedding dropout; (5) output dropout; (6) small integration/interaction checks among independently promising settings; (7) Seed-B confirmation for only the top integrated candidates; (8) uncapped authoritative finalists; (9) a separate, later temporal-context model-family study for sequence length. Ordering rationale: expected scientific/optimization impact, dependency/interaction structure, experimental clarity, and operational cost.
 
