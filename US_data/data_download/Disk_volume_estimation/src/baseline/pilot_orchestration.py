@@ -258,6 +258,8 @@ __all__ = [
     "enforce_pilot_hidden_size_identity",
     "EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME",
     "enforce_pilot_embedding_dropout_identity",
+    "SEQ_LENGTH_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_seq_length_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -302,6 +304,16 @@ HIDDEN_SIZE_IDENTITY_STATE_FILENAME = "pilot_hidden_size_identity.json"
 # enforce_pilot_embedding_dropout_identity. Adopted for the
 # Embedding-Dropout-A range-characterization campaign.
 EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME = "pilot_embedding_dropout_identity.json"
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id, resolved_seq_length)
+# identity this run directory was first used for -- an always-active
+# (W&B-independent) safeguard mirroring CAP_IDENTITY_STATE_FILENAME/
+# LR_IDENTITY_STATE_FILENAME/HIDDEN_SIZE_IDENTITY_STATE_FILENAME/
+# EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME; see
+# enforce_pilot_seq_length_identity. Adopted for the Sequence-Length-A
+# range-characterization campaign.
+SEQ_LENGTH_IDENTITY_STATE_FILENAME = "pilot_seq_length_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -958,16 +970,16 @@ def _save_orchestration_state(nh_run_dir, state: dict) -> None:
             os.remove(tmp_name)
 
 
-def _load_cap_identity_record(nh_run_dir) -> "dict | None":
-    path = Path(nh_run_dir) / CAP_IDENTITY_STATE_FILENAME
+def _load_scalar_identity_record(nh_run_dir, state_filename: str) -> "dict | None":
+    path = Path(nh_run_dir) / state_filename
     if not path.is_file():
         return None
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def _save_cap_identity_record(nh_run_dir, record: dict) -> None:
-    path = Path(nh_run_dir) / CAP_IDENTITY_STATE_FILENAME
+def _save_scalar_identity_record(nh_run_dir, state_filename: str, record: dict) -> None:
+    path = Path(nh_run_dir) / state_filename
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -979,25 +991,46 @@ def _save_cap_identity_record(nh_run_dir, record: dict) -> None:
             os.remove(tmp_name)
 
 
-def _load_lr_identity_record(nh_run_dir) -> "dict | None":
-    path = Path(nh_run_dir) / LR_IDENTITY_STATE_FILENAME
-    if not path.is_file():
-        return None
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+def _enforce_pilot_scalar_identity(
+    *,
+    run_identity: dict,
+    nh_run_dir: "str | Path | None",
+    state_filename: str,
+    identity_key: str,
+    axis_label: str,
+    contradiction_detail: str,
+) -> None:
+    """Shared engine underneath every ``enforce_pilot_*_identity`` wrapper
+    (cap, learning-rate, hidden-size, embedding-dropout, seq-length): each
+    wrapper is the documented/tested public entry point and owns its own
+    state filename, ``run_identity`` key, axis label, and contradiction
+    detail text; this function only implements the common
+    load-if-absent/compare-if-present/raise-loudly-on-mismatch mechanics
+    shared by all of them. Not part of the public API -- see any wrapper's
+    docstring (e.g. :func:`enforce_pilot_cap_identity`) for the full
+    always-active, W&B-independent safeguard contract this implements."""
+    if nh_run_dir is None:
+        return
+    nh_run_dir = Path(nh_run_dir)
+    if not nh_run_dir.is_dir():
+        return
 
+    current = {
+        "pilot_policy_name": run_identity["pilot_policy_name"],
+        "run_id": run_identity["run_id"],
+        identity_key: run_identity[identity_key],
+    }
+    record = _load_scalar_identity_record(nh_run_dir, state_filename)
+    if record is None:
+        _save_scalar_identity_record(nh_run_dir, state_filename, current)
+        return
 
-def _save_lr_identity_record(nh_run_dir, record: dict) -> None:
-    path = Path(nh_run_dir) / LR_IDENTITY_STATE_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record, fh, indent=2)
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.remove(tmp_name)
+    if record != current:
+        raise PilotOrchestrationError(
+            f"NH run directory {nh_run_dir} already has a persisted {axis_label} "
+            f"identity {record!r}, which contradicts this call's identity {current!r} "
+            f"-- {contradiction_detail}"
+        )
 
 
 def enforce_pilot_cap_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
@@ -1023,29 +1056,17 @@ def enforce_pilot_cap_identity(*, run_identity: dict, nh_run_dir: "str | Path | 
     :func:`run_pilot` (right after ``existing_nh_run_dir`` is discovered,
     before ``init_pilot_tracking_run`` and before any chunk is trained) and
     the module docstring's restart-safety discipline."""
-    if nh_run_dir is None:
-        return
-    nh_run_dir = Path(nh_run_dir)
-    if not nh_run_dir.is_dir():
-        return
-
-    current = {
-        "pilot_policy_name": run_identity["pilot_policy_name"],
-        "run_id": run_identity["run_id"],
-        "max_updates_per_epoch": run_identity["max_updates_per_epoch"],
-    }
-    record = _load_cap_identity_record(nh_run_dir)
-    if record is None:
-        _save_cap_identity_record(nh_run_dir, current)
-        return
-
-    if record != current:
-        raise PilotOrchestrationError(
-            f"NH run directory {nh_run_dir} already has a persisted cap identity "
-            f"{record!r}, which contradicts this call's identity {current!r} -- "
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=CAP_IDENTITY_STATE_FILENAME,
+        identity_key="max_updates_per_epoch",
+        axis_label="cap",
+        contradiction_detail=(
             "max_updates_per_epoch (capped vs uncapped, or two different int caps) "
             "must never change across a continuation of the same run directory"
-        )
+        ),
+    )
 
 
 def enforce_pilot_learning_rate_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
@@ -1075,50 +1096,17 @@ def enforce_pilot_learning_rate_identity(*, run_identity: dict, nh_run_dir: "str
     or :class:`PilotOrchestrationError` is raised -- before any further
     tracking or training call. See this function's call site in
     :func:`run_pilot`, immediately alongside ``enforce_pilot_cap_identity``."""
-    if nh_run_dir is None:
-        return
-    nh_run_dir = Path(nh_run_dir)
-    if not nh_run_dir.is_dir():
-        return
-
-    current = {
-        "pilot_policy_name": run_identity["pilot_policy_name"],
-        "run_id": run_identity["run_id"],
-        "resolved_learning_rate": run_identity["resolved_learning_rate"],
-    }
-    record = _load_lr_identity_record(nh_run_dir)
-    if record is None:
-        _save_lr_identity_record(nh_run_dir, current)
-        return
-
-    if record != current:
-        raise PilotOrchestrationError(
-            f"NH run directory {nh_run_dir} already has a persisted learning-rate "
-            f"identity {record!r}, which contradicts this call's identity {current!r} "
-            "-- resolved_learning_rate must never change across a continuation of "
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=LR_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_learning_rate",
+        axis_label="learning-rate",
+        contradiction_detail=(
+            "resolved_learning_rate must never change across a continuation of "
             "the same run directory"
-        )
-
-
-def _load_hidden_size_identity_record(nh_run_dir) -> "dict | None":
-    path = Path(nh_run_dir) / HIDDEN_SIZE_IDENTITY_STATE_FILENAME
-    if not path.is_file():
-        return None
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def _save_hidden_size_identity_record(nh_run_dir, record: dict) -> None:
-    path = Path(nh_run_dir) / HIDDEN_SIZE_IDENTITY_STATE_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record, fh, indent=2)
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.remove(tmp_name)
+        ),
+    )
 
 
 def enforce_pilot_hidden_size_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
@@ -1149,50 +1137,17 @@ def enforce_pilot_hidden_size_identity(*, run_identity: dict, nh_run_dir: "str |
     tracking or training call. See this function's call site in
     :func:`run_pilot`, immediately alongside ``enforce_pilot_cap_identity``
     and ``enforce_pilot_learning_rate_identity``."""
-    if nh_run_dir is None:
-        return
-    nh_run_dir = Path(nh_run_dir)
-    if not nh_run_dir.is_dir():
-        return
-
-    current = {
-        "pilot_policy_name": run_identity["pilot_policy_name"],
-        "run_id": run_identity["run_id"],
-        "resolved_hidden_size": run_identity["resolved_hidden_size"],
-    }
-    record = _load_hidden_size_identity_record(nh_run_dir)
-    if record is None:
-        _save_hidden_size_identity_record(nh_run_dir, current)
-        return
-
-    if record != current:
-        raise PilotOrchestrationError(
-            f"NH run directory {nh_run_dir} already has a persisted hidden-size "
-            f"identity {record!r}, which contradicts this call's identity {current!r} "
-            "-- resolved_hidden_size must never change across a continuation of "
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=HIDDEN_SIZE_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_hidden_size",
+        axis_label="hidden-size",
+        contradiction_detail=(
+            "resolved_hidden_size must never change across a continuation of "
             "the same run directory"
-        )
-
-
-def _load_embedding_dropout_identity_record(nh_run_dir) -> "dict | None":
-    path = Path(nh_run_dir) / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
-    if not path.is_file():
-        return None
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def _save_embedding_dropout_identity_record(nh_run_dir, record: dict) -> None:
-    path = Path(nh_run_dir) / EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record, fh, indent=2)
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.remove(tmp_name)
+        ),
+    )
 
 
 def enforce_pilot_embedding_dropout_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
@@ -1214,9 +1169,9 @@ def enforce_pilot_embedding_dropout_identity(*, run_identity: dict, nh_run_dir: 
     training identity, but two different resolved values (whether from
     different overrides, or an override vs. a differing profile default) are
     always a contradiction. ``0.0`` (the drop00 candidate) is a valid,
-    distinct-from-``None`` resolved value here -- the comparison below is a
-    plain dict-equality check, never a truthiness check, so it is never
-    confused with an unset/omitted value.
+    distinct-from-``None`` resolved value here -- the comparison is a plain
+    dict-equality check, never a truthiness check, so it is never confused
+    with an unset/omitted value.
 
     If ``nh_run_dir`` does not exist yet (this candidate's very first call,
     before any NH run directory has been created), this function persists
@@ -1229,29 +1184,59 @@ def enforce_pilot_embedding_dropout_identity(*, run_identity: dict, nh_run_dir: 
     function's call site in :func:`run_pilot`, immediately alongside
     ``enforce_pilot_cap_identity``, ``enforce_pilot_learning_rate_identity``,
     and ``enforce_pilot_hidden_size_identity``."""
-    if nh_run_dir is None:
-        return
-    nh_run_dir = Path(nh_run_dir)
-    if not nh_run_dir.is_dir():
-        return
-
-    current = {
-        "pilot_policy_name": run_identity["pilot_policy_name"],
-        "run_id": run_identity["run_id"],
-        "resolved_embedding_dropout": run_identity["resolved_embedding_dropout"],
-    }
-    record = _load_embedding_dropout_identity_record(nh_run_dir)
-    if record is None:
-        _save_embedding_dropout_identity_record(nh_run_dir, current)
-        return
-
-    if record != current:
-        raise PilotOrchestrationError(
-            f"NH run directory {nh_run_dir} already has a persisted embedding-dropout "
-            f"identity {record!r}, which contradicts this call's identity {current!r} "
-            "-- resolved_embedding_dropout must never change across a continuation of "
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_embedding_dropout",
+        axis_label="embedding-dropout",
+        contradiction_detail=(
+            "resolved_embedding_dropout must never change across a continuation of "
             "the same run directory"
-        )
+        ),
+    )
+
+
+def enforce_pilot_seq_length_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard for the Sequence-Length-A
+    range-characterization campaign: a candidate's resolved ``seq_length`` is
+    this run directory's frozen identity for its entire on-disk lifetime,
+    exactly like ``pilot_policy_name``/``run_id`` and mirroring
+    :func:`enforce_pilot_cap_identity`/:func:`enforce_pilot_learning_rate_identity`/
+    :func:`enforce_pilot_hidden_size_identity`/
+    :func:`enforce_pilot_embedding_dropout_identity`'s design (a
+    seq-length-identity contradiction is a training-safety concern, not a
+    tracking concern, so it must be caught even when W&B tracking is
+    disabled -- this pilot's default).
+
+    Compares ``run_identity["resolved_seq_length"]`` (see
+    ``pilot_tracking.build_pilot_run_identity``), never the
+    ``seq_length_override`` field alone -- an override and an
+    unset-override-that-resolves-to-the-same-policy-default are the same
+    training identity, but two different resolved values are always a
+    contradiction.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id, resolved_seq_length)``
+    triple; every later call for the same directory must match it exactly,
+    or :class:`PilotOrchestrationError` is raised -- before any further
+    tracking or training call. See this function's call site in
+    :func:`run_pilot`, immediately alongside the other four scalar-identity
+    guards."""
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=SEQ_LENGTH_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_seq_length",
+        axis_label="seq-length",
+        contradiction_detail=(
+            "resolved_seq_length must never change across a continuation of "
+            "the same run directory"
+        ),
+    )
 
 
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
@@ -1968,6 +1953,9 @@ def run_pilot(
     # Likewise always active: see enforce_pilot_embedding_dropout_identity's
     # docstring (Embedding-Dropout-A range-characterization campaign).
     enforce_pilot_embedding_dropout_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    # Likewise always active: see enforce_pilot_seq_length_identity's
+    # docstring (Sequence-Length-A range-characterization campaign).
+    enforce_pilot_seq_length_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
     tracking_run = init_pilot_tracking_run(
         pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir, require_tracking=require_tracking

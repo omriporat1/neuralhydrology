@@ -96,6 +96,7 @@ __all__ = [
     "validate_full_population_basin_membership",
     "build_nh_config_mapping",
     "validate_embedding_dropout_override",
+    "apply_scalar_overrides",
     "generate_stage1_nh_config",
     "generate_stage1_full_population_nh_config_bundles",
     "write_generated_config",
@@ -981,14 +982,6 @@ def build_nh_config_mapping(
         raise NHConfigGenerationError(
             f"unknown run_profile_name {run_profile_name!r}; known profiles: {sorted(_RUN_PROFILES)}"
         )
-    if max_updates_per_epoch is not None:
-        validate_max_updates_per_epoch(max_updates_per_epoch)
-    if learning_rate is not None:
-        validate_learning_rate_override(learning_rate)
-    if hidden_size is not None:
-        validate_hidden_size_override(hidden_size)
-    if embedding_dropout is not None:
-        validate_embedding_dropout_override(embedding_dropout)
     temporal = policy["temporal_split"]
     nh_policy = policy["nh"]
 
@@ -1021,29 +1014,21 @@ def build_nh_config_mapping(
     mapping.update(_RUN_PROFILES[run_profile_name])
     # nan_handling_method deliberately absent: hard-exclusion baseline
     # (accepted finding #7); never set as a defensive backstop here.
+    apply_scalar_overrides(
+        mapping,
+        {
+            "max_updates_per_epoch": max_updates_per_epoch,
+            "learning_rate": learning_rate,
+            "hidden_size": hidden_size,
+            "embedding_dropout": embedding_dropout,
+        },
+    )
+    # Unconditional structural check whenever a statics_embedding section is
+    # present, regardless of whether this call declared an embedding_dropout
+    # override -- a profile's own embedding spec must always be valid, not
+    # only when overridden.
     if "statics_embedding" in mapping:
-        if embedding_dropout is not None:
-            # Copy-before-mutate: mapping["statics_embedding"] is still the
-            # exact same dict object as _RUN_PROFILES[run_profile_name]
-            # ["statics_embedding"] after dict.update() above (a shallow
-            # copy) -- mutating it in place would permanently corrupt the
-            # shared module-level profile registry for every future caller
-            # that reuses this run_profile_name. Copy first so this
-            # candidate's override is local to this one mapping.
-            mapping["statics_embedding"] = dict(mapping["statics_embedding"])
-            mapping["statics_embedding"]["dropout"] = embedding_dropout
         validate_statics_embedding_spec(mapping["statics_embedding"])
-    elif embedding_dropout is not None:
-        raise NHConfigGenerationError(
-            f"embedding_dropout override given ({embedding_dropout!r}) but run_profile_name "
-            f"{run_profile_name!r} has no statics_embedding section (raw-static pathway) to override"
-        )
-    if max_updates_per_epoch is not None:
-        mapping["max_updates_per_epoch"] = max_updates_per_epoch
-    if learning_rate is not None:
-        mapping["learning_rate"] = learning_rate
-    if hidden_size is not None:
-        mapping["hidden_size"] = hidden_size
     return mapping
 
 
@@ -1158,6 +1143,98 @@ def validate_statics_embedding_spec(spec: dict) -> None:
     dropout = spec.get("dropout")
     if not isinstance(dropout, (int, float)) or isinstance(dropout, bool) or not (0 <= dropout < 1):
         raise NHConfigGenerationError(f"statics_embedding.dropout must be in [0, 1), got {dropout!r}")
+
+
+# ---------------------------------------------------------------------------
+# Scalar override application registry (Scope D)
+# ---------------------------------------------------------------------------
+#
+# Central whitelist of the approved per-candidate scalar override axes:
+# max_updates_per_epoch, learning_rate, hidden_size, embedding_dropout. Each
+# entry pairs the axis's existing named validator (unchanged -- same
+# exception type/messages as before this registry existed) with where/how
+# its value is written into an already profile-merged NH config mapping.
+# build_nh_config_mapping (below) is still the one place that decides WHICH
+# overrides apply to a given call (via its own named keyword arguments,
+# never an arbitrary override dict); this registry only centralizes the
+# validate+apply mechanics an approved axis shares with the others, per
+# Scope D's "small whitelist/registry-based shared application mechanism"
+# requirement.
+#
+# seq_length is deliberately NOT part of this registry. Unlike these four
+# (optional, None-default, applied AFTER the profile merge so the override
+# always wins over the profile's own value), seq_length is a REQUIRED field
+# written directly into the mapping BEFORE the profile merge and validated
+# via a different, policy-driven closed-set mechanism
+# (pilot_lead06_config.validate_seq_length, invoked unconditionally at the
+# bundle-building layer on whichever seq_length is actually resolved) -- an
+# intentional architectural distinction, not an oversight.
+
+
+def _apply_flat_scalar_override(mapping: dict, mapping_key: str, value) -> None:
+    mapping[mapping_key] = value
+
+
+def _apply_embedding_dropout_override(mapping: dict, mapping_key: str, value) -> None:
+    if "statics_embedding" not in mapping:
+        raise NHConfigGenerationError(
+            f"embedding_dropout override given ({value!r}) but the resolved run profile has no "
+            "statics_embedding section (raw-static pathway) to override"
+        )
+    # Copy-before-mutate: mapping["statics_embedding"] is still the exact
+    # same dict object as _RUN_PROFILES[run_profile_name]["statics_embedding"]
+    # (a shallow copy from dict.update()) -- mutating it in place would
+    # permanently corrupt the shared module-level profile registry for every
+    # future caller that reuses this run_profile_name.
+    mapping["statics_embedding"] = dict(mapping["statics_embedding"])
+    mapping["statics_embedding"][mapping_key] = value
+
+
+_SCALAR_OVERRIDE_REGISTRY = {
+    "max_updates_per_epoch": {
+        "validate": validate_max_updates_per_epoch,
+        "apply": _apply_flat_scalar_override,
+        "mapping_key": "max_updates_per_epoch",
+    },
+    "learning_rate": {
+        "validate": validate_learning_rate_override,
+        "apply": _apply_flat_scalar_override,
+        "mapping_key": "learning_rate",
+    },
+    "hidden_size": {
+        "validate": validate_hidden_size_override,
+        "apply": _apply_flat_scalar_override,
+        "mapping_key": "hidden_size",
+    },
+    "embedding_dropout": {
+        "validate": validate_embedding_dropout_override,
+        "apply": _apply_embedding_dropout_override,
+        "mapping_key": "dropout",
+    },
+}
+
+
+def apply_scalar_overrides(mapping: dict, overrides: "dict[str, object]") -> None:
+    """Validate and apply zero or more registered per-candidate scalar
+    overrides to an already profile-merged NH config ``mapping``, in place.
+    This is the shared mechanism underneath ``build_nh_config_mapping``'s
+    ``max_updates_per_epoch``/``learning_rate``/``hidden_size``/
+    ``embedding_dropout`` parameters. ``None``-valued entries in
+    ``overrides`` are skipped (== "no override for this axis"), consistent
+    with every registered axis's own ``None``-default semantics. A key not
+    already present in :data:`_SCALAR_OVERRIDE_REGISTRY` is rejected loudly
+    -- this is a whitelist, never an arbitrary override dict (Scope D)."""
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        if name not in _SCALAR_OVERRIDE_REGISTRY:
+            raise NHConfigGenerationError(
+                f"unknown scalar override {name!r}; registered overrides: "
+                f"{sorted(_SCALAR_OVERRIDE_REGISTRY)}"
+            )
+        spec = _SCALAR_OVERRIDE_REGISTRY[name]
+        spec["validate"](value)
+        spec["apply"](mapping, spec["mapping_key"], value)
 
 
 def _get_git_commit(cwd=None) -> "str | None":

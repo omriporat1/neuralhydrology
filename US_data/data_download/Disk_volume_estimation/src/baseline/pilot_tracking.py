@@ -266,6 +266,23 @@ def build_pilot_run_identity(
         "target_variable": bundle.target_variable,
         "lead_hours": bundle.lead_hours,
         "seq_length": bundle.seq_length,
+        # Explicit per-candidate seq_length identity (Sequence-Length-A
+        # range-characterization campaign; see docs/decision_log.md and
+        # pilot_lead06_config.build_pilot_bundle). Mirrors
+        # "learning_rate_override"/"resolved_learning_rate" etc. below --
+        # None for every pre-existing pilot run (their seq_length always
+        # comes from the campaign-wide PilotPolicy.seq_length default, never
+        # a per-run override); non-None only for a Sequence-Length-A
+        # candidate that explicitly set PilotRunSpec.seq_length.
+        # "resolved_seq_length" duplicates the always-present "seq_length"
+        # key above (never omitted/None for a real generated config) so the
+        # override/resolved pair is queryable the same way as the other
+        # scalar axes. See pilot_orchestration.
+        # enforce_pilot_seq_length_identity for the continuation-time
+        # safeguard that keeps this value frozen across any Slurm resumption
+        # of the same run directory.
+        "seq_length_override": run_spec.seq_length,
+        "resolved_seq_length": bundle.seq_length,
         "n_train_basins": len(bundle.train_basin_ids),
         "n_validation_basins": len(bundle.validation_basin_ids),
         "n_test_basins": len(bundle.test_basin_ids),

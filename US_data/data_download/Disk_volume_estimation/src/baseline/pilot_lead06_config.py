@@ -170,6 +170,21 @@ class PilotRunSpec:
     # distinct-from-None override (the drop00 candidate) -- always checked
     # with "is not None", never truthiness.
     embedding_dropout: "float | None" = None
+    # Optional per-candidate seq_length override (Sequence-Length-A range-
+    # characterization campaign; see nh_config_generation.validate_seq_length
+    # and docs/decision_log.md). None (the default) means "use the
+    # campaign-wide PilotPolicy.seq_length" -- byte-identical to every
+    # pre-existing pilot run, including the closed six-run matrix and the
+    # LR-A/Hidden-size-A/Embedding-Dropout-A/cap25k/cap50k closure
+    # candidates. When set, validated against the same closed
+    # {12, 24, 48, 72} set as PilotPolicy.seq_length (see
+    # nh_config_generation.validate_seq_length, invoked unconditionally on
+    # whichever seq_length is actually resolved -- no separate structural
+    # validator is needed for this field). Frozen for this run's entire
+    # lifetime; never mutated or overridden at launch time (see
+    # pilot_orchestration's enforce_pilot_seq_length_identity, which mirrors
+    # enforce_pilot_cap_identity's always-active design).
+    seq_length: "int | None" = None
 
 
 @dataclass(frozen=True)
@@ -602,7 +617,14 @@ def build_pilot_bundle(
         package_root=package_root,
         splits_dir=splits_dir,
         lead_hours=pilot_policy.lead_hours,
-        seq_length=pilot_policy.seq_length,
+        # Sequence-Length-A range-characterization campaign: a run_spec's
+        # explicit seq_length override always wins over the campaign-wide
+        # PilotPolicy default, mirroring max_updates_per_epoch/learning_rate/
+        # hidden_size/embedding_dropout's "run_spec override wins" pattern
+        # below -- byte-identical to every pre-existing pilot run, whose
+        # run_spec.seq_length is always None and therefore always falls
+        # through to pilot_policy.seq_length exactly as before.
+        seq_length=(run_spec.seq_length if run_spec.seq_length is not None else pilot_policy.seq_length),
         run_profile_name=run_spec.run_profile_name,
         validation_basin_ids=screening_ids,
         population_role=SCREENING_VALIDATION_POPULATION_ROLE,
