@@ -97,6 +97,8 @@ __all__ = [
     "load_mrms_series",
     "ScaleSpec",
     "derive_comparison_scale",
+    "DisplayWindow",
+    "derive_display_window",
     "compute_compact_event_metrics",
     "render_interpretation_template",
     "render_basin_panel",
@@ -410,6 +412,72 @@ def derive_comparison_scale(
         x_min=x_min, x_max=x_max,
         discharge_min=discharge_min, discharge_max=discharge_max,
         precip_max=precip_max,
+    )
+
+
+@dataclass(frozen=True)
+class DisplayWindow:
+    """A basin/event's *display* window for plotting -- derived from an
+    already-selected, frozen :class:`~src.baseline.hydrograph_atlas_events.EventWindow`
+    by pulling ``window_start`` back to expose more antecedent context,
+    without altering the frozen event's own ``peak_time``/``peak_value``/
+    ``window_start``/``window_end`` (that object is never mutated). Never
+    used for event *selection* -- :func:`derive_display_window` is a purely
+    presentational widening applied after the event/peak identity is
+    already fixed. Exposes ``window_start``/``window_end`` (rather than
+    e.g. ``display_start``/``display_end``) so a :class:`DisplayWindow` is a
+    drop-in substitute anywhere an :class:`EventWindow`-like ``window_start``/
+    ``window_end`` pair is consumed (e.g. :func:`derive_comparison_scale`)."""
+
+    magnitude_class: str
+    peak_time: pd.Timestamp
+    window_start: pd.Timestamp
+    window_end: pd.Timestamp
+    requested_pre_hours: int
+    actual_pre_hours: float
+    clipped_to_series_start: bool
+
+
+def derive_display_window(
+    window: EventWindow, *, min_pre_hours: int, series_start: Optional[pd.Timestamp] = None,
+) -> DisplayWindow:
+    """Derive a wider *display* window from an already-selected
+    :class:`EventWindow`, pulling ``window_start`` back so at least
+    ``min_pre_hours`` precede ``window.peak_time`` -- ``window`` itself
+    (peak identity, its own ``window_start``/``window_end``) is read-only
+    and never modified or re-derived; this never re-runs event selection.
+    ``window_end`` is carried over unchanged (the post-event span is not
+    affected). If the widened start would precede ``series_start``, it is
+    clipped there instead (``clipped_to_series_start=True``) rather than
+    extending past the available data.
+
+    Note on time-alignment: ``window.peak_time`` is the observed event's
+    *physical target-valid time* (see :class:`BasinSeries`). A model with
+    sequence length ``L`` and lead ``lead_hours`` predicting this exact
+    sample used raw input history ending at ``peak_time - lead_hours`` and
+    spanning back ``L`` hours from there -- i.e.
+    ``[peak_time - lead_hours - L + 1h, peak_time - lead_hours]``, not
+    ``[peak_time - L, peak_time]``. Callers labeling ``-L h`` markers
+    relative to ``peak_time`` on a display axis should treat them as
+    nominal antecedent-context reference lines, not as the model's exact
+    raw input boundary."""
+    if min_pre_hours < 0:
+        raise HydrographRenderingError(f"min_pre_hours={min_pre_hours} must be >= 0")
+    requested_start = window.peak_time - pd.Timedelta(hours=min_pre_hours)
+    display_start = min(window.window_start, requested_start)
+    clipped = False
+    if series_start is not None and display_start < series_start:
+        display_start = pd.Timestamp(series_start)
+        clipped = True
+    actual_pre_hours = (window.peak_time - display_start).total_seconds() / 3600.0
+    return DisplayWindow(
+        magnitude_class=window.magnitude_class,
+        peak_time=window.peak_time,
+        window_start=display_start,
+        window_end=window.window_end,
+        requested_pre_hours=min_pre_hours,
+        actual_pre_hours=actual_pre_hours,
+        clipped_to_series_start=clipped,
     )
 
 

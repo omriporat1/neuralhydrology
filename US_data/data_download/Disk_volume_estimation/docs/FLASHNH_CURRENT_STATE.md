@@ -1,30 +1,46 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-13 (Embedding-Dropout-A CLOSED — documentation-only
-closure of the already-complete campaign: five real Moriah training runs
-(`drop00`/`drop05`/`drop10`/`drop20`/`drop40`, `embedding_dropout`
-0.00/0.05/0.10/0.20/0.40, all other settings frozen at the LR-A/
-Hidden-size-A contract), quantitative analysis, reproducibility audit
-against the historical H=128/dropout=0.10 comparator, and the standing
-fixed 8-basin hydrograph sanity check. Embedding dropout is weakly
-sensitive across `0.00`-`0.40` at this fidelity; no candidate robustly
-dominates; `embedding_dropout=0.10` remains the provisional working
-anchor (not proven optimal); final selection deferred to Phase B joint
-HPO. Hydrograph review found no repeated candidate-specific pathology.
-Revised optimization roadmap adopted: (1) reusable Phase-A/HPO campaign
-infrastructure consolidation (with a new durable artifact/evidence
-identity requirement), (2) Sequence-Length-A (`seq_length=
-{12,24,48,72}`, now a bounded/calibratable model parameter, superseding
-earlier wording that permanently excluded it), (3) dynamic-input family
-characterization, (4) Phase B joint HPO. No training, evaluation,
-rendering, or Moriah/h2o compute performed by this entry — closure only.
-See the section immediately below for detail; see further below for the
+Last updated: 2026-08-15 (Sequence-Length-A CLOSED — documentation-only
+closure of the already-complete campaign: four real Moriah training runs
+(`seq12`/`seq24`/`seq48`/`seq72`, `seq_length` = 12/24/48/72, all other
+settings frozen at the Embedding-Dropout-A-closed contract), quantitative
+raw-space/common-support/paired-basin evaluation, and a dedicated
+hydrograph sanity check with a widened antecedent-context display window.
+Same ordering (`seq72 > seq48 > seq24 > seq12`) held at every evaluated
+epoch, across natural-support, common-support-corrected, and paired-basin
+comparisons; hydrograph review consistent, no repeated `seq72`-specific
+pathology. `seq_length=72` adopted as the **provisional** Stage-1 working
+anchor (performance had not clearly saturated by 72h — the upper-bound
+question remains open, not resolved); `seq_length=48` is the nearest
+credible alternative. A new comparative-hydrograph documentation
+convention was frozen (same frozen event/window/scale, all candidates
+overlaid on one panel for small candidate sets). No new training,
+evaluation, rendering, or Moriah/h2o compute performed by this closure
+task itself beyond a Moriah workaround cleanup/re-sync. Next milestone:
+dynamic-input family characterization. See the section immediately below
+for detail; see further below for the Embedding-Dropout-A closure,
 implementation task, design freeze, hidden-size closure, hidden-size
 design freeze, W&B launch-contract qualification, LR-A closure,
 50k embedding-shape closure, 25k neighborhood screening,
 `max_updates_per_epoch` calibration, prior W&B qualification,
 `emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
 roadmap entries it builds on.)
+
+## Stage 1 — Sequence-Length-A closed: `seq_length=72` adopted as provisional working anchor, `seq_length=48` nearest alternative, hydrograph sanity check clean, dynamic-input family characterization next (2026-08-15)
+
+Documentation-only closure task recording the completed campaign (four real Moriah training runs, infrastructure commit `4646a55`, training jobs `45861222`-`45861225`) and the separately-executed, human-reviewed fixed 8-basin hydrograph sanity check plus a supplemental single-basin diagnostic. No new training, evaluation, or rendering performed by this task. Full decision text: `docs/decision_log.md`'s 2026-08-15 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.20; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-15 closing section.
+
+**Result.** Four candidates (`seq_length` = 12/24/48/72), all other settings frozen at the Embedding-Dropout-A-closed contract (Seed A, `[128,32]` embedding, `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, 25k-update cap, six epochs). Natural-support raw-space median NSE, a new common-support-corrected evaluation, true per-basin paired comparisons, and late-window behavior all agree on the same ordering at every evaluated epoch: `seq72 > seq48 > seq24 > seq12`. The common-support correction did not materially change the ranking.
+
+**Hydrograph sanity check.** Frozen 8-basin panel rendered for `seq24`/epoch5, `seq48`/epoch6, `seq72`/epoch5, with the displayed antecedent window widened to 72h (presentational only; frozen event/peak identity never re-selected) so all three candidates' longest tested context is visible together. Consistent with the quantitative ranking; no repeated `seq72`-specific pathology. A supplemental diagnostic confirmed basin `06131200`'s severe extreme-event failure is shared identically across all three rendered sequence lengths — a near-zero-flow basin/model pathology, not a `seq72`-specific defect.
+
+**Decision.** `seq_length=72` becomes the provisional Stage-1 working anchor within the tested 12-72h range — the strongest-performing tested value, not proven to be the final optimum. `seq_length=48` remains the nearest credible alternative. Performance had not clearly saturated by 72h; whether longer context would help further is an open question, deferred to later work. No longer-lookback campaign launched by this entry.
+
+**Comparative-hydrograph convention (new).** For small candidate sets: same frozen event/time window and observed hydrograph, shared axes/scales, all candidates overlaid on one panel; event selection independent of candidate performance and never re-run once frozen; only the *displayed* antecedent window may widen, and only for experiments that specifically vary historical context. Not a mandate that every future panel use a 72h window.
+
+**Revised roadmap.** (1) Reusable Phase-A/HPO campaign infrastructure consolidation — unaffected, still pending. (2) Sequence-Length-A — closed by this entry. (3) Dynamic-input family characterization — next milestone, at the new `seq_length=72` anchor. (4) Phase B joint HPO — still deferred.
+
+**Not done by this entry.** No Moriah/h2o access beyond sync/verification of a previously identified temporary workaround, no new Slurm submission, no evaluation of any sequence length beyond 72h, no dynamic-input-family characterization started, no Phase B started, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout/California data accessed, no final Stage 1 sequence-length selection beyond the provisional working anchor.
 
 ## Stage 1 — Embedding-Dropout-A closed: weak sensitivity over `0.00`-`0.40`, `drop10` retained as provisional anchor, hydrograph sanity check clean, revised Phase-A/Phase-B roadmap adopted (2026-08-13)
 

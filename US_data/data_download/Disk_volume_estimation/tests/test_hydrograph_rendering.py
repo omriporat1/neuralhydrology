@@ -30,6 +30,8 @@ from src.baseline.hydrograph_rendering import (
     compute_compact_event_metrics,
     compute_target_valid_dates,
     derive_comparison_scale,
+    DisplayWindow,
+    derive_display_window,
     extract_basin_xr,
     format_basin_area_title,
     load_atlas_selection_csv,
@@ -818,6 +820,83 @@ def test_derive_comparison_scale_restricts_to_window():
     assert scale.discharge_max < 100.0  # the out-of-window spike must not affect the window-scoped scale
     assert scale.x_min == dates[0]
     assert scale.x_max == dates[2]
+
+
+# ---------------------------------------------------------------------------
+# Sequence-Length-A hydrograph sanity check -- derive_display_window
+# ---------------------------------------------------------------------------
+
+def _make_event_window(*, peak_time, pre_hours=24, post_hours=48):
+    return EventWindow(
+        magnitude_class="high", peak_time=peak_time, peak_value=42.0,
+        window_start=peak_time - pd.Timedelta(hours=pre_hours),
+        window_end=peak_time + pd.Timedelta(hours=post_hours),
+        window_clipped=False, n_missing_in_window=0,
+    )
+
+
+def test_derive_display_window_extends_start_preserves_peak_and_end():
+    peak_time = pd.Timestamp("2023-03-10 12:00")
+    window = _make_event_window(peak_time=peak_time)  # default 24h pre / 48h post
+    display = derive_display_window(window, min_pre_hours=72)
+
+    assert display.peak_time == window.peak_time
+    assert display.window_end == window.window_end
+    assert display.window_start == peak_time - pd.Timedelta(hours=72)
+    assert display.actual_pre_hours == pytest.approx(72.0)
+    assert display.requested_pre_hours == 72
+    assert display.clipped_to_series_start is False
+    assert display.magnitude_class == window.magnitude_class
+
+
+def test_derive_display_window_does_not_narrow_an_already_wider_window():
+    peak_time = pd.Timestamp("2023-03-10 12:00")
+    # Original event window already has 96h of pre-peak context -- wider
+    # than the requested 72h minimum, so it must be left alone, not shrunk.
+    window = _make_event_window(peak_time=peak_time, pre_hours=96)
+    display = derive_display_window(window, min_pre_hours=72)
+
+    assert display.window_start == window.window_start
+    assert display.actual_pre_hours == pytest.approx(96.0)
+
+
+def test_derive_display_window_does_not_mutate_input_window():
+    peak_time = pd.Timestamp("2023-03-10 12:00")
+    window = _make_event_window(peak_time=peak_time)
+    original_start = window.window_start
+    derive_display_window(window, min_pre_hours=72)
+    assert window.window_start == original_start  # frozen EventWindow untouched
+
+
+def test_derive_display_window_clips_to_series_start():
+    peak_time = pd.Timestamp("2023-03-10 12:00")
+    window = _make_event_window(peak_time=peak_time)
+    series_start = peak_time - pd.Timedelta(hours=30)  # less than the requested 72h
+    display = derive_display_window(window, min_pre_hours=72, series_start=series_start)
+
+    assert display.window_start == series_start
+    assert display.clipped_to_series_start is True
+    assert display.actual_pre_hours == pytest.approx(30.0)
+
+
+def test_derive_display_window_rejects_negative_min_pre_hours():
+    window = _make_event_window(peak_time=pd.Timestamp("2023-03-10 12:00"))
+    with pytest.raises(HydrographRenderingError):
+        derive_display_window(window, min_pre_hours=-1)
+
+
+def test_derive_display_window_is_drop_in_compatible_with_derive_comparison_scale():
+    dates = pd.date_range("2023-01-01", periods=100, freq="h")
+    peak_time = dates[80]
+    obs = np.full(100, 1.0)
+    obs[80] = 100.0
+    bs = _synthetic_basin_series(obs=obs, sim=np.full(100, 1.0), dates=dates)
+    window = _make_event_window(peak_time=peak_time)
+    display = derive_display_window(window, min_pre_hours=72)
+
+    scale = derive_comparison_scale([bs], window=display)
+    assert scale.x_min == display.window_start
+    assert scale.x_max == display.window_end
 
 
 # ---------------------------------------------------------------------------
