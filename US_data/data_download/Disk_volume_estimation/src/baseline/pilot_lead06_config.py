@@ -53,6 +53,7 @@ from .nh_config_generation import (
     read_package_manifest,
     resolve_target_variable,
     validate_dynamic_inputs,
+    validate_dynamic_inputs_override,
     validate_full_population_basin_membership,
     validate_lead_hours,
     validate_seq_length,
@@ -185,6 +186,27 @@ class PilotRunSpec:
     # pilot_orchestration's enforce_pilot_seq_length_identity, which mirrors
     # enforce_pilot_cap_identity's always-active design).
     seq_length: "int | None" = None
+    # Optional per-candidate dynamic-input-variable-set override (Dynamic-
+    # Input-Family-A range-characterization campaign; see
+    # nh_config_generation.validate_dynamic_inputs_override and
+    # docs/decision_log.md). None (the default) means "use the campaign-wide
+    # PilotPolicy's/baseline policy's own binding dynamic_inputs list" --
+    # byte-identical to every pre-existing pilot run, including the closed
+    # six-run matrix and the LR-A/Hidden-size-A/Embedding-Dropout-A/
+    # Sequence-Length-A/cap25k/cap50k closure candidates. When set, must be a
+    # non-empty, duplicate-free tuple of package-advertised dynamic-variable
+    # names, order preserved exactly (validated structurally by
+    # validate_dynamic_inputs_override against the package's actually-
+    # advertised schema -- never re-sorted, never deduplicated-by-set, and
+    # never checked against the baseline policy's exact 8-variable list,
+    # unlike the unconditional package-integrity check every config
+    # generation still performs via validate_dynamic_inputs). A tuple (not a
+    # list) so this frozen dataclass's own instances stay genuinely
+    # immutable/hashable. Frozen for this run's entire lifetime; never
+    # mutated or overridden at launch time (see pilot_orchestration's
+    # enforce_pilot_dynamic_inputs_identity, which mirrors
+    # enforce_pilot_cap_identity's always-active design).
+    dynamic_inputs: "tuple[str, ...] | None" = None
 
 
 @dataclass(frozen=True)
@@ -488,6 +510,7 @@ def build_pilot_bundle_with_validation_scope(
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
     embedding_dropout: "float | None" = None,
+    dynamic_inputs: "list | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
     bundle (task item 1) and ``pilot_full_validation.py``'s full-population
@@ -501,6 +524,16 @@ def build_pilot_bundle_with_validation_scope(
     not treat this bundle as making sealed-period access impossible on its
     own. The pilot's orchestration/screening code is what never invokes
     that period -- see ``pilot_screening_eval.evaluate_screening_checkpoint``.
+
+    ``dynamic_inputs`` (Dynamic-Input-Family-A range-characterization
+    campaign; see ``PilotRunSpec.dynamic_inputs``): None (the default) means
+    "use the baseline policy's own binding dynamic_inputs list", resolved and
+    validated exactly as every pre-existing caller already does (the
+    unconditional package-integrity check below always still runs
+    regardless). A non-None list is validated structurally via
+    ``validate_dynamic_inputs_override`` against the package's actually-
+    advertised schema and used as this bundle's dynamic_inputs verbatim
+    (order preserved), instead of the policy's full list.
     """
     baseline_policy_path = Path(baseline_policy_path)
     package_root = Path(package_root)
@@ -520,8 +553,12 @@ def build_pilot_bundle_with_validation_scope(
     package_manifest = read_package_manifest(package_root)
     package_attribute_columns = read_package_attribute_columns(package_root)
 
-    dynamic_inputs = list(policy["dynamic_inputs"])
-    validate_dynamic_inputs(package_manifest.get("dynamic_variables", []), policy)
+    package_dynamic_variables = list(package_manifest.get("dynamic_variables", []))
+    validate_dynamic_inputs(package_dynamic_variables, policy)
+    if dynamic_inputs is not None:
+        resolved_dynamic_inputs = validate_dynamic_inputs_override(dynamic_inputs, package_dynamic_variables)
+    else:
+        resolved_dynamic_inputs = list(policy["dynamic_inputs"])
 
     static_result = validate_static_attribute_contract(
         policy,
@@ -543,7 +580,7 @@ def build_pilot_bundle_with_validation_scope(
         policy=policy,
         target_variable=target_variable,
         seq_length=seq_length,
-        dynamic_inputs=dynamic_inputs,
+        dynamic_inputs=resolved_dynamic_inputs,
         static_attributes=static_result.columns,
         run_profile_name=run_profile_name,
         max_updates_per_epoch=max_updates_per_epoch,
@@ -566,7 +603,7 @@ def build_pilot_bundle_with_validation_scope(
         lead_hours=lead_hours,
         seq_length=seq_length,
         target_variable=target_variable,
-        dynamic_inputs=dynamic_inputs,
+        dynamic_inputs=resolved_dynamic_inputs,
         static_attribute_result=static_result,
         package_root=str(package_root),
         package_manifest_identity=package_manifest_identity,
@@ -634,6 +671,16 @@ def build_pilot_bundle(
         learning_rate=run_spec.learning_rate,
         hidden_size=run_spec.hidden_size,
         embedding_dropout=run_spec.embedding_dropout,
+        # Dynamic-Input-Family-A range-characterization campaign: a run_spec's
+        # explicit dynamic_inputs override always wins over the baseline
+        # policy's own binding list, mirroring seq_length/max_updates_per_epoch/
+        # learning_rate/hidden_size/embedding_dropout's "run_spec override
+        # wins" pattern above -- byte-identical to every pre-existing pilot
+        # run, whose run_spec.dynamic_inputs is always None and therefore
+        # always falls through to the baseline policy's list exactly as
+        # before. Converted list->tuple->list only insofar as
+        # build_pilot_bundle_with_validation_scope accepts any list/tuple.
+        dynamic_inputs=(list(run_spec.dynamic_inputs) if run_spec.dynamic_inputs is not None else None),
     )
 
 

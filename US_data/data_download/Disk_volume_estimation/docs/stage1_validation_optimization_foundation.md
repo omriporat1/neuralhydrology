@@ -902,6 +902,30 @@ this pilot's existing full-fidelity results — none of which exists yet.
 
 *Not done by this entry.* No Moriah/h2o access beyond sync/verification, no new Slurm submission, no evaluation of any length beyond 72h, no dynamic-input-family characterization started, no Phase B started, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout/California data accessed, no final Stage 1 sequence-length selection beyond the provisional working anchor.
 
+**L.21 — Dynamic-Input-Family-A design frozen (2026-08-16): four-family `P`/`PT`/`PTM`/`PTMW` dynamic-input hierarchy at the `seq_length=72` anchor, gap channels removed from model inputs, dewpoint deliberately omitted from the primary hierarchy, U/V wind kept paired.** Documentation-only design-freeze task, under unchanged commit `dda254b` ("Close Sequence-Length-A and adopt 72-hour working context"), following the accepted read-only Dynamic-Input Family Design Survey earlier in this session and a full-scale (2,307-basin) re-confirmation of that survey's two evidentiary audits. Full decision text: `docs/decision_log.md`'s 2026-08-16 entry (topmost); candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-16 section.
+
+*Gap-flag audit re-confirmed at full scale (`gap_flag_channel_leakage_audit_20260815.json`).* Development-training 57,453,283 admissible windows / 0 MRMS-gap-positive / 0 RTMA-gap-positive / 0 issue-time-flag-positive; development-validation 19,528,664 admissible windows, identically all-zero; package reconciliation 136 MRMS + 2 RTMA = 138 canonical gap timestamps, symmetric difference 0. *Gap-channel decision:* `mrms_qpe_1h_mm_gap`/`rtma_gap` stay in the certified package unchanged (QC/provenance package variables); under the current hard-exclusion admission policy both are constant-zero for every admissible development window, so they are removed from the NH model's `dynamic_inputs` vector (model predictor variables) for this campaign only — not a claim they are useless under a different admission policy, and not a package change/rebuild/version-bump.
+
+*Physical-variable audit re-confirmed at full scale (`dynamic_input_family_audit_20260815.json`).* Six physical `v001-core` variables, no sentinel/clipping/scaling pathology. Moisture redundancy: dewpoint-vs-specific-humidity Pearson ≈0.9512 (85.26M points), Spearman ≈0.9947, seasonal ≈0.925-0.963, temperature-regime ≈0.906-0.967, basin-level median ≈0.964/p95 ≈0.977. Wind components plausible and non-degenerate, no evidence either is redundant alone.
+
+*Moisture decision (adopted, cautious).* `rtma_2sh_kgkg` adopted as the primary single moisture representation for `PTM`/`PTMW`, on grounds of strong empirical redundancy, simplicity, and being a directly sourced moisture mass-fraction — a Phase-A structural simplification, **not** proof dewpoint has zero predictive value. **Must never be justified by the historical (fixed) dewpoint lookup-key bug** — that bug is not scientific evidence against dewpoint. Both-moisture ablation remains a deferred future option.
+
+*Wind decision.* U/V always travel together; no U-only/V-only family; wind inclusion is its own structural step (`PTMW`), not automatic once moisture is included.
+
+*Frozen family matrix.* `P` = `mrms_qpe_1h_mm`. `PT` = `+ rtma_2t_K`. `PTM` = `+ rtma_2sh_kgkg`. `PTMW` = `+ rtma_10u_ms, rtma_10v_ms`. Intentionally 5 physical channels, not 6 — dewpoint omitted from the primary hierarchy, gap flags package-only. `v001-fullmet` (pressure/cloud/visibility/gust/ceiling) explicitly deferred, not implemented.
+
+*Common anchor (unchanged from Sequence-Length-A's closed contract; every candidate varies only `dynamic_inputs`).* Seed A (967139), `[128,32]` embedding (tanh, dropout 0.10), `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, `seq_length=72`, lead 6h, target `qobs_mm_per_h_lead06`, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, fixed development-training/screening populations, strict offline W&B. Campaign: `dynamic_input_family_seedA_25k_v001`.
+
+*Evaluation design.* Raw-space median per-basin NSE (400-basin screening) primary; full epoch 1-6 trajectories; true per-basin paired comparison; late-window (4-6) behavior; transformed-space loss diagnostic-only. Frozen 8-basin hydrograph panel applies at the **standard, non-widened** display window — Sequence-Length-A's 72h display widening was specific to a context-length experiment and does not carry over to a variable-family experiment.
+
+*Rescue policy (rule only, not exercised).* At most one standardized `hidden_size=256` capacity probe for a single weak/ambiguous non-reference family (`PT`/`PTM`/`PTMW`); `P` is the reference and is never rescued; not pre-created/pre-trained; not a second search dimension; not guaranteed to change conclusions; not part of the base four-candidate allowlist.
+
+*Deferred.* Dewpoint/both-moisture ablation, `v001-fullmet`, longer sequence lengths, Phase B, sealed-set evaluation.
+
+*Minimum implementation (already built this same session).* `PilotRunSpec.dynamic_inputs` override; `validate_dynamic_inputs_override()` in `nh_config_generation.py`; resolution threading in `pilot_lead06_config.py` (pre-existing `validate_dynamic_inputs()` package-integrity gate left unchanged); `dynamic_inputs_override`/`resolved_dynamic_inputs` provenance in `pilot_tracking.build_pilot_run_identity()`; new `enforce_pilot_dynamic_inputs_identity()` continuation-safety guard in `pilot_orchestration.py`, mirroring the five existing scalar-identity guards; closure-splice launcher/sbatch mirroring the Sequence-Length-A template, four trainable run_ids, no rescue candidate in the base allowlist.
+
+*Not launched by this entry.* No dynamic-input-family candidate trained, no Slurm job submitted — design freeze only; implementation/preparation-only qualification recorded separately as this session continues.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

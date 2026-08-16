@@ -1,6 +1,46 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-15 (Sequence-Length-A CLOSED — documentation-only
+Last updated: 2026-08-16 (Dynamic-Input-Family-A design frozen, not
+launched — documentation-only design freeze of the next Phase-A
+range-characterization campaign: four dynamic-input families P/PT/PTM/PTMW
+at the Sequence-Length-A-closed `seq_length=72` anchor, gap-QC channels
+removed from model inputs (package unchanged), dewpoint deliberately
+omitted from the primary hierarchy (cautious wording, not a bug-based
+justification), U/V wind kept paired. No candidate launched, no training
+performed. See the section immediately below for detail; see further below
+for the Sequence-Length-A closure, implementation task, design freeze,
+Embedding-Dropout-A closure, implementation task, design freeze,
+hidden-size closure, hidden-size design freeze, W&B launch-contract
+qualification, LR-A closure, 50k embedding-shape closure, 25k neighborhood
+screening, `max_updates_per_epoch` calibration, prior W&B qualification,
+`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
+roadmap entries it builds on.)
+
+## Stage 1 — Dynamic-Input-Family-A design frozen, not launched: four-family P/PT/PTM/PTMW dynamic-input hierarchy at the `seq_length=72` anchor, gap channels removed from model inputs, dewpoint deliberately omitted, U/V wind kept paired (2026-08-16)
+
+Documentation-only design-freeze task, immediately followed in the same session by the campaign's minimum implementation (`PilotRunSpec.dynamic_inputs` override machinery, config-gen/manifest/identity threading, continuation-safety guard, and the `dynamic_input_family_seedA_25k_v001` campaign closure script) — see the implementation entry that follows this one once that work is separately reported closed. Full decision text: `docs/decision_log.md`'s 2026-08-16 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.21; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-16 section.
+
+**Evidence re-confirmed at full 2,307-basin development-training/19,528-basin-window development-validation scale.** Gap-flag audit (`gap_flag_channel_leakage_audit_20260815.json`): 0 MRMS/RTMA flag-positive admissible windows anywhere; package reconciliation clean (138 canonical gap timestamps, symmetric difference 0). Physical-variable audit (`dynamic_input_family_audit_20260815.json`): 6 physical `v001-core` variables, no sentinel/clipping/scaling pathology; dewpoint-vs-specific-humidity Pearson ≈0.9512 globally (Spearman ≈0.9947), consistently strong across seasons/temperature regimes/basins; both directly sourced RTMA fields.
+
+**Gap-channel decision.** `_gap` channels remain in the certified package for QC/provenance (package variables) but leave the NH model `dynamic_inputs` vector for this campaign (model predictor variables) — they are constant-zero for every admissible development input window under current hard exclusion policy. The package itself is not changed or version-bumped for this modeling-input decision.
+
+**Moisture decision (cautious wording, binding).** `rtma_2sh_kgkg` (specific humidity) is the primary single moisture representation. This is a Phase-A structural-simplification choice — strong empirical redundancy with dewpoint, simplicity, avoiding two Kelvin-valued thermal/moisture channels in the smallest family — **not** evidence that dewpoint is inherently inferior, and **not** justified by the historical (fixed) dewpoint lookup-key bug. Both-moisture use remains a possible later ablation.
+
+**Wind decision.** U/V (`rtma_10u_ms`/`rtma_10v_ms`) physically plausible, non-degenerate; always travel together (no U-only/V-only); a separate structural family step, not automatic inclusion.
+
+**Frozen family matrix (the four Dynamic-Input-Family-A candidates — 5 physical channels total, not 6; dewpoint omitted from the hierarchy; both gap flags package-only for this experiment).** P: `mrms_qpe_1h_mm`. PT: + `rtma_2t_K`. PTM: + `rtma_2sh_kgkg`. PTMW: + `rtma_10u_ms`, `rtma_10v_ms`.
+
+**Common anchor (unchanged from the Sequence-Length-A-closed contract).** Seed A (967139), `[128,32]` learned-FC embedding (tanh), `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, `embedding_dropout=0.10` (profile default, unset), `seq_length=72`, lead 6h, target `qobs_mm_per_h_lead06`, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, the fixed development-training population, the fixed ~400-basin development-validation screening population. Every candidate varies only `dynamic_inputs`.
+
+**Rescue policy (rule only, not exercised by this design freeze).** At most one standardized H256 capacity probe if a non-reference family is weak/ambiguous; `P` is reference and is never "rescued"; no pre-created/trained H256 variants; not a second search dimension.
+
+**Deferred.** Dewpoint/both-moisture ablation, `v001-fullmet` (pressure/cloud/visibility/gust/ceiling), longer `seq_length` testing, Phase B, sealed-set evaluation.
+
+**Not done by this entry.** No candidate launched, no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation, no W&B run, no hydrograph panel rendered, no package rebuild, nothing committed.
+
+## Stage 1 — Sequence-Length-A closed: `seq_length=72` adopted as provisional working anchor, `seq_length=48` nearest alternative, hydrograph sanity check clean, dynamic-input family characterization next (2026-08-15)
+
+Documentation-only
 closure of the already-complete campaign: four real Moriah training runs
 (`seq12`/`seq24`/`seq48`/`seq72`, `seq_length` = 12/24/48/72, all other
 settings frozen at the Embedding-Dropout-A-closed contract), quantitative

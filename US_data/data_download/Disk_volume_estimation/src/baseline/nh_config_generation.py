@@ -675,6 +675,56 @@ def validate_dynamic_inputs(dynamic_inputs: list, policy: dict) -> None:
         )
 
 
+def validate_dynamic_inputs_override(dynamic_inputs: list, available_variables: list) -> list:
+    """Structural validator for a per-run ``dynamic_inputs`` override (Dynamic-
+    Input-Family-A range-characterization campaign; see
+    ``pilot_lead06_config.PilotRunSpec.dynamic_inputs`` and
+    ``docs/decision_log.md``). Unlike :func:`validate_dynamic_inputs` (an exact
+    equality gate against the policy's own binding 8-variable list, used
+    unconditionally elsewhere to check the PACKAGE's own advertised schema),
+    this validator accepts any non-empty, duplicate-free list of strings that
+    is a SUBSET of ``available_variables`` (the package's actually-advertised
+    dynamic variables) -- deliberately permissive about which subset/order a
+    caller may request, since restricting *which* package variables a
+    Dynamic-Input-Family-A candidate may use is this campaign's own scientific
+    design choice (see the frozen P/PT/PTM/PTMW family matrix), not a global
+    config-generation policy. Order is preserved exactly as given (never
+    sorted/deduplicated-by-set) -- dynamic_inputs order is a real modeling
+    choice, not incidental. Returns the validated list unchanged (for
+    ``dynamic_inputs = validate_dynamic_inputs_override(...)``-style call
+    sites).
+
+    Deliberately does NOT reject ``*_gap`` fields or any other specific
+    variable name -- that is this campaign's own scientific decision (gap
+    channels stay in the certified package for QC/provenance but are
+    intentionally excluded from the NH model's dynamic_inputs; see
+    docs/decision_log.md), enforced at the Dynamic-Input-Family-A campaign-
+    definition layer (the closure script's own family literals), not here.
+    This function only enforces structural well-formedness against the
+    package's real schema.
+    """
+    if not isinstance(dynamic_inputs, (list, tuple)) or len(dynamic_inputs) == 0:
+        raise NHConfigGenerationError(
+            f"dynamic_inputs override must be a non-empty list, got {dynamic_inputs!r}"
+        )
+    dynamic_inputs = list(dynamic_inputs)
+    if not all(isinstance(v, str) for v in dynamic_inputs):
+        raise NHConfigGenerationError(
+            f"dynamic_inputs override must contain only strings, got {dynamic_inputs!r}"
+        )
+    if len(dynamic_inputs) != len(set(dynamic_inputs)):
+        dupes = sorted({v for v in dynamic_inputs if dynamic_inputs.count(v) > 1})
+        raise NHConfigGenerationError(f"dynamic_inputs override contains duplicate(s): {dupes}")
+    available_set = set(available_variables)
+    missing = [v for v in dynamic_inputs if v not in available_set]
+    if missing:
+        raise NHConfigGenerationError(
+            f"dynamic_inputs override requests variable(s) not advertised by the package: "
+            f"{missing}; package advertises {sorted(available_set)}"
+        )
+    return dynamic_inputs
+
+
 # ---------------------------------------------------------------------------
 # Static-attribute contract (task item 2)
 # ---------------------------------------------------------------------------

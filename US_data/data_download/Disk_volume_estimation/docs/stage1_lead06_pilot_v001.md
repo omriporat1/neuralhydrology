@@ -1254,3 +1254,28 @@ All four share the Embedding-Dropout-A-closed contract: Seed A (967139), `[128,3
 **Revised roadmap.** (1) Reusable Phase-A/HPO campaign infrastructure consolidation — unaffected, still pending. (2) Sequence-Length-A — **closed by this entry.** (3) Dynamic-input family characterization — **next milestone**, at the new `seq_length=72` anchor. (4) Phase B joint HPO — still deferred.
 
 **Not done by this entry.** No Moriah/h2o access beyond sync/verification of the previously identified temporary workaround, no new Slurm submission, no evaluation of any sequence length beyond 72h, no dynamic-input-family characterization started, no Phase B started, no generated evidence committed or staged, no sealed temporal-test/spatial-holdout/California data accessed, no final Stage 1 sequence-length selection beyond the provisional working anchor stated above.
+
+## Dynamic-Input-Family-A design frozen, not launched (2026-08-16)
+
+Documentation-only design-freeze task. Full decision text: `docs/decision_log.md`'s 2026-08-16 entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.21.
+
+**Frozen candidate set (four run_ids, exactly, no rescue candidate).**
+
+| run_id | family | `dynamic_inputs` |
+|---|---|---|
+| `stage1_lead06_pilot_emb128x32_seedA_dynP_seq72_h128_lr3em4_cap25k_cal_v001` | `P` | `mrms_qpe_1h_mm` |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPT_seq72_h128_lr3em4_cap25k_cal_v001` | `PT` | `mrms_qpe_1h_mm`, `rtma_2t_K` |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPTM_seq72_h128_lr3em4_cap25k_cal_v001` | `PTM` | `mrms_qpe_1h_mm`, `rtma_2t_K`, `rtma_2sh_kgkg` |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPTMW_seq72_h128_lr3em4_cap25k_cal_v001` | `PTMW` | `mrms_qpe_1h_mm`, `rtma_2t_K`, `rtma_2sh_kgkg`, `rtma_10u_ms`, `rtma_10v_ms` |
+
+Exact final run_ids and campaign ID are confirmed against repository naming conventions in this session's implementation entry (below); the table above reflects the frozen design intent, prepending the new `dyn{FAMILY}` token immediately after `seedA` and carrying the Sequence-Length-A-closed `seq72_h128_lr3em4_cap25k_cal` suffix forward unchanged, mirroring how each prior Phase-A axis prepended its own varying-dimension token.
+
+**Common anchor.** Seed A (967139), `[128,32]` learned static embedding (tanh activation, embedding dropout 0.10), `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, `seq_length=72`, lead 6h, target `qobs_mm_per_h_lead06`, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, the fixed development-training population, the fixed ~400-basin development-validation screening population, strict offline W&B. Every candidate varies **only** `dynamic_inputs`. Campaign: `dynamic_input_family_seedA_25k_v001`.
+
+**Family rationale (see Part L.21 for full detail).** `P` is the precipitation-only lower-bound/reference family. `PT` adds temperature. `PTM` adds moisture via `rtma_2sh_kgkg` (specific humidity) — dewpoint (`rtma_2d_K`) deliberately omitted from this hierarchy on grounds of strong empirical redundancy (Pearson ≈0.95 at full 2,307-basin scale) and simplicity, **not** because dewpoint has been shown scientifically inferior, and **never** on the grounds of the historical (already-fixed) dewpoint lookup-key bug. `PTMW` adds both wind components together (never split). Both `_gap` channels are excluded from every candidate's `dynamic_inputs` — package-only/QC variables under the current hard-exclusion admission policy, not a package change.
+
+**Evaluation design.** Raw-space median per-basin NSE (400-basin screening) primary; full epoch 1-6 trajectories for all four candidates; true per-basin paired comparison; late-window (epochs 4-6) behavior; transformed-space training loss diagnostic-only. The frozen 8-basin `phase_a_validation_hydrograph_panel_v001` sanity check applies at its **standard, non-widened** display window (Sequence-Length-A's 72h widening does not carry over — this campaign varies input variables, not antecedent context length).
+
+**Rescue policy (rule only).** At most one standardized `hidden_size=256` capacity probe for a single weak/ambiguous non-`P` family; `P` itself is never rescued; not pre-created; not a second search dimension; not part of the base four-candidate allowlist.
+
+**Not launched by this entry.** No candidate trained, no Slurm job submitted. Implementation/preparation-only qualification recorded separately as this session continues.

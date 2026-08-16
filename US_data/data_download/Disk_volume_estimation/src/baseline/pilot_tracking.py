@@ -283,6 +283,25 @@ def build_pilot_run_identity(
         # of the same run directory.
         "seq_length_override": run_spec.seq_length,
         "resolved_seq_length": bundle.seq_length,
+        # Explicit per-candidate dynamic-input-variable-set identity (Dynamic-
+        # Input-Family-A range-characterization campaign; see
+        # docs/decision_log.md and pilot_lead06_config.build_pilot_bundle).
+        # Mirrors "seq_length_override"/"resolved_seq_length" above exactly --
+        # None for every pre-existing pilot run (their dynamic_inputs always
+        # come from the baseline policy's own binding list, never a per-run
+        # override); non-None only for a Dynamic-Input-Family-A candidate
+        # that explicitly set PilotRunSpec.dynamic_inputs. Stored as a list
+        # (never a tuple) so this dict round-trips identically through JSON.
+        # "resolved_dynamic_inputs" duplicates bundle.dynamic_inputs (never
+        # omitted/None for a real generated config) so the override/resolved
+        # pair is queryable the same way as the other axes. See
+        # pilot_orchestration.enforce_pilot_dynamic_inputs_identity for the
+        # continuation-time safeguard that keeps this value frozen across any
+        # Slurm resumption of the same run directory.
+        "dynamic_inputs_override": (
+            list(run_spec.dynamic_inputs) if run_spec.dynamic_inputs is not None else None
+        ),
+        "resolved_dynamic_inputs": list(bundle.dynamic_inputs),
         "n_train_basins": len(bundle.train_basin_ids),
         "n_validation_basins": len(bundle.validation_basin_ids),
         "n_test_basins": len(bundle.test_basin_ids),

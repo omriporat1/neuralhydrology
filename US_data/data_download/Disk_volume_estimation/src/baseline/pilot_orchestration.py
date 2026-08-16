@@ -260,6 +260,8 @@ __all__ = [
     "enforce_pilot_embedding_dropout_identity",
     "SEQ_LENGTH_IDENTITY_STATE_FILENAME",
     "enforce_pilot_seq_length_identity",
+    "DYNAMIC_INPUTS_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_dynamic_inputs_identity",
     "chunk_epoch_targets",
     "screening_epochs_in_chunk",
     "prepare_pilot_run",
@@ -314,6 +316,17 @@ EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME = "pilot_embedding_dropout_identity.js
 # enforce_pilot_seq_length_identity. Adopted for the Sequence-Length-A
 # range-characterization campaign.
 SEQ_LENGTH_IDENTITY_STATE_FILENAME = "pilot_seq_length_identity.json"
+
+# Name of the small JSON record persisted under the NH run directory once it
+# exists, recording which (pilot_policy_name, run_id,
+# resolved_dynamic_inputs) identity this run directory was first used for --
+# an always-active (W&B-independent) safeguard mirroring
+# CAP_IDENTITY_STATE_FILENAME/LR_IDENTITY_STATE_FILENAME/
+# HIDDEN_SIZE_IDENTITY_STATE_FILENAME/
+# EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME/SEQ_LENGTH_IDENTITY_STATE_FILENAME;
+# see enforce_pilot_dynamic_inputs_identity. Adopted for the
+# Dynamic-Input-Family-A range-characterization campaign.
+DYNAMIC_INPUTS_IDENTITY_STATE_FILENAME = "pilot_dynamic_inputs_identity.json"
 
 ACCEPTED_CONTINUATION_FILENAME = "pilot_accepted_continuation.json"
 
@@ -1239,6 +1252,53 @@ def enforce_pilot_seq_length_identity(*, run_identity: dict, nh_run_dir: "str | 
     )
 
 
+def enforce_pilot_dynamic_inputs_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Always-active, W&B-independent safeguard for the Dynamic-Input-Family-A
+    range-characterization campaign: a candidate's resolved
+    ``dynamic_inputs`` list is this run directory's frozen identity for its
+    entire on-disk lifetime, exactly like ``pilot_policy_name``/``run_id``
+    and mirroring :func:`enforce_pilot_cap_identity`/
+    :func:`enforce_pilot_learning_rate_identity`/
+    :func:`enforce_pilot_hidden_size_identity`/
+    :func:`enforce_pilot_embedding_dropout_identity`/
+    :func:`enforce_pilot_seq_length_identity`'s design (a dynamic-inputs
+    identity contradiction is a training-safety concern, not a tracking
+    concern, so it must be caught even when W&B tracking is disabled --
+    this pilot's default).
+
+    Compares ``run_identity["resolved_dynamic_inputs"]`` (see
+    ``pilot_tracking.build_pilot_run_identity``), never the
+    ``dynamic_inputs_override`` field alone -- an override and an
+    unset-override-that-resolves-to-the-same-policy-default are the same
+    training identity, but two different resolved lists (including two
+    lists containing the same variables in a different order) are always a
+    contradiction: order is part of the identity here, since
+    ``resolved_dynamic_inputs`` is compared by plain equality after a JSON
+    round-trip.
+
+    If ``nh_run_dir`` does not exist yet (this candidate's very first call,
+    before any NH run directory has been created), this function persists
+    nothing and returns -- there is nothing yet to contradict. Once a run
+    directory exists, the first call for it persists the current
+    ``run_identity``'s ``(pilot_policy_name, run_id,
+    resolved_dynamic_inputs)`` triple; every later call for the same
+    directory must match it exactly, or :class:`PilotOrchestrationError` is
+    raised -- before any further tracking or training call. See this
+    function's call site in :func:`run_pilot`, immediately alongside the
+    other five scalar-identity guards."""
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity,
+        nh_run_dir=nh_run_dir,
+        state_filename=DYNAMIC_INPUTS_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_dynamic_inputs",
+        axis_label="dynamic-inputs",
+        contradiction_detail=(
+            "resolved_dynamic_inputs must never change across a continuation "
+            "of the same run directory"
+        ),
+    )
+
+
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
     """The sequence of epoch counts each bounded training chunk trains up TO
     (inclusive). The first chunk always ends at
@@ -1956,6 +2016,9 @@ def run_pilot(
     # Likewise always active: see enforce_pilot_seq_length_identity's
     # docstring (Sequence-Length-A range-characterization campaign).
     enforce_pilot_seq_length_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    # Likewise always active: see enforce_pilot_dynamic_inputs_identity's
+    # docstring (Dynamic-Input-Family-A range-characterization campaign).
+    enforce_pilot_dynamic_inputs_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
 
     tracking_run = init_pilot_tracking_run(
         pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir, require_tracking=require_tracking
