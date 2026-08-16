@@ -1279,3 +1279,28 @@ Exact final run_ids and campaign ID are confirmed against repository naming conv
 **Rescue policy (rule only).** At most one standardized `hidden_size=256` capacity probe for a single weak/ambiguous non-`P` family; `P` itself is never rescued; not pre-created; not a second search dimension; not part of the base four-candidate allowlist.
 
 **Not launched by this entry.** No candidate trained, no Slurm job submitted. Implementation/preparation-only qualification recorded separately as this session continues.
+
+## Dynamic-Input-Family-A CLOSED: `PT` adopted as the provisional Stage-1 working family (2026-08-16)
+
+Documentation-only closure task recording the completed campaign. Full decision text: `docs/decision_log.md`'s 2026-08-16 CLOSED entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.22.
+
+**Status table (final).**
+
+| run_id | family | status |
+|---|---|---|
+| `stage1_lead06_pilot_emb128x32_seedA_dynP_seq72_h128_lr3em4_cap25k_cal_v001` | `P` | complete, closed — reference/lower-bound family |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPT_seq72_h128_lr3em4_cap25k_cal_v001` | `PT` | complete, closed — **provisional working family**; best observed checkpoint epoch 3 |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPTM_seq72_h128_lr3em4_cap25k_cal_v001` | `PTM` | complete, closed — no reproducible incremental benefit over `PT` |
+| `stage1_lead06_pilot_emb128x32_seedA_dynPTMW_seq72_h128_lr3em4_cap25k_cal_v001` | `PTMW` | complete, closed — near-tie with `PT` on whole-record/broad event skill; small conditional high-flow edge; nearest broader credible alternative |
+
+All four share the L.21-frozen common anchor: Seed A (967139), `[128,32]` learned static embedding (tanh, dropout 0.10), `hidden_size=128`, `learning_rate=3e-4`, `output_dropout=0.25`, `seq_length=72`, lead 6h, target `qobs_mm_per_h_lead06`, `max_updates_per_epoch=25000`, six epochs, one uninterrupted segment, fixed development-training/screening populations, strict offline W&B. Campaign: `dynamic_input_family_seedA_25k_v001`, implementation commit `a3bf51266859a8706b40cc9e862acab793ce15c7`.
+
+**Whole-record result.** `PT` beats `P` in 63-71% of matched basins at every epoch (median NSE gain ≈0.03-0.06) — the one robust, repeated, basin-general improvement in the campaign. `PT` epoch 3 achieves the strongest observed whole-record skill (median NSE ≈0.3726). `PTM` shows no reproducible incremental benefit over `PT`. `PTMW` is a near-tie with `PT` on whole-record skill (fraction ≈0.43-0.57, sign flips across epochs).
+
+**High-flow/event audit.** 400-basin/1,200-event Q95 audit: `PT` vs `P` clearly positive both conditionally (58-64% of basins) and at the event level (55-61%, peak/volume/shape). `PTMW` vs `PT` shows a small, checkpoint-robust conditional high-flow edge (52-60%) that does **not** translate into a broad event-level peak/volume advantage (near-tie, ~50-51%). Peak timing is tie-dominated (~44-50%) and not discriminative for either comparison. No detectable increase in `PTMW` benefit was observed across the represented severity strata (not a claim severity dependence is ruled out generally).
+
+**Decision.** `PT` — `mrms_qpe_1h_mm` + `rtma_2t_K` — is the **provisional Stage-1 Dynamic-Input-Family-A working family**; not the final optimal family, not globally optimal, not permanently superior to `PTMW`, not proof humidity/wind do not matter. `PT` epoch 3 is the best observed `PT` checkpoint in this specific campaign, not a universal training-budget rule. No H256 rescue probe was warranted or launched. This closes the predictor-family decision only.
+
+**Revised roadmap.** (1) Reusable Phase-A/HPO campaign infrastructure consolidation — unaffected, still pending. (2) Sequence-Length-A — closed. (3) Dynamic-input family characterization — **closed by this entry.** (4) Stage-1 Evaluation Framework v1 + Phase-B Fidelity Design — **next milestone**, named only, not started.
+
+**Not done by this entry.** No new training launched, no H256 rescue run, no Phase B started, no Stage-1 Evaluation Framework v1 implemented, no sealed temporal-test/spatial-holdout/California data accessed, no generated evidence committed or staged beyond the reusable `src/`/`tests/` set and canonical documentation.

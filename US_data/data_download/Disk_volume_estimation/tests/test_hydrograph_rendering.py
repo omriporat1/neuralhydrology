@@ -40,6 +40,7 @@ from src.baseline.hydrograph_rendering import (
     observed_series_for_events,
     render_basin_panel,
     render_compact_panel,
+    render_multi_candidate_basin_panel,
     render_interpretation_template,
     render_stage1_compact_comparison_package,
     render_stage1_hydrographs,
@@ -1067,3 +1068,157 @@ def test_render_stage1_hydrographs_preserves_explicit_selected_epoch(tmp_path):
     assert summary["epoch"] == 6
     manifest = json.loads((out_dir / "rendering_manifest.json").read_text(encoding="utf-8"))
     assert manifest["epoch"] == 6
+
+
+# ---------------------------------------------------------------------------
+# render_multi_candidate_basin_panel -- true N-candidate overlay
+# ---------------------------------------------------------------------------
+
+def _overlay_candidates(*, obs, sim_by_candidate, dates=None):
+    """Build one BasinSeries per candidate sharing the same obs/basin_id."""
+    if dates is None:
+        dates = pd.date_range("2023-01-01", periods=len(obs), freq="h")
+    return {
+        cand_id: _synthetic_basin_series(obs=obs, sim=sim, dates=dates)
+        for cand_id, sim in sim_by_candidate.items()
+    }
+
+
+def test_render_multi_candidate_basin_panel_writes_output_file(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={
+            "P": np.linspace(5, 15, 10), "PT": np.linspace(8, 18, 10),
+            "PTM": np.linspace(7, 17, 10), "PTMW": np.linspace(9, 19, 10),
+        },
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    out_path = tmp_path / "overlay.png"
+    result = render_multi_candidate_basin_panel(
+        series_by_cand, window=window,
+        candidate_labels={"P": "P (ep5)", "PT": "PT (ep3)", "PTM": "PTM (ep5)", "PTMW": "PTMW (ep3)"},
+        out_path=out_path,
+    )
+    assert result == out_path
+    assert out_path.is_file()
+
+
+def test_render_multi_candidate_basin_panel_closes_figure(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={"P": np.linspace(5, 15, 10), "PT": np.linspace(8, 18, 10)},
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    assert plt.get_fignums() == []
+    render_multi_candidate_basin_panel(
+        series_by_cand, window=window, candidate_labels={"P": "P (ep5)", "PT": "PT (ep3)"},
+        out_path=tmp_path / "overlay.png",
+    )
+    assert plt.get_fignums() == []
+
+
+def test_render_multi_candidate_basin_panel_rejects_empty_input(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=5, freq="h")
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[2], peak_value=1.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    with pytest.raises(HydrographRenderingError):
+        render_multi_candidate_basin_panel(
+            {}, window=window, candidate_labels={}, out_path=tmp_path / "overlay.png",
+        )
+
+
+def test_render_multi_candidate_basin_panel_rejects_mismatched_basin_ids(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=5, freq="h")
+    obs = np.linspace(1, 5, 5)
+    bs_a = _synthetic_basin_series(obs=obs, sim=obs, dates=dates)
+    bs_b = BasinSeries(
+        basin_id="OTHER", dates=pd.DatetimeIndex(dates),
+        issue_dates=pd.DatetimeIndex(dates) - pd.Timedelta(hours=LEAD_HOURS),
+        obs_m3s=obs, sim_m3s=obs, admitted_mask=np.ones(5, dtype=bool),
+        area_km2=100.0, n_admitted=5, n_total=5, metrics={},
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[2], peak_value=1.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    with pytest.raises(HydrographRenderingError):
+        render_multi_candidate_basin_panel(
+            {"A": bs_a, "B": bs_b}, window=window, candidate_labels={"A": "A", "B": "B"},
+            out_path=tmp_path / "overlay.png",
+        )
+
+
+def test_render_multi_candidate_basin_panel_rejects_mismatched_observed_series(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=5, freq="h")
+    series_by_cand = {
+        "A": _synthetic_basin_series(obs=[1, 2, 3, 4, 5], sim=[1, 1, 1, 1, 1], dates=dates),
+        "B": _synthetic_basin_series(obs=[1, 2, 3, 4, 999], sim=[1, 1, 1, 1, 1], dates=dates),
+    }
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[2], peak_value=3.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    with pytest.raises(HydrographRenderingError):
+        render_multi_candidate_basin_panel(
+            series_by_cand, window=window, candidate_labels={"A": "A", "B": "B"},
+            out_path=tmp_path / "overlay.png",
+        )
+
+
+def test_render_multi_candidate_basin_panel_rejects_unknown_candidate_order(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=5, freq="h")
+    series_by_cand = _overlay_candidates(obs=[1, 2, 3, 4, 5], sim_by_candidate={"A": [1, 1, 1, 1, 1]}, dates=dates)
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[2], peak_value=3.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    with pytest.raises(HydrographRenderingError):
+        render_multi_candidate_basin_panel(
+            series_by_cand, window=window, candidate_labels={"A": "A"},
+            candidate_order=["A", "NOT_A_CANDIDATE"], out_path=tmp_path / "overlay.png",
+        )
+
+
+def test_render_multi_candidate_basin_panel_legend_has_observed_plus_all_candidates(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={"P": np.linspace(5, 15, 10), "PT": np.linspace(8, 18, 10), "PTM": np.linspace(7, 17, 10)},
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    captured = {}
+    real_subplots = plt.subplots
+
+    def _spy_subplots(*args, **kwargs):
+        fig, ax = real_subplots(*args, **kwargs)
+        captured["ax"] = ax
+        return fig, ax
+
+    orig = rendering_mod.plt.subplots
+    rendering_mod.plt.subplots = _spy_subplots
+    try:
+        render_multi_candidate_basin_panel(
+            series_by_cand, window=window,
+            candidate_labels={"P": "P (ep5)", "PT": "PT (ep3)", "PTM": "PTM (ep5)"},
+            candidate_order=["P", "PT", "PTM"], out_path=tmp_path / "overlay.png",
+        )
+    finally:
+        rendering_mod.plt.subplots = orig
+    labels = [line.get_label() for line in captured["ax"].get_lines()]
+    assert labels == ["observed", "P (ep5)", "PT (ep3)", "PTM (ep5)"]

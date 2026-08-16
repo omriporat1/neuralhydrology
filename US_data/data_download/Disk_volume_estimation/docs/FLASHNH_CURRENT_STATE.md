@@ -1,20 +1,39 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-16 (Dynamic-Input-Family-A design frozen, not
-launched — documentation-only design freeze of the next Phase-A
-range-characterization campaign: four dynamic-input families P/PT/PTM/PTMW
-at the Sequence-Length-A-closed `seq_length=72` anchor, gap-QC channels
-removed from model inputs (package unchanged), dewpoint deliberately
-omitted from the primary hierarchy (cautious wording, not a bug-based
-justification), U/V wind kept paired. No candidate launched, no training
-performed. See the section immediately below for detail; see further below
-for the Sequence-Length-A closure, implementation task, design freeze,
-Embedding-Dropout-A closure, implementation task, design freeze,
-hidden-size closure, hidden-size design freeze, W&B launch-contract
-qualification, LR-A closure, 50k embedding-shape closure, 25k neighborhood
-screening, `max_updates_per_epoch` calibration, prior W&B qualification,
-`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
-roadmap entries it builds on.)
+Last updated: 2026-08-16 (Dynamic-Input-Family-A CLOSED — final Stage 1
+scientific decision: precipitation + temperature (`PT`) adopted as the
+**provisional** Stage-1 Dynamic-Input-Family-A working family, after a
+whole-record base campaign, a true multi-candidate hydrograph-overlay
+review, and a population-level high-flow/event audit. PTM earns no
+reproducible whole-record benefit over PT; PTMW is a near-tie with PT on
+whole-record and broad event-level skill but shows a small, reproducible
+conditional high-flow edge that does not translate into a broad event-level
+peak/volume advantage; no H256 rescue is warranted; PTMW remains documented
+as the nearest broader credible alternative, not dismissed as useless. See
+the section immediately below for detail; see further below for the
+Dynamic-Input-Family-A design freeze, Sequence-Length-A closure,
+implementation task, design freeze, Embedding-Dropout-A closure,
+implementation task, design freeze, hidden-size closure, hidden-size
+design freeze, W&B launch-contract qualification, LR-A closure, 50k
+embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
+calibration, prior W&B qualification, `emb128x64_seedA` hydrograph-atlas
+evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — Dynamic-Input-Family-A CLOSED: `PT` (precipitation + temperature) adopted as the provisional Stage-1 working family; PTM/PTMW not promoted; no H256 rescue warranted (2026-08-16)
+
+Final scientific closure of the Dynamic-Input-Family-A campaign, following the design freeze below, the four-candidate base campaign (whole-record raw-space evaluation across all 6 epochs), a true multi-candidate hydrograph-overlay review (8 frozen basin/event panels, Obs + P + PT + PTM + PTMW on shared axes), and a dedicated population-level high-flow/event audit (400-basin conditional Q90/Q95 analysis plus a deterministic 1,200-event peak/volume/shape/timing audit). This entry closes the **predictor-family decision only** — it does not launch Phase B, does not implement Stage-1 Evaluation Framework v1, and does not launch any new training. Full decision text: `docs/decision_log.md`'s 2026-08-16 CLOSED entry (topmost); technical detail: `docs/stage1_validation_optimization_foundation.md` Part L.22; candidate-level detail: `docs/stage1_lead06_pilot_v001.md`'s new 2026-08-16 closing section. Campaign implementation/training commit `a3bf51266859a8706b40cc9e862acab793ce15c7` — the scientific campaign state against which the closure figure/evidence pack was generated. The scientific closure decision and reusable evaluation tooling are recorded in a separate closure commit on top of this campaign commit.
+
+**Whole-record result (400-basin dev-validation screening population, all 6 epochs).** PT beats P in 63-71% of matched basins at every epoch (median NSE gain ≈0.03-0.06 per epoch); this is the one robust, repeated, basin-general improvement found anywhere in the campaign. PT also achieves the campaign's single strongest observed whole-record skill (epoch 3, median NSE ≈0.3726). PTM shows no reproducible incremental benefit over PT (near-zero median diff, basin-improvement fraction oscillating around the 0.5 coin-flip line across epochs). PTMW is a near-tie with PT on whole-record skill (median diff within ±0.02, fraction PTMW-better ≈0.43-0.57 with multiple sign flips across epochs) — "no reproducible whole-population PTMW advantage over PT" at the whole-record level.
+
+**True hydrograph-overlay review.** The frozen 8-basin panel (Obs + all 4 candidates, shared axes, same event window) showed 3 of the 8 basins (`07261000`, `08072300`, `14301500`) with apparently meaningful PTM/PTMW improvement during specific high-flow events — illustrative only, not population-level evidence, and this observation motivated the population-level event audit below.
+
+**High-flow/event audit (400/400 basins, 1,200 deterministically selected Q95 events, top-3/basin, 72h peak separation, 24h-before+48h-after window, event-weighted and basin-balanced views).** Conditional analysis (flow ≥ basin Q95): PT vs P is clearly positive (58-64% of basins improve on RMSE/KGE/|PBIAS|); PTMW vs PT shows a small-but-checkpoint-robust edge (52-60% of basins) — "real but modest." Event-level analysis: PT vs P remains positive on peak magnitude, event volume, and event shape (55-61%); PTMW vs PT is essentially a near-tie on peak magnitude and event volume (~50-51%) and only a small positive tendency on event shape — the conditional PTMW edge does **not** translate into a broad event-level peak/volume advantage. Peak timing is tie-dominated for both comparisons (~44-50% ties) and is not discriminative. Severity stratification (high `[Q95,Q99)` vs extreme `≥Q99`, note the event-selection protocol itself skews toward severe events): no detectable increase in PTMW benefit was observed across the severity strata represented by the selected event population — this is **not** a claim that severity dependence has been ruled out generally, only that none was detected within this sample. Per-basin cross-check against the 8 frozen overlay basins confirmed the 3 flagged basins (`07261000`, `08072300`, `14301500`) sit in the favorable tail of the 400-basin population, while 2 other frozen basins (`06894200`, `08061540`) show the opposite pattern — a small conditional improvement that reverses into an event-level regression — validating that the overlays are interpretation/sanity evidence, not model-selection votes.
+
+**Final decision (binding, provisional).** `PT` — exactly `mrms_qpe_1h_mm` + `rtma_2t_K` — is adopted as the **provisional Stage-1 Dynamic-Input-Family-A working family**. It is explicitly **not** called "the final optimal dynamic-input family," "globally optimal," "permanently superior to PTMW," or "proof that humidity/wind do not matter." Rationale: (1) PT is the one robust, repeated, basin-general improvement over P; (2) PT achieves the strongest observed whole-record skill; (3) PTM shows no reproducible incremental benefit; (4) PTMW is near-tied with PT on general whole-record skill; (5) PTMW's modest reproducible conditional high-flow advantage does not translate into a broad event-level peak-magnitude or event-volume advantage; (6) the added moisture/wind complexity has not earned promotion over PT at this Stage-1 fidelity; (7) no H256 rescue is warranted by the evidence; (8) PTMW remains documented as the nearest broader credible alternative, not dismissed as useless. PT epoch 3 (median NSE ≈0.3726, 75,000 cumulative optimizer updates) is identified as the **best observed PT checkpoint in this specific Phase-A campaign** — this is not converted into a universal training-budget rule; Dynamic-Input-Family-A closes the predictor-family decision, not the future training-duration decision.
+
+**Reusable evaluation capabilities retained (committed by this entry).** `render_multi_candidate_basin_panel()` (`src/baseline/hydrograph_rendering.py`) — general-purpose true N-candidate overlay renderer (arbitrary candidate set, shared axes, observed-series consistency checks), not Dynamic-Input-specific. `select_high_flow_events()` (`src/baseline/hydrograph_atlas_events.py`) — deterministic, observed-only, candidate-independent high-flow event selector (explicit threshold/separation/window semantics); retained alongside the pre-existing `select_atlas_events()`, which serves a distinct magnitude-stratum purpose. `src/baseline/high_flow_event_metrics.py` (new) — `basin_high_flow_threshold()`, `high_flow_conditional_metrics()`, `event_metrics()`, reusing `raw_space_metrics()` rather than reimplementing metric math. All three, plus their test suites, judged general enough for future HPO-finalist/sequence/architecture/lead-time evaluation work, not campaign scratch.
+
+**Not done by this entry.** No new training launched, no H256 rescue run, no Phase B started, no Stage-1 Evaluation Framework v1 implemented, no sealed temporal-test/spatial-holdout/California data accessed. Campaign-specific drivers (`dynfam_event_audit_runner.py`, `dynfam_event_audit.sbatch`) remain untracked scratch, not committed. Generated figures/reports/evidence remain project-local and gitignored under `.scratch_local/moriah_evidence/dynamic_input_family_a_closure/`.
 
 ## Stage 1 — Dynamic-Input-Family-A design frozen, not launched: four-family P/PT/PTM/PTMW dynamic-input hierarchy at the `seq_length=72` anchor, gap channels removed from model inputs, dewpoint deliberately omitted, U/V wind kept paired (2026-08-16)
 
@@ -37,34 +56,6 @@ Documentation-only design-freeze task, immediately followed in the same session 
 **Deferred.** Dewpoint/both-moisture ablation, `v001-fullmet` (pressure/cloud/visibility/gust/ceiling), longer `seq_length` testing, Phase B, sealed-set evaluation.
 
 **Not done by this entry.** No candidate launched, no Slurm job submitted, no real NeuralHydrology training or checkpoint evaluation, no W&B run, no hydrograph panel rendered, no package rebuild, nothing committed.
-
-## Stage 1 — Sequence-Length-A closed: `seq_length=72` adopted as provisional working anchor, `seq_length=48` nearest alternative, hydrograph sanity check clean, dynamic-input family characterization next (2026-08-15)
-
-Documentation-only
-closure of the already-complete campaign: four real Moriah training runs
-(`seq12`/`seq24`/`seq48`/`seq72`, `seq_length` = 12/24/48/72, all other
-settings frozen at the Embedding-Dropout-A-closed contract), quantitative
-raw-space/common-support/paired-basin evaluation, and a dedicated
-hydrograph sanity check with a widened antecedent-context display window.
-Same ordering (`seq72 > seq48 > seq24 > seq12`) held at every evaluated
-epoch, across natural-support, common-support-corrected, and paired-basin
-comparisons; hydrograph review consistent, no repeated `seq72`-specific
-pathology. `seq_length=72` adopted as the **provisional** Stage-1 working
-anchor (performance had not clearly saturated by 72h — the upper-bound
-question remains open, not resolved); `seq_length=48` is the nearest
-credible alternative. A new comparative-hydrograph documentation
-convention was frozen (same frozen event/window/scale, all candidates
-overlaid on one panel for small candidate sets). No new training,
-evaluation, rendering, or Moriah/h2o compute performed by this closure
-task itself beyond a Moriah workaround cleanup/re-sync. Next milestone:
-dynamic-input family characterization. See the section immediately below
-for detail; see further below for the Embedding-Dropout-A closure,
-implementation task, design freeze, hidden-size closure, hidden-size
-design freeze, W&B launch-contract qualification, LR-A closure,
-50k embedding-shape closure, 25k neighborhood screening,
-`max_updates_per_epoch` calibration, prior W&B qualification,
-`emb128x64_seedA` hydrograph-atlas evaluation, and post-`emb128x64_seedA`
-roadmap entries it builds on.)
 
 ## Stage 1 — Sequence-Length-A closed: `seq_length=72` adopted as provisional working anchor, `seq_length=48` nearest alternative, hydrograph sanity check clean, dynamic-input family characterization next (2026-08-15)
 

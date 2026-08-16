@@ -54,6 +54,7 @@ __all__ = [
     "EventWindow",
     "find_observed_peaks",
     "select_atlas_events",
+    "select_high_flow_events",
 ]
 
 _MAGNITUDE_CLASSES_IN_ORDER = ["moderate", "upper_middle", "high", "extreme"]
@@ -203,6 +204,80 @@ def select_atlas_events(
             n_missing_in_window=n_missing_in_window,
         )
         used_times.add(chosen_time)
+        used_windows.append((window_start, window_end))
+
+    return selected
+
+
+def select_high_flow_events(
+    observed: pd.Series,
+    *,
+    threshold: float,
+    min_separation_hours: int = 72,
+    top_n: int = 3,
+    pre_hours: int = 24,
+    post_hours: int = 48,
+) -> list[EventWindow]:
+    """Select up to ``top_n`` observed high-flow events (declustered peak
+    value >= ``threshold``) for one basin, using observed flow only.
+
+    Distinct from :func:`select_atlas_events` (four magnitude-stratum
+    quantile targets, used only for the frozen 8-basin qualitative overlay
+    panels): this is a simple absolute-threshold top-N ranking, added for
+    the Dynamic-Input-Family-A event/high-flow population audit -- see
+    ``.scratch_local/moriah_evidence/dynamic_input_family_a_event_audit/
+    METHODOLOGY_preregistered.md`` section 2 for the pre-registered rule
+    this implements. ``select_atlas_events`` itself is untouched.
+
+    Every returned :class:`EventWindow` has ``magnitude_class="high_flow"``
+    (not one of ``select_atlas_events``'s four strata). Returned list is
+    ordered by descending observed peak value (index 0 = largest). A basin
+    with zero qualifying peaks returns an empty list (never raises).
+    """
+    if top_n <= 0:
+        raise EventSelectionError(f"top_n must be positive, got {top_n}")
+    if not np.isfinite(threshold):
+        raise EventSelectionError(f"threshold must be finite, got {threshold}")
+
+    peaks = find_observed_peaks(observed, min_separation_hours)
+    qualifying = peaks[peaks.values >= threshold]
+    if qualifying.empty:
+        return []
+
+    tie_break = pd.DataFrame({"value": qualifying.values, "time": qualifying.index})
+    tie_break = tie_break.sort_values(["value", "time"], ascending=[False, True])
+    ranked_times = list(pd.DatetimeIndex(tie_break["time"]))
+    ranked_values = [float(v) for v in tie_break["value"]]
+
+    series_start = observed.index.min()
+    series_end = observed.index.max()
+
+    selected: list[EventWindow] = []
+    used_windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    for chosen_time, chosen_value in zip(ranked_times, ranked_values):
+        if len(selected) >= top_n:
+            break
+        raw_start = chosen_time - pd.Timedelta(hours=pre_hours)
+        raw_end = chosen_time + pd.Timedelta(hours=post_hours)
+        window_start = max(raw_start, series_start)
+        window_end = min(raw_end, series_end)
+        clipped = (window_start != raw_start) or (window_end != raw_end)
+        if any(_windows_overlap(window_start, window_end, s, e) for s, e in used_windows):
+            # Already-declustered by min_separation_hours >= pre_hours +
+            # post_hours (default), so this should not occur in practice;
+            # skip rather than silently return an overlapping window.
+            continue
+        n_missing_in_window = int(observed.loc[window_start:window_end].isna().sum())
+        selected.append(EventWindow(
+            magnitude_class="high_flow",
+            peak_time=chosen_time,
+            peak_value=chosen_value,
+            window_start=window_start,
+            window_end=window_end,
+            window_clipped=bool(clipped),
+            n_missing_in_window=n_missing_in_window,
+        ))
         used_windows.append((window_start, window_end))
 
     return selected

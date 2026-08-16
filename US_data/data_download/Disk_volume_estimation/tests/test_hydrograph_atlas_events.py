@@ -20,6 +20,7 @@ from src.baseline.hydrograph_atlas_events import (
     EventWindow,
     find_observed_peaks,
     select_atlas_events,
+    select_high_flow_events,
 )
 
 
@@ -232,6 +233,94 @@ def test_select_atlas_events_raises_on_invalid_input():
     series = pd.Series([1.0, 2.0, 3.0])  # no DatetimeIndex
     with pytest.raises(EventSelectionError):
         select_atlas_events(series)
+
+
+# ---------------------------------------------------------------------------
+# select_high_flow_events (Dynamic-Input-Family-A event/high-flow audit)
+# ---------------------------------------------------------------------------
+
+def test_select_high_flow_events_empty_when_no_peak_clears_threshold():
+    series = _flat_series_with_spikes(200, {50: 100.0, 150: 90.0})
+    events = select_high_flow_events(series, threshold=1000.0)
+    assert events == []
+
+
+def test_select_high_flow_events_returns_only_qualifying_peaks():
+    series = _flat_series_with_spikes(500, {50: 100.0, 200: 50.0, 350: 80.0})
+    events = select_high_flow_events(series, threshold=75.0, min_separation_hours=24)
+    assert {e.peak_value for e in events} == {100.0, 80.0}
+
+
+def test_select_high_flow_events_ordered_descending_by_peak_value():
+    series = _flat_series_with_spikes(500, {50: 80.0, 200: 100.0, 350: 90.0})
+    events = select_high_flow_events(series, threshold=75.0, min_separation_hours=24)
+    values = [e.peak_value for e in events]
+    assert values == sorted(values, reverse=True)
+
+
+def test_select_high_flow_events_respects_top_n_cap():
+    series = _flat_series_with_spikes(
+        1000, {50: 100.0, 200: 99.0, 350: 98.0, 500: 97.0}
+    )
+    events = select_high_flow_events(series, threshold=90.0, min_separation_hours=24, top_n=2)
+    assert len(events) == 2
+    assert [e.peak_value for e in events] == [100.0, 99.0]
+
+
+def test_select_high_flow_events_all_events_are_high_flow_class():
+    series = _flat_series_with_spikes(500, {50: 100.0, 200: 90.0})
+    events = select_high_flow_events(series, threshold=85.0, min_separation_hours=24)
+    assert all(e.magnitude_class == "high_flow" for e in events)
+
+
+def test_select_high_flow_events_window_bounds_match_pre_post_hours():
+    series = _flat_series_with_spikes(500, {200: 100.0})
+    events = select_high_flow_events(
+        series, threshold=90.0, min_separation_hours=24, pre_hours=24, post_hours=48,
+    )
+    assert len(events) == 1
+    event = events[0]
+    assert event.window_start == event.peak_time - pd.Timedelta(hours=24)
+    assert event.window_end == event.peak_time + pd.Timedelta(hours=48)
+    assert event.window_clipped is False
+
+
+def test_select_high_flow_events_clips_window_at_series_boundary():
+    series = _flat_series_with_spikes(30, {2: 100.0})
+    events = select_high_flow_events(
+        series, threshold=90.0, min_separation_hours=1, pre_hours=24, post_hours=48,
+    )
+    assert len(events) == 1
+    assert events[0].window_clipped is True
+    assert events[0].window_start == series.index.min()
+
+
+def test_select_high_flow_events_rejects_nonpositive_top_n():
+    series = _flat_series_with_spikes(100, {50: 100.0})
+    with pytest.raises(EventSelectionError):
+        select_high_flow_events(series, threshold=50.0, top_n=0)
+
+
+def test_select_high_flow_events_rejects_nonfinite_threshold():
+    series = _flat_series_with_spikes(100, {50: 100.0})
+    with pytest.raises(EventSelectionError):
+        select_high_flow_events(series, threshold=float("nan"))
+
+
+def test_select_high_flow_events_deterministic_across_repeated_calls():
+    series = _flat_series_with_spikes(500, {50: 100.0, 200: 90.0, 350: 95.0})
+    first = select_high_flow_events(series, threshold=85.0, min_separation_hours=24)
+    second = select_high_flow_events(series, threshold=85.0, min_separation_hours=24)
+    assert first == second
+
+
+def test_select_high_flow_events_signature_has_no_predicted_argument():
+    params = list(inspect.signature(select_high_flow_events).parameters)
+    assert params == [
+        "observed", "threshold", "min_separation_hours", "top_n", "pre_hours", "post_hours",
+    ]
+    for name in params:
+        assert not any(frag in name.lower() for frag in _DISALLOWED_PARAM_NAME_FRAGMENTS)
 
 
 # ---------------------------------------------------------------------------

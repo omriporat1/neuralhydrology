@@ -103,6 +103,7 @@ __all__ = [
     "render_interpretation_template",
     "render_basin_panel",
     "render_compact_panel",
+    "render_multi_candidate_basin_panel",
     "render_stage1_hydrographs",
     "render_stage1_compact_comparison_package",
 ]
@@ -802,6 +803,145 @@ def render_compact_panel(
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# True N-candidate overlay panel: one shared observed line plus one
+# predicted line per candidate, all on the SAME axes (as opposed to
+# render_basin_panel/render_compact_panel, which each plot exactly one
+# observed + one predicted line and achieve cross-candidate comparability
+# only by being called once per candidate with a shared ScaleSpec).
+# ---------------------------------------------------------------------------
+
+_OVERLAY_CANDIDATE_COLORS = (
+    "tab:orange", "tab:green", "tab:red", "tab:purple",
+    "tab:brown", "tab:pink", "tab:gray", "tab:olive",
+)
+_OVERLAY_CANDIDATE_LINESTYLES = ("-", "--", "-.", ":")
+
+_OBS_MATCH_ATOL = 1e-6
+_OBS_MATCH_RTOL = 1e-3
+
+
+def render_multi_candidate_basin_panel(
+    basin_series_by_candidate: Mapping[str, BasinSeries],
+    *,
+    window: EventWindow,
+    candidate_labels: Mapping[str, str],
+    out_path,
+    candidate_order: Optional[Sequence[str]] = None,
+    precip_series: Optional[pd.Series] = None,
+    scale: Optional[ScaleSpec] = None,
+    title_prefix: Optional[str] = None,
+) -> Path:
+    """Render ONE panel containing a single shared observed-discharge line
+    plus one predicted-discharge line per candidate, all overlaid on the
+    SAME axes and restricted to ``window`` -- the true N-candidate overlay
+    convention. This is distinct from calling :func:`render_basin_panel`
+    once per candidate (which produces one image per candidate and is only
+    comparable via a shared :class:`ScaleSpec`, never a single combined
+    image).
+
+    All entries in ``basin_series_by_candidate`` must be for the *same*
+    ``basin_id`` and the *same* observed period -- enforced by requiring
+    every candidate's observed series to agree with the first (in
+    ``candidate_order``, or dict insertion order) candidate's observed
+    series wherever both have admitted samples inside ``window`` (within a
+    tight tolerance; observed discharge does not depend on which dynamic
+    inputs a model was trained on, so a mismatch indicates the candidates
+    are not actually comparable -- e.g. different periods or basins -- and
+    is treated as a caller error, not silently overlaid).
+
+    ``candidate_labels`` maps ``candidate_id -> legend label`` (e.g.
+    ``{"PT": "PT (ep3)"}``) so the same primitive serves both the
+    "best-observed-checkpoint-per-family" and "common-epoch" overlay
+    conventions -- the epoch identity lives entirely in the caller-supplied
+    label, not in this function's signature. ``candidate_order`` fixes
+    color/linestyle assignment and legend order; defaults to
+    ``basin_series_by_candidate``'s iteration order.
+
+    Backward compatibility: this is an additive new function alongside
+    :func:`render_basin_panel`/:func:`render_compact_panel`, which are
+    unchanged and remain the supported path for single- or
+    shared-scale-only multi-candidate rendering."""
+    if not basin_series_by_candidate:
+        raise HydrographRenderingError("render_multi_candidate_basin_panel requires at least one candidate")
+
+    basin_ids = {bs.basin_id for bs in basin_series_by_candidate.values()}
+    if len(basin_ids) != 1:
+        raise HydrographRenderingError(
+            f"all candidates must share one basin_id, got {sorted(basin_ids)}"
+        )
+    basin_id = next(iter(basin_ids))
+
+    order = list(candidate_order) if candidate_order is not None else list(basin_series_by_candidate.keys())
+    missing = sorted(set(order) - set(basin_series_by_candidate))
+    if missing:
+        raise HydrographRenderingError(f"candidate_order references unknown candidate(s): {missing}")
+    if not order:
+        raise HydrographRenderingError("candidate_order must not be empty")
+
+    reference_id = order[0]
+    reference_bs = basin_series_by_candidate[reference_id]
+    ref_mask = (
+        np.asarray(reference_bs.admitted_mask, dtype=bool)
+        & (reference_bs.dates >= window.window_start) & (reference_bs.dates <= window.window_end)
+    )
+    ref_obs_by_date = pd.Series(reference_bs.obs_m3s[ref_mask], index=reference_bs.dates[ref_mask])
+
+    for cand_id in order[1:]:
+        bs = basin_series_by_candidate[cand_id]
+        mask = (
+            np.asarray(bs.admitted_mask, dtype=bool)
+            & (bs.dates >= window.window_start) & (bs.dates <= window.window_end)
+        )
+        obs_by_date = pd.Series(bs.obs_m3s[mask], index=bs.dates[mask])
+        common = ref_obs_by_date.index.intersection(obs_by_date.index)
+        if len(common) == 0:
+            continue
+        if not np.allclose(
+            ref_obs_by_date.loc[common].to_numpy(), obs_by_date.loc[common].to_numpy(),
+            atol=_OBS_MATCH_ATOL, rtol=_OBS_MATCH_RTOL,
+        ):
+            raise HydrographRenderingError(
+                f"basin {basin_id!r}: observed discharge for candidate {cand_id!r} does not match "
+                f"candidate {reference_id!r} over their {len(common)} shared admitted timestamp(s) "
+                "in this window -- candidates are not comparable (different period/basin/scaling?)"
+            )
+
+    out_path = Path(out_path)
+    area_title = format_basin_area_title(basin_id, reference_bs.area_km2)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(
+        ref_obs_by_date.index, ref_obs_by_date.to_numpy(),
+        label="observed", color="black", linewidth=1.4, zorder=10,
+    )
+    for i, cand_id in enumerate(order):
+        bs = basin_series_by_candidate[cand_id]
+        mask = (bs.dates >= window.window_start) & (bs.dates <= window.window_end)
+        label = candidate_labels.get(cand_id, cand_id)
+        color = _OVERLAY_CANDIDATE_COLORS[i % len(_OVERLAY_CANDIDATE_COLORS)]
+        linestyle = _OVERLAY_CANDIDATE_LINESTYLES[(i // len(_OVERLAY_CANDIDATE_COLORS)) % len(_OVERLAY_CANDIDATE_LINESTYLES)]
+        ax.plot(bs.dates[mask], bs.sim_m3s[mask], label=label, color=color, linestyle=linestyle, linewidth=1.15)
+
+    ax.set_ylabel("discharge [m^3/s]")
+    if scale is not None:
+        ax.set_xlim(scale.x_min, scale.x_max)
+        ax.set_ylim(scale.discharge_min, scale.discharge_max)
+    else:
+        ax.set_xlim(window.window_start, window.window_end)
+    _add_precip_axis(ax, precip_series, scale)
+    ax.legend(loc="upper right", fontsize=8)
+    title = area_title if not title_prefix else f"{title_prefix}  {area_title}"
+    ax.set_title(title, fontsize=10)
+    ax.tick_params(axis="x", labelrotation=30, labelsize=8)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130)
     plt.close(fig)
     return out_path
 
