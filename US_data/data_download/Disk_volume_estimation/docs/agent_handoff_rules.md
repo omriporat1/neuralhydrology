@@ -1,124 +1,146 @@
 # Agent Handoff Rules — Flash-NH
 
-This file defines how AI coding agents should operate within the Flash-NH repository. All agents (Claude Code, ChatGPT, Copilot, Gemini Code Assist, or any future tool) must follow these rules to keep the repo clean, reproducible, and safe to collaborate on.
+This file is the canonical policy for **multi-agent routing, task handoff, and completion reporting** in Flash-NH.
 
----
+It applies to ChatGPT, Claude Code, Codex, Copilot, and any later coding/review agent.
 
-## 1. What agents may NOT commit without explicit request
+Scientific policy lives in the scientific/current-state docs. Git/artifact/evidence policy lives in `docs/repo_policy.md`. Stable remote host facts live in `docs/remote_operations.md`. Agent-native entrypoints (`CLAUDE.md`, `AGENTS.md`) should point here rather than duplicating this policy.
 
-The following generated artifact types must never be committed unless the user explicitly says "commit this":
+## 1. Scientific authority
 
-- CSV files (intermediate tables, screening results, station lists)
-- Parquet files (processed or cached data)
-- PNG / SVG / PDF figures (hydrographs, plots, maps)
-- Log files and run logs
-- Raw hydrograph data files
-- Cached USGS API responses
-- Report bundles or zipped output directories
-- Temporary diagnostics, profiling output, or scratch files
+Only the user may authorize a change to scientific scope or decision rules.
 
-When in doubt, do not commit. Ask first.
+ChatGPT may help frame, recommend, compare, or route decisions, but it does not authorize scientific changes on the user's behalf.
 
----
+Explicit user approval is required for changes such as:
+- candidate/search-space expansion or alteration;
+- sealed-set access;
+- target/lead/data-admission/split changes;
+- evaluation-rule changes;
+- model/hyperparameter promotion decisions;
+- materially new compute/search scope.
 
-## 2. What agents may commit when requested
+Task prompts should state the approved decision envelope clearly enough that an implementation agent can distinguish ordinary technical execution from a new scientific decision.
 
-The following file types are safe to commit when the user explicitly asks:
+## 2. General handoff principle
 
-- Python source files (`.py`)
-- Documentation and strategy documents (`.md`)
-- Tests and test fixtures
-- Lightweight configuration files (`.yaml`, `.toml`, `.json`, `.cfg`, `.ini`)
-- `.gitignore` and other repo-management files
+Agents should synchronize through concrete project state, not through assumptions about another agent's conversation.
 
----
+Preferred handoff objects are:
 
-## 3. Long-running downloads and processing
+- exact Git commit or clearly identified working-tree state;
+- task objective and scientific scope;
+- relevant current-state/scientific docs;
+- validation/test results;
+- compact evidence paths;
+- unresolved questions requiring a decision.
 
-Scripts that fetch data from external sources (USGS, NOAA, etc.) or perform multi-hour processing must:
+A clean Git commit is the preferred cross-agent implementation/review boundary when practical, but a dirty-tree review is allowed when explicitly intended and clearly scoped.
 
-- Support resumable execution via checkpoints or skip-if-exists logic
-- Write intermediate state to disk so a restart does not repeat completed work
-- Never re-download data that already exists locally unless forced by a flag
-
----
-
-## 4. GitHub push policy
-
-Agents must not push to GitHub (or any remote) unless the user explicitly requests it with a clear instruction such as "push this" or "push to origin". Completing a task does not authorize a push.
-
----
-
-## 5. External downloads policy
-
-Agents must not initiate expensive or time-consuming external downloads (USGS bulk pulls, NWIS queries, S3 fetches, etc.) unless the user explicitly requests it. Proposing a download plan and waiting for approval is the correct default.
-
----
-
-## 6. Output directory convention
-
-All script outputs must be written under a clearly named output directory. Preferred pattern:
-
-```
-reports/<run_name>/
-```
-
-Examples:
-- `reports/flashnh_wy2024_pilot_selection_v001/`
-- `reports/usgs_rbi_screening_2024/`
-
-Outputs must not be written to the repo root, `src/`, `docs/`, or any source-code directory.
-
----
-
-## 7. Required content in final replies
-
-Every agent reply that completes a task must include:
-
-- **Files changed**: list of files created, modified, or deleted
-- **Validation commands run**: exact commands executed (e.g., `python -m pytest`, `git diff --stat`)
-- **Output paths**: full or repo-relative paths to any outputs written
-- **Git status**: result of `git status --short`
-- **Commit hash**: only if a commit was made (include the short SHA)
-
----
-
-## 8. Preferred agent usage
+## 3. Preferred agent roles
 
 | Agent | Preferred role |
 |---|---|
-| **ChatGPT** | Strategy, scientific interpretation, prompt design, code review |
-| **Claude Code** | Larger repo edits, multi-file refactors, debugging across files |
-| **Copilot** | Small local fixes only while quota is constrained |
-| **Gemini Code Assist** | Optional secondary reviewer for code quality or documentation |
+| **ChatGPT** | Scientific strategy, experiment design, interpretation, workflow/routing control, prompt design, cross-agent review |
+| **Claude Code** | Difficult repo integration, multi-file implementation, complex debugging, Slurm/HPC execution, remote evidence workflows |
+| **Codex** | Bounded implementation, focused tests, code archaeology, independent code review, mechanical/refactoring work under a frozen design, overflow engineering |
+| **Copilot** | Micro-edits, autocomplete, tiny local refactors/fixes |
 
-Route tasks to the agent best suited for them. Do not duplicate expensive work across agents.
+These are defaults, not rigid capability boundaries.
 
----
+Use the agent that best matches the task while minimizing duplicated expensive work.
 
-## 9. Reusable prompt template
+Cross-model review is most useful when it adds independent value, for example:
 
-Use or adapt the following template when handing off a task to an agent:
+- Claude implementation -> Codex review of the exact commit/diff;
+- Codex implementation -> Claude review of risky integration/HPC aspects;
+- ChatGPT reviews scientific framing/interpretation regardless of implementation agent.
 
-```
+Do not ask a second agent to reimplement work merely for redundancy.
+
+## 4. Bounded tasks and decision envelopes
+
+A task is suitable for bounded implementation/review when its scientific objective and acceptance criteria are already frozen enough that the agent does not need to invent a new scientific choice.
+
+A task handoff should make clear, when relevant:
+- allowed data/split scope;
+- whether candidate/search-space changes are forbidden;
+- whether HPO/search launch is authorized;
+- whether promotion/selection decisions are authorized;
+- allowed compute budget/fidelity;
+- remote execution mode.
+
+If execution reveals a genuine scientific ambiguity, return it to the user rather than silently expanding the task.
+
+## 5. Commit and push authority
+
+Generated-artifact policy is defined in `docs/repo_policy.md`.
+
+Agents must not push to GitHub or another remote unless the user explicitly authorizes the push.
+
+Agents must not commit automatically unless the task explicitly authorizes a commit.
+
+Completing an implementation does not itself authorize either commit or push.
+
+## 6. Expensive downloads and compute
+
+Agents must not initiate substantial new external downloads, large data acquisition, or materially new compute commitments unless the task explicitly authorizes them.
+
+Once an approved run is launched, an agent may continue through a pre-authorized bounded continuation envelope when specified by the task.
+
+Ordinary technical recovery inside the approved design is allowed; new scientific scope or material new compute/cost requires escalation.
+
+## 7. Output/scratch locations
+
+Canonical location rules are defined in `docs/repo_policy.md`.
+
+Do not invent a new output convention inside a task prompt unless the task genuinely requires one.
+
+## 8. Completion-report convention
+
+Task-completion replies should normally include:
+
+1. **Files changed** — created, modified, or deleted tracked/source files.
+2. **Validation commands run** — exact relevant commands and concise results.
+3. **Output/evidence paths** — repo-relative or full paths to generated outputs/evidence needed for review.
+4. **Git status** — concise, preferably scoped to the Flash-NH project; summarize pre-existing unrelated untracked clutter rather than dumping it.
+5. **Commit hash** — only when a commit was actually made.
+6. **Anomalies / decisions needed** — include when there is anything unexpected, unresolved, or requiring scientific/user judgment.
+
+This is a default reporting contract, not a ceremonial requirement.
+
+For a tiny read-only review, report only what is relevant. For a complex failure, security issue, or formal scientific closure, expand the report as needed.
+
+Do not paste large diffs, full logs, or large tables into the completion message when the underlying artifact can be inspected directly.
+
+## 9. Prompt/handoff template
+
+Use/adapt this lightweight structure when helpful:
+
+```text
 Project: Flash-NH
-Task: <one-sentence description of what to do>
+Task: <one-sentence objective>
 
-Context:
-- Working directory: <repo root or relevant subdirectory>
-- Relevant files: <list key files the agent should read first>
-- Prior work: <brief summary of what has already been done>
+Current state:
+- Git commit / working-tree state: <...>
+- Current milestone/source of truth: <...>
 
-Constraints:
-- Do not commit generated artifacts (CSV, Parquet, PNG, logs, etc.)
-- Do not push to GitHub unless I explicitly say so
-- Do not run external downloads unless I explicitly say so
-- Write outputs to reports/<run_name>/
+Read first:
+- <only relevant files/docs>
 
-When done, report:
-1. Files changed
-2. Validation commands run and their output
-3. Output paths
-4. git status --short
-5. Commit hash (only if committed)
+User-approved decision envelope:
+- Data/split scope: <...>
+- Candidate/search-space changes: <allowed/forbidden>
+- HPO/search launch: <allowed/forbidden>
+- Promotion/selection decisions: <allowed/forbidden>
+- Compute/fidelity budget: <...>
+- Remote execution mode: <local only / detached / bounded continuation / interactive debug / etc.>
+
+Acceptance:
+- <tests/evidence/result required>
+
+When done:
+- follow docs/agent_handoff_rules.md completion-report convention
 ```
+
+Do not repeat stable project rules that already live in `CLAUDE.md`, `AGENTS.md`, `docs/repo_policy.md`, or `docs/remote_operations.md`.
