@@ -114,6 +114,8 @@ Use W&B's run filter/group-by on config fields, not custom tags, since the confi
 
 A W&B "sweep" is an automated hyperparameter search: W&B itself proposes and launches new runs against a search space. **No sweep has been created for this project.** This pilot's six runs are a fixed, hand-specified structural matrix (`config/stage1_lead06_pilot_v001.yaml`), not a sweep's output -- each was/will be launched individually. Real HPO sweeps are explicitly deferred to Stage B (see the foundation doc's adoption sequencing) and are out of scope until Stage B design is frozen.
 
+**Planned Phase-B direction (future, unimplemented -- recorded here only as a pointer, 2026-08-19).** `docs/stage1_phase_b_hpo_evaluation_plan.md` records the accepted *direction* for Phase-B: W&B Bayesian optimization as the intended first adaptive sweep mechanism, alongside a seeded random-search control. **None of this exists yet** -- no sweep config, no sweep-agent/Slurm architecture, and no qualification of W&B's sweep feature against this project's launcher contract. This paragraph does not change any status line above; sweeps remain "not implemented" until a separate implementation task builds and qualifies them.
+
 ## 8. Running / failed / stopped / completed state differences
 
 W&B's own run-state column (visible in the runs table) reflects only whether the **process that called `wandb.init`/`finish`** stayed alive -- it does not know Flash-NH's own stopping semantics. Read it alongside, never instead of, the repository evidence bundle's `run_status` field:

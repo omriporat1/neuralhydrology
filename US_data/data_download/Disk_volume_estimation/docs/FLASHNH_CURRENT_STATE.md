@@ -1,16 +1,17 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-16 (Dynamic-Input-Family-A CLOSED — final Stage 1
-scientific decision: precipitation + temperature (`PT`) adopted as the
-**provisional** Stage-1 Dynamic-Input-Family-A working family, after a
-whole-record base campaign, a true multi-candidate hydrograph-overlay
-review, and a population-level high-flow/event audit. PTM earns no
-reproducible whole-record benefit over PT; PTMW is a near-tie with PT on
-whole-record and broad event-level skill but shows a small, reproducible
-conditional high-flow edge that does not translate into a broad event-level
-peak/volume advantage; no H256 rescue is warranted; PTMW remains documented
-as the nearest broader credible alternative, not dismissed as useless. See
-the section immediately below for detail; see further below for the
+Last updated: 2026-08-19 (Stage-1 Evaluation Framework v1 + Phase-B
+Bayesian HPO Design — documentation-only transition handoff following
+Dynamic-Input-Family-A's closure. Records the accepted scientific
+motivation, data roles, HPO objective, Bayesian-vs-random-control
+methodology, hyperparameter-search framing, fidelity open question,
+Evaluation Framework v1 architecture, evaluation hierarchy, benchmark
+plan, seed strategy, and W&B/Slurm architecture requirement for the next
+phase, all as **decisions already made about design**, not as HPO/sweep/
+event-separator implementation or new training/evaluation. Canonical
+document: `docs/stage1_phase_b_hpo_evaluation_plan.md`. See the section
+immediately below for detail; see further below for the
+Dynamic-Input-Family-A closure this transition follows, and the earlier
 Dynamic-Input-Family-A design freeze, Sequence-Length-A closure,
 implementation task, design freeze, Embedding-Dropout-A closure,
 implementation task, design freeze, hidden-size closure, hidden-size
@@ -18,6 +19,20 @@ design freeze, W&B launch-contract qualification, LR-A closure, 50k
 embedding-shape closure, 25k neighborhood screening, `max_updates_per_epoch`
 calibration, prior W&B qualification, `emb128x64_seedA` hydrograph-atlas
 evaluation, and post-`emb128x64_seedA` roadmap entries it builds on.)
+
+## Stage 1 — Evaluation Framework v1 + Phase-B Bayesian HPO Design: documentation-only transition handoff (2026-08-19)
+
+Documentation-only transition task recording scientific decisions made about the next phase after Dynamic-Input-Family-A's closure, so they are captured before new ChatGPT/Claude sessions and multiple parallel workstreams begin. Full text: `docs/stage1_phase_b_hpo_evaluation_plan.md` (new canonical design/handoff document); decision text: `docs/decision_log.md`'s 2026-08-19 entry (topmost).
+
+**Two parallel tracks adopted.** Track A (Phase-B joint multidimensional HPO, W&B Bayesian search + seeded random-search control, initial objective = median per-basin raw-space NSE on the frozen ~400-basin 2024 development-validation screening subset) and Track B (Evaluation Framework v1: exact-hour categorical/operational metrics including conditional POD, plus a deterministic variable-duration observed-only hydrologic event separator and event diagnostics) proceed in parallel. HPO does not wait for Track B to complete; Track B does not replace the Sweep-v1 HPO objective.
+
+**Data roles, sealed sets unchanged.** ~2,307 development-training basins (`2020-10-14`–`2023-12-31`); the ~400-basin screening subset is a subset of the development population, evaluated on `2024-01-01`–`2024-12-31` — repeated HPO querying makes this population/year part of tuning, not an independent test. 2025 temporal test, non-CA spatial holdout, and California remain sealed and unaccessed by this document, per existing `docs/stage1_scientific_baseline_design.md` §8/§8b/§8c policy (unchanged).
+
+**Not decided by this entry, explicitly open.** Exact Sweep-v1 search-space dimensions/ranges (batch size, forget-gate bias, weight decay, LR schedule, optimizer-fixed-vs-searched all under review); medium-fidelity Phase-B training/evaluation protocol (update cap, epoch budget, cadence — `50k`×`12` is an example under discussion, not frozen); exact W&B sweep-agent/Slurm architecture, Bayesian concurrency, and trial budgets; exact Seed-B finalist count; canonical high-flow threshold(s) and event-separator algorithm. Full open-question register in the new document §15.
+
+**Not done by this entry.** No HPO launched, no W&B sweep implemented, no event separator implemented, no training launched, no new scientific evaluation run, Dynamic-Input-Family-A not reopened, no sealed-set access. `docs/stage1_validation_optimization_foundation.md` (roadmap note only) and `docs/stage1_wandb_user_guide.md` (planned-Phase-B-sweep note, clearly labeled future/unimplemented) received narrow consistency updates; no other source/test/config files touched.
+
+**Next.** Two separate read-only/design-first tasks, not started by this entry: Task A (Phase-B Bayesian HPO Launch Design Review) and Task B (Evaluation Framework v1 Scientific Design). See `docs/stage1_phase_b_hpo_evaluation_plan.md` §16.
 
 ## Stage 1 — Dynamic-Input-Family-A CLOSED: `PT` (precipitation + temperature) adopted as the provisional Stage-1 working family; PTM/PTMW not promoted; no H256 rescue warranted (2026-08-16)
 
