@@ -96,6 +96,8 @@ __all__ = [
     "validate_full_population_basin_membership",
     "build_nh_config_mapping",
     "validate_embedding_dropout_override",
+    "validate_output_dropout_override",
+    "validate_batch_size_override",
     "apply_scalar_overrides",
     "generate_stage1_nh_config",
     "generate_stage1_full_population_nh_config_bundles",
@@ -600,6 +602,8 @@ class GeneratedConfigBundle:
     # same run identity (see pilot_orchestration.
     # enforce_pilot_embedding_dropout_identity).
     embedding_dropout: "float | None" = None
+    output_dropout: "float | None" = None
+    batch_size: "int | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -977,6 +981,8 @@ def build_nh_config_mapping(
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
     embedding_dropout: "float | None" = None,
+    output_dropout: "float | None" = None,
+    batch_size: "int | None" = None,
 ) -> dict:
     """Pure function: assemble the policy/target/structural fields of the
     rendered config. Does not include experiment_name, basin-file paths,
@@ -1071,6 +1077,8 @@ def build_nh_config_mapping(
             "learning_rate": learning_rate,
             "hidden_size": hidden_size,
             "embedding_dropout": embedding_dropout,
+            "output_dropout": output_dropout,
+            "batch_size": batch_size,
         },
     )
     # Unconditional structural check whenever a statics_embedding section is
@@ -1157,6 +1165,18 @@ def validate_embedding_dropout_override(value) -> None:
         raise NHConfigGenerationError(
             f"embedding_dropout override must be in [0, 1), got {value!r}"
         )
+
+
+def validate_output_dropout_override(value) -> None:
+    """Validate CUDALSTM's top-level ``output_dropout`` in NH's [0, 1) domain."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or not (0 <= value < 1):
+        raise NHConfigGenerationError(f"output_dropout override must be a finite real number in [0, 1), got {value!r}")
+
+
+def validate_batch_size_override(value) -> None:
+    """Validate NH's top-level DataLoader batch size."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise NHConfigGenerationError(f"batch_size override must be a positive int, got {value!r}")
 
 
 _ALLOWED_STATICS_EMBEDDING_ACTIVATIONS = ("tanh", "sigmoid", "linear")
@@ -1261,6 +1281,16 @@ _SCALAR_OVERRIDE_REGISTRY = {
         "apply": _apply_embedding_dropout_override,
         "mapping_key": "dropout",
     },
+    "output_dropout": {
+        "validate": validate_output_dropout_override,
+        "apply": _apply_flat_scalar_override,
+        "mapping_key": "output_dropout",
+    },
+    "batch_size": {
+        "validate": validate_batch_size_override,
+        "apply": _apply_flat_scalar_override,
+        "mapping_key": "batch_size",
+    },
 }
 
 
@@ -1320,6 +1350,8 @@ def generate_stage1_nh_config(
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
     embedding_dropout: "float | None" = None,
+    output_dropout: "float | None" = None,
+    batch_size: "int | None" = None,
 ) -> GeneratedConfigBundle:
     policy_path = Path(policy_path)
     package_root = Path(package_root)
@@ -1367,6 +1399,8 @@ def generate_stage1_nh_config(
         learning_rate=learning_rate,
         hidden_size=hidden_size,
         embedding_dropout=embedding_dropout,
+        output_dropout=output_dropout,
+        batch_size=batch_size,
     )
 
     package_manifest_identity = {
@@ -1397,6 +1431,8 @@ def generate_stage1_nh_config(
         learning_rate=learning_rate,
         hidden_size=hidden_size,
         embedding_dropout=embedding_dropout,
+        output_dropout=output_dropout,
+        batch_size=batch_size,
     )
 
 
@@ -1739,6 +1775,10 @@ def write_generated_config(
             if isinstance(full_mapping.get("statics_embedding"), dict)
             else None
         ),
+        "output_dropout_override": bundle.output_dropout,
+        "resolved_output_dropout": full_mapping.get("output_dropout"),
+        "batch_size_override": bundle.batch_size,
+        "resolved_batch_size": full_mapping.get("batch_size"),
         "artifact_sha256": artifact_sha256,
     }
     manifest_path = out_dir / "generation_manifest.json"

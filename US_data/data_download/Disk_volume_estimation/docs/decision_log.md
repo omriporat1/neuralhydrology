@@ -2,6 +2,38 @@
 
 # Decision Log
 
+## 2026-08-20 — Phase-B Task-A decisions and `output_dropout` / `batch_size` plumbing increment
+
+**Scientific/design decisions.** Sweep v1 searches exactly `learning_rate`,
+`hidden_size`, `embedding_dropout`, `output_dropout`, and `batch_size`. Adam
+is fixed. `initial_forget_bias`, weight decay/regularization, learning-rate
+schedules, and optimizer search are excluded from this first joint-search
+scope, not declared permanently irrelevant. Sweep-v1 medium fidelity uses the
+same `max_updates_per_epoch=50,000` across batch sizes: this holds optimizer
+update opportunity constant, not sample exposure, and is a Sweep-v1 policy
+rather than a universal project rule. Raw-space screening occurs every epoch.
+There is no performance-based scientific early stopping; every candidate
+receives the complete predefined budget and the objective is its best observed
+eligible raw-space screening checkpoint within that budget.
+
+**Provisional items.** `output_dropout` is continuous-uniform `0.0`--`0.4`,
+a conservative working range around inherited `0.25`, not a previously
+one-dimensional-characterized optimum. Preferred `batch_size` candidates are
+`{128, 256, 512}`, pending technical/operational qualification. Planning
+direction is approximately 30--40 Bayesian and 10--15 frozen random-control
+trials; exact counts remain open.
+
+**Open items.** Exact epoch budget, final batch-size qualification, exact
+Bayesian/random counts, Bayesian concurrency, W&B/Slurm sweep-agent
+architecture, Seed-B finalist count, higher-fidelity promotion, and Task-B
+Evaluation Framework scientific choices remain open.
+
+**Implementation status.** This implementation increment adds only low-level
+`output_dropout` and `batch_size` override validation, configuration
+threading, identity, provenance, and continuation protection. No HPO candidate
+scheme, W&B sweep/controller, random-control generator, Slurm sweep agent, or
+training run has been implemented or launched; no sealed data were accessed.
+
 Project: Flash-NH — near-real-time and forecast-aware hydrological modeling pipeline.
 
 ## 2026-08-19 — Stage 1 — Evaluation Framework v1 + Phase-B Bayesian HPO Design: documentation-only transition handoff

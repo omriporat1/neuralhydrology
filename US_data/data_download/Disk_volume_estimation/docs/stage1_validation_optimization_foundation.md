@@ -950,6 +950,15 @@ this pilot's existing full-fidelity results — none of which exists yet.
 
 **Post-L.22 transition note (2026-08-19, documentation-only, no new Part-L entry created here).** L.22's roadmap item 4 ("Stage-1 Evaluation Framework v1 + Phase-B Fidelity Design — next milestone, named only") has been expanded into a full design/handoff document: `docs/stage1_phase_b_hpo_evaluation_plan.md`. Summary only — that document, not this note, is canonical: Phase A (LR-A, Hidden-size-A, Embedding-Dropout-A, Sequence-Length-A, Dynamic-Input-Family-A) has closed its one-dimensional structural characterizations; Phase B is now intended as **joint multidimensional HPO** (W&B Bayesian search plus a seeded random-search control, drawn from the same space); the initial Phase-B search objective is median per-basin raw-space NSE on the frozen development-validation screening population, unchanged in kind from Phase A's own evaluation metric; a parallel, richer Evaluation Framework v1 (categorical detection metrics, variable-duration observed-only event evaluation) feeds later promotion/final-interpretation decisions but does not replace the Sweep-v1 search objective. Exact Sweep-v1 search-space dimensions, medium-fidelity training/evaluation protocol, and W&B/Slurm sweep architecture remain explicitly open, to be resolved by the separate Task A/Task B design reviews named in the new document, not by this note.
 
+**2026-08-20 update.** The canonical Phase-B plan now decides the five
+Sweep-v1 axes (`learning_rate`, `hidden_size`, `embedding_dropout`,
+`output_dropout`, `batch_size`), the common `max_updates_per_epoch=50,000`
+medium-fidelity cap, every-epoch raw-space screening, and no
+performance-based early stopping. The total epoch budget, exact trial
+budgets/concurrency, and W&B/Slurm sweep architecture remain open. This update
+supersedes the preceding transition note only where it describes those
+Sweep-v1 details as open; the canonical Phase-B plan remains authoritative.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

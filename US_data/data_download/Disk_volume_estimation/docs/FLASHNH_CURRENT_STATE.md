@@ -1,6 +1,35 @@
 # Flash-NH Current State
 
-Last updated: 2026-08-19 (Stage-1 Evaluation Framework v1 + Phase-B
+## Phase-B Task-A design review and first `output_dropout` / `batch_size` plumbing increment (2026-08-20)
+
+**Sweep-v1 decisions.** The five search axes are `learning_rate`,
+`hidden_size`, `embedding_dropout`, `output_dropout`, and `batch_size`.
+Adam is fixed for Sweep v1. `initial_forget_bias`, weight decay,
+learning-rate schedules, and optimizer search are excluded from this first
+joint-search scope only; they are not declared permanently irrelevant.
+
+**Medium-fidelity policy.** Sweep-v1 candidates use the same
+`max_updates_per_epoch=50,000` across batch sizes, deliberately holding
+optimizer-update opportunity constant rather than sample exposure. Authoritative
+raw-space screening occurs every epoch, and there is no performance-based
+scientific early stopping: each candidate receives the complete predefined
+budget and is scored from its best observed eligible screening checkpoint.
+
+**Provisional and open items.** `output_dropout` has a continuous-uniform
+working range of `0.0`--`0.4` (not previously characterized one-dimensionally).
+The preferred `batch_size` set is `{128, 256, 512}`, pending technical and
+operational qualification. The epoch budget, exact Bayesian/random trial
+counts, and Bayesian concurrency remain open. This implementation increment
+adds `output_dropout`/`batch_size` configuration, identity, and
+provenance plumbing; it creates no HPO controller, W&B sweep, or training run.
+
+Last updated: 2026-08-20 (Phase-B Task-A design review and first local
+`output_dropout` / `batch_size` plumbing increment; no HPO/sweep/training
+launched). Historical 2026-08-19 transition context follows.
+
+## Historical transition context (2026-08-19)
+
+Stage-1 Evaluation Framework v1 + Phase-B
 Bayesian HPO Design — documentation-only transition handoff following
 Dynamic-Input-Family-A's closure. Records the accepted scientific
 motivation, data roles, HPO objective, Bayesian-vs-random-control

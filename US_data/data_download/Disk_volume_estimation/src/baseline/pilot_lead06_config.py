@@ -63,6 +63,8 @@ from .nh_config_generation import (
     validate_learning_rate_override,
     validate_hidden_size_override,
     validate_embedding_dropout_override,
+    validate_output_dropout_override,
+    validate_batch_size_override,
     _get_git_commit,
 )
 from datetime import datetime, timezone
@@ -171,6 +173,8 @@ class PilotRunSpec:
     # distinct-from-None override (the drop00 candidate) -- always checked
     # with "is not None", never truthiness.
     embedding_dropout: "float | None" = None
+    output_dropout: "float | None" = None
+    batch_size: "int | None" = None
     # Optional per-candidate seq_length override (Sequence-Length-A range-
     # characterization campaign; see nh_config_generation.validate_seq_length
     # and docs/decision_log.md). None (the default) means "use the
@@ -301,6 +305,12 @@ def load_pilot_policy(path) -> PilotPolicy:
         run_embedding_dropout = entry.get("embedding_dropout")
         if run_embedding_dropout is not None:
             validate_embedding_dropout_override(run_embedding_dropout)
+        run_output_dropout = entry.get("output_dropout")
+        if run_output_dropout is not None:
+            validate_output_dropout_override(run_output_dropout)
+        run_batch_size = entry.get("batch_size")
+        if run_batch_size is not None:
+            validate_batch_size_override(run_batch_size)
 
         expected_semantics = _EXPECTED_RUN_SEMANTICS[run_id]
         if static_pathway != expected_semantics["static_pathway"]:
@@ -397,6 +407,8 @@ def load_pilot_policy(path) -> PilotPolicy:
             learning_rate=learning_rate,
             hidden_size=hidden_size,
             embedding_dropout=run_embedding_dropout,
+            output_dropout=run_output_dropout,
+            batch_size=run_batch_size,
         )
 
     known_run_ids = set(PILOT_LEAD06_RUN_ID_TO_PROFILE_NAME)
@@ -510,6 +522,8 @@ def build_pilot_bundle_with_validation_scope(
     learning_rate: "float | None" = None,
     hidden_size: "int | None" = None,
     embedding_dropout: "float | None" = None,
+    output_dropout: "float | None" = None,
+    batch_size: "int | None" = None,
     dynamic_inputs: "list | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
@@ -587,6 +601,8 @@ def build_pilot_bundle_with_validation_scope(
         learning_rate=learning_rate,
         hidden_size=hidden_size,
         embedding_dropout=embedding_dropout,
+        output_dropout=output_dropout,
+        batch_size=batch_size,
     )
 
     package_manifest_identity = {
@@ -622,6 +638,8 @@ def build_pilot_bundle_with_validation_scope(
         learning_rate=learning_rate,
         hidden_size=hidden_size,
         embedding_dropout=embedding_dropout,
+        output_dropout=output_dropout,
+        batch_size=batch_size,
     )
 
 
@@ -671,6 +689,8 @@ def build_pilot_bundle(
         learning_rate=run_spec.learning_rate,
         hidden_size=run_spec.hidden_size,
         embedding_dropout=run_spec.embedding_dropout,
+        output_dropout=run_spec.output_dropout,
+        batch_size=run_spec.batch_size,
         # Dynamic-Input-Family-A range-characterization campaign: a run_spec's
         # explicit dynamic_inputs override always wins over the baseline
         # policy's own binding list, mirroring seq_length/max_updates_per_epoch/

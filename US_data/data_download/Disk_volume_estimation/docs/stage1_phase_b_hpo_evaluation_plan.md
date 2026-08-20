@@ -97,29 +97,18 @@ The Phase-B HPO experiment will include two arms:
 
 **Must NOT** compare the two arms primarily by wall-clock completion time — random search is inherently more parallel, so wall-clock is not a fair axis.
 
-**[OPEN]** Exact number of Bayesian trials; exact number of random-control trials; exact Bayesian concurrency level. None of these are frozen anywhere in the repository today.
+**[PROVISIONAL planning direction / OPEN exact numbers.]** Plan approximately 30--40 Bayesian trials and 10--15 seeded, frozen random-control trials. Exact trial counts and Bayesian concurrency remain open pending fidelity/runtime calibration.
 
 ## 6. Hyperparameter-search framing for Sweep v1
 
-**[PROVISIONAL / OPEN mix — the final Sweep-v1 search space is NOT frozen by this document]**
+**[UPDATED 2026-08-20 — axes, cap, cadence, and early-stopping policy are decided; the output-dropout range and batch-size set are provisional; epoch budget remains open.]**
 
-### Strong current candidates for Sweep v1 dimensions **[PROVISIONAL]**
+### Sweep-v1 dimensions **[DECIDED / PROVISIONAL]**
 
-- Learning rate
-- Hidden size
-- Embedding dropout
-- Output dropout
-
-### Candidate fifth dimension **[OPEN]**
-
-- Batch size — inclusion not decided.
-
-### Parameters requiring explicit review before inclusion **[OPEN]**
-
-- Initial forget-gate bias
-- Weight decay / regularization
-- Learning-rate schedule parameters
-- Optimizer type — **must not be documented as permanently fixed.** Current working expectation (**[PROVISIONAL]**, not binding): keep Adam fixed in Sweep v1 unless inspection gives a concrete reason to reopen optimizer search.
+- Sweep v1 searches exactly `learning_rate`, `hidden_size`, `embedding_dropout`, `output_dropout`, and `batch_size`.
+- Adam is fixed. Initial forget bias, weight decay/regularization, learning-rate schedule parameters, and optimizer type are excluded from this first joint-search scope; they are not thereby scientifically irrelevant or permanently fixed. NeuralHydrology CudaLSTM supports `initial_forget_bias`, but it is excluded for Sweep-v1 search-space discipline and lack of Flash-NH Phase-A characterization/plumbing.
+- `output_dropout` is included. **[PROVISIONAL]** The continuous-uniform `0.0`--`0.4` range is a conservative working range around inherited `0.25`, not bounds established as optimal by a Phase-A one-dimensional campaign.
+- `batch_size` is included. **[PROVISIONAL]** Preferred candidates are `{128, 256, 512}`, pending technical/operational qualification on the intended Moriah L4 GPU and hidden-size envelope.
 
 ### Fixed for Sweep v1 unless explicitly reopened **[DECIDED, scope-limited to "unless explicitly reopened"]**
 
@@ -137,6 +126,16 @@ Static embedding architecture and sequence length are explicitly **deferred stru
 
 **[OPEN]**
 
+### Sweep-v1 current policy **[DECIDED unless marked OPEN]**
+
+All medium-fidelity Sweep-v1 candidates use `max_updates_per_epoch=50,000`; the cap is not rescaled by batch size within Sweep v1. This holds optimizer-update opportunity constant, not sample exposure: different batch sizes process different sample counts under the common budget. That effect is part of the joint batch-size/optimization-efficiency tradeoff. It is not a universal fairness claim or permanent project-wide rule; apparent batch-size advantages remain conditional on this capped regime and require higher-fidelity confirmation before promotion.
+
+Authoritative Flash-NH raw-space screening evaluation occurs every epoch. Sweep v1 uses no performance-based early stopping: every candidate receives the full predefined fidelity budget, and its objective is the best observed eligible raw-space screening checkpoint within that completed budget. Ordinary technical-failure handling is separate.
+
+**[OPEN]** The total epoch budget is not frozen. A bounded roughly 10--14 epoch calibration at the fixed 50k/every-epoch/no-performance-early-stopping setting will inspect whether 8, 10, 12, or 14 epochs are sufficient from ranking stability, best-checkpoint locations, and trajectories.
+
+### Prior fidelity discussion **[SUPERSEDED where it conflicts with the current policy above]**
+
 The Phase-A regime (25k updates/epoch cap × six epochs) was a screening/characterization fidelity. Evidence that it is probably not ideal for joint Bayesian HPO:
 
 - Noisy trajectories across Phase-A campaigns.
@@ -144,9 +143,9 @@ The Phase-A regime (25k updates/epoch cap × six epochs) was a screening/charact
 - Best observed checkpoints were sometimes not at the final epoch (e.g. Dynamic-Input-Family-A's `PT` best checkpoint was epoch 3, not epoch 6).
 - Phase-A comparisons repeatedly showed cadence sensitivity (Embedding-Dropout-A: "ranking is cadence-sensitive").
 
-**Current working idea, NOT frozen policy:** raise the update cap (examples discussed: roughly `50k` updates/epoch), run more epochs (examples discussed: roughly `10`–`12`), and evaluate every epoch or substantially more densely than the 3/6 cadence.
+The current Sweep-v1 policy is stated above. This prior paragraph is retained only as historical planning context; the total epoch count remains open pending the bounded calibration.
 
-> **Open question:** What medium-fidelity Phase-B protocol gives sufficiently stable candidate ranking without wasting HPO compute?
+> **Open question:** What Sweep-v1 epoch budget gives sufficiently stable ranking and captures the useful best-checkpoint region under the fixed 50k-update, every-epoch, no-performance-early-stopping regime?
 
 `50k × 12` is an example under discussion, **not** binding policy. This must be resolved (or explicitly deferred with a stated interim choice) in Task A (§17).
 
@@ -265,22 +264,15 @@ W&B must not bypass: Slurm resource allocation; clean-tree/commit guards; config
 
 ## 15. Open-decision register (before Phase-B launch)
 
-Consolidated from the sections above — none of these are resolved by this document.
+Remaining open items from the current Phase-B design are listed below.
 
 **Search space**
-- Exact Sweep-v1 HP dimensions.
-- Batch size: yes/no.
-- Forget-gate bias: yes/no.
-- Weight decay: yes/no.
-- Learning-rate schedule search: yes/no.
-- Optimizer: fixed Adam vs. optimizer search.
-- Exact parameter ranges/distributions.
+- Inclusion/exclusion of the five axes, Adam fixed, the 50k cap, every-epoch evaluation, and no performance-based early stopping are decided; they are not open items.
+- Final technical/operational confirmation of the provisional `{128, 256, 512}` batch-size set.
+- Final epoch count, after the 50k/every-epoch calibration.
 
 **Fidelity**
-- Updates-per-epoch cap.
 - Epoch budget.
-- Screening/evaluation cadence.
-- Performance-based early stopping during Sweep v1: yes/no.
 
 **W&B / Slurm**
 - Exact sweep-agent architecture.

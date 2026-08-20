@@ -258,6 +258,10 @@ __all__ = [
     "enforce_pilot_hidden_size_identity",
     "EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME",
     "enforce_pilot_embedding_dropout_identity",
+    "OUTPUT_DROPOUT_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_output_dropout_identity",
+    "BATCH_SIZE_IDENTITY_STATE_FILENAME",
+    "enforce_pilot_batch_size_identity",
     "SEQ_LENGTH_IDENTITY_STATE_FILENAME",
     "enforce_pilot_seq_length_identity",
     "DYNAMIC_INPUTS_IDENTITY_STATE_FILENAME",
@@ -306,6 +310,8 @@ HIDDEN_SIZE_IDENTITY_STATE_FILENAME = "pilot_hidden_size_identity.json"
 # enforce_pilot_embedding_dropout_identity. Adopted for the
 # Embedding-Dropout-A range-characterization campaign.
 EMBEDDING_DROPOUT_IDENTITY_STATE_FILENAME = "pilot_embedding_dropout_identity.json"
+OUTPUT_DROPOUT_IDENTITY_STATE_FILENAME = "pilot_output_dropout_identity.json"
+BATCH_SIZE_IDENTITY_STATE_FILENAME = "pilot_batch_size_identity.json"
 
 # Name of the small JSON record persisted under the NH run directory once it
 # exists, recording which (pilot_policy_name, run_id, resolved_seq_length)
@@ -1210,6 +1216,26 @@ def enforce_pilot_embedding_dropout_identity(*, run_identity: dict, nh_run_dir: 
     )
 
 
+def enforce_pilot_output_dropout_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Keep resolved CUDALSTM output dropout immutable across a continuation."""
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity, nh_run_dir=nh_run_dir,
+        state_filename=OUTPUT_DROPOUT_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_output_dropout", axis_label="output-dropout",
+        contradiction_detail="resolved_output_dropout must never change across a continuation of the same run directory",
+    )
+
+
+def enforce_pilot_batch_size_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
+    """Keep resolved NH DataLoader batch size immutable across a continuation."""
+    _enforce_pilot_scalar_identity(
+        run_identity=run_identity, nh_run_dir=nh_run_dir,
+        state_filename=BATCH_SIZE_IDENTITY_STATE_FILENAME,
+        identity_key="resolved_batch_size", axis_label="batch-size",
+        contradiction_detail="resolved_batch_size must never change across a continuation of the same run directory",
+    )
+
+
 def enforce_pilot_seq_length_identity(*, run_identity: dict, nh_run_dir: "str | Path | None") -> None:
     """Always-active, W&B-independent safeguard for the Sequence-Length-A
     range-characterization campaign: a candidate's resolved ``seq_length`` is
@@ -2013,6 +2039,8 @@ def run_pilot(
     # Likewise always active: see enforce_pilot_embedding_dropout_identity's
     # docstring (Embedding-Dropout-A range-characterization campaign).
     enforce_pilot_embedding_dropout_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    enforce_pilot_output_dropout_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
+    enforce_pilot_batch_size_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)
     # Likewise always active: see enforce_pilot_seq_length_identity's
     # docstring (Sequence-Length-A range-characterization campaign).
     enforce_pilot_seq_length_identity(run_identity=run_identity, nh_run_dir=existing_nh_run_dir)

@@ -377,6 +377,10 @@ def build_pilot_run_identity(
             if isinstance(bundle.config_mapping.get("statics_embedding"), dict)
             else None
         ),
+        "output_dropout_override": bundle.output_dropout,
+        "resolved_output_dropout": bundle.config_mapping.get("output_dropout"),
+        "batch_size_override": bundle.batch_size,
+        "resolved_batch_size": bundle.config_mapping.get("batch_size"),
         "baseline_policy_sha256": bundle.policy_sha256,
         "splits_dir": bundle.splits_dir,
         # Whichever W&B policy file actually took effect for this invocation
