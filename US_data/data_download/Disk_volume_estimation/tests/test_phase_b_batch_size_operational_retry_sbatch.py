@@ -33,9 +33,9 @@ def test_retry_is_one_l4_allocation_with_deterministic_fresh_batch_processes():
 
 def test_retry_preserves_separate_attempt_and_batch_evidence_identities():
     text = RETRY.read_text(encoding="utf-8")
-    assert "OPQUAL_ATTEMPT2_EVIDENCE_ROOT" in text
+    assert "OPQUAL_COMBINED_EVIDENCE_ROOT" in text
     assert "phase_b_batch_size_operational_qualification_attempt2_combined_v001" in text
-    assert 'export OPQUAL_ATTEMPT_ID="${ATTEMPT_ID}"' in text
+    assert 'export OPQUAL_ATTEMPT_ID="${PARENT_ATTEMPT_ID}"' in text
     assert 'f"bs{batch_size}_job{os.environ.get(\'SLURM_JOB_ID\', \'unknown\')}"' in text
     assert "attempt2_combined_summary.json" in text
     assert "intended_config_sha256" in text

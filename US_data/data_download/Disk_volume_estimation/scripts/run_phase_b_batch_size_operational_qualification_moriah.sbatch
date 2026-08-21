@@ -25,6 +25,7 @@ FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 REPO_CLONE_DIR="${FLASHNH_REPO_CLONE_DIR:-${FLASHNH_BASE}/repos/flash-nh}"
 REPO_WORKDIR="${REPO_CLONE_DIR}/US_data/data_download/Disk_volume_estimation"
 ENV_PREFIX="${FLASHNH_BASE}/envs/flashnh-moriah"
+MORIAH_PYTHON="${FLASHNH_MORIAH_PYTHON:-${ENV_PREFIX}/bin/python}"
 PACKAGE_ROOT="${PILOT_PACKAGE_ROOT:-${FLASHNH_BASE}/data/stage1_scientific_package_v002}"
 EVIDENCE_ROOT="${OPQUAL_EVIDENCE_ROOT:-${FLASHNH_BASE}/evidence/phase_b_batch_size_operational_qualification_only}"
 RESULT_DIR="${EVIDENCE_ROOT}/bs${BATCH_SIZE}_job${SLURM_JOB_ID}"
@@ -39,6 +40,7 @@ echo "job_id=${SLURM_JOB_ID:-unknown} partition=${SLURM_JOB_PARTITION:-unknown}"
 SUBMIT_WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd -P)}"
 echo "SUBMIT_WORKDIR: ${SUBMIT_WORKDIR}"
 echo "CONFIGURED_REPO_WORKDIR: ${REPO_WORKDIR}"
+echo "MORIAH_PYTHON: ${MORIAH_PYTHON}"
 
 test -d "${REPO_WORKDIR}" || { echo "missing canonical repo workdir: ${REPO_WORKDIR}" >&2; exit 1; }
 test -d "${PACKAGE_ROOT}" || { echo "missing package root" >&2; exit 1; }
@@ -59,20 +61,20 @@ test "${ACTUAL_COMMIT}" = "${EXPECTED_COMMIT}" || {
 cd "${REPO_WORKDIR}"
 SOURCE_COMMIT="${ACTUAL_COMMIT}"
 
-module load spack/all
-module load miniconda3/24.3.0-gcc-iqeknet
-module load nvidia/580.95.05
-module load cuda/12.8.1
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "${ENV_PREFIX}"
+test -x "${MORIAH_PYTHON}" || { echo "REFUSING: MORIAH_PYTHON is not executable: ${MORIAH_PYTHON}" >&2; exit 1; }
+"${MORIAH_PYTHON}" --version
+"${MORIAH_PYTHON}" - <<'PY'
+import yaml, torch, neuralhydrology
+print("MORIAH_PYTHON_IMPORT_PREFLIGHT: yaml torch neuralhydrology PASS")
+PY
 nvidia-smi | tee "${RESULT_DIR}/nvidia_smi_before.txt"
 
-python -u scripts/prepare_phase_b_batch_size_operational_qualification.py \
+"${MORIAH_PYTHON}" -u scripts/prepare_phase_b_batch_size_operational_qualification.py \
   --batch-size "${BATCH_SIZE}" --package-root "${PACKAGE_ROOT}" \
   --out-dir "${RESULT_DIR}/prepared"
 
 set +e
-RESULT_DIR="${RESULT_DIR}" BATCH_SIZE="${BATCH_SIZE}" SOURCE_COMMIT="${SOURCE_COMMIT}" ATTEMPT_ID="${ATTEMPT_ID}" python -u - <<'PY'
+RESULT_DIR="${RESULT_DIR}" BATCH_SIZE="${BATCH_SIZE}" SOURCE_COMMIT="${SOURCE_COMMIT}" ATTEMPT_ID="${ATTEMPT_ID}" "${MORIAH_PYTHON}" -u - <<'PY'
 import json, os, time, traceback
 from pathlib import Path
 import torch
@@ -107,7 +109,7 @@ raise SystemExit(0 if result['status'] == 'PASS' else 1)
 PY
 PYTHON_STATUS=$?
 set -e
-RESULT_DIR="${RESULT_DIR}" PYTHON_STATUS="${PYTHON_STATUS}" python - <<'PY'
+RESULT_DIR="${RESULT_DIR}" PYTHON_STATUS="${PYTHON_STATUS}" "${MORIAH_PYTHON}" - <<'PY'
 import json, os
 from pathlib import Path
 path = Path(os.environ['RESULT_DIR']) / 'qualification_result.json'

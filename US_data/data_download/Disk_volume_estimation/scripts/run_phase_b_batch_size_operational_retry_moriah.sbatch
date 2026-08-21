@@ -13,7 +13,7 @@
 # Python/CUDA processes. It does not submit nested Slurm jobs.
 set -uo pipefail
 
-readonly ATTEMPT_ID="attempt2_combined_sequential_operational_retry_v001"
+readonly PARENT_ATTEMPT_ID="${OPQUAL_PARENT_ATTEMPT_ID:-attempt2_combined_sequential_operational_retry_v001}"
 readonly BATCH_SIZES=(128 256 512)
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 if [ -z "${EXPECTED_COMMIT}" ]; then
@@ -25,18 +25,20 @@ FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 REPO_CLONE_DIR="${FLASHNH_REPO_CLONE_DIR:-${FLASHNH_BASE}/repos/flash-nh}"
 REPO_WORKDIR="${REPO_CLONE_DIR}/US_data/data_download/Disk_volume_estimation"
 ENV_PREFIX="${FLASHNH_BASE}/envs/flashnh-moriah"
-EVIDENCE_ROOT="${OPQUAL_ATTEMPT2_EVIDENCE_ROOT:-${FLASHNH_BASE}/evidence/phase_b_batch_size_operational_qualification_attempt2_combined_v001}"
+MORIAH_PYTHON="${FLASHNH_MORIAH_PYTHON:-${ENV_PREFIX}/bin/python}"
+EVIDENCE_ROOT="${OPQUAL_COMBINED_EVIDENCE_ROOT:-${FLASHNH_BASE}/evidence/phase_b_batch_size_operational_qualification_attempt2_combined_v001}"
 ALLOCATION_DIR="${EVIDENCE_ROOT}/allocation_job${SLURM_JOB_ID:-unknown}"
 SINGLE_BATCH_LAUNCHER="${REPO_WORKDIR}/scripts/run_phase_b_batch_size_operational_qualification_moriah.sbatch"
 
 mkdir -p "${ALLOCATION_DIR}"
 exec > >(tee -a "${ALLOCATION_DIR}/launcher.log") 2>&1
 echo "OPERATIONAL QUALIFICATION ONLY -- NOT SCIENTIFIC PERFORMANCE EVIDENCE"
-echo "attempt_id=${ATTEMPT_ID} batches=${BATCH_SIZES[*]}"
+echo "attempt_id=${PARENT_ATTEMPT_ID} batches=${BATCH_SIZES[*]}"
 echo "job_id=${SLURM_JOB_ID:-unknown} partition=${SLURM_JOB_PARTITION:-unknown}"
 SUBMIT_WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd -P)}"
 echo "SUBMIT_WORKDIR: ${SUBMIT_WORKDIR}"
 echo "CONFIGURED_REPO_WORKDIR: ${REPO_WORKDIR}"
+echo "MORIAH_PYTHON: ${MORIAH_PYTHON}"
 
 # Keep the repaired exact-commit guard authoritative at allocation preflight.
 test -d "${REPO_WORKDIR}" || { echo "REFUSING: missing canonical repo workdir: ${REPO_WORKDIR}" >&2; exit 1; }
@@ -56,19 +58,22 @@ test "${ACTUAL_COMMIT}" = "${EXPECTED_COMMIT}" || {
 }
 
 cd "${REPO_WORKDIR}"
-module load spack/all
-module load miniconda3/24.3.0-gcc-iqeknet
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "${ENV_PREFIX}"
+test -x "${MORIAH_PYTHON}" || { echo "REFUSING: MORIAH_PYTHON is not executable: ${MORIAH_PYTHON}" >&2; exit 1; }
+"${MORIAH_PYTHON}" --version
+"${MORIAH_PYTHON}" - <<'PY'
+import yaml, torch, neuralhydrology
+print("MORIAH_PYTHON_IMPORT_PREFLIGHT: yaml torch neuralhydrology PASS")
+PY
 
 # The child launcher is invoked with bash, never sbatch. Each invocation is a
 # fresh shell and starts its own fresh Python process for the real NH smoke.
 export FLASHNH_REPO_CLONE_DIR="${REPO_CLONE_DIR}"
 export OPQUAL_EVIDENCE_ROOT="${EVIDENCE_ROOT}"
-export OPQUAL_ATTEMPT_ID="${ATTEMPT_ID}"
+export FLASHNH_MORIAH_PYTHON="${MORIAH_PYTHON}"
+export OPQUAL_ATTEMPT_ID="${PARENT_ATTEMPT_ID}"
 declare -A BATCH_EXIT_STATUS
 for batch_size in "${BATCH_SIZES[@]}"; do
-    echo "BEGIN_BATCH batch_size=${batch_size} attempt_id=${ATTEMPT_ID}"
+    echo "BEGIN_BATCH batch_size=${batch_size} attempt_id=${PARENT_ATTEMPT_ID}"
     set +e
     bash "${SINGLE_BATCH_LAUNCHER}" "${batch_size}"
     BATCH_EXIT_STATUS["${batch_size}"]=$?
@@ -76,9 +81,9 @@ for batch_size in "${BATCH_SIZES[@]}"; do
     echo "END_BATCH batch_size=${batch_size} exit_status=${BATCH_EXIT_STATUS[${batch_size}]}"
 done
 
-RESULT_DIR="${ALLOCATION_DIR}" ATTEMPT_ID="${ATTEMPT_ID}" EVIDENCE_ROOT="${EVIDENCE_ROOT}" \
+RESULT_DIR="${ALLOCATION_DIR}" ATTEMPT_ID="${PARENT_ATTEMPT_ID}" EVIDENCE_ROOT="${EVIDENCE_ROOT}" \
 EXPECTED_COMMIT="${EXPECTED_COMMIT}" BATCH_EXIT_128="${BATCH_EXIT_STATUS[128]}" \
-BATCH_EXIT_256="${BATCH_EXIT_STATUS[256]}" BATCH_EXIT_512="${BATCH_EXIT_STATUS[512]}" python - <<'PY'
+BATCH_EXIT_256="${BATCH_EXIT_STATUS[256]}" BATCH_EXIT_512="${BATCH_EXIT_STATUS[512]}" "${MORIAH_PYTHON}" - <<'PY'
 import json
 import os
 from pathlib import Path
