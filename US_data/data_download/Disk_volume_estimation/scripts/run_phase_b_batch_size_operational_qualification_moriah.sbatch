@@ -19,7 +19,10 @@ EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 if [ -z "${EXPECTED_COMMIT}" ]; then echo "EXPECTED_COMMIT is required." >&2; exit 2; fi
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
-REPO_CLONE_DIR="${PILOT_REPO_CLONE_DIR:-/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology}"
+# Resolve the reviewed clone deterministically from the canonical Flash-NH
+# runtime base.  Do not inherit PILOT_REPO_CLONE_DIR: that historical default
+# names a separate, stale clone and caused Attempt 1's preflight refusal.
+REPO_CLONE_DIR="${FLASHNH_REPO_CLONE_DIR:-${FLASHNH_BASE}/repos/flash-nh}"
 REPO_WORKDIR="${REPO_CLONE_DIR}/US_data/data_download/Disk_volume_estimation"
 ENV_PREFIX="${FLASHNH_BASE}/envs/flashnh-moriah"
 PACKAGE_ROOT="${PILOT_PACKAGE_ROOT:-${FLASHNH_BASE}/data/stage1_scientific_package_v002}"
@@ -31,14 +34,28 @@ exec > >(tee -a "${RESULT_DIR}/launcher.log") 2>&1
 echo "OPERATIONAL QUALIFICATION ONLY — NOT SCIENTIFIC PERFORMANCE EVIDENCE"
 echo "batch_size=${BATCH_SIZE} hidden_size=256 operational_updates=8"
 echo "job_id=${SLURM_JOB_ID:-unknown} partition=${SLURM_JOB_PARTITION:-unknown}"
+SUBMIT_WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd -P)}"
+echo "SUBMIT_WORKDIR: ${SUBMIT_WORKDIR}"
+echo "CONFIGURED_REPO_WORKDIR: ${REPO_WORKDIR}"
 
-test -d "${REPO_WORKDIR}" || { echo "missing repo workdir" >&2; exit 1; }
+test -d "${REPO_WORKDIR}" || { echo "missing canonical repo workdir: ${REPO_WORKDIR}" >&2; exit 1; }
 test -d "${PACKAGE_ROOT}" || { echo "missing package root" >&2; exit 1; }
-cd "${REPO_WORKDIR}"
-SOURCE_COMMIT=$(git rev-parse HEAD)
-TRACKED_CHANGES=$(git status --porcelain | grep -v '^??' || true)
+RESOLVED_REPOSITORY=$(git -C "${REPO_WORKDIR}" rev-parse --show-toplevel) || {
+    echo "REFUSING: unable to resolve Git repository from ${REPO_WORKDIR}" >&2
+    exit 1
+}
+ACTUAL_COMMIT=$(git -C "${RESOLVED_REPOSITORY}" rev-parse HEAD)
+TRACKED_CHANGES=$(git -C "${RESOLVED_REPOSITORY}" status --porcelain | grep -v '^??' || true)
+echo "RESOLVED_REPOSITORY: ${RESOLVED_REPOSITORY}"
+echo "EXPECTED_COMMIT: ${EXPECTED_COMMIT}"
+echo "ACTUAL_COMMIT: ${ACTUAL_COMMIT}"
 test -z "${TRACKED_CHANGES}" || { echo "REFUSING: tracked working-tree changes" >&2; exit 1; }
-test "${SOURCE_COMMIT}" = "${EXPECTED_COMMIT}" || { echo "REFUSING: HEAD does not match EXPECTED_COMMIT" >&2; exit 1; }
+test "${ACTUAL_COMMIT}" = "${EXPECTED_COMMIT}" || {
+    echo "REFUSING: ACTUAL_COMMIT does not match EXPECTED_COMMIT" >&2
+    exit 1
+}
+cd "${REPO_WORKDIR}"
+SOURCE_COMMIT="${ACTUAL_COMMIT}"
 
 module load spack/all
 module load miniconda3/24.3.0-gcc-iqeknet
