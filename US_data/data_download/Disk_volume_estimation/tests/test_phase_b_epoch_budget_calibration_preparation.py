@@ -83,9 +83,12 @@ def test_prepare_campaign_writes_auditable_configs_only(tmp_path):
     assert audit["canonical_package_validation_required_before_training"] is True
     assert audit["training_cadence"] == "one_uninterrupted_segment_through_target_epoch"
     assert audit["checkpoint_retention"] == "save_weights_every_epoch"
+    assert audit["evaluation_scope"] == "development_validation_2024_only"
+    assert audit["sealed_scopes_not_accessed"] == ["temporal_test_2025", "non_ca_spatial_holdout", "california"]
     assert audit["screening_epochs"] == list(range(1, 15))
     assert audit["performance_early_stopping_enabled"] is False
     assert audit["no_wandb_or_hpo"] is True and audit["no_sealed_scope"] is True
     assert all(row["max_updates_per_epoch"] == 50_000 and row["training_segment_epochs"] == 14
                and row["checkpoint_save_every_epochs"] == 1 for row in audit["candidates"])
+    assert all(row["evaluation_period"] == "validation_2024_only" and row["screening_validation_basin_count"] == 400 for row in audit["candidates"])
     assert all("slurm" not in row and "wandb" not in row and row["sealed_scope"] is False for row in audit["candidates"])

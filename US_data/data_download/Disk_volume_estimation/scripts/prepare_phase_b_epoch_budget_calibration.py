@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -74,18 +75,21 @@ def build_epoch_budget_calibration_policy(base_policy):
     )
 
 
-def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, splits_dir, output_dir) -> Path:
+def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, splits_dir, output_dir,
+                     audit_scope: str = "LOCAL_STRUCTURAL_AUDIT_ONLY") -> Path:
     """Generate all five configs and write ``config_audit.json``; never train."""
     base = _resolve_policy_relative_paths(load_pilot_policy(pilot_policy_path))
     policy = build_epoch_budget_calibration_policy(base)
     effective = build_effective_policy(policy)
     output = Path(output_dir)
     rows = []
+    package_identity = None
     for run_id in EPOCH_BUDGET_CALIBRATION_RUN_SPECS:
         bundle = build_pilot_bundle(pilot_policy=policy, run_id=run_id, baseline_policy_path=baseline_policy_path,
                                     package_root=package_root, splits_dir=splits_dir)
         config_paths = write_generated_config(bundle, output / run_id)
         config = bundle.config_mapping
+        package_identity = package_identity or bundle.package_manifest_identity
         rows.append({
             "candidate_id": run_id, "learning_rate": config["learning_rate"], "hidden_size": config["hidden_size"],
             "batch_size": config["batch_size"], "dynamic_inputs": config["dynamic_inputs"], "seq_length": config["seq_length"],
@@ -94,14 +98,28 @@ def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, s
             "target_epoch": TARGET_EPOCH,
             "max_updates_per_epoch": config["max_updates_per_epoch"], "screening_epochs": list(range(1, TARGET_EPOCH + 1)),
             "performance_early_stopping_enabled": False, "sealed_scope": False,
-                "config_path": str(config_paths["config.yaml"]), "generation_manifest": str(config_paths["generation_manifest.json"]),
+            "development_training_basin_count": len(bundle.train_basin_ids),
+            "screening_validation_basin_count": len(bundle.validation_basin_ids),
+            "screening_validation_basin_ids_sha256": hashlib.sha256(
+                "\n".join(bundle.validation_basin_ids).encode("utf-8")
+            ).hexdigest(),
+            "evaluation_period": "validation_2024_only",
+            "validation_start_date": config["validation_start_date"], "validation_end_date": config["validation_end_date"],
+            "config_path": str(config_paths["config.yaml"]), "generation_manifest": str(config_paths["generation_manifest.json"]),
         })
-    audit = {"campaign": CAMPAIGN_NAME, "audit_scope": "LOCAL_STRUCTURAL_AUDIT_ONLY",
-             "canonical_package_validation_required_before_training": True, "candidate_count": len(rows), "target_epoch": TARGET_EPOCH,
+    canonical = audit_scope == "CANONICAL_PACKAGE_PREFLIGHT"
+    audit = {"campaign": CAMPAIGN_NAME, "audit_scope": audit_scope,
+             "canonical_package_validation_required_before_training": not canonical, "candidate_count": len(rows), "target_epoch": TARGET_EPOCH,
              "max_updates_per_epoch": MAX_UPDATES_PER_EPOCH, "screening_epochs": list(range(1, TARGET_EPOCH + 1)),
              "training_cadence": "one_uninterrupted_segment_through_target_epoch",
              "checkpoint_retention": "save_weights_every_epoch",
              "raw_space_evaluation_cadence": "every_retained_epoch_post_training_or_existing_result",
+             "package_manifest_identity": package_identity,
+             "screening_identity": {"basin_ids_path": policy.screening_basin_ids_path,
+                                    "expected_count": policy.screening_expected_count,
+                                    "expected_sha256": policy.screening_expected_sha256},
+             "evaluation_scope": "development_validation_2024_only",
+             "sealed_scopes_not_accessed": ["temporal_test_2025", "non_ca_spatial_holdout", "california"],
              "performance_early_stopping_enabled": False, "effective_policy": effective,
              "no_wandb_or_hpo": True, "no_sealed_scope": True, "candidates": rows}
     output.mkdir(parents=True, exist_ok=True)
@@ -117,9 +135,12 @@ def main() -> None:
     parser.add_argument("--pilot-policy-path", type=Path, default=_REPO_WORKDIR / "config" / "stage1_lead06_pilot_v001.yaml")
     parser.add_argument("--baseline-policy-path", type=Path, default=_REPO_WORKDIR / "config" / "stage1_scientific_baseline_v001.yaml")
     parser.add_argument("--splits-dir", type=Path, default=_REPO_WORKDIR / "config" / "stage1_baseline_splits_v001")
+    parser.add_argument("--canonical-package-preflight", action="store_true",
+                        help="Label this audit as the real canonical-package preflight, not local structural validation.")
     args = parser.parse_args()
     print(prepare_campaign(pilot_policy_path=args.pilot_policy_path, baseline_policy_path=args.baseline_policy_path,
-                           package_root=args.package_root, splits_dir=args.splits_dir, output_dir=args.output_dir))
+                           package_root=args.package_root, splits_dir=args.splits_dir, output_dir=args.output_dir,
+                           audit_scope=("CANONICAL_PACKAGE_PREFLIGHT" if args.canonical_package_preflight else "LOCAL_STRUCTURAL_AUDIT_ONLY")))
 
 
 if __name__ == "__main__":
