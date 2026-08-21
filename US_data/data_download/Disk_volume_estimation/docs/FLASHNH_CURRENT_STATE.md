@@ -15,7 +15,9 @@ raw-space screening occurs every epoch, and there is no performance-based
 scientific early stopping: each candidate receives the complete predefined
 budget and is scored from its best observed eligible screening checkpoint.
 
-**Provisional and open items.** `output_dropout` has a continuous-uniform
+**[DECIDED FOR SWEEP V1]** `batch_size={128,256,512}` is operationally
+qualified under the reviewed H256/L4 eight-update envelope; no batch-size
+winner was selected. **Provisional and open items.** `output_dropout` has a continuous-uniform
 working range of `0.0`--`0.4` (not previously characterized one-dimensionally).
 The preferred `batch_size` set is `{128, 256, 512}`, pending technical and
 operational qualification. The epoch budget, exact Bayesian/random trial

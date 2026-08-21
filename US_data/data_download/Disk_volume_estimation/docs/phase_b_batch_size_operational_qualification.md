@@ -44,3 +44,20 @@ The Attempt-2 evidence root is
 `/sci/labs/efratmorin/omripo/Flash-NH/evidence/phase_b_batch_size_operational_qualification_attempt2_combined_v001/`;
 it is distinct from the immutable Attempt-1 root
 `/sci/labs/efratmorin/omripo/Flash-NH/evidence/phase_b_batch_size_operational_qualification_only/`.
+
+## Closure
+
+Attempt 1 (45901431/2/3) was invalid: a stale clone failed before config/CUDA.
+Attempt 2 (45904704) was invalid: ambient Python lacked yaml/torch and the
+aggregate hit a readonly-variable defect. CPU preflight 45904829 passed exact
+runtime imports and all three 50k/8 configs without training. Attempt 3
+(45904830) validly passed batch 128, then timed out while 256 loaded data;
+512 was not attempted. Attempt 4 validly passed 256 (45904976) and 512
+(45904977). Their Slurm 127 occurred only after PASS, from optional post-run
+`nvidia-smi`; the launcher now records that diagnostic absence as a warning.
+
+**[DECIDED FOR SWEEP V1]** `{128,256,512}` is operationally qualified under
+the reviewed H256/L4 eight-update envelope: PT, sequence 72, lead 6h,
+`[128,32]` tanh static embedding, output dropout 0.25, intended 50,000 update
+cap, and one-epoch/eight-update smoke. This is not a scientific ranking,
+throughput result, long-run stability claim, or final Sweep-v1 performance.

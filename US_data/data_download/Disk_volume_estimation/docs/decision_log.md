@@ -2,6 +2,14 @@
 
 # Decision Log
 
+## 2026-08-21 — Phase-B batch-size operational qualification closed
+
+**[DECIDED FOR SWEEP V1]** Batch-size search values are frozen as
+`{128,256,512}` after operational H256/L4 eight-update qualification. This
+demonstrates practical execution viability only; no winner was selected and
+higher-fidelity HPO must evaluate scientific performance. Technical provenance:
+`docs/phase_b_batch_size_operational_qualification.md`.
+
 ## 2026-08-20 — Phase-B Task-A decisions and `output_dropout` / `batch_size` plumbing increment
 
 **Scientific/design decisions.** Sweep v1 searches exactly `learning_rate`,
