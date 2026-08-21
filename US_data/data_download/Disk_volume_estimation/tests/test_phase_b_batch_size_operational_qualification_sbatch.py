@@ -20,6 +20,8 @@ def test_launcher_has_expected_l4_scope_and_no_wandb_or_submission():
     assert "OPERATIONAL QUALIFICATION ONLY" in text
     assert "launcher_python_exit_status" in text
     assert "peak_gpu_memory_bytes" in text
+    assert "OPQUAL_ATTEMPT_ID" in text
+    assert "attempt_id" in text
     assert 'REPO_CLONE_DIR="${FLASHNH_REPO_CLONE_DIR:-${FLASHNH_BASE}/repos/flash-nh}"' in text
     assert "/sci/labs/efratmorin/omripo/PhD/Python/neuralhydrology" not in text
     assert 'git -C "${REPO_WORKDIR}" rev-parse --show-toplevel' in text

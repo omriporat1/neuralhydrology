@@ -19,14 +19,28 @@ evidence includes the reviewed commit, both generated configs and their
 hashes, Slurm identity, CUDA device, peak allocated GPU memory, elapsed time,
 and explicit PASS/FAIL.
 
-After this preparation is committed, reviewed, pushed, and synchronized to
-Moriah, the separately authorized submission form is:
+Attempt 1 is preserved as **invalid preflight commit-guard evidence**: its
+three jobs reached an L4 node but the historical launcher resolved a stale
+clone and refused before configuration generation, CUDA, data loading, model
+initialization, or training. It is not evidence against any batch size.
+
+Attempt 2 is a separately reviewed combined sequential retry. It reserves one
+Catfish L4 allocation and invokes the reviewed single-batch launcher for
+`128`, `256`, and `512` in that deterministic order. Each invocation is a
+fresh shell/Python process, generates separate configs/checksums and evidence,
+and may fail without preventing later batch attempts. The combined summary
+returns nonzero for any individual failure; it contains no scientific metric,
+comparison, or ranking.
+
+After Attempt 2 is committed, reviewed, pushed, and synchronized to Moriah,
+the separately authorized single submission form is:
 
 ```bash
-EXPECTED_COMMIT=<reviewed_commit> sbatch --export=ALL,EXPECTED_COMMIT \
-  scripts/run_phase_b_batch_size_operational_qualification_moriah.sbatch 128
+EXPECTED_COMMIT=<reviewed_attempt2_commit> sbatch --export=ALL,EXPECTED_COMMIT \
+  scripts/run_phase_b_batch_size_operational_retry_moriah.sbatch
 ```
 
-Repeat once for `256` and `512`; do not use arrays until separately reviewed.
-The default remote evidence root is
+The Attempt-2 evidence root is
+`/sci/labs/efratmorin/omripo/Flash-NH/evidence/phase_b_batch_size_operational_qualification_attempt2_combined_v001/`;
+it is distinct from the immutable Attempt-1 root
 `/sci/labs/efratmorin/omripo/Flash-NH/evidence/phase_b_batch_size_operational_qualification_only/`.

@@ -28,11 +28,13 @@ ENV_PREFIX="${FLASHNH_BASE}/envs/flashnh-moriah"
 PACKAGE_ROOT="${PILOT_PACKAGE_ROOT:-${FLASHNH_BASE}/data/stage1_scientific_package_v002}"
 EVIDENCE_ROOT="${OPQUAL_EVIDENCE_ROOT:-${FLASHNH_BASE}/evidence/phase_b_batch_size_operational_qualification_only}"
 RESULT_DIR="${EVIDENCE_ROOT}/bs${BATCH_SIZE}_job${SLURM_JOB_ID}"
+ATTEMPT_ID="${OPQUAL_ATTEMPT_ID:-attempt1_single_batch_operational_qualification_v001}"
 
 mkdir -p "${RESULT_DIR}"
 exec > >(tee -a "${RESULT_DIR}/launcher.log") 2>&1
 echo "OPERATIONAL QUALIFICATION ONLY — NOT SCIENTIFIC PERFORMANCE EVIDENCE"
 echo "batch_size=${BATCH_SIZE} hidden_size=256 operational_updates=8"
+echo "attempt_id=${ATTEMPT_ID}"
 echo "job_id=${SLURM_JOB_ID:-unknown} partition=${SLURM_JOB_PARTITION:-unknown}"
 SUBMIT_WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd -P)}"
 echo "SUBMIT_WORKDIR: ${SUBMIT_WORKDIR}"
@@ -70,7 +72,7 @@ python -u scripts/prepare_phase_b_batch_size_operational_qualification.py \
   --out-dir "${RESULT_DIR}/prepared"
 
 set +e
-RESULT_DIR="${RESULT_DIR}" BATCH_SIZE="${BATCH_SIZE}" SOURCE_COMMIT="${SOURCE_COMMIT}" python -u - <<'PY'
+RESULT_DIR="${RESULT_DIR}" BATCH_SIZE="${BATCH_SIZE}" SOURCE_COMMIT="${SOURCE_COMMIT}" ATTEMPT_ID="${ATTEMPT_ID}" python -u - <<'PY'
 import json, os, time, traceback
 from pathlib import Path
 import torch
@@ -82,6 +84,7 @@ config = root / 'prepared' / 'operational_smoke_config' / 'config.yaml'
 result = {'classification': 'OPERATIONAL QUALIFICATION ONLY — NOT SCIENTIFIC PERFORMANCE EVIDENCE',
           'batch_size': int(os.environ['BATCH_SIZE']), 'hidden_size': 256,
           'operational_updates': 8, 'source_commit': os.environ['SOURCE_COMMIT'],
+          'attempt_id': os.environ['ATTEMPT_ID'],
           'slurm_job_id': os.environ.get('SLURM_JOB_ID'), 'device': torch.cuda.get_device_name(0),
           'cuda_device_count': torch.cuda.device_count(), 'forward_backward_optimizer_completed': False}
 started = time.monotonic()
