@@ -214,6 +214,10 @@ def record_official_validation_event(state: dict, epoch: int, metric_value: floa
 
 
 def _evaluate_stopping(state: dict, epoch: int, policy: dict) -> tuple[bool, str | None]:
+    if not policy.get("performance_early_stopping_enabled", True):
+        if epoch >= policy["max_epoch_budget"]:
+            return True, "max_epoch_budget_reached"
+        return False, None
     if epoch < policy["min_epoch_before_stop"]:
         return False, None
     if epoch >= policy["max_epoch_budget"]:

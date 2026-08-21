@@ -36,7 +36,7 @@ which refuses to write into an existing non-empty directory without
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -232,6 +232,11 @@ class PilotPolicy:
     screening_expected_sha256: str
     base_early_stopping_policy_path: str
     wandb_policy_path: str
+    # Defaults preserve the historical pilot's initial six-epoch NH segment
+    # and its performance-driven stopping behavior.  Campaign-specific
+    # wrappers may opt in to a different bounded trajectory contract.
+    initial_training_epochs: int = 6
+    performance_early_stopping_enabled: bool = True
 
 
 def load_pilot_policy(path) -> PilotPolicy:
@@ -667,7 +672,7 @@ def build_pilot_bundle(
         expected_sha256=pilot_policy.screening_expected_sha256,
     )
 
-    return build_pilot_bundle_with_validation_scope(
+    bundle = build_pilot_bundle_with_validation_scope(
         baseline_policy_path=baseline_policy_path,
         package_root=package_root,
         splits_dir=splits_dir,
@@ -702,6 +707,15 @@ def build_pilot_bundle(
         # build_pilot_bundle_with_validation_scope accepts any list/tuple.
         dynamic_inputs=(list(run_spec.dynamic_inputs) if run_spec.dynamic_inputs is not None else None),
     )
+    # The historical profile already has epochs=6, so its generated mapping
+    # remains identical. Campaign-specific policies may explicitly request a
+    # different uninterrupted initial segment without changing shared NH
+    # profile definitions.
+    if bundle.config_mapping["epochs"] == pilot_policy.initial_training_epochs:
+        return bundle
+    mapping = dict(bundle.config_mapping)
+    mapping["epochs"] = pilot_policy.initial_training_epochs
+    return replace(bundle, config_mapping=mapping)
 
 
 def build_all_pilot_bundles(

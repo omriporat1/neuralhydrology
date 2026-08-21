@@ -1327,22 +1327,20 @@ def enforce_pilot_dynamic_inputs_identity(*, run_identity: dict, nh_run_dir: "st
 
 def chunk_epoch_targets(pilot_policy: PilotPolicy, effective_max_epoch_budget: int) -> "list[int]":
     """The sequence of epoch counts each bounded training chunk trains up TO
-    (inclusive). The first chunk always ends at
-    ``pilot_policy.stopping_eligible_from_epoch`` (6) -- this is the frozen
-    base profile's own ``epochs: 6``
-    (``nh_config_generation._PILOT_LEAD06_BASE_PROFILE``), never edited
-    here. Each later chunk advances by
+    (inclusive). The first chunk ends at the explicitly configured
+    ``pilot_policy.initial_training_epochs`` (historically 6). Each later
+    chunk advances by
     ``screening_validation_every_n_epochs`` (3), since NH's own
     ``validate_every=3`` already produces a screening-cadence
     checkpoint+validation at every chunk boundary without this module
     re-triggering anything. Capped at ``effective_max_epoch_budget`` (this
     pilot's 36-epoch sub-cap, see
     :func:`src.baseline.pilot_early_stopping.build_effective_policy`)."""
-    first_target = pilot_policy.stopping_eligible_from_epoch
+    first_target = pilot_policy.initial_training_epochs
     step = pilot_policy.screening_validation_every_n_epochs
     if first_target > effective_max_epoch_budget:
         raise PilotOrchestrationError(
-            f"stopping_eligible_from_epoch={first_target} exceeds "
+            f"initial_training_epochs={first_target} exceeds "
             f"effective_max_epoch_budget={effective_max_epoch_budget}"
         )
     targets = list(range(first_target, effective_max_epoch_budget + 1, step))

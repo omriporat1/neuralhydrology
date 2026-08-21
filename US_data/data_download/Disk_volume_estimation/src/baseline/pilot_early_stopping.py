@@ -86,7 +86,8 @@ def build_effective_policy(pilot_policy: PilotPolicy) -> dict:
         )
     if not base_policy["higher_is_better"]:
         raise PilotEarlyStoppingError("base early-stopping policy must have higher_is_better=true for NSE")
-    if base_policy["min_epoch_before_stop"] != pilot_policy.stopping_eligible_from_epoch:
+    if (pilot_policy.performance_early_stopping_enabled and
+            base_policy["min_epoch_before_stop"] != pilot_policy.stopping_eligible_from_epoch):
         raise PilotEarlyStoppingError(
             f"base policy min_epoch_before_stop={base_policy['min_epoch_before_stop']} != "
             f"pilot stopping_eligible_from_epoch={pilot_policy.stopping_eligible_from_epoch}"
@@ -104,6 +105,9 @@ def build_effective_policy(pilot_policy: PilotPolicy) -> dict:
     effective = dict(base_policy)
     effective["max_epoch_budget"] = min(base_policy["max_epoch_budget"], pilot_policy.pilot_max_epoch_budget)
     effective["policy_name"] = f"{base_policy['policy_name']}__pilot_subcap_{effective['max_epoch_budget']}"
+    effective["performance_early_stopping_enabled"] = pilot_policy.performance_early_stopping_enabled
+    if not pilot_policy.performance_early_stopping_enabled:
+        effective["policy_name"] += "__no_performance_stop"
     return effective
 
 

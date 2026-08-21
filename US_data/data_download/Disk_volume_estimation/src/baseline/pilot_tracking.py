@@ -312,9 +312,13 @@ def build_pilot_run_identity(
         "min_epoch_before_stop": effective_early_stopping_policy["min_epoch_before_stop"],
         "min_delta": effective_early_stopping_policy["min_delta"],
         "patience_events": effective_early_stopping_policy["patience_events"],
+        "performance_early_stopping_enabled": effective_early_stopping_policy.get(
+            "performance_early_stopping_enabled", True
+        ),
         "screening_validation_every_n_epochs": pilot_policy.screening_validation_every_n_epochs,
         "diagnostic_only_epoch": pilot_policy.diagnostic_only_epoch,
         "stopping_eligible_from_epoch": pilot_policy.stopping_eligible_from_epoch,
+        "initial_training_epochs": pilot_policy.initial_training_epochs,
         # Nullable multi-fidelity field (see docs/
         # stage1_validation_optimization_foundation.md Part L.5/L.6): None
         # (the default, and every pre-existing pilot run's value) means
