@@ -42,6 +42,15 @@ echo "SUBMIT_WORKDIR: ${SUBMIT_WORKDIR}"
 echo "CONFIGURED_REPO_WORKDIR: ${REPO_WORKDIR}"
 echo "MORIAH_PYTHON: ${MORIAH_PYTHON}"
 
+capture_nvidia_smi() {
+    local output_path="$1"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi | tee "${output_path}" || echo "WARNING: nvidia-smi diagnostic failed" | tee -a "${output_path}"
+    else
+        echo "WARNING: nvidia-smi unavailable; GPU diagnostic not recorded" | tee "${output_path}"
+    fi
+}
+
 test -d "${REPO_WORKDIR}" || { echo "missing canonical repo workdir: ${REPO_WORKDIR}" >&2; exit 1; }
 test -d "${PACKAGE_ROOT}" || { echo "missing package root" >&2; exit 1; }
 RESOLVED_REPOSITORY=$(git -C "${REPO_WORKDIR}" rev-parse --show-toplevel) || {
@@ -67,7 +76,7 @@ test -x "${MORIAH_PYTHON}" || { echo "REFUSING: MORIAH_PYTHON is not executable:
 import yaml, torch, neuralhydrology
 print("MORIAH_PYTHON_IMPORT_PREFLIGHT: yaml torch neuralhydrology PASS")
 PY
-nvidia-smi | tee "${RESULT_DIR}/nvidia_smi_before.txt"
+capture_nvidia_smi "${RESULT_DIR}/nvidia_smi_before.txt"
 
 "${MORIAH_PYTHON}" -u scripts/prepare_phase_b_batch_size_operational_qualification.py \
   --batch-size "${BATCH_SIZE}" --package-root "${PACKAGE_ROOT}" \
@@ -118,5 +127,5 @@ if path.is_file():
     result['launcher_python_exit_status'] = int(os.environ['PYTHON_STATUS'])
     path.write_text(json.dumps(result, indent=2))
 PY
-nvidia-smi | tee "${RESULT_DIR}/nvidia_smi_after.txt"
+capture_nvidia_smi "${RESULT_DIR}/nvidia_smi_after.txt"
 exit "${PYTHON_STATUS}"
