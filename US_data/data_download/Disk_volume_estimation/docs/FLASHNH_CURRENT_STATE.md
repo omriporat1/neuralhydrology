@@ -1,5 +1,9 @@
 # Flash-NH Current State
 
+## Phase-B Track-A epoch-budget calibration core contract frozen (2026-08-21; not launched)
+
+**[DECIDED — CALIBRATION DESIGN]** A five-candidate Seed-A calibration will determine whether the common Sweep-v1 epoch budget should be 8, 10, 12, or 14. It is one logical continuous trajectory through epoch 14 per candidate, at 50,000 updates/epoch, checkpointed every epoch, with performance stopping disabled and authoritative raw-space screening eligible at every epoch 1--14. NH's existing epoch-specific evaluation and Flash-NH's existing raw-space path may operate post-training; continuation is recovery-only. Cohort: C1 `3e-4/H128/B256`; C2 `1e-4/H128/B256`; C3 `1e-3/H128/B256`; C4 `3e-4/H64/B256`; C5 `3e-4/H256/B128` (joint convergence-stress corner). Shared PT/seq72/[128,32]-tanh/0.10 embedding-dropout/0.25 output-dropout/Adam/Seed-A/lead6 contract remains frozen. No calibration training has run; the common epoch budget remains **[OPEN]** and no winner is implied. Cutoff rules are provisional in `docs/stage1_phase_b_hpo_evaluation_plan.md` §7.
+
 ## Phase-B Task-A design review and first `output_dropout` / `batch_size` plumbing increment (2026-08-20)
 
 **Sweep-v1 decisions.** The five search axes are `learning_rate`,

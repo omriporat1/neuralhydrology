@@ -959,6 +959,8 @@ budgets/concurrency, and W&B/Slurm sweep architecture remain open. This update
 supersedes the preceding transition note only where it describes those
 Sweep-v1 details as open; the canonical Phase-B plan remains authoritative.
 
+**2026-08-21 update.** The epoch-budget *calibration design* is now frozen: five Seed-A candidates will run one continuous 14-epoch, 50k-update-cap, per-epoch-checkpoint/no-performance-stop trajectory with every epoch eligible for canonical raw-space screening. This records no result: the common Sweep-v1 epoch budget remains open pending the later 8/10/12/14 cutoff review; `docs/stage1_phase_b_hpo_evaluation_plan.md` §7 is authoritative.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

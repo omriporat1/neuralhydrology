@@ -2,6 +2,14 @@
 
 # Decision Log
 
+## 2026-08-21 — Phase-B Track-A epoch-budget calibration core contract frozen (not launched)
+
+**[DECIDED — CALIBRATION DESIGN]** Purpose: determine the common Sweep-v1 epoch budget among `8/10/12/14`, not select a configuration. The frozen cohort is C1 anchor (`lr=3e-4`, H128, batch256), C2 low LR (`1e-4`, H128, batch256), C3 high LR (`1e-3`, H128, batch256), C4 late H64 (`3e-4`, H64, batch256), and C5 convergence stress (`3e-4`, H256, batch128; deliberately a joint H/batch corner). All use PT, seq72, `[128,32]` tanh embedding, embedding dropout 0.10, output dropout 0.25, Adam, Seed A 967139, lead6, and 50k updates/epoch.
+
+Each candidate is one logical uninterrupted epoch-1--14 trajectory with `save_weights_every=1`, no performance-based early stopping, and every epoch 1--14 authoritative raw-space-screening eligible. Existing NH epoch-specific evaluation and Flash-NH raw-space evaluation may run after training; continuation is technical recovery only. The common Sweep-v1 epoch budget remains **[OPEN]**: no calibration training has run and no winner is implied. This does not reopen the five axes, `{128,256,512}` batch support, 50k cap, PT, seq72, or lead6.
+
+**[PROVISIONAL ANALYSIS RULE]** For cutoffs `k={8,10,12,14}`, inspect best score/epoch through k, late regret versus 14, ranking, top-2 membership, Spearman agreement, and rising trajectories. Working checks: no late regret above 0.01 median NSE (also report 0.005 sensitivity), stable top-2, rho >= 0.9, and no clearly still-rising candidate; a threshold-sensitive result gets conservative review, not false precision.
+
 ## 2026-08-21 — Phase-B batch-size operational qualification closed
 
 **[DECIDED FOR SWEEP V1]** Batch-size search values are frozen as

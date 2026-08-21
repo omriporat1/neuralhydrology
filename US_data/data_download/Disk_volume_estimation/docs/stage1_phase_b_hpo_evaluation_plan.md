@@ -122,7 +122,7 @@ The Phase-B HPO experiment will include two arms:
 
 Static embedding architecture and sequence length are explicitly **deferred structural decisions**, carried forward from Phase A, not claims of global optimality — consistent with how their respective closure entries (Parts L.19, L.20) described them.
 
-## 7. Fidelity — OPEN
+## 7. Fidelity calibration design
 
 **[OPEN]**
 
@@ -131,6 +131,20 @@ Static embedding architecture and sequence length are explicitly **deferred stru
 All medium-fidelity Sweep-v1 candidates use `max_updates_per_epoch=50,000`; the cap is not rescaled by batch size within Sweep v1. This holds optimizer-update opportunity constant, not sample exposure: different batch sizes process different sample counts under the common budget. That effect is part of the joint batch-size/optimization-efficiency tradeoff. It is not a universal fairness claim or permanent project-wide rule; apparent batch-size advantages remain conditional on this capped regime and require higher-fidelity confirmation before promotion.
 
 Authoritative Flash-NH raw-space screening evaluation occurs every epoch. Sweep v1 uses no performance-based early stopping: every candidate receives the full predefined fidelity budget, and its objective is the best observed eligible raw-space screening checkpoint within that completed budget. Ordinary technical-failure handling is separate.
+
+### [DECIDED — CALIBRATION DESIGN] Epoch-budget calibration
+
+Purpose: determine the common Sweep-v1 epoch budget among `8`, `10`, `12`, or `14`, without selecting a configuration or claiming a calibration result.
+
+Frozen Seed-A cohort: C1 anchor (`lr=3e-4`, H128, batch256); C2 low LR (`1e-4`, H128, batch256); C3 high LR (`1e-3`, H128, batch256); C4 late H64 (`3e-4`, H64, batch256); and C5 convergence stress (`3e-4`, H256, batch128). C5 deliberately changes hidden size and batch size together; no one-factor interpretation is intended.
+
+Shared contract: PT; `seq_length=72`; `[128,32]` tanh static embedding; embedding dropout `0.10`; output dropout `0.25`; Adam; Seed A (`967139`); lead 6h; `max_updates_per_epoch=50,000`; one logical run through epoch 14; `save_weights_every=1`; and no performance-based early stopping. Training is one uninterrupted initial segment through epoch 14, retaining every checkpoint. Every epoch 1--14 is authoritative raw-space-screening eligible; NH epoch-specific evaluation and the existing Flash-NH raw-space evaluator may be run/reused after training. Continuation is recovery-only and preserves the same candidate/model/optimizer/epoch/seed identity; it is not normal cadence.
+
+The common Sweep-v1 epoch budget remains **[OPEN]**. No calibration training has run; no configuration winner is implied. This calibration does not reopen the five Sweep-v1 axes, batch sizes `{128,256,512}`, the common 50k update cap, PT, seq72, or lead6.
+
+### [PROVISIONAL ANALYSIS RULE] Eventual cutoff review
+
+For each `k` in `{8,10,12,14}`, inspect best score and best epoch up to `k`, late regret versus epoch 14, ranking, top-2 membership, Spearman ranking agreement, and whether trajectories remain clearly rising. Working adequacy checks are: no late regret above `0.01` median NSE (also report `0.005` sensitivity), stable top-2 membership, Spearman rho at least `0.9`, and no clearly still-rising candidate. If `0.005` versus `0.01` changes the recommendation, prefer conservative review rather than false precision. This is not a selected epoch budget or a completed scientific result.
 
 **[OPEN]** The total epoch budget is not frozen. A bounded roughly 10--14 epoch calibration at the fixed 50k/every-epoch/no-performance-early-stopping setting will inspect whether 8, 10, 12, or 14 epochs are sufficient from ranking stability, best-checkpoint locations, and trajectories.
 
