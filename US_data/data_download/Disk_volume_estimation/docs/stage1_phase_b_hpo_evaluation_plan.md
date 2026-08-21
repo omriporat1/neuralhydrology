@@ -108,7 +108,7 @@ The Phase-B HPO experiment will include two arms:
 - Sweep v1 searches exactly `learning_rate`, `hidden_size`, `embedding_dropout`, `output_dropout`, and `batch_size`.
 - Adam is fixed. Initial forget bias, weight decay/regularization, learning-rate schedule parameters, and optimizer type are excluded from this first joint-search scope; they are not thereby scientifically irrelevant or permanently fixed. NeuralHydrology CudaLSTM supports `initial_forget_bias`, but it is excluded for Sweep-v1 search-space discipline and lack of Flash-NH Phase-A characterization/plumbing.
 - `output_dropout` is included. **[PROVISIONAL]** The continuous-uniform `0.0`--`0.4` range is a conservative working range around inherited `0.25`, not bounds established as optimal by a Phase-A one-dimensional campaign.
-- `batch_size` is included. **[PROVISIONAL]** Preferred candidates are `{128, 256, 512}`, pending technical/operational qualification on the intended Moriah L4 GPU and hidden-size envelope.
+- `batch_size` is included. **[DECIDED FOR SWEEP V1]** Candidates are `{128, 256, 512}`, operationally qualified under the reviewed Moriah L4/H256 eight-update smoke envelope. This establishes execution viability only, not scientific ranking, an optimal batch size, throughput, long-run stability, or higher-fidelity performance.
 
 ### Fixed for Sweep v1 unless explicitly reopened **[DECIDED, scope-limited to "unless explicitly reopened"]**
 
