@@ -1,8 +1,24 @@
 # Flash-NH Current State
 
-## Phase-B Track-A epoch-budget calibration core contract frozen (2026-08-21; not launched)
+## Phase-B Sweep-v1 launch contract frozen (2026-08-22; not launched)
 
-**[DECIDED — CALIBRATION DESIGN]** A five-candidate Seed-A calibration will determine whether the common Sweep-v1 epoch budget should be 8, 10, 12, or 14. It is one logical continuous trajectory through epoch 14 per candidate, at 50,000 updates/epoch, checkpointed every epoch, with performance stopping disabled and authoritative raw-space screening eligible at every epoch 1--14. NH's existing epoch-specific evaluation and Flash-NH's existing raw-space path may operate post-training; continuation is recovery-only. Cohort: C1 `3e-4/H128/B256`; C2 `1e-4/H128/B256`; C3 `1e-3/H128/B256`; C4 `3e-4/H64/B256`; C5 `3e-4/H256/B128` (joint convergence-stress corner). Shared PT/seq72/[128,32]-tanh/0.10 embedding-dropout/0.25 output-dropout/Adam/Seed-A/lead6 contract remains frozen. No calibration training has run; the common epoch budget remains **[OPEN]** and no winner is implied. Cutoff rules are provisional in `docs/stage1_phase_b_hpo_evaluation_plan.md` §7.
+**[DECIDED]** The completed five-candidate epoch-budget calibration freezes
+Sweep-v1 medium fidelity at 12 epochs, 50,000 updates/epoch, Seed A,
+every-epoch authoritative raw-space screening, and no performance stopping.
+The objective is best eligible median per-basin raw-space NSE through epoch
+12. The cohort directly supported epoch 10 for its tested configurations;
+12 is the deliberate precautionary margin for untested joint configurations.
+Sweep v1 has 36 valid Bayesian and 12 frozen IID-random trials over LR
+log-uniform `1e-4`--`1e-3`, H `{64,128,256}`, both dropouts uniform
+`0.0`--`0.4`, and batch `{128,256,512}`. The detailed frozen contract,
+boundary reviews, visualization requirements, online-W&B qualification gate,
+and deferred items are canonical in
+`docs/stage1_phase_b_sweep_v1_launch_contract.md`. No W&B implementation,
+random manifest, or Sweep-v1 launch has occurred.
+
+## Historical Phase-B Track-A epoch-budget calibration design (2026-08-21; superseded by completed closure)
+
+**[HISTORICAL — CALIBRATION DESIGN]** The five-candidate Seed-A calibration was designed to determine whether the common Sweep-v1 epoch budget should be 8, 10, 12, or 14. It used one logical continuous trajectory through epoch 14 per candidate, at 50,000 updates/epoch, checkpointed every epoch, with performance stopping disabled and authoritative raw-space screening eligible at every epoch 1--14. NH's existing epoch-specific evaluation and Flash-NH's existing raw-space path could operate post-training; continuation was recovery-only. Cohort: C1 `3e-4/H128/B256`; C2 `1e-4/H128/B256`; C3 `1e-3/H128/B256`; C4 `3e-4/H64/B256`; C5 `3e-4/H256/B128` (joint convergence-stress corner). Shared PT/seq72/[128,32]-tanh/0.10 embedding-dropout/0.25 output-dropout/Adam/Seed-A/lead6 contract remained frozen. Its completed closure and current Sweep-v1 decision are recorded above and in `docs/stage1_phase_b_sweep_v1_launch_contract.md`.
 
 ## Phase-B Task-A design review and first `output_dropout` / `batch_size` plumbing increment (2026-08-20)
 

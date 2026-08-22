@@ -2,6 +2,22 @@
 
 # Decision Log
 
+## 2026-08-22 — Phase-B Sweep-v1 launch contract frozen
+
+**[DECIDED]** The completed 5/5 epoch-budget calibration freezes Sweep-v1 at
+12 epochs, 50,000 updates/epoch, Seed A, every-epoch raw-space screening, and
+no performance stopping; objective is best eligible median per-basin
+raw-space NSE through epoch 12. Epoch 10 directly sufficed for the tested
+cohort; 12 is a conservative margin for untested joint configurations, while
+14 found no further cohort best checkpoint. The original domain is 36 valid
+Bayesian and 12 frozen IID-random trials over the five recorded axes; its
+domain is immutable within a versioned wave, with human boundary reviews at
+about 12 and 24 valid Bayesian trials. Online W&B qualification remains a
+CPU-Slurm prerequisite before science launch. Detailed rules, visualization
+requirements, authority split, and deferred items are canonical in
+`docs/stage1_phase_b_sweep_v1_launch_contract.md`. This entry implements or
+launches nothing.
+
 ## 2026-08-22 — Phase-B adopted screening-subset portability repair
 
 The accepted Stage-1 provisional operational screening subset v001 did not change: it is the epoch-9, 400-basin realization produced by `scripts/generate_stage1_screening_subset.py` (seed `42`, `stage1_screening_subset_proportional_composite_stratum_selection_v1`), with SHA-256 `d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372`. Historical Phase-A launchers depended on this repo-relative report artifact as ignored state in their historical Moriah worktree. Clean canonical-clone migration exposed that operational dependency; it does not reopen any Phase-A scientific conclusion. The exact historical artifact is now promoted outside Git to the stable Flash-NH project-data location and Phase-B requires its pinned checksum, 400 unique IDs, and development-population membership. Historical campaigns identify the common accepted path/population, but not every retained run has a subset-file checksum.

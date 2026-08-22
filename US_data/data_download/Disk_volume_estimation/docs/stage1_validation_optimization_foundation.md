@@ -961,6 +961,14 @@ Sweep-v1 details as open; the canonical Phase-B plan remains authoritative.
 
 **2026-08-21 update.** The epoch-budget *calibration design* is now frozen: five Seed-A candidates will run one continuous 14-epoch, 50k-update-cap, per-epoch-checkpoint/no-performance-stop trajectory with every epoch eligible for canonical raw-space screening. This records no result: the common Sweep-v1 epoch budget remains open pending the later 8/10/12/14 cutoff review; `docs/stage1_phase_b_hpo_evaluation_plan.md` §7 is authoritative.
 
+**2026-08-22 update.** The completed five-candidate Phase-B epoch-budget
+calibration closes the medium-fidelity question: Sweep-v1 uses 12 epochs,
+50,000 updates/epoch, Seed A, every-epoch raw-space screening, and no
+performance stopping. The full original-domain search, control, review, and
+visualization contract is now `docs/stage1_phase_b_sweep_v1_launch_contract.md`.
+This foundation note records the transition only; it does not launch W&B,
+generate a random manifest, or alter sealed-set policy.
+
 ## Cross-references
 
 - `docs/decision_log.md` — full decision history, including the seed-run

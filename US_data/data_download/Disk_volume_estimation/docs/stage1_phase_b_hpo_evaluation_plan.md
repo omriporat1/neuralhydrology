@@ -1,5 +1,15 @@
 # Stage-1 Evaluation Framework v1 + Phase-B Bayesian HPO Design — Transition Plan
 
+> **2026-08-22 launch-contract update.** The completed epoch-budget
+> calibration resolves the prior open Sweep-v1 fidelity and original-domain
+> budget questions. The canonical implementation contract is now
+> `docs/stage1_phase_b_sweep_v1_launch_contract.md`: 12 epochs/50k updates,
+> 36 valid Bayesian plus 12 frozen IID-random trials, immutable versioned
+> waves, human boundary reviews, required visualization, and CPU-Slurm online
+> W&B qualification before scientific launch. Where this transition document
+> retains an earlier OPEN or PROVISIONAL Sweep-v1 launch detail, the launch
+> contract supersedes it. This update implements and launches nothing.
+
 Status: **documentation-only transition/design document.** Written after Dynamic-Input-Family-A closed (`docs/decision_log.md`/`docs/FLASHNH_CURRENT_STATE.md` 2026-08-16 CLOSED entry; `docs/stage1_validation_optimization_foundation.md` Part L.22). This document does not launch HPO, does not implement W&B sweeps, does not implement an event separator, does not launch training, does not run new scientific evaluation, and does not reopen Dynamic-Input-Family-A. It exists so the many scientific decisions made about the *next* phase are captured in the repository before new ChatGPT/Claude sessions and multiple parallel workstreams begin.
 
 Throughout this document, every substantive statement is tagged:
