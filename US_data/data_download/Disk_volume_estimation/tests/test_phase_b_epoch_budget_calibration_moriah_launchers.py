@@ -12,6 +12,21 @@ ROOT = Path(__file__).parents[1]
 PREFLIGHT = ROOT / "scripts" / "run_phase_b_epoch_budget_calibration_preflight_moriah.sbatch"
 TRAINING = ROOT / "scripts" / "run_phase_b_epoch_budget_calibration_moriah.sbatch"
 PYTHON = "/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah/bin/python"
+_READONLY = re.compile(r"^\s*readonly\s+([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def _readonly_assignment_violations(text: str) -> list[tuple[str, int, str]]:
+    """Conservative launcher check for direct or inline reassignment after readonly."""
+    lines = text.splitlines()
+    readonly_at = {match.group(1): index for index, line in enumerate(lines) if (match := _READONLY.match(line))}
+    violations = []
+    for name, declaration_index in readonly_at.items():
+        target = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*=")
+        for index, line in enumerate(lines[declaration_index + 1:], start=declaration_index + 2):
+            code = line.split("#", 1)[0]
+            if target.search(code):
+                violations.append((name, index, line))
+    return violations
 
 
 @pytest.mark.parametrize("launcher", [PREFLIGHT, TRAINING])
@@ -35,9 +50,9 @@ def test_preflight_is_cpu_only_and_generates_all_configs():
     assert "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372" in text
     assert "--screening-artifact-path" in text
     assert 'readonly RESULT_DIR=' in text
-    assert 'PREFLIGHT_RESULT_DIR="${RESULT_DIR}"' in text
-    assert not any(line.startswith('RESULT_DIR="${RESULT_DIR}"') for line in text.splitlines())
-    assert "os.environ['PREFLIGHT_RESULT_DIR']" in text
+    assert '"${MORIAH_PYTHON}" - "${RESULT_DIR}" "${EXPECTED_COMMIT}" "${PACKAGE_ROOT}" <<\'PY\'' in text
+    assert "root = Path(sys.argv[1])" in text
+    assert "expected_commit = sys.argv[2]" in text and "package_root = sys.argv[3]" in text
     # Summary finalization is part of the required CPU gate, not an optional
     # diagnostic whose failure can be masked after successful config creation.
     assert "raise SystemExit(0 if required and summary['no_sealed_scope'] else 1)" in text
@@ -50,7 +65,16 @@ def test_training_launcher_is_exactly_one_frozen_candidate_and_no_wandb():
     assert "W&B" in text and "require_tracking" not in text
     assert "PHASEB_SCREENING_ARTIFACT" in text
     assert 'readonly ' in text and 'PHASEB_SCREENING_ARTIFACT="${SCREENING_ARTIFACT}"' in text
-    assert not any(line.startswith('SCREENING_ARTIFACT="${SCREENING_ARTIFACT}"') for line in text.splitlines())
+
+
+@pytest.mark.parametrize("launcher", [PREFLIGHT, TRAINING])
+def test_readonly_launcher_variables_are_never_reassigned(launcher):
+    assert _readonly_assignment_violations(launcher.read_text(encoding="utf-8")) == []
+
+
+def test_readonly_regression_catches_direct_and_inline_environment_assignment():
+    assert _readonly_assignment_violations('readonly RESULT_DIR=x\nRESULT_DIR="${RESULT_DIR}" command')
+    assert _readonly_assignment_violations('readonly PACKAGE_ROOT=x\nPACKAGE_ROOT="${PACKAGE_ROOT}" command')
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")

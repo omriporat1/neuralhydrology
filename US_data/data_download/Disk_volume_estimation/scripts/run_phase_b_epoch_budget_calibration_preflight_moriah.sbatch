@@ -43,10 +43,13 @@ cd "${REPO_WORKDIR}"
 "${MORIAH_PYTHON}" -u scripts/prepare_phase_b_epoch_budget_calibration.py \
   --package-root "${PACKAGE_ROOT}" --screening-artifact-path "${SCREENING_ARTIFACT}" \
   --output-dir "${RESULT_DIR}/canonical_config_audit" --canonical-package-preflight
-PREFLIGHT_RESULT_DIR="${RESULT_DIR}" EXPECTED_COMMIT="${EXPECTED_COMMIT}" PACKAGE_ROOT="${PACKAGE_ROOT}" "${MORIAH_PYTHON}" - <<'PY'
-import json, os
+"${MORIAH_PYTHON}" - "${RESULT_DIR}" "${EXPECTED_COMMIT}" "${PACKAGE_ROOT}" <<'PY'
+import json
+import sys
 from pathlib import Path
-root = Path(os.environ['PREFLIGHT_RESULT_DIR'])
+root = Path(sys.argv[1])
+expected_commit = sys.argv[2]
+package_root = sys.argv[3]
 audit = json.loads((root / 'canonical_config_audit' / 'config_audit.json').read_text())
 required = audit['candidate_count'] == 5 and audit['target_epoch'] == 14 and audit['max_updates_per_epoch'] == 50000
 required = required and audit['screening_epochs'] == list(range(1, 15)) and not audit['performance_early_stopping_enabled']
@@ -54,7 +57,7 @@ required = required and all(row['training_segment_epochs'] == 14 and row['checkp
 screening = audit['screening_identity']
 required = required and screening['expected_count'] == 400 and screening['expected_sha256'] == 'd4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372'
 summary = {'schema_name': 'phase_b_epoch_budget_calibration_canonical_preflight', 'status': 'PASS' if required else 'FAIL',
-           'source_commit_expected': os.environ['EXPECTED_COMMIT'], 'package_root': os.environ['PACKAGE_ROOT'],
+           'source_commit_expected': expected_commit, 'package_root': package_root,
            'audit_path': str(root / 'canonical_config_audit' / 'config_audit.json'), 'candidate_count': audit['candidate_count'],
            'screening_identity': screening,
            'no_training': True, 'no_cuda': True, 'no_sealed_scope': audit['no_sealed_scope']}
