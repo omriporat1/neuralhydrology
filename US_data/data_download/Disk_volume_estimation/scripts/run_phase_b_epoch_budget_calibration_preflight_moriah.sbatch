@@ -43,10 +43,10 @@ cd "${REPO_WORKDIR}"
 "${MORIAH_PYTHON}" -u scripts/prepare_phase_b_epoch_budget_calibration.py \
   --package-root "${PACKAGE_ROOT}" --screening-artifact-path "${SCREENING_ARTIFACT}" \
   --output-dir "${RESULT_DIR}/canonical_config_audit" --canonical-package-preflight
-RESULT_DIR="${RESULT_DIR}" EXPECTED_COMMIT="${EXPECTED_COMMIT}" PACKAGE_ROOT="${PACKAGE_ROOT}" "${MORIAH_PYTHON}" - <<'PY'
+PREFLIGHT_RESULT_DIR="${RESULT_DIR}" EXPECTED_COMMIT="${EXPECTED_COMMIT}" PACKAGE_ROOT="${PACKAGE_ROOT}" "${MORIAH_PYTHON}" - <<'PY'
 import json, os
 from pathlib import Path
-root = Path(os.environ['RESULT_DIR'])
+root = Path(os.environ['PREFLIGHT_RESULT_DIR'])
 audit = json.loads((root / 'canonical_config_audit' / 'config_audit.json').read_text())
 required = audit['candidate_count'] == 5 and audit['target_epoch'] == 14 and audit['max_updates_per_epoch'] == 50000
 required = required and audit['screening_epochs'] == list(range(1, 15)) and not audit['performance_early_stopping_enabled']

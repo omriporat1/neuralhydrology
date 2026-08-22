@@ -34,6 +34,13 @@ def test_preflight_is_cpu_only_and_generates_all_configs():
     assert "PHASEB_SCREENING_ARTIFACT" in text
     assert "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372" in text
     assert "--screening-artifact-path" in text
+    assert 'readonly RESULT_DIR=' in text
+    assert 'PREFLIGHT_RESULT_DIR="${RESULT_DIR}"' in text
+    assert not any(line.startswith('RESULT_DIR="${RESULT_DIR}"') for line in text.splitlines())
+    assert "os.environ['PREFLIGHT_RESULT_DIR']" in text
+    # Summary finalization is part of the required CPU gate, not an optional
+    # diagnostic whose failure can be masked after successful config creation.
+    assert "raise SystemExit(0 if required and summary['no_sealed_scope'] else 1)" in text
 
 
 def test_training_launcher_is_exactly_one_frozen_candidate_and_no_wandb():
@@ -42,6 +49,8 @@ def test_training_launcher_is_exactly_one_frozen_candidate_and_no_wandb():
     assert "C1_anchor|C2_low_lr|C3_high_lr|C4_late_h64|C5_convergence_stress" in text
     assert "W&B" in text and "require_tracking" not in text
     assert "PHASEB_SCREENING_ARTIFACT" in text
+    assert 'readonly ' in text and 'PHASEB_SCREENING_ARTIFACT="${SCREENING_ARTIFACT}"' in text
+    assert not any(line.startswith('SCREENING_ARTIFACT="${SCREENING_ARTIFACT}"') for line in text.splitlines())
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
