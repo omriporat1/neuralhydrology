@@ -2,6 +2,10 @@
 
 # Decision Log
 
+## 2026-08-22 — Phase-B adopted screening-subset portability repair
+
+The accepted Stage-1 provisional operational screening subset v001 did not change: it is the epoch-9, 400-basin realization produced by `scripts/generate_stage1_screening_subset.py` (seed `42`, `stage1_screening_subset_proportional_composite_stratum_selection_v1`), with SHA-256 `d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372`. Historical Phase-A launchers depended on this repo-relative report artifact as ignored state in their historical Moriah worktree. Clean canonical-clone migration exposed that operational dependency; it does not reopen any Phase-A scientific conclusion. The exact historical artifact is now promoted outside Git to the stable Flash-NH project-data location and Phase-B requires its pinned checksum, 400 unique IDs, and development-population membership. Historical campaigns identify the common accepted path/population, but not every retained run has a subset-file checksum.
+
 ## 2026-08-21 — Phase-B Track-A epoch-budget calibration core contract frozen (not launched)
 
 **[DECIDED — CALIBRATION DESIGN]** Purpose: determine the common Sweep-v1 epoch budget among `8/10/12/14`, not select a configuration. The frozen cohort is C1 anchor (`lr=3e-4`, H128, batch256), C2 low LR (`1e-4`, H128, batch256), C3 high LR (`1e-3`, H128, batch256), C4 late H64 (`3e-4`, H64, batch256), and C5 convergence stress (`3e-4`, H256, batch128; deliberately a joint H/batch corner). All use PT, seq72, `[128,32]` tanh embedding, embedding dropout 0.10, output dropout 0.25, Adam, Seed A 967139, lead6, and 50k updates/epoch.

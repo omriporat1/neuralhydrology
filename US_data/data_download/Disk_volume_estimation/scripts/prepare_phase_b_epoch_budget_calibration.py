@@ -29,6 +29,11 @@ MAX_UPDATES_PER_EPOCH = 50_000
 SEED_A = 967139
 PT_DYNAMIC_INPUTS = ("mrms_qpe_1h_mm", "rtma_2t_K")
 _PROFILE = "pilot_lead06_emb128x32_seedA_v001"
+SCREENING_ARTIFACT_RELATIVE_PATH = Path(
+    "screening_subsets/stage1_provisional_operational_screening_subset_v001/"
+    "screening_subset_basin_ids.txt"
+)
+SCREENING_ARTIFACT_SHA256 = "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372"
 
 EPOCH_BUDGET_CALIBRATION_RUN_SPECS = {
     "C1_anchor": PilotRunSpec("C1_anchor", "learned_fc_embedding", [128, 32], "seed_a", SEED_A, _PROFILE,
@@ -49,11 +54,12 @@ EPOCH_BUDGET_CALIBRATION_RUN_SPECS = {
 }
 
 
-def _resolve_policy_relative_paths(policy):
+def _resolve_policy_relative_paths(policy, *, screening_artifact_path: Path | None = None):
     def absolute(raw: str) -> str:
         path = Path(raw)
         return str(path if path.is_absolute() else _REPO_WORKDIR / path)
-    return dataclasses.replace(policy, screening_basin_ids_path=absolute(policy.screening_basin_ids_path),
+    screening_path = Path(screening_artifact_path) if screening_artifact_path is not None else Path(policy.screening_basin_ids_path)
+    return dataclasses.replace(policy, screening_basin_ids_path=absolute(str(screening_path)),
                                base_early_stopping_policy_path=absolute(policy.base_early_stopping_policy_path),
                                wandb_policy_path=absolute(policy.wandb_policy_path))
 
@@ -75,10 +81,18 @@ def build_epoch_budget_calibration_policy(base_policy):
     )
 
 
+def stable_screening_artifact_path(package_root: Path) -> Path:
+    """Return the external, project-data artifact location for Phase-B only."""
+    return Path(package_root).parent / SCREENING_ARTIFACT_RELATIVE_PATH
+
+
 def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, splits_dir, output_dir,
+                     screening_artifact_path: Path | None = None,
                      audit_scope: str = "LOCAL_STRUCTURAL_AUDIT_ONLY") -> Path:
     """Generate all five configs and write ``config_audit.json``; never train."""
-    base = _resolve_policy_relative_paths(load_pilot_policy(pilot_policy_path))
+    artifact_path = Path(screening_artifact_path) if screening_artifact_path is not None else stable_screening_artifact_path(package_root)
+    base = _resolve_policy_relative_paths(load_pilot_policy(pilot_policy_path), screening_artifact_path=artifact_path)
+    base = dataclasses.replace(base, screening_expected_count=400, screening_expected_sha256=SCREENING_ARTIFACT_SHA256)
     policy = build_epoch_budget_calibration_policy(base)
     effective = build_effective_policy(policy)
     output = Path(output_dir)
@@ -103,6 +117,7 @@ def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, s
             "screening_validation_basin_ids_sha256": hashlib.sha256(
                 "\n".join(bundle.validation_basin_ids).encode("utf-8")
             ).hexdigest(),
+            "screening_artifact_sha256": policy.screening_expected_sha256,
             "evaluation_period": "validation_2024_only",
             "validation_start_date": config["validation_start_date"], "validation_end_date": config["validation_end_date"],
             "config_path": str(config_paths["config.yaml"]), "generation_manifest": str(config_paths["generation_manifest.json"]),
@@ -117,7 +132,8 @@ def prepare_campaign(*, pilot_policy_path, baseline_policy_path, package_root, s
              "package_manifest_identity": package_identity,
              "screening_identity": {"basin_ids_path": policy.screening_basin_ids_path,
                                     "expected_count": policy.screening_expected_count,
-                                    "expected_sha256": policy.screening_expected_sha256},
+                                    "expected_sha256": policy.screening_expected_sha256,
+                                    "artifact_role": "external_promoted_adopted_epoch9_subset"},
              "evaluation_scope": "development_validation_2024_only",
              "sealed_scopes_not_accessed": ["temporal_test_2025", "non_ca_spatial_holdout", "california"],
              "performance_early_stopping_enabled": False, "effective_policy": effective,
@@ -137,9 +153,12 @@ def main() -> None:
     parser.add_argument("--splits-dir", type=Path, default=_REPO_WORKDIR / "config" / "stage1_baseline_splits_v001")
     parser.add_argument("--canonical-package-preflight", action="store_true",
                         help="Label this audit as the real canonical-package preflight, not local structural validation.")
+    parser.add_argument("--screening-artifact-path", type=Path,
+                        help="Optional external promoted screening artifact; it must satisfy the fixed Phase-B identity contract.")
     args = parser.parse_args()
     print(prepare_campaign(pilot_policy_path=args.pilot_policy_path, baseline_policy_path=args.baseline_policy_path,
                            package_root=args.package_root, splits_dir=args.splits_dir, output_dir=args.output_dir,
+                           screening_artifact_path=args.screening_artifact_path,
                            audit_scope=("CANONICAL_PACKAGE_PREFLIGHT" if args.canonical_package_preflight else "LOCAL_STRUCTURAL_AUDIT_ONLY")))
 
 

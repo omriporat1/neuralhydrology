@@ -6,8 +6,10 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from src.baseline.pilot_early_stopping import build_effective_policy, record_screening_event
-from src.baseline.pilot_lead06_config import load_pilot_policy
+from src.baseline.pilot_lead06_config import PilotConfigError, load_pilot_policy
 from src.baseline.pilot_screening_eval import classify_screening_epoch_role
 from src.baseline.pilot_orchestration import chunk_epoch_targets, screening_epochs_in_chunk
 from tests._pilot_support import BASELINE_POLICY_PATH, PILOT_POLICY_PATH, REAL_DEVELOPMENT, SPLITS_DIR, build_full_union_package, write_screening_basin_ids_file
@@ -26,6 +28,18 @@ def _policy(tmp_path):
     from src.baseline.splits import sha256_of
     base = dataclasses.replace(base, screening_expected_sha256=sha256_of(screening))
     return campaign.build_epoch_budget_calibration_policy(base)
+
+
+def _promoted_artifact(tmp_path, basin_ids=REAL_DEVELOPMENT[:400]):
+    path = tmp_path / "screening_subsets" / "stage1_provisional_operational_screening_subset_v001" / "screening_subset_basin_ids.txt"
+    path.parent.mkdir(parents=True)
+    return write_screening_basin_ids_file(path, basin_ids)
+
+
+@pytest.fixture
+def accepted_artifact_hash(monkeypatch):
+    """Structural tests use synthetic IDs; the production hash stays literal/pinned."""
+    monkeypatch.setattr("src.baseline.pilot_lead06_config.sha256_of", lambda path: campaign.SCREENING_ARTIFACT_SHA256)
 
 
 def test_frozen_five_candidate_cohort_and_exact_tuples():
@@ -73,10 +87,11 @@ def test_no_performance_stop_records_every_epoch_through_target(tmp_path):
     assert state["stop_reason"] == "max_epoch_budget_reached"
 
 
-def test_prepare_campaign_writes_auditable_configs_only(tmp_path):
+def test_prepare_campaign_writes_auditable_configs_only(tmp_path, accepted_artifact_hash):
     package = tmp_path / "package"; build_full_union_package(package)
     audit_path = campaign.prepare_campaign(pilot_policy_path=PILOT_POLICY_PATH, baseline_policy_path=BASELINE_POLICY_PATH,
-                                           package_root=package, splits_dir=SPLITS_DIR, output_dir=tmp_path / "audit")
+                                           package_root=package, splits_dir=SPLITS_DIR, output_dir=tmp_path / "audit",
+                                           screening_artifact_path=_promoted_artifact(tmp_path))
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert audit["candidate_count"] == 5
     assert audit["audit_scope"] == "LOCAL_STRUCTURAL_AUDIT_ONLY"
@@ -87,8 +102,37 @@ def test_prepare_campaign_writes_auditable_configs_only(tmp_path):
     assert audit["sealed_scopes_not_accessed"] == ["temporal_test_2025", "non_ca_spatial_holdout", "california"]
     assert audit["screening_epochs"] == list(range(1, 15))
     assert audit["performance_early_stopping_enabled"] is False
+    assert audit["screening_identity"]["expected_sha256"] == campaign.SCREENING_ARTIFACT_SHA256
+    assert audit["screening_identity"]["expected_count"] == 400
     assert audit["no_wandb_or_hpo"] is True and audit["no_sealed_scope"] is True
     assert all(row["max_updates_per_epoch"] == 50_000 and row["training_segment_epochs"] == 14
                and row["checkpoint_save_every_epochs"] == 1 for row in audit["candidates"])
     assert all(row["evaluation_period"] == "validation_2024_only" and row["screening_validation_basin_count"] == 400 for row in audit["candidates"])
+    assert {row["screening_artifact_sha256"] for row in audit["candidates"]} == {campaign.SCREENING_ARTIFACT_SHA256}
     assert all("slurm" not in row and "wandb" not in row and row["sealed_scope"] is False for row in audit["candidates"])
+
+
+def test_external_artifact_contract_rejects_missing_checksum_duplicate_and_non_development(tmp_path, monkeypatch):
+    package = tmp_path / "package"; build_full_union_package(package)
+    common = dict(pilot_policy_path=PILOT_POLICY_PATH, baseline_policy_path=BASELINE_POLICY_PATH,
+                  package_root=package, splits_dir=SPLITS_DIR, output_dir=tmp_path / "audit")
+    with pytest.raises(PilotConfigError, match="could not read"):
+        campaign.prepare_campaign(**common, screening_artifact_path=tmp_path / "missing.txt")
+    bad_hash = _promoted_artifact(tmp_path / "hash")
+    with pytest.raises(PilotConfigError, match="sha256"):
+        campaign.prepare_campaign(**common, screening_artifact_path=bad_hash)
+    monkeypatch.setattr("src.baseline.pilot_lead06_config.sha256_of", lambda path: campaign.SCREENING_ARTIFACT_SHA256)
+    duplicate = _promoted_artifact(tmp_path / "duplicate", REAL_DEVELOPMENT[:399] + [REAL_DEVELOPMENT[0]])
+    with pytest.raises(PilotConfigError, match="duplicate"):
+        campaign.prepare_campaign(**common, screening_artifact_path=duplicate)
+    outsider = _promoted_artifact(tmp_path / "outsider", REAL_DEVELOPMENT[:399] + ["99999999"])
+    with pytest.raises(PilotConfigError, match="development population"):
+        campaign.prepare_campaign(**common, screening_artifact_path=outsider)
+
+
+def test_no_ignored_reports_or_regeneration_fallback(tmp_path):
+    package = tmp_path / "package"; build_full_union_package(package)
+    assert campaign.stable_screening_artifact_path(package) == package.parent / campaign.SCREENING_ARTIFACT_RELATIVE_PATH
+    with pytest.raises(PilotConfigError, match="could not read"):
+        campaign.prepare_campaign(pilot_policy_path=PILOT_POLICY_PATH, baseline_policy_path=BASELINE_POLICY_PATH,
+                                  package_root=package, splits_dir=SPLITS_DIR, output_dir=tmp_path / "audit")

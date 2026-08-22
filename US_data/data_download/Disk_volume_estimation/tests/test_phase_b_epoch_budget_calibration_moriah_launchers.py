@@ -31,6 +31,9 @@ def test_preflight_is_cpu_only_and_generates_all_configs():
     assert "--canonical-package-preflight" in text
     assert "from neuralhydrology.nh_run" not in text and "torch.cuda.is_initialized" in text
     assert "canonical_preflight_summary.json" in text
+    assert "PHASEB_SCREENING_ARTIFACT" in text
+    assert "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372" in text
+    assert "--screening-artifact-path" in text
 
 
 def test_training_launcher_is_exactly_one_frozen_candidate_and_no_wandb():
@@ -38,6 +41,7 @@ def test_training_launcher_is_exactly_one_frozen_candidate_and_no_wandb():
     assert "#SBATCH --partition=catfish" in text and "#SBATCH --gres=gpu:l4:1" in text
     assert "C1_anchor|C2_low_lr|C3_high_lr|C4_late_h64|C5_convergence_stress" in text
     assert "W&B" in text and "require_tracking" not in text
+    assert "PHASEB_SCREENING_ARTIFACT" in text
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
