@@ -272,6 +272,8 @@ __all__ = [
     "PREPARATION_RESULT_FILENAME",
     "prepare_pilot_run_only",
     "run_pilot_chunk",
+    "logged_screening_epochs",
+    "PreparedPilotExecutionResult",
     "execute_prepared_pilot_run",
     "run_pilot",
 ]
@@ -988,6 +990,20 @@ def _save_orchestration_state(nh_run_dir, state: dict) -> None:
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
+
+
+def logged_screening_epochs(nh_run_dir) -> "list[int]":
+    """Public accessor for the durable, restart-safe set of screening epochs
+    already logged for ``nh_run_dir`` (``pilot_orchestration_state.json``'s
+    ``logged_screening_epochs`` -- see :func:`run_pilot_chunk`'s docstring).
+    This is every screening-cadence epoch ever processed across every past
+    invocation for this run directory, both ``diagnostic_only`` and
+    ``stopping_eligible`` roles -- the authoritative source for
+    full-history reconstruction. The public entry point external consumers
+    should use instead of reaching into ``_load_orchestration_state``
+    directly."""
+    state = _load_orchestration_state(nh_run_dir)
+    return sorted(state["logged_screening_epochs"])
 
 
 def _load_scalar_identity_record(nh_run_dir, state_filename: str) -> "dict | None":
@@ -1914,18 +1930,111 @@ def run_pilot_chunk(
     }
 
 
+@dataclass(frozen=True)
+class PreparedPilotExecutionResult:
+    """Generic, campaign-agnostic receipt for one
+    :func:`execute_prepared_pilot_run` call -- the sole interface a
+    higher-level scientific workflow needs, so it never has to reopen the
+    internal per-chunk dict shape, crawl the NH run directory itself, or
+    reconstruct screening history by hand.
+
+    ``screening_events`` is always this run's COMPLETE, epoch-ordered
+    screening history -- every screening-cadence epoch ever logged for
+    ``nh_run_dir`` across every past and current invocation (see
+    :func:`logged_screening_epochs`), not just the epochs newly processed by
+    this particular call. Each entry is exactly
+    :func:`src.baseline.pilot_screening_eval.evaluate_screening_checkpoint`'s
+    return shape. A successfully reconstructed entry for epoch E is itself
+    the evidence that NH validation/evaluation for E completed -- the
+    ``ensure_validation_results`` -> ``evaluate_screening_checkpoint`` chain
+    only ever produces a result by reading an already-saved validation
+    pickle. Consumers should treat ``{e["epoch"] for e in screening_events}``
+    as the authoritative NH-evaluation-coverage set and must not build a
+    second, parallel evaluation-coverage model.
+
+    ``checkpoint_inventory`` is exactly :func:`discover_physical_checkpoints`'s
+    return shape (``dict[int, PhysicalCheckpoint]``) -- physical checkpoint
+    presence only, no campaign-specific completeness interpretation.
+
+    This type intentionally carries no campaign-specific concept (no
+    VALID/INVALID, best_epoch/best_score, Bayesian objective, or W&B field).
+    A caller needing actual optimizer-update evidence must call
+    :func:`actual_optimizer_updates_by_epoch` on ``nh_run_dir`` explicitly --
+    it is deliberately not eagerly computed here (torch-dependent, and not
+    every consumer needs it).
+    """
+
+    final_status: str
+    blocked_reason: "str | None"
+    effective_policy: dict
+    nh_run_dir: Path
+    blocked: bool
+    stopped: bool
+    stop_reason: "str | None"
+    checkpoint_inventory: "dict[int, PhysicalCheckpoint]"
+    early_stopping_state: dict
+    screening_events: list
+
+
+def _reconstruct_screening_history(
+    *, nh_run_dir, checkpoint_inventory: "dict[int, PhysicalCheckpoint]",
+    package_root, target_variable: str, lead_hours: int, screening_basin_ids, pilot_policy,
+) -> list:
+    """Rebuild this run's COMPLETE, epoch-ordered screening-event history
+    from durable state, fixing the pre-existing bug where a resumed
+    :func:`execute_prepared_pilot_run` call only returned the CURRENT
+    invocation's screening results (prior chunks'/invocations' events were
+    silently missing). Never persists a second screening-event
+    representation, never re-runs NH inference, and never recomputes
+    hydrologic metrics itself: each event is produced by re-reading the
+    already-written validation pickle through the same mature
+    :func:`evaluate_screening_checkpoint` helper :func:`run_pilot_chunk`
+    itself uses, driven by the durable :func:`logged_screening_epochs` set
+    (the authoritative record of which epochs were ever actually screened)
+    and the authoritative physical checkpoint inventory (for each epoch's
+    exact owning run directory -- never inferred from the base run
+    directory, since an earlier chunk's screening epoch may physically live
+    in a different, now-superseded continuation directory than the
+    base/current one)."""
+    events = []
+    for epoch in logged_screening_epochs(nh_run_dir):
+        checkpoint = checkpoint_inventory.get(epoch)
+        if checkpoint is None:
+            raise PilotOrchestrationError(
+                f"epoch {epoch} is recorded as logged in this run's orchestration state "
+                f"but has no physical checkpoint anywhere under {nh_run_dir} -- refusing to "
+                "fabricate a screening-history entry for a checkpoint that no longer exists"
+            )
+        result = evaluate_screening_checkpoint(
+            run_dir=checkpoint.owning_run_dir,
+            epoch=epoch,
+            package_root=package_root,
+            target_variable=target_variable,
+            lead_hours=lead_hours,
+            screening_basin_ids=screening_basin_ids,
+            pilot_policy=pilot_policy,
+        )
+        events.append(result)
+    return events
+
+
 def execute_prepared_pilot_run(
     *, execution_policy, config_dir, experiment_name: str, package_root,
     target_variable: str, lead_hours: int, screening_basin_ids, run_id: str,
     tracking_run=None, train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
     max_target_epoch: "int | None" = None,
-) -> dict:
+) -> PreparedPilotExecutionResult:
     """Execute an already-written NH config through the mature chunk primitive.
 
     This intentionally does not resolve a run spec or write ``config.yaml``.
     It reads only the existing execution-policy surface used by the former
     inline loop: chunk scheduling, lead hours, and the effective stop policy.
+
+    Returns a generic, campaign-agnostic :class:`PreparedPilotExecutionResult`
+    -- see that class's docstring for field semantics, in particular
+    ``screening_events``' full-history reconstruction and its relationship
+    to NH evaluation coverage.
     """
     effective_policy = build_effective_policy(execution_policy)
     targets = chunk_epoch_targets(execution_policy, effective_policy["max_epoch_budget"])
@@ -1936,7 +2045,7 @@ def execute_prepared_pilot_run(
         if not targets:
             raise PilotOrchestrationError(f"max_target_epoch={max_target_epoch} excludes every chunk target")
     have_started = _try_discover_nh_run_dir(config_dir, experiment_name) is not None
-    previous_target = 0; previous_checkpoint_dir = None; all_screening_results = []
+    previous_target = 0; previous_checkpoint_dir = None
     last_chunk_result = None; final_status = "not_started"; blocked_reason = None
     for idx, target in enumerate(targets):
         chunk_result = run_pilot_chunk(
@@ -1956,7 +2065,6 @@ def execute_prepared_pilot_run(
             final_status = "blocked_continuation_overshoot_conflict"
             break
         last_chunk_result = chunk_result
-        all_screening_results.extend(chunk_result["screening_results"])
         previous_target, previous_checkpoint_dir = target, chunk_result["checkpoint_dir_for_target"]
         if chunk_result["stopped"]:
             final_status = f"stopped_{chunk_result['stop_reason']}"
@@ -1966,9 +2074,27 @@ def execute_prepared_pilot_run(
                         and targets[-1] < effective_policy["max_epoch_budget"] else "budget_exhausted_not_stopped")
     if last_chunk_result is None:
         raise PilotOrchestrationError("prepared execution produced no chunk result")
-    return {"final_status": final_status, "blocked_reason": blocked_reason,
-            "last_chunk_result": last_chunk_result, "screening_events": all_screening_results,
-            "effective_policy": effective_policy}
+
+    nh_run_dir = last_chunk_result["nh_run_dir"]
+    checkpoint_inventory = discover_physical_checkpoints(nh_run_dir)
+    screening_events = _reconstruct_screening_history(
+        nh_run_dir=nh_run_dir, checkpoint_inventory=checkpoint_inventory,
+        package_root=package_root, target_variable=target_variable, lead_hours=lead_hours,
+        screening_basin_ids=screening_basin_ids, pilot_policy=execution_policy,
+    )
+
+    return PreparedPilotExecutionResult(
+        final_status=final_status,
+        blocked_reason=blocked_reason,
+        effective_policy=effective_policy,
+        nh_run_dir=nh_run_dir,
+        blocked=blocked_reason is not None,
+        stopped=bool(last_chunk_result["stopped"]),
+        stop_reason=last_chunk_result["stop_reason"],
+        checkpoint_inventory=checkpoint_inventory,
+        early_stopping_state=last_chunk_result["state"],
+        screening_events=screening_events,
+    )
 
 
 def run_pilot(
@@ -2115,25 +2241,23 @@ def run_pilot(
         train_chunk_fn=train_chunk_fn, evaluate_checkpoint_fn=evaluate_checkpoint_fn,
         max_target_epoch=max_target_epoch,
     )
-    final_status = execution["final_status"]
-    blocked_reason = execution["blocked_reason"]
-    last_chunk_result = execution["last_chunk_result"]
-    all_screening_results = execution["screening_events"]
+    final_status = execution.final_status
+    blocked_reason = execution.blocked_reason
 
-    best_epoch = pilot_best_checkpoint_epoch(last_chunk_result["state"])
+    best_epoch = pilot_best_checkpoint_epoch(execution.early_stopping_state)
     finish_pilot_run(tracking_run, final_status=final_status, best_epoch=best_epoch)
 
-    status_fields = compute_pilot_status_fields(last_chunk_result["nh_run_dir"], pilot_policy=pilot_policy)
+    status_fields = compute_pilot_status_fields(execution.nh_run_dir, pilot_policy=pilot_policy)
 
     evidence_path = write_pilot_evidence_bundle(
         out_dir=evidence_out_dir,
         config_dir=config_dir,
-        nh_run_dir=last_chunk_result["nh_run_dir"],
+        nh_run_dir=execution.nh_run_dir,
         pilot_policy=pilot_policy,
         run_spec=run_spec,
         tracking_run=tracking_run,
-        early_stopping_state=last_chunk_result["state"],
-        screening_events=all_screening_results,
+        early_stopping_state=execution.early_stopping_state,
+        screening_events=execution.screening_events,
         run_status=final_status,
         commands_used=list(commands_used) if commands_used else [],
         slurm_identity=slurm_identity,
@@ -2153,7 +2277,7 @@ def run_pilot(
         "run_id": run_id,
         "final_status": final_status,
         "best_checkpoint_epoch": best_epoch,
-        "nh_run_dir": last_chunk_result["nh_run_dir"],
+        "nh_run_dir": execution.nh_run_dir,
         "evidence_bundle_path": evidence_path,
         "highest_physical_checkpoint_epoch": status_fields["highest_physical_checkpoint_epoch"],
         "highest_screened_epoch": status_fields["highest_screened_epoch"],

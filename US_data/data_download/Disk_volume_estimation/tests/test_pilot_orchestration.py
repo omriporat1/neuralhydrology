@@ -1377,8 +1377,8 @@ def test_run_pilot_end_to_end_rerun_of_fully_screened_earlier_chunks_is_idempote
     flat, continue_training_from_epoch006/ containing 7-15 (untrusted
     overshoot beyond the already-screened frontier), and -- unlike the
     blocked-conflict test above -- this run's OWN persisted state already
-    shows epochs 3/6/9 fully screened and logged (not just the disk
-    checkpoints/validation results). run_pilot() always restarts its
+    shows epochs 3/6/9 fully screened and logged directly via
+    pilot_orchestration_state.json (not derived from disk). run_pilot() always restarts its
     chunk walk from target=6 on every call (see chunk_epoch_targets), so a
     rerun must recognize epochs 3/6/9 as already-logged
     (pilot_orchestration_state.json's logged_screening_epochs) and skip
@@ -1407,11 +1407,22 @@ def test_run_pilot_end_to_end_rerun_of_fully_screened_earlier_chunks_is_idempote
     for epoch in range(7, 16):
         (cont_dir / f"model_epoch{epoch:03d}.pt").write_bytes(f"ckpt{epoch}".encode())
 
-    # No validation_results.p pickles are written for epochs 3/6/9 here --
-    # deliberately, to prove the rerun never re-evaluates them (it must
+    # validation_results.p pickles ARE written for epochs 3/6/9 here, matching
+    # the real invariant an epoch is only ever added to logged_screening_epochs
+    # after its validation result already exists on disk (see
+    # execute_prepared_pilot_run's screening-history reconstruction, which
+    # re-reads these existing pickles via evaluate_screening_checkpoint to
+    # rebuild the full history -- this is not new NH evaluation and must not
+    # touch the fake evaluate callback below). Epoch 9's checkpoint physically
+    # lives under cont_dir (not nh_run_dir), so its validation artifact must
+    # too, matching PhysicalCheckpoint.owning_run_dir for that epoch. The test
+    # still proves the rerun never re-evaluates via the live callback: it must
     # skip straight past on the persisted logged_screening_epochs contract
-    # alone; if it tried to evaluate, ensure_validation_results would call
-    # the fake evaluate callback below and the counter would be nonzero).
+    # alone, without ever invoking counting_evaluate below.
+    write_perfect_validation_results(nh_run_dir, 3, fx["basins"], fx["package_root"])
+    write_perfect_validation_results(nh_run_dir, 6, fx["basins"], fx["package_root"])
+    write_perfect_validation_results(cont_dir, 9, fx["basins"], fx["package_root"])
+
     orchestration_state_path = nh_run_dir / "pilot_orchestration_state.json"
     orchestration_state_path.write_text(json.dumps({"logged_screening_epochs": [3, 6, 9]}))
 
