@@ -33,7 +33,7 @@ if [ -z "${EXPECTED_COMMIT}" ]; then
 fi
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
-REPO_WORKDIR="${REPO_WORKDIR:-${FLASHNH_BASE}/repos/flash-nh}"
+REPO_WORKDIR="${REPO_WORKDIR:-${FLASHNH_BASE}/repos/flash-nh/US_data/data_download/Disk_volume_estimation}"
 CANONICAL_PYTHON="${CANONICAL_PYTHON:-${FLASHNH_BASE}/envs/flashnh-moriah/bin/python}"
 
 RESULT_DIR="${FLASHNH_BASE}/evidence/phase_b_wandb_online_sweep_qualification_v001/preflight_${SLURM_JOB_ID}"
