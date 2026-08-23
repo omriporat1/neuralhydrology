@@ -2,6 +2,33 @@
 
 # Decision Log
 
+## 2026-08-23 — Workflow: adopted Interface / Consumer Contract Gate for agent handoffs
+
+**[DECIDED — WORKFLOW/PROCESS, NOT SCIENTIFIC]** The user approved a durable
+workflow lesson from the Phase-B Sweep-v1 production-adapter integration
+difficulty. W&B tracking/telemetry qualification and execution-provenance
+evidence had each previously been closed within their own scope (see the W&B
+offline launch-contract and real-artifact qualification entries below), but
+Phase-B integration work exposed that the prepared executor's
+consumer-facing result/evidence contract — the structured receipt Sweep-v1
+needs to determine trial validity — was a separate, unresolved interface that
+neither prior closure covered. Broad claims like "tracking is closed" or
+"execution is qualified" had been silently read as covering this consumer
+contract too, which they did not.
+
+Future substantial reuse/integration work (cross-component production
+integration, reuse of a mature subsystem by a new consumer, reusable-component
+extraction, or evidence/tracking/result plumbing where scientific validity
+depends on the interface) must apply the Interface / Consumer Contract Gate
+now recorded in `docs/agent_handoff_rules.md` §5: identify producer,
+consumer, required inputs/outputs, fact authority, failure semantics, and a
+vertical synthetic/integration test; prefer scoped closure language over
+broad claims; and route missing lower-layer facts to a repaired lower-layer
+contract rather than an ad hoc higher-layer reconstruction. This entry adopts
+the workflow rule only; it does not change any scientific policy, and it does
+not itself define the Sweep-v1 execution result contract (that remains a
+separate technical task).
+
 ## 2026-08-22 — Phase-B Sweep-v1 launch contract frozen
 
 **[DECIDED]** The completed 5/5 epoch-budget calibration freezes Sweep-v1 at

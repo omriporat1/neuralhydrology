@@ -72,7 +72,53 @@ A task handoff should make clear, when relevant:
 
 If execution reveals a genuine scientific ambiguity, return it to the user rather than silently expanding the task.
 
-## 5. Commit and push authority
+## 5. Interface / Consumer Contract Gate
+
+Before substantial cross-component production integration, reuse of a mature
+subsystem by a new consumer, extraction of a reusable component, or
+evidence/tracking/result plumbing where scientific validity depends on the
+interface, the task must identify, when relevant:
+
+1. Producer.
+2. Intended consumer.
+3. Required inputs.
+4. Required outputs / success receipt.
+5. Authority for each scientifically or operationally meaningful fact.
+6. Failure/incomplete semantics.
+7. One vertical synthetic/integration test proving the consumer can use the
+   producer contract.
+
+**Core rule.** "The information exists internally" is not sufficient. The
+intended consumer must be able to obtain every authoritative fact it needs
+through the defined interface or another explicitly-authoritative shared
+artifact/helper. A higher layer must not silently reconstruct lower-layer
+scientific/execution facts using an ad hoc parallel interpretation merely
+because the lower layer does not expose them. If the missing information
+belongs to the lower layer's authority, prefer repairing/exposing the generic
+lower-level result contract over working around it in the higher layer.
+
+**Reusable-extraction review.** When reviewing an extracted/reusable
+component, do not only verify code motion, backward compatibility, and
+sufficient inputs. Also verify whether the stated new consumer receives all
+outputs/evidence it needs to use the component safely. A reusable extraction
+may be behaviorally correct for its old caller while still having an
+incomplete consumer-facing result contract.
+
+**Scoped closure language.** Avoid broad closure claims such as "tracking is
+closed," "evidence is settled," or "execution is qualified" when multiple
+distinct contracts exist. Prefer scoped status language, for example: W&B
+telemetry — CLOSED; execution provenance — CLOSED; consumer result contract —
+OPEN. This is not a heavy formal status system; it exists only to prevent
+confidence in one contract from being silently transferred to another.
+
+**Facts vs. interpretation.** Lower layers should expose authoritative facts;
+higher layers should interpret those facts according to their scientific
+contract. For example: an execution layer reports what physically executed; a
+campaign/scientific layer decides whether that execution is scientifically
+valid and what objective it implies; a telemetry layer reports/displays the
+result. This is a general project rule, not specific to any one subsystem.
+
+## 6. Commit and push authority
 
 Generated-artifact policy is defined in `docs/repo_policy.md`.
 
@@ -82,7 +128,7 @@ Agents must not commit automatically unless the task explicitly authorizes a com
 
 Completing an implementation does not itself authorize either commit or push.
 
-## 6. Expensive downloads and compute
+## 7. Expensive downloads and compute
 
 Agents must not initiate substantial new external downloads, large data acquisition, or materially new compute commitments unless the task explicitly authorizes them.
 
@@ -90,13 +136,13 @@ Once an approved run is launched, an agent may continue through a pre-authorized
 
 Ordinary technical recovery inside the approved design is allowed; new scientific scope or material new compute/cost requires escalation.
 
-## 7. Output/scratch locations
+## 8. Output/scratch locations
 
 Canonical location rules are defined in `docs/repo_policy.md`.
 
 Do not invent a new output convention inside a task prompt unless the task genuinely requires one.
 
-## 8. Completion-report convention
+## 9. Completion-report convention
 
 Task-completion replies should normally include:
 
@@ -107,13 +153,19 @@ Task-completion replies should normally include:
 5. **Commit hash** — only when a commit was actually made.
 6. **Anomalies / decisions needed** — include when there is anything unexpected, unresolved, or requiring scientific/user judgment.
 
+For substantial integration tasks (see §5), also explicitly surface:
+
+7. **Consumer contract status** — whether the consumer result/evidence contract is CLOSED or still PARTIAL.
+8. **Implicit/reconstructed facts** — any authoritative facts the consumer still has to infer rather than obtain from the interface.
+9. **Vertical synthetic/integration test result** — pass/fail and where to inspect it.
+
 This is a default reporting contract, not a ceremonial requirement.
 
 For a tiny read-only review, report only what is relevant. For a complex failure, security issue, or formal scientific closure, expand the report as needed.
 
 Do not paste large diffs, full logs, or large tables into the completion message when the underlying artifact can be inspected directly.
 
-## 9. Prompt/handoff template
+## 10. Prompt/handoff template
 
 Use/adapt this lightweight structure when helpful:
 
@@ -138,6 +190,15 @@ User-approved decision envelope:
 
 Acceptance:
 - <tests/evidence/result required>
+
+Integration contract (optional; use for substantial cross-component tasks — see §5):
+- Producer:
+- Consumer:
+- Required inputs:
+- Required output/success receipt:
+- Authority boundary:
+- Failure semantics:
+- Vertical synthetic test:
 
 When done:
 - follow docs/agent_handoff_rules.md completion-report convention

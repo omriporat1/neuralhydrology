@@ -172,6 +172,8 @@ Prioritize tests around:
 
 Do not over-engineer immaterial differences.
 
+Before substantial cross-component integration or reusable extraction, apply the Interface / Consumer Contract Gate in `docs/agent_handoff_rules.md`.
+
 ## 9. Autonomous repair
 
 Diagnose and fix ordinary technical failures when the repair stays inside the approved task/scientific envelope and does not weaken safety/provenance or materially expand environment/compute scope.

@@ -1,5 +1,21 @@
 # Flash-NH Current State
 
+## Phase-B Sweep-v1 production integration PAUSED before real launch (2026-08-23)
+
+Prepared-execution mechanics (the generic prepared executor and its
+qualification evidence) are committed and reusable. Sweep-v1 production
+integration — wiring that executor as the W&B Bayesian/random-search
+consumer — is **paused before any real launch**: the generic prepared
+executor does not yet expose the complete structured authoritative execution
+receipt that Sweep-v1 needs to determine trial validity (see the 2026-08-23
+workflow entry in `docs/decision_log.md` and the Interface / Consumer
+Contract Gate in `docs/agent_handoff_rules.md` §5). No Bayesian or random
+scientific trial has been consumed because of this gap. The next technical
+step is to define, review, and implement that generic execution result
+contract before resuming the W&B/Sweep-v1 bridge; the contract itself is not
+specified by this entry. The frozen Sweep-v1 launch design below is
+unaffected.
+
 ## Phase-B Sweep-v1 launch contract frozen (2026-08-22; not launched)
 
 **[DECIDED]** The completed five-candidate epoch-budget calibration freezes

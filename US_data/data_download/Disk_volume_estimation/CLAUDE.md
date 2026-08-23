@@ -136,6 +136,8 @@ Be especially rigorous around:
 
 Do not over-engineer differences that are immaterial to the scientific question.
 
+Before substantial cross-component integration or reusable extraction, apply the Interface / Consumer Contract Gate in `docs/agent_handoff_rules.md`.
+
 ## 8. Scientific figures and candidate comparisons
 
 When scientific interpretation materially benefits from figures, produce clear explanatory figures in addition to tables/reports.
