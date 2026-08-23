@@ -17,6 +17,7 @@ import hashlib
 import json
 import pickle
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,7 +45,32 @@ REAL_SPATIAL_HOLDOUT = sorted(load_eligible_basins(SPLITS_DIR / "spatial_holdout
 REAL_FULL_UNION = REAL_DEVELOPMENT + REAL_SPATIAL_HOLDOUT
 
 
-def _make_short_root_dir() -> Path:
+def _subst_mappings() -> dict[str, Path]:
+    """Return active ``subst`` drive mappings, keyed by uppercase letter."""
+    result = subprocess.run(["subst"], check=True, capture_output=True, text=True)
+    mappings: dict[str, Path] = {}
+    for line in result.stdout.splitlines():
+        if ":\\: => " in line:
+            drive, target = line.split(":\\: => ", 1)
+            mappings[drive.upper()] = Path(target.strip())
+    return mappings
+
+
+def _windows_project_alias() -> tuple[Path, bool]:
+    """Create a short test-only alias, or safely reuse an existing one."""
+    mappings = _subst_mappings()
+    project_root = REPO_ROOT
+    for letter, target in mappings.items():
+        if target.exists() and project_root.exists() and target.samefile(project_root):
+            return Path(f"{letter}:\\"), False
+    for letter in ("T", "U", "V", "W", "X", "Y", "Z"):
+        if letter not in mappings and not Path(f"{letter}:\\").exists():
+            subprocess.run(["subst", f"{letter}:", str(project_root)], check=True)
+            return Path(f"{letter}:\\"), True
+    raise RuntimeError("no safe free drive letter available for project-local pilot-test scratch")
+
+
+def _make_short_root_dir() -> tuple[Path, "Callable[[], None]"]:
     """A short-rooted temporary directory.
 
     This pilot's real NH continuation-directory nesting
@@ -58,10 +84,18 @@ def _make_short_root_dir() -> Path:
     has no such limit; see ``docs/stage1_lead06_pilot_v001.md``). Callers own
     cleanup of the returned directory."""
     if sys.platform != "win32":
-        return Path(tempfile.mkdtemp())
-    root = Path(Path(tempfile.gettempdir()).anchor) / "fnh_pytest_tmp"
+        return Path(tempfile.mkdtemp()), (lambda: None)
+    # ``tmp/`` is the project's intentionally ignored disposable scratch
+    # location. Its short path preserves room for real continuation nesting.
+    # Do not call ``resolve()`` here: a test-only short drive alias must
+    # remain visible to pathlib while the files still live under the project.
+    alias_root, created_alias = _windows_project_alias()
+    root = alias_root / "tmp"
     root.mkdir(exist_ok=True)
-    return Path(tempfile.mkdtemp(dir=str(root)))
+    def cleanup_alias() -> None:
+        if created_alias:
+            subprocess.run(["subst", alias_root.drive, "/D"], check=True)
+    return Path(tempfile.mkdtemp(prefix="t", dir=str(root))), cleanup_alias
 
 
 @pytest.fixture
@@ -70,11 +104,12 @@ def short_tmp_path():
     Windows (see :func:`_make_short_root_dir`) -- use for any pilot test
     whose NH run directory may nest multiple nested continuation
     directories deep."""
-    path = _make_short_root_dir()
+    path, cleanup_alias = _make_short_root_dir()
     try:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+        cleanup_alias()
 
 
 def pick_development_basins(n: int = 5) -> list:

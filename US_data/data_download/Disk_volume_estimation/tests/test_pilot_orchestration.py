@@ -26,6 +26,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import pickle
 import sys
 import types
@@ -137,6 +138,13 @@ def test_discover_nh_run_dir_rejects_ambiguous_multiple_matches(tmp_path):
 
 
 # --- end-to-end run_pilot() with a fake trainer (no NH/torch) --------------
+
+def test_short_tmp_path_is_project_local_and_writable(short_tmp_path):
+    expected = Path(__file__).resolve().parents[1] / "tmp"
+    assert short_tmp_path.resolve().is_relative_to(expected)
+    marker = short_tmp_path / "writable.txt"
+    marker.write_text("ok", encoding="utf-8")
+    assert marker.read_text(encoding="utf-8") == "ok"
 
 def _make_fake_train_chunk_fn(package_root, basins, experiment_name):
     """Writes checkpoint files ONLY -- never a validation_results.p. Training
@@ -1749,7 +1757,7 @@ def test_correct_manifest_trusts_epoch_12(run_pilot_fixture):
         run_id=_ACCEPTED_RUN_ID, **common_kwargs,
     )
     assert next_chunk["blocked"] is False
-    assert next_chunk["checkpoint_dir_for_target"] == cont_dir
+    assert os.path.samefile(next_chunk["checkpoint_dir_for_target"], cont_dir)
     assert train_calls == [], "adopting an accepted checkpoint must never trigger training"
 
 
@@ -1922,7 +1930,7 @@ def test_epoch_15_used_only_if_still_required(run_pilot_fixture):
         run_id=_ACCEPTED_RUN_ID, **common_kwargs,
     )
     assert chunk15["blocked"] is False
-    assert chunk15["checkpoint_dir_for_target"] == cont_dir
+    assert os.path.samefile(chunk15["checkpoint_dir_for_target"], cont_dir)
     assert train_calls == []
     assert [r.epoch for r in eval_calls] == [12, 15]
 
@@ -2002,7 +2010,7 @@ def test_rerun_idempotency_with_accepted_manifest(run_pilot_fixture):
         run_id=_ACCEPTED_RUN_ID, **common_kwargs,
     )
     assert second["blocked"] is False
-    assert second["checkpoint_dir_for_target"] == cont_dir
+    assert os.path.samefile(second["checkpoint_dir_for_target"], cont_dir)
     assert train_calls == []
     assert [r.epoch for r in eval_calls] == [12], "second call must not re-evaluate epoch 12"
 
