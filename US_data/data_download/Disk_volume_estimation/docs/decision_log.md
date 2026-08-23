@@ -2,6 +2,55 @@
 
 # Decision Log
 
+## 2026-08-23 — Prepared-execution consumer result contract CLOSED; Phase-B Sweep-v1 production integration unblocked
+
+**[CLOSED — TECHNICAL, NOT SCIENTIFIC]** Following the workflow entry
+immediately below (Interface / Consumer Contract Gate, `docs/agent_handoff_rules.md`
+§5), the prepared executor's consumer-facing result/evidence contract is now
+closed. Prepared-execution mechanics remain CLOSED as before, unchanged.
+`execute_prepared_pilot_run` (`src/baseline/pilot_orchestration.py`) now
+returns a typed `PreparedPilotExecutionResult` — the generic, campaign-agnostic
+factual execution receipt a higher-level scientific workflow such as Sweep-v1
+needs. It exposes: physical checkpoint inventory (`checkpoint_inventory`, via
+the existing mature `discover_physical_checkpoints`); the complete,
+epoch-ordered screening history (`screening_events`, each entry the mature
+`evaluate_screening_checkpoint` return shape); and stopping/state facts
+(`blocked`, `blocked_reason`, `stopped`, `stop_reason`, `early_stopping_state`).
+Actual optimizer-update evidence stays out of the eager receipt (torch-dependent,
+not every consumer needs it) and remains available through the existing
+authoritative `actual_optimizer_updates_by_epoch` helper. The type carries no
+campaign-specific concept — no `VALID`/`INVALID`, `best_score`/`best_epoch`,
+or Bayesian objective.
+
+As part of this closure, resumed `execute_prepared_pilot_run`/`run_pilot`
+calls now correctly reconstruct the run's full screening history from durable
+state (`logged_screening_epochs`) plus the physical checkpoint inventory,
+fixing a prior bug where a resumed call's evidence bundle silently carried
+only that invocation's newly-processed screening epochs rather than the
+run's complete history — a correctness fix to `run_pilot`'s evidence-bundle
+content, not a change to its training/continuation/stopping/evaluation
+behavior.
+
+An independent read-only review applied the Interface / Consumer Contract
+Gate: verified each result field's single authority, the resume
+screening-history reconstruction's correctness (including correct
+`owning_run_dir` use for continuation-directory checkpoints), `run_pilot`
+backward compatibility, and the repaired legacy test fixture's realism. A
+vertical consumer-contract test proves a generic consumer can establish
+checkpoint coverage, actual optimizer-update evidence, NH evaluation
+coverage, screening coverage, screening-population accounting, and the
+raw-space median NSE trajectory using only the receipt plus
+`actual_optimizer_updates_by_epoch` — no filesystem crawling, no reopened
+predictions, no re-derived hydrologic metrics. All focused and regression
+tests passed. Commit `63c31a983b2a494e3078ad18a5e97c3cf3b876ee`
+(`src/baseline/pilot_orchestration.py`,
+`tests/test_prepared_execution_core.py`, `tests/test_pilot_orchestration.py`).
+
+No scientific policy, candidate set, evaluation rule, or sealed-set scope
+changed. Sweep-v1 production integration, paused pending this contract (see
+`docs/FLASHNH_CURRENT_STATE.md`), may now resume against this closed
+contract; this entry does not itself specify or redesign that integration.
+
 ## 2026-08-23 — Workflow: adopted Interface / Consumer Contract Gate for agent handoffs
 
 **[DECIDED — WORKFLOW/PROCESS, NOT SCIENTIFIC]** The user approved a durable

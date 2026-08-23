@@ -1,6 +1,34 @@
 # Flash-NH Current State
 
-## Phase-B Sweep-v1 production integration PAUSED before real launch (2026-08-23)
+## Prepared-execution consumer result contract CLOSED — Phase-B Sweep-v1 production integration unblocked (2026-08-23)
+
+**[CLOSED]** The gap identified by the entry immediately below is resolved.
+Prepared-execution mechanics remain CLOSED (unchanged). The prepared
+executor's consumer-facing result/evidence contract is now also CLOSED:
+`execute_prepared_pilot_run` (`src/baseline/pilot_orchestration.py`) returns
+a typed `PreparedPilotExecutionResult` — a generic, campaign-agnostic
+factual execution receipt exposing physical checkpoint inventory (via
+`discover_physical_checkpoints`), the complete epoch-ordered screening
+history (`screening_events`), and stopping/state facts
+(`stopped`/`stop_reason`/`early_stopping_state`/`blocked`/`blocked_reason`).
+Actual optimizer-update evidence remains available through the existing
+authoritative `actual_optimizer_updates_by_epoch` helper rather than being
+folded into the eager receipt. As part of this closure, full screening
+history is now correctly reconstructed across resumed
+`execute_prepared_pilot_run`/`run_pilot` calls (previously a resumed call's
+evidence bundle silently carried only that invocation's newly-processed
+screening epochs, not the run's full history). An independent review
+(Interface / Consumer Contract Gate, `docs/agent_handoff_rules.md` §5)
+verified field authority, resume-history correctness, `run_pilot` backward
+compatibility, and a vertical consumer-contract test proving a generic
+consumer can establish checkpoint/optimizer-update/NH-evaluation/screening
+coverage and the raw-space NSE trajectory from the receipt alone, with no
+filesystem archaeology or re-derived metrics; all tests passed
+(commit `63c31a983b2a494e3078ad18a5e97c3cf3b876ee`). No scientific policy
+changed. Sweep-v1 production integration may now resume against this
+closed contract; see `docs/decision_log.md`'s 2026-08-23 closure entry.
+
+## Phase-B Sweep-v1 production integration PAUSED before real launch (2026-08-23; superseded by the closure above)
 
 Prepared-execution mechanics (the generic prepared executor and its
 qualification evidence) are committed and reusable. Sweep-v1 production
