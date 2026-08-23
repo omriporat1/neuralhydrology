@@ -272,6 +272,7 @@ __all__ = [
     "PREPARATION_RESULT_FILENAME",
     "prepare_pilot_run_only",
     "run_pilot_chunk",
+    "execute_prepared_pilot_run",
     "run_pilot",
 ]
 
@@ -1913,6 +1914,63 @@ def run_pilot_chunk(
     }
 
 
+def execute_prepared_pilot_run(
+    *, execution_policy, config_dir, experiment_name: str, package_root,
+    target_variable: str, lead_hours: int, screening_basin_ids, run_id: str,
+    tracking_run=None, train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
+    evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+    max_target_epoch: "int | None" = None,
+) -> dict:
+    """Execute an already-written NH config through the mature chunk primitive.
+
+    This intentionally does not resolve a run spec or write ``config.yaml``.
+    It reads only the existing execution-policy surface used by the former
+    inline loop: chunk scheduling, lead hours, and the effective stop policy.
+    """
+    effective_policy = build_effective_policy(execution_policy)
+    targets = chunk_epoch_targets(execution_policy, effective_policy["max_epoch_budget"])
+    if not targets:
+        raise PilotOrchestrationError("chunk_epoch_targets returned no targets -- nothing to train")
+    if max_target_epoch is not None:
+        targets = [target for target in targets if target <= max_target_epoch]
+        if not targets:
+            raise PilotOrchestrationError(f"max_target_epoch={max_target_epoch} excludes every chunk target")
+    have_started = _try_discover_nh_run_dir(config_dir, experiment_name) is not None
+    previous_target = 0; previous_checkpoint_dir = None; all_screening_results = []
+    last_chunk_result = None; final_status = "not_started"; blocked_reason = None
+    for idx, target in enumerate(targets):
+        chunk_result = run_pilot_chunk(
+            pilot_policy=execution_policy, config_dir=config_dir, experiment_name=experiment_name,
+            package_root=package_root, target_variable=target_variable, lead_hours=lead_hours,
+            screening_basin_ids=screening_basin_ids, effective_policy=effective_policy,
+            chunk_target_epoch=target, previous_target_epoch=previous_target,
+            is_first_chunk=(not have_started) and idx == 0, previous_checkpoint_dir=previous_checkpoint_dir,
+            tracking_run=tracking_run, train_chunk_fn=train_chunk_fn,
+            evaluate_checkpoint_fn=evaluate_checkpoint_fn, run_id=run_id,
+        )
+        have_started = True
+        if chunk_result["blocked"]:
+            if last_chunk_result is None:
+                last_chunk_result = chunk_result
+            blocked_reason = chunk_result["blocked_reason"]
+            final_status = "blocked_continuation_overshoot_conflict"
+            break
+        last_chunk_result = chunk_result
+        all_screening_results.extend(chunk_result["screening_results"])
+        previous_target, previous_checkpoint_dir = target, chunk_result["checkpoint_dir_for_target"]
+        if chunk_result["stopped"]:
+            final_status = f"stopped_{chunk_result['stop_reason']}"
+            break
+    else:
+        final_status = ("paused_at_max_target_epoch" if max_target_epoch is not None
+                        and targets[-1] < effective_policy["max_epoch_budget"] else "budget_exhausted_not_stopped")
+    if last_chunk_result is None:
+        raise PilotOrchestrationError("prepared execution produced no chunk result")
+    return {"final_status": final_status, "blocked_reason": blocked_reason,
+            "last_chunk_result": last_chunk_result, "screening_events": all_screening_results,
+            "effective_policy": effective_policy}
+
+
 def run_pilot(
     *,
     pilot_policy: PilotPolicy,
@@ -2050,71 +2108,17 @@ def run_pilot(
         pilot_policy, run_identity, nh_run_dir=existing_nh_run_dir, require_tracking=require_tracking
     )
 
-    targets = chunk_epoch_targets(pilot_policy, effective_policy["max_epoch_budget"])
-    if not targets:
-        raise PilotOrchestrationError("chunk_epoch_targets returned no targets -- nothing to train")
-    if max_target_epoch is not None:
-        bounded_targets = [t for t in targets if t <= max_target_epoch]
-        if not bounded_targets:
-            raise PilotOrchestrationError(
-                f"max_target_epoch={max_target_epoch} excludes every chunk target in {targets}"
-            )
-        targets = bounded_targets
-
-    previous_target = 0
-    previous_checkpoint_dir = None
-    all_screening_results: "list[dict]" = []
-    last_chunk_result = None
-    final_status = "not_started"
-    blocked_reason = None
-    for idx, target in enumerate(targets):
-        is_first_chunk = (not have_started) and idx == 0
-        chunk_result = run_pilot_chunk(
-            pilot_policy=pilot_policy,
-            config_dir=config_dir,
-            experiment_name=experiment_name,
-            package_root=package_root,
-            target_variable=bundle.target_variable,
-            lead_hours=pilot_policy.lead_hours,
-            screening_basin_ids=screening_basin_ids,
-            effective_policy=effective_policy,
-            chunk_target_epoch=target,
-            previous_target_epoch=previous_target,
-            is_first_chunk=is_first_chunk,
-            previous_checkpoint_dir=previous_checkpoint_dir,
-            tracking_run=tracking_run,
-            train_chunk_fn=train_chunk_fn,
-            evaluate_checkpoint_fn=evaluate_checkpoint_fn,
-            run_id=run_id,
-        )
-        have_started = True
-        if chunk_result["blocked"]:
-            # Never overwrite last_chunk_result with a blocked attempt: the
-            # evidence bundle/state below must still reflect the last
-            # successfully-processed chunk, not this refused one (see module
-            # docstring's overshoot-safety note). If this is the very first
-            # chunk ever processed, there is no prior good state to keep --
-            # fall back to this blocked result so downstream code has
-            # something safe to read.
-            if last_chunk_result is None:
-                last_chunk_result = chunk_result
-            blocked_reason = chunk_result["blocked_reason"]
-            final_status = "blocked_continuation_overshoot_conflict"
-            break
-        last_chunk_result = chunk_result
-        all_screening_results.extend(chunk_result["screening_results"])
-        previous_target = target
-        previous_checkpoint_dir = chunk_result["checkpoint_dir_for_target"]
-        if chunk_result["stopped"]:
-            final_status = f"stopped_{chunk_result['stop_reason']}"
-            break
-    else:
-        was_bounded_before_full_budget = (
-            max_target_epoch is not None and targets[-1] < effective_policy["max_epoch_budget"]
-        )
-        final_status = (
-            "paused_at_max_target_epoch" if was_bounded_before_full_budget else "budget_exhausted_not_stopped"
-        )
+    execution = execute_prepared_pilot_run(
+        execution_policy=pilot_policy, config_dir=config_dir, experiment_name=experiment_name,
+        package_root=package_root, target_variable=bundle.target_variable, lead_hours=pilot_policy.lead_hours,
+        screening_basin_ids=screening_basin_ids, run_id=run_id, tracking_run=tracking_run,
+        train_chunk_fn=train_chunk_fn, evaluate_checkpoint_fn=evaluate_checkpoint_fn,
+        max_target_epoch=max_target_epoch,
+    )
+    final_status = execution["final_status"]
+    blocked_reason = execution["blocked_reason"]
+    last_chunk_result = execution["last_chunk_result"]
+    all_screening_results = execution["screening_events"]
 
     best_epoch = pilot_best_checkpoint_epoch(last_chunk_result["state"])
     finish_pilot_run(tracking_run, final_status=final_status, best_epoch=best_epoch)
