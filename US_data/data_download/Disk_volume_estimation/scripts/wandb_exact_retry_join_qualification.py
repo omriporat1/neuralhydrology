@@ -51,6 +51,18 @@ Scenario exercised, all against ONE fresh disposable sweep:
      summary are byte-identical to what was recorded right after they
      finished -- the manual joins/second proposal never mutated them.
 
+Each manual join (steps 2-3) runs in its own freshly-spawned Python
+subprocess with every ``WANDB_*`` environment variable stripped -- matching
+how the real ``run_sweep_v1_exact_retry_bridge.py`` is actually invoked (a
+brand-new sbatch-launched process, never in-process after a ``wandb.agent()``
+call). An earlier version of this script called ``wandb.init()`` for the
+manual joins directly in the same process as ``wandb.agent()``; that
+inherited a leaked ``WANDB_RUN_ID`` left behind by the agent and silently
+rejoined the SAME run instead of creating a fresh one -- a same-process
+artifact of the qualification harness, not evidence about the real bridge.
+Isolating each join into its own process with a clean environment removes
+that artifact and lets this script measure what actually matters.
+
 This script does NOT attempt to statistically prove the controller's
 Bayesian posterior was numerically influenced by the manually-joined runs
 (that would require many repeated sweeps and is out of scope) -- it proves
@@ -68,6 +80,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -156,6 +169,75 @@ def _verify_online(run, label: str, captured: dict) -> None:
     captured[f"{label}_online_confirmed"] = True
 
 
+def _run_manual_join(*, mode: str, sweep_id: str, entity: str, project: str, axes: dict, original_run_id: str) -> dict:
+    """Executed inside an isolated, freshly-spawned subprocess (see ``_spawn_manual_join``).
+
+    Performs exactly the join mechanism the real exact-retry bridge uses:
+    ``wandb.init(settings=wandb.Settings(sweep_id=...))``, never ``wandb.agent()``.
+    """
+    import wandb
+
+    run = wandb.init(
+        mode="online", settings=wandb.Settings(sweep_id=sweep_id), project=project, entity=entity,
+        config=dict(axes), group=SWEEP_NAME, job_type=f"qualification_manual_exact_retry_{mode}",
+        tags=list(QUALIFICATION_TAGS) + ["manual_join", "no_agent", f"simulated_{mode}_retry"],
+    )
+    result: dict = {}
+    try:
+        reported_mode = getattr(getattr(run, "settings", None), "mode", None)
+        try:
+            hosted_url = run.get_url()
+        except Exception:  # noqa: BLE001 -- absence itself is the signal
+            hosted_url = None
+        result["online_confirmed"] = reported_mode == "online" and bool(hosted_url) and bool(run.id)
+        result["run_id"] = run.id
+        result["sweep_id_matches"] = run.sweep_id == sweep_id
+        run.summary["qualification/exact_retry_of_run_id"] = original_run_id
+        if mode == "valid":
+            objective = compute_toy_objective(axes)
+            run.log({TOY_METRIC_NAME: objective})
+            result["objective"] = objective
+        else:
+            run.summary["qualification/simulated_invalid_no_objective"] = True
+            result["objective"] = None
+    finally:
+        run.finish()
+    return result
+
+
+def _spawn_manual_join(
+    *, mode: str, sweep_id: str, entity: str, project: str, axes: dict, original_run_id: str,
+    expected_commit: str, expected_runtime_python: str, out_dir: Path,
+) -> dict:
+    """Spawn a brand-new Python process (no inherited ``WANDB_*`` env) to run one manual join.
+
+    This mirrors how ``run_sweep_v1_exact_retry_bridge.py`` is actually invoked in production:
+    a fresh sbatch-launched process, never in-process right after a ``wandb.agent()`` call. A
+    prior in-process version of this script inherited a leaked ``WANDB_RUN_ID`` left behind by
+    ``wandb.agent()`` and silently rejoined the same run instead of creating a fresh one.
+    """
+    result_path = out_dir / f"manual_join_{mode}_result.json"
+    axes_path = out_dir / f"manual_join_{mode}_axes.json"
+    axes_path.write_text(json.dumps(axes), encoding="utf-8")
+
+    clean_env = {key: value for key, value in os.environ.items() if not key.startswith("WANDB_")}
+
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--expected-commit", expected_commit,
+        "--expected-runtime-python", expected_runtime_python,
+        "--internal-manual-join", mode,
+        "--internal-sweep-id", sweep_id,
+        "--internal-entity", entity,
+        "--internal-project", project,
+        "--internal-original-run-id", original_run_id,
+        "--internal-axes-json-path", str(axes_path),
+        "--internal-result-path", str(result_path),
+    ]
+    subprocess.run(cmd, env=clean_env, check=True)
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--expected-commit", type=str, required=True)
@@ -163,9 +245,27 @@ def main() -> int:
     parser.add_argument("--project", type=str, default=DEFAULT_PROJECT)
     parser.add_argument("--entity", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default=str(_DEFAULT_OUT_DIR))
+    parser.add_argument("--internal-manual-join", choices=["valid", "invalid"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-sweep-id", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-entity", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-project", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-original-run-id", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-axes-json-path", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-result-path", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     _guard_or_die(expected_commit=args.expected_commit, expected_runtime_python=args.expected_runtime_python)
+
+    if args.internal_manual_join is not None:
+        # Internal re-entry point: this process was spawned by _spawn_manual_join with a
+        # clean (WANDB_*-stripped) environment. It performs exactly one manual join and exits.
+        axes = json.loads(Path(args.internal_axes_json_path).read_text(encoding="utf-8"))
+        result = _run_manual_join(
+            mode=args.internal_manual_join, sweep_id=args.internal_sweep_id, entity=args.internal_entity,
+            project=args.internal_project, axes=axes, original_run_id=args.internal_original_run_id,
+        )
+        Path(args.internal_result_path).write_text(json.dumps(result), encoding="utf-8")
+        return 0
 
     import wandb
 
@@ -198,32 +298,34 @@ def main() -> int:
     project = captured["original"]["project"]
     exact_axes = captured["original"]["proposed_config"]
 
+    out_dir_early = Path(args.out_dir)
+    out_dir_early.mkdir(parents=True, exist_ok=True)
+
     # --- Step 2: manual join, EXACT SAME axes, VALID retry (logs objective) --
-    manual_valid_run = wandb.init(
-        mode="online", settings=wandb.Settings(sweep_id=sweep_id), project=project, entity=entity,
-        config=dict(exact_axes), group=SWEEP_NAME, job_type="qualification_manual_exact_retry_valid",
-        tags=list(QUALIFICATION_TAGS) + ["manual_join", "no_agent", "simulated_valid_retry"],
+    # Isolated subprocess, clean WANDB_*-stripped env -- see _spawn_manual_join docstring.
+    manual_valid_result = _spawn_manual_join(
+        mode="valid", sweep_id=sweep_id, entity=entity, project=project, axes=exact_axes,
+        original_run_id=captured["original"]["run_id"], expected_commit=args.expected_commit,
+        expected_runtime_python=args.expected_runtime_python, out_dir=out_dir_early,
     )
-    _verify_online(manual_valid_run, "manual_valid", captured)
-    manual_valid_sweep_id_matches = manual_valid_run.sweep_id == sweep_id
-    manual_valid_objective = compute_toy_objective(exact_axes)
-    manual_valid_run.log({TOY_METRIC_NAME: manual_valid_objective})
-    manual_valid_run.summary["qualification/exact_retry_of_run_id"] = captured["original"]["run_id"]
-    manual_valid_run_id = manual_valid_run.id
-    manual_valid_run.finish()
+    captured["manual_valid_online_confirmed"] = manual_valid_result["online_confirmed"]
+    manual_valid_sweep_id_matches = manual_valid_result["sweep_id_matches"]
+    manual_valid_objective = manual_valid_result["objective"]
+    manual_valid_run_id = manual_valid_result["run_id"]
+    if not manual_valid_result["online_confirmed"]:
+        raise SystemExit(f"QUALIFICATION FAIL (manual_valid): subprocess result did not confirm online: {manual_valid_result!r}")
 
     # --- Step 3: manual join, EXACT SAME axes, INVALID retry (no objective logged) --
-    manual_invalid_run = wandb.init(
-        mode="online", settings=wandb.Settings(sweep_id=sweep_id), project=project, entity=entity,
-        config=dict(exact_axes), group=SWEEP_NAME, job_type="qualification_manual_exact_retry_invalid",
-        tags=list(QUALIFICATION_TAGS) + ["manual_join", "no_agent", "simulated_invalid_retry"],
+    manual_invalid_result = _spawn_manual_join(
+        mode="invalid", sweep_id=sweep_id, entity=entity, project=project, axes=exact_axes,
+        original_run_id=captured["original"]["run_id"], expected_commit=args.expected_commit,
+        expected_runtime_python=args.expected_runtime_python, out_dir=out_dir_early,
     )
-    _verify_online(manual_invalid_run, "manual_invalid", captured)
-    manual_invalid_sweep_id_matches = manual_invalid_run.sweep_id == sweep_id
-    manual_invalid_run.summary["qualification/exact_retry_of_run_id"] = captured["original"]["run_id"]
-    manual_invalid_run.summary["qualification/simulated_invalid_no_objective"] = True
-    manual_invalid_run_id = manual_invalid_run.id
-    manual_invalid_run.finish()
+    captured["manual_invalid_online_confirmed"] = manual_invalid_result["online_confirmed"]
+    manual_invalid_sweep_id_matches = manual_invalid_result["sweep_id_matches"]
+    manual_invalid_run_id = manual_invalid_result["run_id"]
+    if not manual_invalid_result["online_confirmed"]:
+        raise SystemExit(f"QUALIFICATION FAIL (manual_invalid): subprocess result did not confirm online: {manual_invalid_result!r}")
 
     # --- Step 4: API inspection after manual joins, before any 2nd proposal --
     api = wandb.Api()
