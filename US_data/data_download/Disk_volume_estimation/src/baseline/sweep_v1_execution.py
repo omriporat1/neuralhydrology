@@ -40,7 +40,7 @@ import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from . import pilot_orchestration
 from . import sweep_v1_campaign as sweep
@@ -97,7 +97,8 @@ def _git_commit() -> str | None:
 
 def write_proposal_intake_provenance(*, output_root: "str | Path", axes: Mapping[str, Any], search_arm: str,
                                      proposal_order: int, wandb_sweep_id: "str | None", wandb_run_id: "str | None",
-                                     execution_generation: int = 1, retry_of_trial_id: "str | None" = None
+                                     execution_generation: int = 1, retry_of_trial_id: "str | None" = None,
+                                     retry_history: "Sequence[Mapping[str, Any]] | None" = None
                                      ) -> dict[str, Any]:
     """Durable Layer-B proposal-intake provenance for one W&B-assigned
     proposal, written immediately after the five-axis proposal passes
@@ -131,11 +132,26 @@ def write_proposal_intake_provenance(*, output_root: "str | Path", axes: Mapping
     subsequent step (preparation, config write, execution all write to the
     SAME ``execution_provenance.json`` -- one coherent Layer-B record, never
     a second competing provenance authority).
+
+    ``retry_history`` records prior, operationally-distinct retry attempts
+    that must never be conflated with ``retry_of_trial_id``.
+    ``retry_of_trial_id`` is a fixed, single-purpose field that always points
+    at the ORIGINAL frozen record (e.g. an authoritatively-invalid
+    attempt001), regardless of how many intervening attempts failed before
+    training/W&B registration ever began. A failed attempt that crashed
+    before writing any durable evidence of its own (e.g. a W&B client-side
+    tag-validation failure) has no other durable trace, so its operational
+    link -- generation number, Slurm job id, and failure category -- is
+    instead carried forward here as a bounded list of small dicts, supplied
+    by the caller (normally sourced from an operator-authored prior-attempts
+    record, the same trust model as pinned-identity). Defaults to an empty
+    list when this is the first attempt at any generation.
     """
     output_root = Path(output_root)
     common = {
         "search_arm": search_arm, "proposal_order": proposal_order, "execution_generation": execution_generation,
         "wandb_sweep_id": wandb_sweep_id, "wandb_run_id": wandb_run_id, "retry_of_trial_id": retry_of_trial_id,
+        "retry_history": [dict(item) for item in (retry_history or [])],
         "git_commit": _git_commit(), "raw_proposed_axes": dict(axes), "objective_score": None,
         "campaign_id": sweep.CAMPAIGN_ID, "domain_version": sweep.DOMAIN_VERSION,
     }

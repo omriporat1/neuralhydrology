@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from . import sweep_v1_campaign as sweep
 
@@ -33,9 +33,18 @@ __all__ = [
     "load_frozen_proposal_record",
     "assert_matches_pinned_identity",
     "derive_exact_retry_identity",
+    "assert_generation_not_previously_attempted",
+    "build_bounded_wandb_tags",
+    "validate_wandb_tags",
+    "MAX_WANDB_TAG_LENGTH",
 ]
 
 _HYPERPARAMETER_FIELDS = ("learning_rate", "hidden_size", "embedding_dropout", "output_dropout", "batch_size")
+
+# The real, pydantic-enforced limit observed in the attempt002/job 45939764
+# incident ("Tags must be between 1 and 64 characters"). Not an invented
+# value -- see build_bounded_wandb_tags/validate_wandb_tags below.
+MAX_WANDB_TAG_LENGTH = 64
 
 # Fields that legitimately exist ONLY in the outer executed-attempt envelope
 # (never in the nested, pre-execution ``preparation_record``) and are never
@@ -222,7 +231,79 @@ def assert_matches_pinned_identity(record: Mapping[str, Any], pinned: Mapping[st
         raise SweepV1RetryError(f"frozen proposal record contradicts pinned expected identity: {mismatches}")
 
 
-def derive_exact_retry_identity(record: Mapping[str, Any], *, execution_generation: int) -> dict[str, Any]:
+def assert_generation_not_previously_attempted(
+    execution_generation: int, prior_attempts: "Sequence[Mapping[str, Any]]"
+) -> None:
+    """Reject reusing an ``execution_generation`` that a durable
+    ``prior_attempts`` record already reports as having been attempted --
+    regardless of whether that prior attempt ever produced an output
+    directory.
+
+    This exists because a failed attempt (e.g. one that crashes inside
+    ``wandb.init()`` before any durable per-trial evidence is written) can
+    leave NO filesystem trace to check against, so directory-existence alone
+    cannot detect reuse. ``prior_attempts`` is an operator-authored,
+    explicitly reviewed JSON record (the same trust model as
+    ``assert_matches_pinned_identity``'s pinned-identity file) listing every
+    previously reserved/attempted generation for this trial family -- e.g.
+    ``{"execution_generation": 2, "slurm_job_id": "45939764", "status":
+    "failed_before_wandb_association"}`` for the attempt002/job 45939764
+    incident. Never invents or infers this list from the filesystem.
+    """
+    reserved = {
+        int(attempt["execution_generation"]): attempt
+        for attempt in prior_attempts if "execution_generation" in attempt
+    }
+    if execution_generation in reserved:
+        raise SweepV1RetryError(
+            f"execution_generation {execution_generation} is already reserved by a prior recorded "
+            f"attempt and must never be reused: {reserved[execution_generation]}"
+        )
+
+
+def build_bounded_wandb_tags(*, proposal_order: int, execution_generation: int, configuration_id: str) -> list[str]:
+    """Deterministic, bounded W&B tag set for an exact-retry run.
+
+    Tags are non-authoritative conveniences (see
+    ``scripts/run_sweep_v1_exact_retry_bridge.py``'s module docstring); the
+    complete retry/trial/proposal/configuration identity always lives in the
+    durable Flash-NH provenance record and the W&B run's own ``config`` --
+    never only in a tag. Every element here is short and fixed-shape by
+    construction (never a truncated fragment of a longer identifier, which
+    risks collision), so the resulting tags are always comfortably under
+    ``MAX_WANDB_TAG_LENGTH`` -- see :func:`validate_wandb_tags` for the
+    defensive check applied immediately before any ``wandb.init()`` call.
+    """
+    return [
+        "sweep-v1",
+        "exact-retry",
+        f"proposal-{int(proposal_order):03d}",
+        f"execution-generation-{int(execution_generation)}",
+        str(configuration_id),
+    ]
+
+
+def validate_wandb_tags(tags: "Sequence[str]") -> None:
+    """Reject any tag that violates W&B's real (pydantic-enforced) tag
+    length contract -- between 1 and :data:`MAX_WANDB_TAG_LENGTH` characters
+    -- BEFORE ever calling ``wandb.init()``.
+
+    This is the direct fix for the attempt002/job 45939764 incident: a
+    125-character ``retry_of_<trial_id>`` tag was rejected only deep inside
+    ``wandb.init()``'s own ``Settings`` validation, after all local
+    preparation had already run and with no durable evidence yet written.
+    Never silently truncates an offending tag -- truncation risks a
+    collision between two distinct identities.
+    """
+    overlong = {tag: len(tag) for tag in tags if not (1 <= len(tag) <= MAX_WANDB_TAG_LENGTH)}
+    if overlong:
+        raise SweepV1RetryError(
+            f"one or more W&B tags violate the 1-{MAX_WANDB_TAG_LENGTH} character contract: {overlong}"
+        )
+
+
+def derive_exact_retry_identity(record: Mapping[str, Any], *, execution_generation: int,
+                                prior_attempts: "Sequence[Mapping[str, Any]]" = ()) -> dict[str, Any]:
     """Derive a fresh, strictly-later attempt's exact-retry identity from an
     already-validated frozen proposal record.
 
@@ -233,6 +314,14 @@ def derive_exact_retry_identity(record: Mapping[str, Any], *, execution_generati
     ``retry_of_trial_id`` to the record's own ``trial_id``. Purely a
     re-derivation over already-canonical data -- never requests, samples, or
     invents a new W&B Bayesian proposal.
+
+    ``prior_attempts`` (default empty) is forwarded to
+    :func:`assert_generation_not_previously_attempted` -- see that function's
+    docstring. ``retry_of_trial_id`` always continues to reference the
+    original frozen record's own ``trial_id`` (e.g. attempt001) regardless of
+    how many intervening failed attempts ``prior_attempts`` lists; their
+    operational link is carried separately, never by overloading
+    ``retry_of_trial_id``.
     """
     if not isinstance(execution_generation, int) or isinstance(execution_generation, bool):
         raise SweepV1RetryError("execution_generation must be an integer")
@@ -242,6 +331,7 @@ def derive_exact_retry_identity(record: Mapping[str, Any], *, execution_generati
             f"retry execution_generation ({execution_generation}) must strictly exceed the frozen "
             f"record's execution_generation ({original_generation})"
         )
+    assert_generation_not_previously_attempted(execution_generation, prior_attempts)
     configuration_id = record["configuration_id"]
     new_trial_id = sweep.trial_id(configuration_id, execution_generation=execution_generation)
     if new_trial_id == record["trial_id"]:

@@ -86,3 +86,22 @@ def test_no_credential_exposure():
     text = SBATCH_SCRIPT.read_text(encoding="utf-8")
     assert "WANDB_API_KEY" not in text
     assert "wandb login" not in text
+
+
+def test_prior_attempts_is_optional_and_passed_through_when_set():
+    text = SBATCH_SCRIPT.read_text(encoding="utf-8")
+    # Optional (":-", never ":?") -- generation 2 (the first retry) legitimately has no prior attempts.
+    assert '"${FLASHNH_RETRY_PRIOR_ATTEMPTS:-}"' in text
+    assert "--prior-attempts" in text
+    assert '"$FLASHNH_RETRY_PRIOR_ATTEMPTS"' in text
+
+
+def test_execution_generation_3_passes_the_guard():
+    # The guard's only specific-value rejection pattern is "0|1)" (the
+    # original attempt's own generation and below); anything else numeric,
+    # including 3 (attempt003's generation), falls through unmodified to the
+    # bridge invocation with no launcher code change required.
+    text = SBATCH_SCRIPT.read_text(encoding="utf-8")
+    case_block = text.split("case ", 1)[1].split("esac", 1)[0]
+    assert case_block.count(";;") == 2  # exactly two arms: the non-numeric guard and "0|1)" -- no arm for 2/3+
+    assert "0|1)" in case_block

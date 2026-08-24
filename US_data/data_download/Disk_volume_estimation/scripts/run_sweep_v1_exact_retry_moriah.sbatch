@@ -26,6 +26,12 @@ set -euo pipefail
 : "${FLASHNH_RETRY_OUTPUT_ROOT:?set the output root for this retry (never the original attempt's own directory)}"
 : "${FLASHNH_RETRY_PROJECT:?set the W&B project}"
 : "${FLASHNH_RETRY_ENTITY:?set the W&B entity}"
+# Optional: operator-authored JSON array of prior recorded attempts for this
+# trial family (e.g. a failed attempt that crashed before wandb.init() and
+# left no other durable trace, such as attempt002/job 45939764). Left unset
+# for a first retry (generation 2); required in practice for any subsequent
+# retry of an already-attempted-and-failed generation.
+FLASHNH_RETRY_PRIOR_ATTEMPTS="${FLASHNH_RETRY_PRIOR_ATTEMPTS:-}"
 case "$FLASHNH_RETRY_EXECUTION_GENERATION" in
     ''|*[!0-9]*)
         echo "FLASHNH_RETRY_EXECUTION_GENERATION must be a positive integer, got '$FLASHNH_RETRY_EXECUTION_GENERATION'" >&2
@@ -34,10 +40,15 @@ case "$FLASHNH_RETRY_EXECUTION_GENERATION" in
         echo "FLASHNH_RETRY_EXECUTION_GENERATION must strictly exceed the original attempt's execution_generation (1); got '$FLASHNH_RETRY_EXECUTION_GENERATION'" >&2
         exit 1 ;;
 esac
+prior_attempts_args=()
+if [ -n "$FLASHNH_RETRY_PRIOR_ATTEMPTS" ]; then
+    prior_attempts_args=(--prior-attempts "$FLASHNH_RETRY_PRIOR_ATTEMPTS")
+fi
 python scripts/run_sweep_v1_exact_retry_bridge.py \
     --frozen-proposal-record "$FLASHNH_RETRY_FROZEN_PROPOSAL_RECORD" \
     --expected-identity "$FLASHNH_RETRY_EXPECTED_IDENTITY" \
     --execution-generation "$FLASHNH_RETRY_EXECUTION_GENERATION" \
+    "${prior_attempts_args[@]}" \
     --package-root "$FLASHNH_RETRY_PACKAGE_ROOT" \
     --screening-basin-ids "$FLASHNH_RETRY_SCREENING_BASIN_IDS" \
     --output-root "$FLASHNH_RETRY_OUTPUT_ROOT" \

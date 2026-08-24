@@ -55,7 +55,9 @@ import pytest
 from src.baseline import sweep_v1_campaign as sweep
 from src.baseline.sweep_v1_execution import write_proposal_intake_provenance
 from src.baseline.sweep_v1_retry import (
-    SweepV1RetryError, assert_matches_pinned_identity, derive_exact_retry_identity, load_frozen_proposal_record,
+    MAX_WANDB_TAG_LENGTH, SweepV1RetryError, assert_generation_not_previously_attempted,
+    assert_matches_pinned_identity, build_bounded_wandb_tags, derive_exact_retry_identity,
+    load_frozen_proposal_record, validate_wandb_tags,
 )
 
 _AXES = {"learning_rate": 3e-4, "hidden_size": 128, "embedding_dropout": 0.10, "output_dropout": 0.25, "batch_size": 256}
@@ -396,3 +398,151 @@ def test_derive_exact_retry_identity_from_real_attempt001_envelope(tmp_path):
     assert retry["proposal_order"] == 1
     assert retry["hyperparameters"] == _REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"]
     assert retry["trial_id"] == sweep.trial_id("sweep_v1_cfg_5731e180d1bf9d582afc", execution_generation=2)
+
+
+# --- attempt002/job 45939764 incident: generation-reuse guard + attempt003 derivation ----
+
+# The real, historical operator-authored prior-attempts record for the
+# attempt002/job 45939764 incident: a failed attempt that crashed inside
+# wandb.init()'s own tag validation before any durable per-trial evidence of
+# its own was ever written, so its only durable trace is this operator
+# record (same trust model as pinned-identity).
+_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002 = [
+    {
+        "execution_generation": 2,
+        "slurm_job_id": "45939764",
+        "source_commit": "12efb3e",
+        "status": "failed_before_wandb_association",
+        "failure_category": "wandb_tag_length_validation",
+    }
+]
+
+
+def test_assert_generation_not_previously_attempted_passes_when_generation_is_fresh():
+    assert_generation_not_previously_attempted(3, _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002)  # must not raise
+
+
+def test_assert_generation_not_previously_attempted_raises_when_generation_2_is_reused():
+    with pytest.raises(SweepV1RetryError, match="already reserved"):
+        assert_generation_not_previously_attempted(2, _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002)
+
+
+def test_derive_exact_retry_identity_from_real_attempt001_envelope_to_attempt003(tmp_path):
+    """Real attempt001 envelope -> attempt003 derivation (execution_generation=3),
+    with the real attempt002/job 45939764 prior-attempts record supplied --
+    the direct real-record analogue of the attempt003 launch this repair
+    exists to support."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    retry = derive_exact_retry_identity(
+        loaded, execution_generation=3, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002,
+    )
+
+    assert retry["execution_generation"] == 3
+    assert retry["retry_of_trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] != _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] == sweep.trial_id("sweep_v1_cfg_5731e180d1bf9d582afc", execution_generation=3)
+    assert retry["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert retry["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+    assert retry["proposal_order"] == 1
+    assert retry["hyperparameters"] == _REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"]
+    assert retry["wandb_sweep_id"] == "4x3btz2s"
+
+
+def test_derive_exact_retry_identity_refuses_to_reuse_generation_2_after_attempt002(tmp_path):
+    """Generation 2 (attempt002's own reserved generation) must never be
+    reused for a new attempt, even though attempt002 itself left no output
+    directory on disk -- the only detection mechanism is the operator-
+    supplied prior-attempts record."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    with pytest.raises(SweepV1RetryError, match="already reserved"):
+        derive_exact_retry_identity(
+            loaded, execution_generation=2, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002,
+        )
+
+
+def test_derive_exact_retry_identity_defaults_to_no_prior_attempts(tmp_path):
+    """Omitting prior_attempts entirely (the first retry ever, generation 2)
+    must behave exactly as before this repair -- no forced argument, no
+    behavior change for the common case."""
+    written = _write_record(tmp_path)
+    retry = derive_exact_retry_identity(written, execution_generation=2)
+    assert retry["execution_generation"] == 2
+
+
+# --- Repair 1: bounded W&B tags (attempt002/job 45939764 tag-length incident) ----
+
+# The real, historical offending tag from job 45939764: "retry_of_" plus
+# attempt001's own real trial_id -- reproduced here (not invented) to prove
+# the new bounded tag scheme replaces exactly this failure mode.
+_REAL_ATTEMPT001_TRIAL_ID = _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+_REAL_OFFENDING_ATTEMPT002_TAG = f"retry_of_{_REAL_ATTEMPT001_TRIAL_ID}"
+
+
+def test_real_offending_attempt002_tag_exceeds_the_max_length():
+    """Confirms the historical failure mode: the OLD tag construction really
+    does exceed MAX_WANDB_TAG_LENGTH for the real attempt001 identity."""
+    assert len(_REAL_OFFENDING_ATTEMPT002_TAG) > MAX_WANDB_TAG_LENGTH
+
+
+def test_build_bounded_wandb_tags_are_all_within_the_max_length():
+    tags = build_bounded_wandb_tags(
+        proposal_order=1, execution_generation=3, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+    )
+    assert all(1 <= len(tag) <= MAX_WANDB_TAG_LENGTH for tag in tags)
+
+
+def test_build_bounded_wandb_tags_real_attempt003_identity_matches_expected_set():
+    tags = build_bounded_wandb_tags(
+        proposal_order=1, execution_generation=3, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+    )
+    assert tags == [
+        "sweep-v1", "exact-retry", "proposal-001", "execution-generation-3", "sweep_v1_cfg_5731e180d1bf9d582afc",
+    ]
+
+
+def test_validate_wandb_tags_accepts_boundary_63_and_64_char_tags():
+    validate_wandb_tags(["a" * 63, "b" * 64])  # must not raise
+
+
+def test_validate_wandb_tags_rejects_boundary_65_char_tag():
+    with pytest.raises(SweepV1RetryError, match=r"1-64 character contract"):
+        validate_wandb_tags(["a" * 65])
+
+
+def test_validate_wandb_tags_rejects_empty_tag():
+    with pytest.raises(SweepV1RetryError, match=r"1-64 character contract"):
+        validate_wandb_tags([""])
+
+
+def test_validate_wandb_tags_rejects_the_real_historical_offending_tag():
+    with pytest.raises(SweepV1RetryError, match=r"1-64 character contract"):
+        validate_wandb_tags(["exact_retry", _REAL_OFFENDING_ATTEMPT002_TAG])
+
+
+def test_validate_wandb_tags_accepts_the_production_bounded_tag_set_for_real_attempt003_identity():
+    tags = build_bounded_wandb_tags(
+        proposal_order=1, execution_generation=3, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+    )
+    validate_wandb_tags(tags)  # must not raise
+
+
+# --- Repair 2: retry_history carried in durable provenance, never overloading retry_of_trial_id ----
+
+def test_write_proposal_intake_provenance_persists_retry_history_without_touching_retry_of_trial_id(tmp_path):
+    written = _write_record(
+        tmp_path, execution_generation=3, retry_of_trial_id=_REAL_ATTEMPT001_TRIAL_ID,
+        retry_history=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002,
+    )
+    assert written["retry_of_trial_id"] == _REAL_ATTEMPT001_TRIAL_ID
+    assert written["retry_history"] == _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT002
+
+
+def test_write_proposal_intake_provenance_defaults_retry_history_to_empty_list(tmp_path):
+    written = _write_record(tmp_path)
+    assert written["retry_history"] == []

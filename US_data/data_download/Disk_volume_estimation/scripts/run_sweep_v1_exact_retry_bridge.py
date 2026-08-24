@@ -26,9 +26,24 @@ hand-edited configuration:
      BEFORE any W&B call -- so a re-invocation can never overwrite or
      duplicate an attempt, and the original attempt's directory is never
      touched by this script (it is never opened for writing).
-  5. ``wandb.init(settings=wandb.Settings(sweep_id=<production sweep>),
-     config=<exact frozen hyperparameters>)`` -- deliberately NOT
-     ``wandb.agent()``. Associating a run with a sweep via
+  5. Write the durable Layer-B proposal-intake record (``write_proposal_intake_provenance``,
+     with ``wandb_run_id=None`` -- never fabricated) BEFORE any W&B call, so
+     the retry's full identity (including any prior failed attempts recorded
+     via ``--prior-attempts``, e.g. attempt002/job 45939764) survives even if
+     W&B association itself fails. This ordering, and the bounded tag scheme
+     in step 6, are the direct fix for the attempt002/job 45939764 incident,
+     in which a 125-character tag was rejected deep inside ``wandb.init()``'s
+     own ``Settings`` validation with no durable evidence yet written.
+  6. Build a small, fixed-shape, deterministic tag set
+     (``sweep_v1_retry.build_bounded_wandb_tags``) and validate every tag is
+     at most ``MAX_WANDB_TAG_LENGTH`` characters
+     (``sweep_v1_retry.validate_wandb_tags``) BEFORE calling ``wandb.init()``.
+     Tags are non-authoritative conveniences; the complete retry/trial/
+     proposal/configuration identity always lives in the durable intake
+     record and in the W&B run's own ``config`` (never only in a tag).
+  7. ``wandb.init(settings=wandb.Settings(sweep_id=<production sweep>),
+     config=<exact frozen hyperparameters + retry_identity>)`` -- deliberately
+     NOT ``wandb.agent()``. Associating a run with a sweep via
      ``Settings.sweep_id`` and letting ``wandb.init()`` create it directly
      uses the identical backend run-creation field
      (``internal_api.upsert_run(..., sweep_name=...)``) that an
@@ -40,13 +55,19 @@ hand-edited configuration:
      mechanism is empirically confirmed against wandb 0.28.1 source (see
      the disposable, non-scientific qualification in
      ``scripts/wandb_exact_retry_join_qualification.py``) rather than
-     assumed.
-  6. The remaining steps reuse the exact same, already-qualified production
-     path as ``run_sweep_v1_wandb_bridge.py``: ``write_proposal_intake_provenance``
-     -> ``canonicalize_wandb_proposal`` + ``prepare_bayesian_proposal`` +
-     ``write_prepared_proposal`` (with ``allow_layer_b_provenance=True``) ->
-     ``run_prepared_trial_in_production`` (passing ``retry_of_trial_id``
-     through) -> logging ``flashnh/best_score`` only if the retry is VALID.
+     assumed. Any tag-validation failure or ``wandb.init()`` exception is
+     recorded onto the SAME durable intake record (stages
+     ``wandb_tags_rejected`` / ``wandb_init_failed``) before re-raising --
+     evidence is never lost, and no training ever starts without a
+     successful W&B association. A successful association is itself
+     recorded (stage ``wandb_associated``) before any preparation/training
+     step runs.
+  8. The remaining steps reuse the exact same, already-qualified production
+     path as ``run_sweep_v1_wandb_bridge.py``: ``canonicalize_wandb_proposal``
+     + ``prepare_bayesian_proposal`` + ``write_prepared_proposal`` (with
+     ``allow_layer_b_provenance=True``) -> ``run_prepared_trial_in_production``
+     (passing ``retry_of_trial_id`` through) -> logging ``flashnh/best_score``
+     only if the retry is VALID.
 
 This script never reads, writes, or deletes anything under the ORIGINAL
 attempt's output directory -- only under the freshly derived retry output
@@ -78,7 +99,8 @@ from src.baseline.sweep_v1_production_adapter import (
     PreparationPaths, canonicalize_wandb_proposal, prepare_bayesian_proposal, write_prepared_proposal,
 )
 from src.baseline.sweep_v1_retry import (
-    assert_matches_pinned_identity, derive_exact_retry_identity, load_frozen_proposal_record,
+    SweepV1RetryError, assert_matches_pinned_identity, build_bounded_wandb_tags, derive_exact_retry_identity,
+    load_frozen_proposal_record, validate_wandb_tags,
 )
 
 ENV_SELFTEST = "FLASHNH_SWEEP_V1_RETRY_BRIDGE_SELFTEST"
@@ -94,6 +116,15 @@ def main() -> int:
                              "search_arm/wandb_sweep_id/model_seed/five hyperparameters).")
     parser.add_argument("--execution-generation", type=int, required=True,
                         help="Strictly greater than the frozen record's own execution_generation.")
+    parser.add_argument("--prior-attempts", type=Path, default=None,
+                        help="Optional path to an operator-authored JSON array of prior recorded attempts "
+                             "for this trial family (e.g. a failed attempt002/Slurm job that crashed before "
+                             "wandb.init() and left no other durable trace). Each element is a small dict "
+                             "such as {\"execution_generation\": 2, \"slurm_job_id\": \"45939764\", "
+                             "\"status\": \"failed_before_wandb_association\"}. Used to (a) refuse reusing "
+                             "any already-attempted execution_generation and (b) carry the operational link "
+                             "forward into the retry-intake record's retry_history, without overloading "
+                             "retry_of_trial_id.")
     parser.add_argument("--package-root", type=Path, required=True)
     parser.add_argument("--screening-basin-ids", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -106,7 +137,17 @@ def main() -> int:
     record = load_frozen_proposal_record(args.frozen_proposal_record)
     pinned = json.loads(Path(args.expected_identity).read_text(encoding="utf-8"))
     assert_matches_pinned_identity(record, pinned)
-    retry = derive_exact_retry_identity(record, execution_generation=args.execution_generation)
+
+    prior_attempts: list = []
+    if args.prior_attempts is not None:
+        loaded_prior_attempts = json.loads(Path(args.prior_attempts).read_text(encoding="utf-8"))
+        if not isinstance(loaded_prior_attempts, list):
+            raise SystemExit(f"--prior-attempts must contain a JSON array: {args.prior_attempts}")
+        prior_attempts = loaded_prior_attempts
+
+    retry = derive_exact_retry_identity(
+        record, execution_generation=args.execution_generation, prior_attempts=prior_attempts,
+    )
 
     output_root = args.output_root
     output_dir = output_root / retry["trial_id"]
@@ -126,34 +167,84 @@ def main() -> int:
     canonical_splits = ROOT / "config" / "stage1_baseline_splits_v001"
     paths = PreparationPaths(args.baseline_policy_path, args.package_root, canonical_splits, args.screening_basin_ids)
 
-    import wandb
-    run = wandb.init(
-        settings=wandb.Settings(sweep_id=retry["wandb_sweep_id"]),
-        project=args.project,
-        entity=args.entity,
-        config=retry["hyperparameters"],
-        group=retry["proposal_id"],
-        job_type="exact_retry",
-        tags=["exact_retry", f"retry_of_{retry['retry_of_trial_id']}"],
+    # Durable retry-intake BEFORE any W&B call: no fabricated wandb_run_id,
+    # and this record (including the operational link to any prior failed
+    # attempt such as attempt002/job 45939764, via retry_history) survives
+    # even if tag validation or wandb.init() itself fails below.
+    intake = write_proposal_intake_provenance(
+        output_root=output_root, axes=retry["hyperparameters"], search_arm=retry["search_arm"],
+        proposal_order=retry["proposal_order"], wandb_sweep_id=retry["wandb_sweep_id"], wandb_run_id=None,
+        execution_generation=retry["execution_generation"], retry_of_trial_id=retry["retry_of_trial_id"],
+        retry_history=prior_attempts,
     )
+    if intake["trial_id"] != retry["trial_id"]:
+        raise SystemExit(
+            f"REFUSING: intake trial_id ({intake['trial_id']!r}) disagrees with the derived retry "
+            f"trial_id ({retry['trial_id']!r})."
+        )
+
+    tags = build_bounded_wandb_tags(
+        proposal_order=retry["proposal_order"], execution_generation=retry["execution_generation"],
+        configuration_id=retry["configuration_id"],
+    )
+    try:
+        validate_wandb_tags(tags)
+    except SweepV1RetryError as exc:
+        enrich_layer_b_provenance(
+            output_dir=output_dir, stage="wandb_tags_rejected", fields={"error": str(exc), "tags": tags},
+        )
+        raise SystemExit(f"REFUSING: bounded W&B tag set failed validation: {exc}") from exc
+
+    wandb_config = {
+        **retry["hyperparameters"],
+        "retry_identity": {
+            "trial_id": retry["trial_id"],
+            "retry_of_trial_id": retry["retry_of_trial_id"],
+            "proposal_id": retry["proposal_id"],
+            "configuration_id": retry["configuration_id"],
+            "execution_generation": retry["execution_generation"],
+        },
+    }
+
+    import wandb
+    try:
+        run = wandb.init(
+            settings=wandb.Settings(sweep_id=retry["wandb_sweep_id"]),
+            project=args.project,
+            entity=args.entity,
+            config=wandb_config,
+            group=retry["proposal_id"],
+            job_type="exact_retry",
+            tags=tags,
+        )
+    except Exception as exc:
+        enrich_layer_b_provenance(
+            output_dir=output_dir, stage="wandb_init_failed",
+            fields={"error": str(exc), "error_type": type(exc).__name__, "tags": tags},
+        )
+        raise SystemExit(
+            f"REFUSING: wandb.init() failed for exact-retry attempt {retry['trial_id']!r}: {exc}"
+        ) from exc
+
     valid = False
     try:
         if run.sweep_id != retry["wandb_sweep_id"]:
+            enrich_layer_b_provenance(
+                output_dir=output_dir, stage="wandb_association_mismatch",
+                fields={
+                    "wandb_run_id": run.id, "actual_sweep_id": run.sweep_id,
+                    "expected_sweep_id": retry["wandb_sweep_id"],
+                },
+            )
             raise SystemExit(
                 f"REFUSING: run.sweep_id ({run.sweep_id!r}) did not associate with the requested "
                 f"production sweep ({retry['wandb_sweep_id']!r}); no silent fallback is accepted."
             )
 
-        intake = write_proposal_intake_provenance(
-            output_root=output_root, axes=retry["hyperparameters"], search_arm=retry["search_arm"],
-            proposal_order=retry["proposal_order"], wandb_sweep_id=run.sweep_id, wandb_run_id=run.id,
-            execution_generation=retry["execution_generation"], retry_of_trial_id=retry["retry_of_trial_id"],
+        enrich_layer_b_provenance(
+            output_dir=output_dir, stage="wandb_associated",
+            fields={"trial_id": retry["trial_id"], "wandb_run_id": run.id, "wandb_sweep_id": run.sweep_id},
         )
-        if intake["trial_id"] != retry["trial_id"]:
-            raise SystemExit(
-                f"REFUSING: intake trial_id ({intake['trial_id']!r}) disagrees with the derived retry "
-                f"trial_id ({retry['trial_id']!r})."
-            )
 
         proposal = canonicalize_wandb_proposal(
             retry["hyperparameters"],

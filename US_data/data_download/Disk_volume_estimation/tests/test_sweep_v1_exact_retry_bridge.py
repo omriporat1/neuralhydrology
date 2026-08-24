@@ -491,3 +491,255 @@ def test_invalid_retry_never_logs_a_finite_objective(tmp_path, monkeypatch, fake
     retry_provenance = json.loads((output_root / retry_trial_id / "execution_provenance.json").read_text(encoding="utf-8"))
     assert retry_provenance["execution_status"] == "INVALID"
     assert retry_provenance["objective_score"] is None
+
+
+# --- Repair 2: durable intake exists BEFORE any W&B call --------------------
+
+def test_durable_intake_exists_before_wandb_init_is_called(tmp_path, monkeypatch):
+    """Direct proof of the required ordering: by the time wandb.init() is
+    invoked, the durable Layer-B intake record is already on disk, at stage
+    'proposal_intake', with no fabricated wandb_run_id."""
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    retry_trial_id = sweep.trial_id(written["configuration_id"], execution_generation=2)
+    provenance_path = output_root / retry_trial_id / "execution_provenance.json"
+
+    observed: "dict[str, object]" = {}
+
+    class _ObservingWandbModule(types.ModuleType):
+        class Settings:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        def init(self, **kwargs):
+            observed["provenance_at_init_time"] = json.loads(provenance_path.read_text(encoding="utf-8"))
+            return _FakeWandbRun("fake-run", written["wandb_sweep_id"], kwargs["config"])
+
+    monkeypatch.setitem(sys.modules, "wandb", _ObservingWandbModule("wandb"))
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path, paths=_paths(tmp_path / "prep", monkeypatch), frozen_record_path=record_path,
+        expected_identity_path=identity_path, output_root=output_root,
+    ))
+    _patch_real_canonical_split_shas_for_local_checkout(monkeypatch)
+
+    # We only need to observe ordering up to wandb.init(); whatever happens to
+    # the (unpatched, real) execution path afterwards -- typically an INVALID
+    # trial, since no real training/checkpoints are wired into this fixture --
+    # is irrelevant to this test.
+    retry_bridge.main()
+
+    assert provenance_path.is_file()  # written before the call we observed inside
+    at_init = observed["provenance_at_init_time"]
+    assert at_init["provenance_stage"] == "proposal_intake"
+    assert at_init["wandb_run_id"] is None
+    assert at_init["retry_of_trial_id"] == written["trial_id"]
+    assert at_init["execution_generation"] == 2
+
+
+# --- Repair 1: tag rejection is recorded durably and precedes any W&B call ---
+
+def test_overlong_tags_are_rejected_before_wandb_import_with_durable_provenance_retained(tmp_path, monkeypatch):
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    retry_trial_id = sweep.trial_id(written["configuration_id"], execution_generation=2)
+
+    # Force an overlong tag through, simulating a future regression in
+    # build_bounded_wandb_tags -- validate_wandb_tags must still catch it.
+    monkeypatch.setattr(retry_bridge, "build_bounded_wandb_tags", lambda **kwargs: ["x" * 70])
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path, paths=_paths(tmp_path / "prep", monkeypatch), frozen_record_path=record_path,
+        expected_identity_path=identity_path, output_root=output_root,
+    ))
+
+    with pytest.raises(SystemExit, match="tag"):
+        retry_bridge.main()
+
+    assert "wandb" not in sys.modules
+    provenance = json.loads((output_root / retry_trial_id / "execution_provenance.json").read_text(encoding="utf-8"))
+    assert provenance["provenance_stage"] == "wandb_tags_rejected"
+    assert provenance["retry_of_trial_id"] == written["trial_id"]
+    assert "execution_status" not in provenance  # never reached training
+
+
+# --- Repair 2: wandb.init() exception yields durable terminal evidence, no objective ---
+
+def test_wandb_init_exception_produces_durable_terminal_evidence_and_no_objective(tmp_path, monkeypatch):
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    retry_trial_id = sweep.trial_id(written["configuration_id"], execution_generation=2)
+
+    class _RaisingWandbModule(types.ModuleType):
+        class Settings:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        def init(self, **kwargs):
+            raise RuntimeError("simulated real wandb.init() network/validation failure")
+
+    monkeypatch.setitem(sys.modules, "wandb", _RaisingWandbModule("wandb"))
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path, paths=_paths(tmp_path / "prep", monkeypatch), frozen_record_path=record_path,
+        expected_identity_path=identity_path, output_root=output_root,
+    ))
+
+    with pytest.raises(SystemExit, match="wandb.init"):
+        retry_bridge.main()
+
+    provenance = json.loads((output_root / retry_trial_id / "execution_provenance.json").read_text(encoding="utf-8"))
+    assert provenance["provenance_stage"] == "wandb_init_failed"
+    assert provenance["retry_of_trial_id"] == written["trial_id"]
+    assert provenance["objective_score"] is None
+    assert "execution_status" not in provenance  # training never started
+    assert "simulated real wandb.init()" in provenance["error"]
+
+
+# --- Repair 2: successful association is durably recorded before preparation ---
+
+def test_wandb_association_recorded_before_preparation_starts(tmp_path, monkeypatch, fake_wandb_module):
+    torch = pytest.importorskip("torch")
+    paths = _paths(tmp_path / "prep", monkeypatch)
+    _patch_real_canonical_split_shas_for_local_checkout(monkeypatch)
+
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    retry_trial_id = sweep.trial_id(written["configuration_id"], execution_generation=2)
+    provenance_path = output_root / retry_trial_id / "execution_provenance.json"
+
+    fake = fake_wandb_module(_AXES, sweep_id=written["wandb_sweep_id"])
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path, paths=paths, frozen_record_path=record_path,
+        expected_identity_path=identity_path, output_root=output_root,
+    ))
+
+    observed: "dict[str, object]" = {}
+    real_prepare = retry_bridge.prepare_bayesian_proposal
+
+    def _spying_prepare(*, proposal, paths):
+        observed["provenance_at_prepare_time"] = json.loads(provenance_path.read_text(encoding="utf-8"))
+        return real_prepare(proposal=proposal, paths=paths)
+
+    monkeypatch.setattr(retry_bridge, "prepare_bayesian_proposal", _spying_prepare)
+
+    nh_run_dir = tmp_path / "nh_run"
+    epochs = list(range(1, 13))
+    _write_real_checkpoints(nh_run_dir, epochs, torch)
+    scores = {e: 0.10 + 0.01 * e for e in epochs}
+
+    def fake_execute(**kwargs):
+        return _fake_result(nh_run_dir, checkpoint_epochs=epochs, screening_scores=scores, n_basins=kwargs["screening_basin_ids"].__len__())
+
+    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run_monolithic", fake_execute)
+
+    retry_bridge.main()
+
+    at_prepare = observed["provenance_at_prepare_time"]
+    assert at_prepare["provenance_stage"] == "wandb_associated"
+    assert at_prepare["wandb_run_id"] == fake.run.id
+    assert at_prepare["wandb_sweep_id"] == fake.run.sweep_id
+
+
+# --- Repair 2/1: full identity present in the W&B run config, not only tags --
+
+def test_full_retry_identity_is_present_in_wandb_config(tmp_path, monkeypatch, fake_wandb_module):
+    torch = pytest.importorskip("torch")
+    paths = _paths(tmp_path / "prep", monkeypatch)
+    _patch_real_canonical_split_shas_for_local_checkout(monkeypatch)
+
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+
+    fake = fake_wandb_module(_AXES, sweep_id=written["wandb_sweep_id"])
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path, paths=paths, frozen_record_path=record_path,
+        expected_identity_path=identity_path, output_root=output_root,
+    ))
+
+    nh_run_dir = tmp_path / "nh_run"
+    epochs = list(range(1, 13))
+    _write_real_checkpoints(nh_run_dir, epochs, torch)
+    scores = {e: 0.10 + 0.01 * e for e in epochs}
+
+    def fake_execute(**kwargs):
+        return _fake_result(nh_run_dir, checkpoint_epochs=epochs, screening_scores=scores, n_basins=kwargs["screening_basin_ids"].__len__())
+
+    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run_monolithic", fake_execute)
+
+    retry_bridge.main()
+
+    init_kwargs = fake.captured_init_kwargs
+    assert all(1 <= len(tag) <= 64 for tag in init_kwargs["tags"])
+    identity = init_kwargs["config"]["retry_identity"]
+    assert identity["retry_of_trial_id"] == written["trial_id"]
+    assert identity["proposal_id"] == written["proposal_id"]
+    assert identity["configuration_id"] == written["configuration_id"]
+    assert identity["execution_generation"] == 2
+
+
+# --- Repair 2 + generation-reuse guard: --prior-attempts CLI wiring ----------
+
+def test_resolve_only_refuses_reusing_a_generation_recorded_in_prior_attempts_file(tmp_path, monkeypatch):
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    prior_attempts_path = tmp_path / "prior_attempts.json"
+    prior_attempts_path.write_text(
+        json.dumps([{"execution_generation": 2, "slurm_job_id": "45939764"}]), encoding="utf-8",
+    )
+
+    monkeypatch.setenv(retry_bridge.ENV_SELFTEST, "resolve_only")
+    monkeypatch.setattr(sys, "argv", [
+        "run_sweep_v1_exact_retry_bridge.py",
+        "--frozen-proposal-record", str(record_path),
+        "--expected-identity", str(identity_path),
+        "--execution-generation", "2",
+        "--prior-attempts", str(prior_attempts_path),
+        "--package-root", str(tmp_path / "unused_package"),
+        "--screening-basin-ids", str(tmp_path / "unused_screening.txt"),
+        "--output-root", str(output_root),
+    ])
+
+    with pytest.raises(SweepV1RetryError, match="already reserved"):
+        retry_bridge.main()
+    assert "wandb" not in sys.modules
+    assert not output_root.exists()
+
+
+def test_resolve_only_allows_a_fresh_generation_with_prior_attempts_file_present(tmp_path, monkeypatch, capsys):
+    written = _write_frozen_record(tmp_path)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+    prior_attempts_path = tmp_path / "prior_attempts.json"
+    prior_attempts_path.write_text(
+        json.dumps([{"execution_generation": 2, "slurm_job_id": "45939764"}]), encoding="utf-8",
+    )
+
+    monkeypatch.setenv(retry_bridge.ENV_SELFTEST, "resolve_only")
+    monkeypatch.setattr(sys, "argv", [
+        "run_sweep_v1_exact_retry_bridge.py",
+        "--frozen-proposal-record", str(record_path),
+        "--expected-identity", str(identity_path),
+        "--execution-generation", "3",
+        "--prior-attempts", str(prior_attempts_path),
+        "--package-root", str(tmp_path / "unused_package"),
+        "--screening-basin-ids", str(tmp_path / "unused_screening.txt"),
+        "--output-root", str(output_root),
+    ])
+
+    exit_code = retry_bridge.main()
+
+    assert exit_code == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["retry_identity"]["execution_generation"] == 3
+    assert printed["retry_identity"]["retry_of_trial_id"] == written["trial_id"]
