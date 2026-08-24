@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,7 +23,8 @@ from .nh_config_generation import read_package_manifest, validate_full_populatio
 
 __all__ = [
     "SweepV1PreparationError", "PreparationPaths", "PreparedSweepV1Proposal",
-    "canonicalize_wandb_proposal", "prepare_bayesian_proposal", "write_prepared_proposal",
+    "canonicalize_wandb_proposal", "prepare_bayesian_proposal", "prepare_random_control_row",
+    "write_prepared_proposal",
 ]
 
 
@@ -106,7 +108,7 @@ def canonicalize_wandb_proposal(config: Mapping[str, Any], metadata: Mapping[str
     return merged
 
 
-def _validate_proposal(proposal: Mapping[str, Any]) -> tuple[dict[str, Any], int, int]:
+def _validate_proposal(proposal: Mapping[str, Any], *, expected_arm: str) -> tuple[dict[str, Any], int, int]:
     keys = set(proposal)
     forbidden = keys & _FORBIDDEN
     if forbidden:
@@ -119,8 +121,8 @@ def _validate_proposal(proposal: Mapping[str, Any]) -> tuple[dict[str, Any], int
         raise SweepV1PreparationError(f"missing frozen search axes: {sorted(missing)}")
     if proposal.get("campaign_id", sweep.CAMPAIGN_ID) != sweep.CAMPAIGN_ID or proposal.get("domain_version", sweep.DOMAIN_VERSION) != sweep.DOMAIN_VERSION:
         raise SweepV1PreparationError("proposal campaign/domain does not match frozen original wave")
-    if proposal.get("search_arm", "bayesian") != "bayesian":
-        raise SweepV1PreparationError("production adapter accepts Bayesian proposals only")
+    if proposal.get("search_arm", expected_arm) != expected_arm:
+        raise SweepV1PreparationError(f"preparation expects {expected_arm!r} provenance")
     order = proposal.get("proposal_order")
     generation = proposal.get("execution_generation", 1)
     if not isinstance(order, int) or isinstance(order, bool) or order < 1:
@@ -159,9 +161,8 @@ def _audit_generated_config(bundle: GeneratedConfigBundle, axes: Mapping[str, An
         raise SweepV1PreparationError("generated bundle does not preserve the pinned screening population")
 
 
-def prepare_bayesian_proposal(*, proposal: Mapping[str, Any], paths: PreparationPaths) -> PreparedSweepV1Proposal:
-    """Pure Flash-NH preparation: no W&B import, launcher, training, or writes."""
-    axes, order, generation = _validate_proposal(proposal)
+def _prepare_proposal(*, proposal: Mapping[str, Any], paths: PreparationPaths, expected_arm: str) -> PreparedSweepV1Proposal:
+    axes, order, generation = _validate_proposal(proposal, expected_arm=expected_arm)
     artifact_identities = _verify_artifact_identities(paths)
     package_manifest = read_package_manifest(paths.package_root)
     membership = validate_full_population_basin_membership(package_manifest, paths.splits_dir)
@@ -179,11 +180,11 @@ def prepare_bayesian_proposal(*, proposal: Mapping[str, Any], paths: Preparation
     bundle = replace(bundle, config_mapping={**bundle.config_mapping, "epochs": sweep.TARGET_EPOCH})
     _audit_generated_config(bundle, axes)
     config_id = sweep.configuration_id(axes)
-    pid = sweep.proposal_id("bayesian", order)
+    pid = sweep.proposal_id(expected_arm, order)
     tid = sweep.trial_id(config_id, execution_generation=generation)
     evidence = {
         "prepare_status": "PASS", "prepare_only": True, "objective_score": None,
-        "campaign_id": sweep.CAMPAIGN_ID, "domain_version": sweep.DOMAIN_VERSION, "search_arm": "bayesian",
+        "campaign_id": sweep.CAMPAIGN_ID, "domain_version": sweep.DOMAIN_VERSION, "search_arm": expected_arm,
         "proposal_id": pid, "proposal_order": order, "configuration_id": config_id, "trial_id": tid,
         "execution_generation": generation, "hyperparameters": axes, "model_seed": sweep.MODEL_SEED_A,
         "fidelity_id": "mf12x50000", "target_epoch": sweep.TARGET_EPOCH,
@@ -197,9 +198,81 @@ def prepare_bayesian_proposal(*, proposal: Mapping[str, Any], paths: Preparation
     return PreparedSweepV1Proposal(dict(proposal), config_id, pid, tid, generation, bundle, evidence)
 
 
-def write_prepared_proposal(prepared: PreparedSweepV1Proposal, output_dir: Path) -> dict[str, Any]:
-    """Write the exact NH config and finalize compact prepare-only evidence."""
-    written = write_generated_config(prepared.bundle, output_dir, experiment_name=prepared.trial_id)
+def prepare_bayesian_proposal(*, proposal: Mapping[str, Any], paths: PreparationPaths) -> PreparedSweepV1Proposal:
+    """Prepare one Bayesian proposal; W&B values are telemetry-only provenance."""
+    return _prepare_proposal(proposal=proposal, paths=paths, expected_arm="bayesian")
+
+
+def prepare_random_control_row(*, row: Mapping[str, Any], manifest_path: Path, paths: PreparationPaths,
+                               execution_generation: int = 1) -> PreparedSweepV1Proposal:
+    """Prepare one immutable committed random-control row without regenerating it."""
+    manifest_path = Path(manifest_path)
+    if _sha256(manifest_path) != sweep.RANDOM_CONTROL_MANIFEST_SHA256:
+        raise SweepV1PreparationError("random-control manifest SHA-256 does not match frozen bytes")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or dict(row) not in rows:
+        raise SweepV1PreparationError("requested random row is not an exact committed manifest row")
+    supplied = dict(row)
+    supplied["execution_generation"] = execution_generation
+    supplied.pop("configuration_id", None)
+    supplied.pop("proposal_id", None)
+    supplied.pop("manifest_rng_seed", None)
+    supplied.pop("manifest_index", None)
+    return _prepare_proposal(proposal=supplied, paths=paths, expected_arm="random_control")
+
+
+_LAYER_B_PROVENANCE_FILENAME = "execution_provenance.json"
+
+
+def write_prepared_proposal(
+    prepared: PreparedSweepV1Proposal, output_dir: Path, *, allow_layer_b_provenance: bool = False
+) -> dict[str, Any]:
+    """Write the exact NH config and finalize compact prepare-only evidence.
+
+    By default ``output_dir`` must be empty (or absent) -- the same strict
+    no-overwrite behavior ``write_generated_config`` has always had. Every
+    caller other than the Sweep-v1 W&B bridge should leave
+    ``allow_layer_b_provenance`` at its default ``False``.
+
+    ``allow_layer_b_provenance=True`` is the single narrow exception: it
+    tolerates ``output_dir`` already containing exactly one pre-existing file,
+    ``execution_provenance.json`` -- the durable Layer-B record written by
+    ``sweep_v1_execution.write_proposal_intake_provenance`` before this call
+    -- and nothing else (``write_generated_config`` itself refuses to ever
+    accept one of its own protected generated-target filenames into an
+    allowlist, and refuses an allowlisted name that exists but is not a
+    regular file, so this can never be abused to recreate the old unsafe
+    ``force=True`` overwrite behavior). Before writing anything, if that file
+    is present its recorded ``trial_id`` must be present and exactly equal to
+    ``prepared.trial_id`` -- unlike ``sweep.trial_identity_conflicts`` (which
+    treats a missing/``None`` id on either side as "no conflict", appropriate
+    for progressive enrichment), a missing, ``null``, or merely different
+    ``trial_id`` here is always a hard failure, since this boundary is
+    specifically deciding whether to tolerate a pre-existing file, not
+    enriching one. Any failure raises ``SweepV1PreparationError`` and writes
+    no generated artifact -- a stale/foreign/malformed provenance file must
+    never be silently coexisted with. The provenance file itself is never
+    read for any other purpose, never rewritten, deleted, or moved -- any
+    other pre-existing entry (including an already-generated ``config.yaml``
+    or basin file) remains a hard error raised before any write.
+    """
+    if allow_layer_b_provenance:
+        provenance_path = Path(output_dir) / _LAYER_B_PROVENANCE_FILENAME
+        if provenance_path.exists():
+            existing_trial_id = json.loads(provenance_path.read_text(encoding="utf-8")).get("trial_id")
+            if existing_trial_id != prepared.trial_id:
+                raise SweepV1PreparationError(
+                    f"existing {_LAYER_B_PROVENANCE_FILENAME} trial_id={existing_trial_id!r} does not "
+                    f"exactly match the trial being prepared ({prepared.trial_id!r}); "
+                    "refusing to write generated config"
+                )
+        written = write_generated_config(
+            prepared.bundle, output_dir, experiment_name=prepared.trial_id,
+            allowed_existing_files=frozenset({_LAYER_B_PROVENANCE_FILENAME}),
+        )
+    else:
+        written = write_generated_config(prepared.bundle, output_dir, experiment_name=prepared.trial_id)
     config_sha = hashlib.sha256(Path(written["config.yaml"]).read_bytes()).hexdigest()
     return {**prepared.evidence, "generated_nh_config_path": str(written["config.yaml"]),
             "generated_nh_config_sha256": config_sha, "generation_manifest_path": str(written["generation_manifest.json"]),

@@ -21,7 +21,7 @@ __all__ = [
     "RANDOM_CONTROL_MANIFEST_SHA256", "SEARCH_ARMS", "SEARCH_DOMAIN",
     "TRIAL_SUMMARY_FIELDS", "EPOCH_TRAJECTORY_FIELDS", "PROPOSAL_RECORD_FIELDS",
     "OPERATIONS_RECORD_FIELDS", "canonical_hyperparameters", "configuration_id",
-    "trial_id", "proposal_id", "generate_random_control_rows", "manifest_payload",
+    "trial_id", "proposal_id", "trial_identity_conflicts", "generate_random_control_rows", "manifest_payload",
     "render_manifest", "sha256_bytes", "derive_trajectory_diagnostics",
     "validate_review_record", "validate_manifest_rows",
 ]
@@ -172,6 +172,15 @@ def proposal_id(search_arm: str, proposal_order: int) -> str:
     if not isinstance(proposal_order, int) or proposal_order < 1:
         raise ValueError("proposal_order must be a positive integer")
     return f"{CAMPAIGN_ID}__{search_arm}__proposal{proposal_order:03d}"
+
+
+def trial_identity_conflicts(existing_trial_id: "str | None", expected_trial_id: "str | None") -> bool:
+    """True iff both a recorded and an expected ``trial_id`` are present and
+    disagree -- the single reused Layer-B provenance identity-consistency
+    check (``sweep_v1_execution.enrich_layer_b_provenance`` and
+    ``sweep_v1_production_adapter.write_prepared_proposal`` both call this
+    rather than each re-implementing the comparison)."""
+    return existing_trial_id is not None and expected_trial_id is not None and existing_trial_id != expected_trial_id
 
 
 def generate_random_control_rows() -> list[dict[str, Any]]:

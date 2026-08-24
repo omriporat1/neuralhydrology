@@ -1600,27 +1600,74 @@ def _check_no_forbidden_keys(mapping: dict) -> None:
             raise NHConfigGenerationError(f"generated config contains a forbidden key: {key!r}")
 
 
+PROTECTED_GENERATED_TARGET_BASENAMES = frozenset({
+    "train_basins.txt", "validation_basins.txt", "test_basins.txt",
+    "config.yaml", "generation_manifest.json", HOLDOUT_MARKER_FILENAME,
+})
+
+
 def write_generated_config(
     bundle: GeneratedConfigBundle,
     out_dir,
     *,
     experiment_name: "str | None" = None,
     force: bool = False,
+    allowed_existing_files: "frozenset[str] | set[str]" = frozenset(),
 ) -> dict:
     """Atomically write the generated basin-list files, ``config.yaml``, and
     ``generation_manifest.json`` under ``out_dir``.
 
-    Fails if ``out_dir`` already exists and is non-empty, unless
-    ``force=True`` (mirrors ``splits.write_split_artifacts``'s safety
-    pattern). Never writes into a tracked source/config directory implicitly
-    -- callers choose ``out_dir`` explicitly (CLI default is under
-    ``tmp/``, which is gitignored).
+    Fails if ``out_dir`` already exists and contains any entry other than one
+    named in ``allowed_existing_files`` (default empty, i.e. ``out_dir`` must
+    be empty -- unchanged strict behavior for every pre-existing caller),
+    unless ``force=True`` (mirrors ``splits.write_split_artifacts``'s safety
+    pattern; bypasses this check entirely, same as before ``allowed_existing_files``
+    existed). ``allowed_existing_files`` never causes an existing file to be
+    read, overwritten, deleted, or moved -- it only narrows which pre-existing
+    filenames are tolerated before this function writes its own distinctly
+    named targets (``train_basins.txt``, ``validation_basins.txt``,
+    ``test_basins.txt``, ``config.yaml``, ``generation_manifest.json``, and
+    the holdout marker file -- together ``PROTECTED_GENERATED_TARGET_BASENAMES``).
+
+    ``allowed_existing_files`` may never name one of those protected targets
+    -- regardless of ``force`` -- since that would let a caller reintroduce
+    exactly the silent-overwrite behavior this parameter exists to prevent
+    (a pre-existing ``config.yaml``/basin file/manifest would be accepted by
+    the directory preflight and then unconditionally overwritten below).
+    Such a call is a contract violation and raises immediately, before any
+    filesystem state is inspected or modified. Separately, if an allowed
+    basename does exist on disk it must be a regular file; an allowlisted
+    name that turns out to be a directory (or other non-regular entry) also
+    fails before any write -- ``allowed_existing_files`` is only for
+    tolerating an explicitly-authorized pre-existing auxiliary FILE such as
+    ``execution_provenance.json``, never a placeholder directory of that name.
+
+    Never writes into a tracked source/config directory implicitly --
+    callers choose ``out_dir`` explicitly (CLI default is under ``tmp/``,
+    which is gitignored).
     """
     out_dir = Path(out_dir)
-    if out_dir.exists() and any(out_dir.iterdir()) and not force:
+    allowed_existing_files = frozenset(allowed_existing_files)
+    reserved = allowed_existing_files & PROTECTED_GENERATED_TARGET_BASENAMES
+    if reserved:
         raise NHConfigGenerationError(
-            f"output directory already exists and is non-empty: {out_dir} (use force=True/--force)"
+            f"allowed_existing_files may not name a protected generated target {sorted(reserved)}: "
+            f"write_generated_config always writes {sorted(PROTECTED_GENERATED_TARGET_BASENAMES)} itself "
+            "and can never be told to tolerate one of them pre-existing"
         )
+    if out_dir.exists() and not force:
+        existing_names = {p.name for p in out_dir.iterdir()}
+        disallowed = existing_names - allowed_existing_files
+        if disallowed:
+            raise NHConfigGenerationError(
+                f"output directory already exists and contains disallowed entries {sorted(disallowed)}: "
+                f"{out_dir} (use force=True/--force, or ensure only {sorted(allowed_existing_files)} pre-exists)"
+            )
+        for name in existing_names & allowed_existing_files:
+            if not (out_dir / name).is_file():
+                raise NHConfigGenerationError(
+                    f"allowed pre-existing entry {name!r} exists but is not a regular file: {out_dir / name}"
+                )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     exp_name = experiment_name or f"stage1_compact_lead{bundle.lead_hours:02d}_seq{bundle.seq_length}_v001"

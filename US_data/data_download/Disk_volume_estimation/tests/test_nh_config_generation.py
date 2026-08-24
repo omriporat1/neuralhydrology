@@ -26,6 +26,7 @@ from src.baseline.nh_config_generation import (
     PILOT_LEAD06_EMB128X32_SEEDA_PROFILE_NAME,
     PILOT_LEAD06_EMB128X64_SEEDA_PROFILE_NAME,
     PILOT_LEAD06_EMB256X64_SEEDA_PROFILE_NAME,
+    PROTECTED_GENERATED_TARGET_BASENAMES,
     NHConfigGenerationError,
     build_nh_config_mapping,
     generate_stage1_nh_config,
@@ -363,6 +364,60 @@ def test_write_generated_config_rejects_nonempty_out_dir_without_force(tmp_path)
 
     written = write_generated_config(bundle, out_dir, force=True)
     assert written["config.yaml"].is_file()
+
+
+def _prepared_bundle(tmp_path):
+    basins = _pick_basins(32)
+    package_root = _build_fake_package(tmp_path / "package", basins)
+    return generate_stage1_nh_config(
+        policy_path=POLICY_PATH, package_root=package_root, splits_dir=SPLITS_DIR,
+        lead_hours=6, seq_length=24,
+    )
+
+
+@pytest.mark.parametrize("protected_name", sorted(PROTECTED_GENERATED_TARGET_BASENAMES))
+def test_write_generated_config_rejects_protected_target_in_allowlist(tmp_path, protected_name):
+    bundle = _prepared_bundle(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    sentinel = f"sentinel bytes for {protected_name}".encode()
+    (out_dir / protected_name).write_bytes(sentinel)
+    (out_dir / "execution_provenance.json").write_bytes(b'{"trial_id": "t"}')
+
+    with pytest.raises(NHConfigGenerationError):
+        write_generated_config(bundle, out_dir, allowed_existing_files=frozenset({protected_name}))
+
+    assert (out_dir / protected_name).read_bytes() == sentinel
+    assert (out_dir / "execution_provenance.json").read_bytes() == b'{"trial_id": "t"}'
+    for other_name in PROTECTED_GENERATED_TARGET_BASENAMES - {protected_name}:
+        assert not (out_dir / other_name).exists()
+
+
+def test_write_generated_config_allows_named_auxiliary_file_to_coexist(tmp_path):
+    bundle = _prepared_bundle(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    aux = out_dir / "execution_provenance.json"
+    aux_bytes = b'{"trial_id": "t", "provenance_stage": "prepared"}'
+    aux.write_bytes(aux_bytes)
+
+    written = write_generated_config(bundle, out_dir, allowed_existing_files=frozenset({"execution_provenance.json"}))
+
+    assert written["config.yaml"].is_file()
+    assert aux.read_bytes() == aux_bytes
+
+
+def test_write_generated_config_rejects_allowlisted_name_that_is_a_directory(tmp_path):
+    bundle = _prepared_bundle(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "execution_provenance.json").mkdir()
+
+    with pytest.raises(NHConfigGenerationError):
+        write_generated_config(bundle, out_dir, allowed_existing_files=frozenset({"execution_provenance.json"}))
+
+    assert (out_dir / "execution_provenance.json").is_dir()
+    assert not (out_dir / "config.yaml").exists()
 
 
 # ---------------------------------------------------------------------------
