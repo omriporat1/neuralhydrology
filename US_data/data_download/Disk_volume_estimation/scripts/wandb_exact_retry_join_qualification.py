@@ -238,6 +238,56 @@ def _spawn_manual_join(
     return json.loads(result_path.read_text(encoding="utf-8"))
 
 
+def _run_api_inspection(*, sweep_id: str, entity: str, project: str) -> dict:
+    """Executed inside an isolated, freshly-spawned subprocess (see ``_spawn_api_inspection``).
+
+    Read-only ``wandb.Api()`` inspection of every run currently in the sweep.
+    """
+    import wandb
+
+    api = wandb.Api()
+    sweep_obj = api.sweep(f"{entity}/{project}/{sweep_id}")
+    runs = {}
+    for r in sweep_obj.runs:
+        runs[r.id] = {
+            "config": dict(r.config),
+            "summary": {
+                key: r.summary.get(key)
+                for key in (TOY_METRIC_NAME, "qualification/exact_retry_of_run_id", "qualification/simulated_invalid_no_objective")
+            },
+        }
+    return {"run_count": len(runs), "runs": runs}
+
+
+def _spawn_api_inspection(
+    *, sweep_id: str, entity: str, project: str, expected_commit: str, expected_runtime_python: str,
+    out_dir: Path, tag: str,
+) -> dict:
+    """Spawn a brand-new Python process (no inherited ``WANDB_*`` env) to run one read-only API inspection.
+
+    A prior version of this script reused a single in-process ``wandb.Api()`` handle after two
+    in-process ``wandb.agent()`` calls; by the second inspection the SDK's shared asyncio service
+    had already been joined/torn down, and lazy ``run.summary`` access raised
+    ``wandb.sdk.lib.asyncio_manager.AlreadyJoinedError`` (observed live on Moriah job 45939056).
+    Isolating each inspection into its own fresh process avoids sharing that service handle at all.
+    """
+    result_path = out_dir / f"api_inspection_{tag}_result.json"
+    clean_env = {key: value for key, value in os.environ.items() if not key.startswith("WANDB_")}
+
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--expected-commit", expected_commit,
+        "--expected-runtime-python", expected_runtime_python,
+        "--internal-api-inspect", "1",
+        "--internal-sweep-id", sweep_id,
+        "--internal-entity", entity,
+        "--internal-project", project,
+        "--internal-result-path", str(result_path),
+    ]
+    subprocess.run(cmd, env=clean_env, check=True)
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--expected-commit", type=str, required=True)
@@ -252,6 +302,7 @@ def main() -> int:
     parser.add_argument("--internal-original-run-id", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--internal-axes-json-path", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--internal-result-path", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--internal-api-inspect", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     _guard_or_die(expected_commit=args.expected_commit, expected_runtime_python=args.expected_runtime_python)
@@ -264,6 +315,13 @@ def main() -> int:
             mode=args.internal_manual_join, sweep_id=args.internal_sweep_id, entity=args.internal_entity,
             project=args.internal_project, axes=axes, original_run_id=args.internal_original_run_id,
         )
+        Path(args.internal_result_path).write_text(json.dumps(result), encoding="utf-8")
+        return 0
+
+    if args.internal_api_inspect:
+        # Internal re-entry point: this process was spawned by _spawn_api_inspection with a
+        # clean (WANDB_*-stripped) environment. It performs exactly one read-only inspection and exits.
+        result = _run_api_inspection(sweep_id=args.internal_sweep_id, entity=args.internal_entity, project=args.internal_project)
         Path(args.internal_result_path).write_text(json.dumps(result), encoding="utf-8")
         return 0
 
@@ -328,15 +386,25 @@ def main() -> int:
         raise SystemExit(f"QUALIFICATION FAIL (manual_invalid): subprocess result did not confirm online: {manual_invalid_result!r}")
 
     # --- Step 4: API inspection after manual joins, before any 2nd proposal --
-    api = wandb.Api()
-    sweep_obj = api.sweep(f"{entity}/{project}/{sweep_id}")
-    runs_after_manual = {r.id: r for r in sweep_obj.runs}
+    # Isolated subprocess (see _spawn_api_inspection) -- avoids reusing an Api()/asyncio-manager
+    # handle across multiple in-process wandb.agent() calls.
+    inspection_after_manual = _spawn_api_inspection(
+        sweep_id=sweep_id, entity=entity, project=project, expected_commit=args.expected_commit,
+        expected_runtime_python=args.expected_runtime_python, out_dir=out_dir_early, tag="after_manual",
+    )
+    runs_after_manual = inspection_after_manual["runs"]
     manual_valid_present = manual_valid_run_id in runs_after_manual
     manual_invalid_present = manual_invalid_run_id in runs_after_manual
     original_present = captured["original"]["run_id"] in runs_after_manual
-    manual_valid_metric_visible = runs_after_manual[manual_valid_run_id].summary.get(TOY_METRIC_NAME) is not None if manual_valid_present else False
-    manual_invalid_metric_absent = runs_after_manual[manual_invalid_run_id].summary.get(TOY_METRIC_NAME) is None if manual_invalid_present else False
-    run_count_after_manual = len(runs_after_manual)
+    manual_valid_metric_visible = (
+        runs_after_manual.get(manual_valid_run_id, {}).get("summary", {}).get(TOY_METRIC_NAME) is not None
+        if manual_valid_present else False
+    )
+    manual_invalid_metric_absent = (
+        runs_after_manual.get(manual_invalid_run_id, {}).get("summary", {}).get(TOY_METRIC_NAME) is None
+        if manual_invalid_present else False
+    )
+    run_count_after_manual = inspection_after_manual["run_count"]
 
     # --- Step 5: a second REAL controller proposal over the now-3-run history --
     def _agent_fn_second() -> None:
@@ -355,22 +423,25 @@ def main() -> int:
     wandb.agent(sweep_id, function=_agent_fn_second, project=args.project, entity=args.entity, count=1)
 
     # --- Step 6: re-fetch and confirm nothing prior was mutated ----------
-    sweep_obj_final = api.sweep(f"{entity}/{project}/{sweep_id}")
-    runs_final = {r.id: r for r in sweep_obj_final.runs}
-    run_count_final = len(runs_final)
+    inspection_final = _spawn_api_inspection(
+        sweep_id=sweep_id, entity=entity, project=project, expected_commit=args.expected_commit,
+        expected_runtime_python=args.expected_runtime_python, out_dir=out_dir_early, tag="final",
+    )
+    runs_final = inspection_final["runs"]
+    run_count_final = inspection_final["run_count"]
     manual_valid_unchanged = (
         manual_valid_run_id in runs_final
-        and dict(runs_final[manual_valid_run_id].config) == dict(exact_axes)
-        and runs_final[manual_valid_run_id].summary.get(TOY_METRIC_NAME) == manual_valid_objective
+        and runs_final[manual_valid_run_id]["config"] == dict(exact_axes)
+        and runs_final[manual_valid_run_id]["summary"].get(TOY_METRIC_NAME) == manual_valid_objective
     )
     manual_invalid_unchanged = (
         manual_invalid_run_id in runs_final
-        and dict(runs_final[manual_invalid_run_id].config) == dict(exact_axes)
-        and runs_final[manual_invalid_run_id].summary.get(TOY_METRIC_NAME) is None
+        and runs_final[manual_invalid_run_id]["config"] == dict(exact_axes)
+        and runs_final[manual_invalid_run_id]["summary"].get(TOY_METRIC_NAME) is None
     )
     original_unchanged = (
         captured["original"]["run_id"] in runs_final
-        and runs_final[captured["original"]["run_id"]].summary.get(TOY_METRIC_NAME) == captured["original"]["objective"]
+        and runs_final[captured["original"]["run_id"]]["summary"].get(TOY_METRIC_NAME) == captured["original"]["objective"]
     )
 
     checks = {
