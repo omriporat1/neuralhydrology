@@ -2,6 +2,50 @@
 
 # Decision Log
 
+## 2026-08-23 — Sweep-v1 local production integration CLOSED; independently approved for commit
+
+**[CLOSED — TECHNICAL, NOT SCIENTIFIC]** Following the prepared-execution
+consumer result contract closure immediately below, Sweep-v1's local
+production integration layer (`src/baseline/sweep_v1_production_adapter.py`,
+`src/baseline/sweep_v1_execution.py`, `src/baseline/sweep_v1_campaign.py`,
+`src/baseline/nh_config_generation.py`, the production scripts and
+`.sbatch` launchers) is now CLOSED. An independent review verified the
+reviewed architecture is genuinely present — `PreparedPilotExecutionResult`
+consumed directly; `actual_optimizer_updates_by_epoch` as authoritative
+update evidence; VALID/INVALID interpretation and the committed
+`derive_trajectory_diagnostics` objective staying in Flash-NH; full
+12-epoch checkpoint/screening coverage; 50,000 as `max_updates_per_epoch`
+cap semantics; mature requested/evaluated/area-excluded population
+accounting; INVALID/PARTIAL trials never producing a finite Bayesian
+objective; Bayesian and random-control trials sharing one executor/validity
+path; a thin, non-authoritative W&B bridge; early durable proposal-intake
+Layer-B provenance; exact-retry identity preservation; provenance-aware
+config generation with protected generated targets categorically
+non-allowlistable and exact-present-`trial_id` required for same-trial
+provenance coexistence (replacing the earlier unsafe `force=True`
+overwrite path); and the one-allocation/one-agent/`count=1` production
+launch shape for both arms — and returned final verdict: **APPROVE
+PRODUCTION INTEGRATION FOR COMMIT**. The final focused safety gate passed
+220 tests, 0 skipped, with torch-capable golden VALID/INVALID bridge paths
+executed and `git diff --check` clean.
+
+Committed as `a3ae86b91569e27b6e183666675c06f0e7dc89d4` ("Complete Sweep-v1
+production integration"): `src/baseline/sweep_v1_production_adapter.py`,
+`src/baseline/sweep_v1_execution.py`, `src/baseline/sweep_v1_campaign.py`,
+`src/baseline/nh_config_generation.py`, `tests/test_sweep_v1_execution.py`,
+`tests/test_sweep_v1_wandb_bridge_provenance.py`,
+`tests/test_nh_config_generation.py`,
+`scripts/build_sweep_v1_production_sweep_config.py`,
+`scripts/run_sweep_v1_wandb_agent_moriah.sbatch`,
+`scripts/run_sweep_v1_wandb_bridge.py`,
+`scripts/run_sweep_v1_random_control_trial.py`,
+`scripts/run_sweep_v1_random_control_moriah.sbatch`.
+
+No scientific policy changed. No real Sweep-v1 production trial has been
+consumed. No live W&B, Slurm, GPU, or training occurred during this
+closure. The next operational milestone is one serialized real Bayesian
+proposal/trial, which remains a separate, not-yet-authorized step.
+
 ## 2026-08-23 — Prepared-execution consumer result contract CLOSED; Phase-B Sweep-v1 production integration unblocked
 
 **[CLOSED — TECHNICAL, NOT SCIENTIFIC]** Following the workflow entry

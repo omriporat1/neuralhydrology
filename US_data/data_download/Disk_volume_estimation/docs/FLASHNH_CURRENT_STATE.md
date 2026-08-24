@@ -1,5 +1,37 @@
 # Flash-NH Current State
 
+## Sweep-v1 local production integration CLOSED — independently approved for commit (2026-08-23)
+
+**[CLOSED]** Building on the prepared-execution consumer contract closure
+immediately below, Sweep-v1's local production integration layer is now
+CLOSED and independently reviewed as APPROVE PRODUCTION INTEGRATION FOR
+COMMIT (commit `a3ae86b91569e27b6e183666675c06f0e7dc89d4`). Production
+execution consumes `PreparedPilotExecutionResult` directly, with
+`actual_optimizer_updates_by_epoch` as the authoritative update evidence;
+VALID/INVALID scientific interpretation, the committed
+`derive_trajectory_diagnostics` objective, and the 50,000-update
+`max_updates_per_epoch` cap semantics stay authoritative in Flash-NH.
+Bayesian and frozen random-control trials share one prepare/execute/validity
+path and one-allocation/one-agent/`count=1` production launch shape. W&B is
+proposal/telemetry only — never validity or objective authority. Proposal-
+intake Layer-B provenance is written durably before any preparation/config
+failure point, so an exact retry recovers identical scientific proposal/
+config identity while only its attempt identity changes.
+
+Config generation (`write_generated_config` /
+`write_prepared_proposal(..., allow_layer_b_provenance=True)`) no longer
+uses the earlier unsafe `force=True` escape hatch: protected generated
+targets (`train_basins.txt`, `validation_basins.txt`, `test_basins.txt`,
+`config.yaml`, `generation_manifest.json`, the holdout marker file) can
+never be allowlisted as pre-existing, an allowlisted pre-existing name must
+be a regular file, and same-trial `execution_provenance.json` coexistence
+requires an exact present `trial_id` match (a missing/null/mismatched
+`trial_id` hard-fails before any write). The final focused safety gate
+passed 220 tests, 0 skipped, including torch-capable golden VALID/INVALID
+bridge paths. No real Sweep-v1 production trial has been consumed yet; the
+next operational milestone is one serialized real Bayesian proposal/trial.
+See `docs/decision_log.md`'s 2026-08-23 closure entry.
+
 ## Prepared-execution consumer result contract CLOSED — Phase-B Sweep-v1 production integration unblocked (2026-08-23)
 
 **[CLOSED]** The gap identified by the entry immediately below is resolved.
