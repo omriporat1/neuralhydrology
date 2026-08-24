@@ -278,7 +278,7 @@ def _spawn_api_inspection(
         sys.executable, str(Path(__file__).resolve()),
         "--expected-commit", expected_commit,
         "--expected-runtime-python", expected_runtime_python,
-        "--internal-api-inspect", "1",
+        "--internal-api-inspect",
         "--internal-sweep-id", sweep_id,
         "--internal-entity", entity,
         "--internal-project", project,
