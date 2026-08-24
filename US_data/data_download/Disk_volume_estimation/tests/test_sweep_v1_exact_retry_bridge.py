@@ -49,6 +49,51 @@ import scripts.run_sweep_v1_exact_retry_bridge as retry_bridge
 
 _AXES = {"learning_rate": 3e-4, "hidden_size": 128, "embedding_dropout": 0.10, "output_dropout": 0.25, "batch_size": 256}
 
+# Sanitized golden fixture matching the REAL Sweep-v1 production attempt001
+# ``execution_provenance.json`` executed-attempt envelope shape (fetched
+# directly off Moriah; baseline sha256
+# 4da96c34dcaee4cad83c9371c62fccbf609fad05985f8b56e4d69f3633afb052). Real
+# non-secret identity/hyperparameter values and evidence-tree paths -- no
+# credentials or machine-private secrets are present. See the identical
+# fixture (with commentary) in tests/test_sweep_v1_retry.py.
+_REAL_ATTEMPT001_PREPARATION_RECORD = {
+    "campaign_id": "stage1_phase_b_sweep_v1_original_domain_v001",
+    "configuration_id": "sweep_v1_cfg_5731e180d1bf9d582afc",
+    "domain_version": "original_domain_v001",
+    "execution_generation": 1,
+    "hyperparameters": {
+        "batch_size": 512,
+        "embedding_dropout": "0.08637149503762416",
+        "hidden_size": 64,
+        "learning_rate": "0.00024474898782657741",
+        "output_dropout": "0.20096018948154892",
+    },
+    "model_seed": 967139,
+    "objective_score": None,
+    "proposal_id": "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001",
+    "proposal_order": 1,
+    "search_arm": "bayesian",
+    "trial_id": (
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001"
+    ),
+    "wandb_run_id": "7nxaim79",
+    "wandb_sweep_id": "4x3btz2s",
+}
+
+_REAL_ATTEMPT001_ENVELOPE = {
+    "campaign_id": "stage1_phase_b_sweep_v1_original_domain_v001",
+    "configuration_id": "sweep_v1_cfg_5731e180d1bf9d582afc",
+    "execution_generation": 1,
+    "execution_status": "INVALID",
+    "objective_score": None,
+    "preparation_record": _REAL_ATTEMPT001_PREPARATION_RECORD,
+    "proposal_id": "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001",
+    "result": {"blocked": True, "final_status": "blocked_continuation_overshoot_conflict"},
+    "retry_of_trial_id": None,
+    "search_arm": "bayesian",
+    "trial_id": _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"],
+}
+
 
 def _paths(tmp_path, monkeypatch):
     package = build_full_union_package(tmp_path / "package")
@@ -234,6 +279,47 @@ def test_selftest_resolve_only_hook_never_imports_wandb(tmp_path, monkeypatch, c
     assert printed["retry_identity"]["retry_of_trial_id"] == written["trial_id"]
     assert printed["retry_identity"]["execution_generation"] == 2
     assert printed["retry_identity"]["configuration_id"] == written["configuration_id"]
+    assert not Path(printed["output_dir"]).exists()
+
+
+# --- case 1b: resolve_only accepts the real attempt001 executed envelope ----
+
+def test_selftest_resolve_only_accepts_real_attempt001_executed_envelope(tmp_path, monkeypatch, capsys):
+    import copy
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    record_path = tmp_path / "execution_provenance.json"
+    record_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    pinned = {
+        "proposal_order": 1, "configuration_id": "sweep_v1_cfg_5731e180d1bf9d582afc",
+        "search_arm": "bayesian", "wandb_sweep_id": "4x3btz2s", "model_seed": 967139,
+        **_REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"],
+    }
+    identity_path = tmp_path / "expected_identity.json"
+    identity_path.write_text(json.dumps(pinned), encoding="utf-8")
+    output_root = tmp_path / "out_attempt002"
+
+    monkeypatch.setenv(retry_bridge.ENV_SELFTEST, "resolve_only")
+    monkeypatch.setattr(sys, "argv", [
+        "run_sweep_v1_exact_retry_bridge.py",
+        "--frozen-proposal-record", str(record_path),
+        "--expected-identity", str(identity_path),
+        "--execution-generation", "2",
+        "--package-root", str(tmp_path / "unused_package"),
+        "--screening-basin-ids", str(tmp_path / "unused_screening.txt"),
+        "--output-root", str(output_root),
+    ])
+
+    exit_code = retry_bridge.main()
+
+    assert exit_code == 0
+    assert "wandb" not in sys.modules
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["retry_identity"]["retry_of_trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert printed["retry_identity"]["execution_generation"] == 2
+    assert printed["retry_identity"]["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert printed["retry_identity"]["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+    assert printed["retry_identity"]["trial_id"] != _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
     assert not Path(printed["output_dir"]).exists()
 
 

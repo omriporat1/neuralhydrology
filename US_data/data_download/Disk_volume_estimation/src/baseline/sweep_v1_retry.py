@@ -37,11 +37,76 @@ __all__ = [
 
 _HYPERPARAMETER_FIELDS = ("learning_rate", "hidden_size", "embedding_dropout", "output_dropout", "batch_size")
 
+# Fields that legitimately exist ONLY in the outer executed-attempt envelope
+# (never in the nested, pre-execution ``preparation_record``) and are never
+# part of the frozen proposal identity.
+_ENVELOPE_TERMINAL_FIELDS = frozenset({"execution_status", "result", "preparation_record"})
+
+# Present in both layers of an executed envelope but expected to legitimately
+# DIVERGE once a trial actually runs: the nested ``preparation_record``'s own
+# ``objective_score`` is fixed at proposal-intake time (always null), while
+# the outer envelope's ``objective_score`` reflects the trial's real terminal
+# result (null for INVALID, a finite number for VALID). Never gated on
+# equality -- the normalized identity always keeps the nested (frozen,
+# intake-time) value; the terminal objective must never replace the frozen
+# proposal identity.
+_DIVERGENT_TERMINAL_FIELDS = frozenset({"objective_score"})
+
 
 class SweepV1RetryError(ValueError):
     """Raised when a frozen proposal record is internally inconsistent, or
     contradicts an operator-supplied pinned expected identity, or a
     requested retry generation is not a genuine forward advance."""
+
+
+def _normalize_frozen_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize either recognized frozen-record shape into the flat
+    proposal/preparation-identity shape every downstream retry function
+    expects.
+
+    Two recognized shapes:
+
+    1. FLAT proposal/preparation record -- identity fields already at the
+       top level, as originally written by
+       :func:`~src.baseline.sweep_v1_execution.write_proposal_intake_provenance`
+       before a trial starts running. Returned unchanged (as a copy).
+    2. EXECUTED-ATTEMPT ENVELOPE -- the shape
+       :func:`~src.baseline.sweep_v1_execution.execute_prepared_trial`
+       (over)writes once a trial actually starts: identity/hyperparameter
+       fields move under a nested ``preparation_record`` mapping, and the
+       outer envelope instead carries terminal execution fields
+       (``execution_status``, ``result``, a possibly-non-null
+       ``objective_score``). Every field present in BOTH layers (other than
+       the explicitly-divergent terminal fields above) must agree exactly;
+       any disagreement is a hard failure -- the two layers are never
+       silently reconciled by preferring one. The nested record is returned
+       (as a copy).
+
+    A record lacking ``preparation_record`` is treated as the flat shape; if
+    it is not genuinely complete, the caller's own required-field check
+    rejects it -- there is no silent third shape.
+    """
+    if "preparation_record" not in record:
+        return dict(record)
+
+    nested = record["preparation_record"]
+    if not isinstance(nested, Mapping):
+        raise SweepV1RetryError(
+            "frozen proposal record is an executed-attempt envelope but its "
+            "'preparation_record' is not a JSON object"
+        )
+
+    shared_keys = (set(record) & set(nested)) - _ENVELOPE_TERMINAL_FIELDS - _DIVERGENT_TERMINAL_FIELDS
+    mismatches = {
+        key: {"outer": record[key], "nested": nested[key]}
+        for key in sorted(shared_keys) if record[key] != nested[key]
+    }
+    if mismatches:
+        raise SweepV1RetryError(
+            f"frozen proposal record outer envelope contradicts its own nested "
+            f"preparation_record: {mismatches}"
+        )
+    return dict(nested)
 
 
 def load_frozen_proposal_record(path: "str | Path") -> dict[str, Any]:
@@ -54,16 +119,26 @@ def load_frozen_proposal_record(path: "str | Path") -> dict[str, Any]:
     out-of-domain hyperparameter, or any internal disagreement (a tampered
     or stale file), never silently accepting a record whose recorded
     identity does not match its own recorded axes.
+
+    Accepts either the FLAT proposal/preparation shape or the
+    EXECUTED-ATTEMPT ENVELOPE shape (see :func:`_normalize_frozen_record`)
+    -- the latter is what a real, already-run attempt's own
+    ``execution_provenance.json`` looks like once
+    :func:`~src.baseline.sweep_v1_execution.execute_prepared_trial` has
+    written to it, so this loader must accept it directly; no separately
+    extracted proposal JSON is required or supported.
     """
     path = Path(path)
     if not path.is_file():
         raise SweepV1RetryError(f"frozen proposal record not found: {path}")
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
+        raw_record = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise SweepV1RetryError(f"frozen proposal record is not valid JSON: {path}") from exc
-    if not isinstance(record, dict):
+    if not isinstance(raw_record, dict):
         raise SweepV1RetryError(f"frozen proposal record must be a JSON object: {path}")
+
+    record = _normalize_frozen_record(raw_record)
 
     required = (
         "hyperparameters", "search_arm", "proposal_order", "execution_generation",

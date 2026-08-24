@@ -26,11 +26,28 @@ Covers, in order:
   12. ``derive_exact_retry_identity`` raises on a non-integer (including
       ``bool``) execution_generation.
 
+Executed-attempt envelope coverage (the real, post-execution
+``execution_provenance.json`` shape ``execute_prepared_trial`` writes, with
+identity nested under ``preparation_record``):
+  13. A realistic executed-attempt envelope loads successfully.
+  14. The normalized identity exactly matches the nested ``preparation_record``.
+  15. An outer/nested identity contradiction is rejected.
+  16. A non-mapping ``preparation_record`` is rejected.
+  17. A ``preparation_record`` missing a required field is rejected.
+  18. The real attempt001 golden fixture (INVALID, null objective) loads and
+      recovers its frozen proposal identity.
+  19. A VALID envelope (non-null outer terminal objective) also loads, and
+      the normalized record's own ``objective_score`` is the nested
+      (always-null-at-intake) value, never the outer terminal one.
+  20. ``derive_exact_retry_identity`` fed a normalized envelope record
+      produces the expected fresh attempt002 identity.
+
 Never imports wandb; never touches the filesystem beyond ``tmp_path``; never
 starts NH training or execution.
 """
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -42,6 +59,103 @@ from src.baseline.sweep_v1_retry import (
 )
 
 _AXES = {"learning_rate": 3e-4, "hidden_size": 128, "embedding_dropout": 0.10, "output_dropout": 0.25, "batch_size": 256}
+
+# Sanitized golden fixture matching the REAL Sweep-v1 production attempt001
+# ``execution_provenance.json`` envelope shape (fetched directly off Moriah,
+# baseline sha256 4da96c34dcaee4cad83c9371c62fccbf609fad05985f8b56e4d69f3633afb052).
+# Contains the real non-secret identity/hyperparameter values and real HPC
+# paths -- no credentials or machine-private secrets are present in this
+# record. Only ``expected_output_dir``/``generated_nh_config_path``/
+# ``generation_manifest_path``/``nh_run_dir`` (plain evidence-tree paths, not
+# secrets) are reproduced verbatim; nothing here is a token, password, or key.
+_REAL_ATTEMPT001_PREPARATION_RECORD = {
+    "artifact_identity_status": "PASS",
+    "authoritative_screening_epochs": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "campaign_id": "stage1_phase_b_sweep_v1_original_domain_v001",
+    "configuration_id": "sweep_v1_cfg_5731e180d1bf9d582afc",
+    "development_split_sha256": "397ab432564c18c3abc5158a47ada2b28840bbf6f0c213d2475444fded33858f",
+    "domain_version": "original_domain_v001",
+    "evaluation_scope": "development_validation_2024_only",
+    "execution_generation": 1,
+    "expected_output_dir": (
+        "/sci/labs/efratmorin/omripo/Flash-NH/evidence/sweep_v1_bayesian_production_v001/"
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001"
+    ),
+    "fidelity_id": "mf12x50000",
+    "generated_nh_config_path": (
+        "/sci/labs/efratmorin/omripo/Flash-NH/evidence/sweep_v1_bayesian_production_v001/"
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001/config.yaml"
+    ),
+    "generated_nh_config_sha256": "3bfe06e5f784153630abcad935e6defcebfaeb3f8566e265c8eba403ebd68f77",
+    "generation_manifest_path": (
+        "/sci/labs/efratmorin/omripo/Flash-NH/evidence/sweep_v1_bayesian_production_v001/"
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001/generation_manifest.json"
+    ),
+    "hyperparameters": {
+        "batch_size": 512,
+        "embedding_dropout": "0.08637149503762416",
+        "hidden_size": 64,
+        "learning_rate": "0.00024474898782657741",
+        "output_dropout": "0.20096018948154892",
+    },
+    "max_updates_per_epoch": 50000,
+    "model_seed": 967139,
+    "objective_score": None,
+    "package_file_checksums_sha256": "83b47374725d418b130a8e28dcf1cb118cee88f99624907238e25ee2a9067d13",
+    "package_identity": "stage1_scientific_package_v002",
+    "package_manifest_sha256": "6c52fb1b81f6a5f730b805d0c273e9d00cbf5bb93d1cd0da58452f5a0e5bcc4a",
+    "package_run_provenance_sha256": "030de2f9458aa40deba74d84910904f02468adb9eb1786ee3a71556bfcb11a8b",
+    "performance_early_stopping_enabled": False,
+    "prepare_only": True,
+    "prepare_status": "PASS",
+    "proposal_id": "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001",
+    "proposal_order": 1,
+    "save_weights_every": 1,
+    "screening_artifact_sha256": "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372",
+    "screening_policy_identity": "stage1_provisional_operational_screening_subset_v001",
+    "sealed_scope": False,
+    "search_arm": "bayesian",
+    "spatial_holdout_split_sha256": "76d1c546e703b1b5aa8f4a3ead971327de0151dae4fcce0c90b1272da0f587b7",
+    "target_epoch": 12,
+    "trial_id": (
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001"
+    ),
+    "wandb_run_id": "7nxaim79",
+    "wandb_sweep_id": "4x3btz2s",
+}
+
+_REAL_ATTEMPT001_ENVELOPE = {
+    "campaign_id": "stage1_phase_b_sweep_v1_original_domain_v001",
+    "configuration_id": "sweep_v1_cfg_5731e180d1bf9d582afc",
+    "execution_generation": 1,
+    "execution_status": "INVALID",
+    "generated_nh_config_path": _REAL_ATTEMPT001_PREPARATION_RECORD["generated_nh_config_path"],
+    "generated_nh_config_sha256": "3bfe06e5f784153630abcad935e6defcebfaeb3f8566e265c8eba403ebd68f77",
+    "git_commit": "d8098ee5267e96e4e1b4c8246c210be376760eef",
+    "objective_score": None,
+    "preparation_record": _REAL_ATTEMPT001_PREPARATION_RECORD,
+    "proposal_id": "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001",
+    "result": {
+        "blocked": True,
+        "blocked_reason": "cannot safely continue training from epoch 1 to 2: refusing duplicate physical claim",
+        "checkpoint_epochs": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "final_status": "blocked_continuation_overshoot_conflict",
+        "screening_epochs": [1],
+        "stop_reason": None,
+        "stopped": False,
+    },
+    "retry_of_trial_id": None,
+    "search_arm": "bayesian",
+    "trial_id": (
+        "stage1_phase_b_sweep_v1_original_domain_v001__sweep_v1_cfg_5731e180d1bf9d582afc__mf12x50000__seedA967139__attempt001"
+    ),
+}
+
+
+def _write_json(tmp_path, name, payload) -> "object":
+    path = tmp_path / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def _write_record(tmp_path, **overrides):
@@ -179,3 +293,106 @@ def test_derive_exact_retry_identity_raises_on_non_integer_generation(tmp_path):
         derive_exact_retry_identity(written, execution_generation=True)
     with pytest.raises(SweepV1RetryError, match="must be an integer"):
         derive_exact_retry_identity(written, execution_generation=2.0)
+
+
+# --- executed-attempt envelope normalization ----------------------------------
+
+def test_load_frozen_proposal_record_accepts_executed_attempt_envelope(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    loaded = load_frozen_proposal_record(path)
+
+    assert loaded["trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert loaded["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert loaded["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+
+
+def test_load_frozen_proposal_record_envelope_identity_matches_nested_preparation_record_exactly(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    loaded = load_frozen_proposal_record(path)
+
+    for key, value in _REAL_ATTEMPT001_PREPARATION_RECORD.items():
+        assert loaded[key] == value, key
+
+
+def test_load_frozen_proposal_record_rejects_outer_nested_identity_contradiction(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    envelope["configuration_id"] = "sweep_v1_cfg_deadbeefdeadbeefdead"
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    with pytest.raises(SweepV1RetryError, match="contradicts its own nested preparation_record"):
+        load_frozen_proposal_record(path)
+
+
+def test_load_frozen_proposal_record_rejects_non_mapping_preparation_record(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    envelope["preparation_record"] = "not-an-object"
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    with pytest.raises(SweepV1RetryError, match="not a JSON object"):
+        load_frozen_proposal_record(path)
+
+
+def test_load_frozen_proposal_record_rejects_envelope_missing_required_nested_field(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    del envelope["preparation_record"]["wandb_sweep_id"]
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    with pytest.raises(SweepV1RetryError, match="missing required fields"):
+        load_frozen_proposal_record(path)
+
+
+def test_load_frozen_proposal_record_real_attempt001_golden_fixture_invalid_status(tmp_path):
+    """attempt001's real INVALID execution_status and null outer objective_score
+    must not prevent recovering the frozen proposal identity -- the outer
+    terminal fields are never load-bearing for identity."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    assert envelope["execution_status"] == "INVALID"
+    assert envelope["objective_score"] is None
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    loaded = load_frozen_proposal_record(path)
+
+    assert loaded["proposal_order"] == 1
+    assert loaded["model_seed"] == 967139
+    assert loaded["hyperparameters"] == {
+        "batch_size": 512, "embedding_dropout": "0.08637149503762416", "hidden_size": 64,
+        "learning_rate": "0.00024474898782657741", "output_dropout": "0.20096018948154892",
+    }
+
+
+def test_load_frozen_proposal_record_valid_envelope_keeps_nested_null_objective_not_outer_terminal_value(tmp_path):
+    """A VALID envelope's outer objective_score legitimately diverges (a real
+    finite score) from the nested, always-null-at-intake objective_score --
+    the normalized identity must keep the nested (frozen) value, never the
+    outer terminal one."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    envelope["execution_status"] = "VALID"
+    envelope["objective_score"] = 0.412  # outer terminal result -- must not leak into identity
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+
+    loaded = load_frozen_proposal_record(path)
+
+    assert loaded["objective_score"] is None
+    assert loaded["trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert loaded["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+
+
+def test_derive_exact_retry_identity_from_real_attempt001_envelope(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    retry = derive_exact_retry_identity(loaded, execution_generation=2)
+
+    assert retry["execution_generation"] == 2
+    assert retry["retry_of_trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] != _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert retry["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+    assert retry["proposal_order"] == 1
+    assert retry["hyperparameters"] == _REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"]
+    assert retry["trial_id"] == sweep.trial_id("sweep_v1_cfg_5731e180d1bf9d582afc", execution_generation=2)
