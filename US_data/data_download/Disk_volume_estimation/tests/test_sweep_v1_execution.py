@@ -30,8 +30,8 @@ from src.baseline import pilot_orchestration as orchestration
 from src.baseline import sweep_v1_campaign as sweep
 from src.baseline.pilot_screening_eval import PRIMARY_METRIC_NAME, SCREENING_METRIC_SCOPE
 from src.baseline.sweep_v1_execution import (
-    SweepV1ExecutionContext, build_execution_context, execute_prepared_trial,
-    run_prepared_trial_in_production,
+    SweepV1ExecutionContext, SweepV1ExecutionError, build_execution_context, enrich_operations_slurm_accounting,
+    execute_prepared_trial, run_prepared_trial_in_production,
 )
 from src.baseline.sweep_v1_production_adapter import (
     PreparationPaths, prepare_bayesian_proposal, prepare_random_control_row, write_prepared_proposal,
@@ -177,6 +177,17 @@ def test_vertical_prepared_execution_consumer_contract(tmp_path, monkeypatch):
     assert trial["final_epoch_score"] == pytest.approx(0.35)
     assert trial["gpu_hours"] is None
     assert trial["failure_category"] is None
+    # Late diagnostics, independently computed from fx["scores"] per
+    # sweep.derive_trajectory_diagnostics: best_score_10 is the max over
+    # epochs 1..10 -- still 0.40 (epoch 9 falls within that range); best_score_12
+    # is the overall max (also 0.40, epoch 9); late_gain_10_to_12 =
+    # best_score_12 - best_score_10 = 0; late_best is False since the true
+    # best (epoch 9) falls before epoch 11.
+    assert trial["best_score_10"] == pytest.approx(0.40)
+    assert trial["best_score_12"] == pytest.approx(0.40)
+    assert trial["best_minus_final"] == pytest.approx(0.05)
+    assert trial["late_gain_10_to_12"] == pytest.approx(0.0)
+    assert trial["late_best"] is False
 
     trajectory = outcome["review_records"]["epoch_trajectory"]
     assert len(trajectory) == 12
@@ -198,8 +209,8 @@ def test_run_prepared_trial_in_production_wires_context_into_injected_executor(t
     """Proves the full production wiring, not just the two halves in
     isolation: run_prepared_trial_in_production must build the execution
     context and pass every one of its fields straight into
-    pilot_orchestration.execute_prepared_pilot_run -- no separately
-    hardcoded/reconstructed value."""
+    pilot_orchestration.execute_prepared_pilot_run_monolithic -- no
+    separately hardcoded/reconstructed value."""
     fx = _baseline(tmp_path, monkeypatch)
     context = fx["context"]
     fake_result = _fake_result(fx["nh_run_dir"], checkpoint_epochs=fx["epochs"],
@@ -211,7 +222,7 @@ def test_run_prepared_trial_in_production_wires_context_into_injected_executor(t
         captured.update(kwargs)
         return fake_result
 
-    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run", fake_execute)
+    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run_monolithic", fake_execute)
 
     outcome = run_prepared_trial_in_production(
         prepared_record=fx["record"], output_dir=tmp_path / "trial_out",
@@ -220,7 +231,7 @@ def test_run_prepared_trial_in_production_wires_context_into_injected_executor(t
 
     assert outcome["valid"] is True
     assert captured["experiment_name"] == context.experiment_name
-    assert captured["run_id"] == context.experiment_name
+    assert captured["target_epoch"] == int(fx["record"]["target_epoch"])
     assert captured["target_variable"] == context.target_variable
     assert captured["lead_hours"] == context.lead_hours
     assert list(captured["screening_basin_ids"]) == context.screening_basin_ids
@@ -403,3 +414,89 @@ def test_wrong_result_type_from_injected_executor_is_invalid(tmp_path, monkeypat
     assert outcome["valid"] is False
     assert outcome["review_records"]["trial_summary"]["objective_score"] is None
     assert outcome["review_records"]["trial_summary"]["failure_category"] == "technical_execution_failure"
+
+
+# --- Slurm job/state/GPU-hour provenance propagation -------------------------
+
+def test_slurm_job_id_is_recorded_at_execution_time_regardless_of_validity(tmp_path, monkeypatch):
+    """review_records.json's operations.slurm_job_id must reflect the live
+    allocation identity as soon as it is known -- the attempt001 evidence-path
+    defect being repaired here left it null even though the caller always has
+    it available under sbatch/wandb agent. Checked for both a VALID and an
+    INVALID trial: the allocation identity is a fact about how the trial was
+    run, never gated on whether it succeeded."""
+    fx = _baseline(tmp_path, monkeypatch)
+    valid_result = _fake_result(fx["nh_run_dir"], checkpoint_epochs=fx["epochs"],
+                                screening_scores=fx["scores"], n_basins=fx["n_basins"])
+    outcome = execute_prepared_trial(
+        prepared_record=fx["record"], output_dir=tmp_path / "trial_out_valid",
+        expected_screening_population=fx["n_basins"], execute_prepared_run_fn=lambda: valid_result,
+        slurm_job_id="45999001",
+    )
+    assert outcome["valid"] is True
+    assert outcome["review_records"]["operations"]["slurm_job_id"] == "45999001"
+    assert outcome["review_records"]["operations"]["slurm_state"] is None
+    assert outcome["review_records"]["operations"]["gpu_hours"] is None
+
+    invalid_result = _fake_result(fx["nh_run_dir"], checkpoint_epochs=[e for e in fx["epochs"] if e != 7],
+                                  screening_scores=fx["scores"], n_basins=fx["n_basins"])
+    outcome_invalid = execute_prepared_trial(
+        prepared_record=fx["record"], output_dir=tmp_path / "trial_out_invalid",
+        expected_screening_population=fx["n_basins"], execute_prepared_run_fn=lambda: invalid_result,
+        slurm_job_id="45999002",
+    )
+    assert outcome_invalid["valid"] is False
+    assert outcome_invalid["review_records"]["operations"]["slurm_job_id"] == "45999002"
+
+
+def test_enrich_operations_slurm_accounting_patches_state_and_gpu_hours_after_termination(tmp_path, monkeypatch):
+    """Once sacct/seff data is available on the login node,
+    enrich_operations_slurm_accounting must patch slurm_state/gpu_hours into
+    both operations and trial_summary, in place, without disturbing
+    VALID/INVALID or the objective."""
+    fx = _baseline(tmp_path, monkeypatch)
+    fake_result = _fake_result(fx["nh_run_dir"], checkpoint_epochs=fx["epochs"],
+                               screening_scores=fx["scores"], n_basins=fx["n_basins"])
+    output_dir = tmp_path / "trial_out"
+    outcome = execute_prepared_trial(
+        prepared_record=fx["record"], output_dir=output_dir,
+        expected_screening_population=fx["n_basins"], execute_prepared_run_fn=lambda: fake_result,
+        slurm_job_id="45999003",
+    )
+    assert outcome["review_records"]["operations"]["gpu_hours"] is None
+
+    patched = enrich_operations_slurm_accounting(
+        output_dir=output_dir, slurm_job_id="45999003", slurm_state="COMPLETED", gpu_hours=1.75,
+    )
+    assert patched["operations"]["slurm_job_id"] == "45999003"
+    assert patched["operations"]["slurm_state"] == "COMPLETED"
+    assert patched["operations"]["gpu_hours"] == pytest.approx(1.75)
+    assert patched["trial_summary"]["gpu_hours"] == pytest.approx(1.75)
+    assert patched["trial_summary"]["objective_score"] == pytest.approx(0.40)
+
+    on_disk = json.loads((output_dir / "review_records.json").read_text(encoding="utf-8"))
+    assert on_disk["operations"]["slurm_state"] == "COMPLETED"
+    assert on_disk["operations"]["gpu_hours"] == pytest.approx(1.75)
+    assert on_disk["trial_summary"]["gpu_hours"] == pytest.approx(1.75)
+
+
+def test_enrich_operations_slurm_accounting_refuses_a_mismatched_job_id(tmp_path, monkeypatch):
+    """Must never attach Slurm accounting facts to the wrong trial by
+    guessing -- an exact slurm_job_id match against the already-recorded
+    value is required."""
+    fx = _baseline(tmp_path, monkeypatch)
+    fake_result = _fake_result(fx["nh_run_dir"], checkpoint_epochs=fx["epochs"],
+                               screening_scores=fx["scores"], n_basins=fx["n_basins"])
+    output_dir = tmp_path / "trial_out"
+    execute_prepared_trial(
+        prepared_record=fx["record"], output_dir=output_dir,
+        expected_screening_population=fx["n_basins"], execute_prepared_run_fn=lambda: fake_result,
+        slurm_job_id="45999003",
+    )
+    with pytest.raises(SweepV1ExecutionError):
+        enrich_operations_slurm_accounting(
+            output_dir=output_dir, slurm_job_id="wrong-job-id", slurm_state="COMPLETED", gpu_hours=1.0,
+        )
+    on_disk = json.loads((output_dir / "review_records.json").read_text(encoding="utf-8"))
+    assert on_disk["operations"]["slurm_state"] is None
+    assert on_disk["operations"]["gpu_hours"] is None

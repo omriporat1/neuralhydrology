@@ -52,7 +52,7 @@ from .sweep_v1_production_adapter import PreparationPaths
 __all__ = [
     "SweepV1ExecutionError", "SweepV1ExecutionContext", "build_execution_context",
     "execute_prepared_trial", "run_prepared_trial_in_production", "build_production_sweep_config",
-    "write_proposal_intake_provenance", "enrich_layer_b_provenance",
+    "write_proposal_intake_provenance", "enrich_layer_b_provenance", "enrich_operations_slurm_accounting",
 ]
 
 # Mirrors the same frozen screening-population size already hardcoded and
@@ -217,7 +217,7 @@ def _require_prepared(record: Mapping[str, Any]) -> None:
 @dataclass(frozen=True)
 class SweepV1ExecutionContext:
     """Real prepared-execution input plumbing for one trial: everything
-    :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run`
+    :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run_monolithic`
     needs to run this already-prepared trial. Sourced from the written
     prepared proposal, the frozen Sweep-v1 campaign contract, and the same
     package/split/screening loaders preparation already used -- never
@@ -250,6 +250,16 @@ def build_execution_context(*, prepared_record: Mapping[str, Any], paths: Prepar
     pilot-policy YAML via ``dataclasses.replace``, the established
     repo-wide idiom for specializing that file per campaign; the base
     policy's own early-stopping/seed/run-matrix fields are left untouched.
+
+    ``screening_validation_every_n_epochs=1`` is load-bearing here: it makes
+    every epoch ``1..target_epoch`` classify as a screening epoch for
+    :func:`~src.baseline.pilot_screening_eval.classify_screening_epoch_role`,
+    which :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run_monolithic`
+    requires. ``initial_training_epochs=1`` is vestigial for that monolithic
+    executor (it never calls :func:`~src.baseline.pilot_orchestration.chunk_epoch_targets`,
+    the only reader of that field) -- left set for backward-compatible
+    ``PilotPolicy`` construction, not because monolithic execution consults
+    it.
     """
     _require_prepared(prepared_record)
     manifest_path = Path(str(prepared_record["generation_manifest_path"]))
@@ -336,7 +346,7 @@ def _derive_validity(result: "pilot_orchestration.PreparedPilotExecutionResult",
     required = set(range(1, target_epoch + 1))
 
     if result.blocked or result.blocked_reason is not None:
-        return False, None, "blocked_continuation_conflict"
+        return False, None, result.final_status or "blocked_continuation_conflict"
     if result.stopped or result.stop_reason is not None:
         return False, None, "stopped_before_full_budget"
 
@@ -394,7 +404,7 @@ def _summarize_receipt(result: "pilot_orchestration.PreparedPilotExecutionResult
 
 def _review_records(record: Mapping[str, Any], *, runtime_seconds: float, gpu_hours: "float | None",
                     screenings: "Mapping[int, float] | None", failure_category: "str | None",
-                    retry_of_trial_id: "str | None") -> dict[str, Any]:
+                    retry_of_trial_id: "str | None", slurm_job_id: "str | None" = None) -> dict[str, Any]:
     hp = dict(record["hyperparameters"])
     common = {key: record[key] for key in ("campaign_id", "domain_version", "search_arm", "proposal_id", "configuration_id", "trial_id")}
     if screenings is not None:
@@ -411,7 +421,12 @@ def _review_records(record: Mapping[str, Any], *, runtime_seconds: float, gpu_ho
     proposal.update({"proposal_order": record["proposal_order"], "valid_result_order": None,
                      "boundary_review_checkpoint": None, "wave_id": f"{sweep.DOMAIN_VERSION}_wave1"})
     operations = {key: trial[key] for key in sweep.OPERATIONS_RECORD_FIELDS if key in trial}
-    operations.update({"slurm_job_id": None, "slurm_state": None})
+    # slurm_job_id is populated from the live SLURM_JOB_ID allocation identity
+    # when execute_prepared_trial is given one (see that function's
+    # docstring); slurm_state/gpu_hours are only knowable after the job
+    # terminates and are populated later, out of band, by
+    # enrich_operations_slurm_accounting -- never fabricated here.
+    operations.update({"slurm_job_id": slurm_job_id, "slurm_state": None})
     trajectory = [{"campaign_id": record["campaign_id"], "domain_version": record["domain_version"],
                    "configuration_id": record["configuration_id"], "trial_id": record["trial_id"],
                    "search_arm": record["search_arm"], "epoch": epoch,
@@ -429,7 +444,8 @@ def _review_records(record: Mapping[str, Any], *, runtime_seconds: float, gpu_ho
 def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Path,
                            expected_screening_population: int = SCREENING_POPULATION_SIZE,
                            execute_prepared_run_fn: "Callable[[], pilot_orchestration.PreparedPilotExecutionResult]",
-                           retry_of_trial_id: "str | None" = None) -> dict[str, Any]:
+                           retry_of_trial_id: "str | None" = None,
+                           slurm_job_id: "str | None" = None) -> dict[str, Any]:
     """Persist retry provenance, then execute exactly one continuous prepared
     trial and interpret it using Sweep-v1's scientific contract.
 
@@ -437,16 +453,26 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
     and return a
     :class:`~src.baseline.pilot_orchestration.PreparedPilotExecutionResult`
     (production wires it to
-    :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run` via
-    :func:`run_prepared_trial_in_production`; local/unit tests inject a
+    :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run_monolithic`
+    via :func:`run_prepared_trial_in_production`; local/unit tests inject a
     fake receipt of the same type). Validity is derived from that receipt's
     structured facts plus
     :func:`~src.baseline.pilot_orchestration.actual_optimizer_updates_by_epoch`
-    -- see :func:`_derive_validity`. GPU-hours are unmeasured in this local
-    integration (no authoritative runtime/accounting source exists yet) and
-    are represented as ``None``, never fabricated as ``0.0``; GPU-hours do
-    not gate VALID/INVALID or the objective, and ``None`` passes
-    ``sweep.validate_review_record`` (it checks only for missing keys).
+    -- see :func:`_derive_validity`.
+
+    ``slurm_job_id`` is the live ``SLURM_JOB_ID`` allocation identity, when
+    the caller has one (production always does when launched under
+    ``sbatch``/``wandb agent`` on a compute node) -- recorded into
+    ``review_records.json``'s ``operations`` block regardless of
+    VALID/INVALID, since the allocation identity is a fact about how this
+    trial was run, not about whether it succeeded. ``slurm_state``/
+    ``gpu_hours`` are NOT populated here (only knowable after the job
+    terminates, via ``sacct``/``seff`` on the login node) -- represented as
+    ``None``, never fabricated as ``0.0`` or inferred from progress; a
+    separate, explicitly-tested :func:`enrich_operations_slurm_accounting`
+    call patches them in afterward. Neither field gates VALID/INVALID or the
+    objective, and ``None`` passes ``sweep.validate_review_record`` (it
+    checks only for missing keys).
     """
     _require_prepared(prepared_record)
     output_dir = Path(output_dir); started = time.time()
@@ -470,13 +496,13 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
         records = _review_records(prepared_record, runtime_seconds=time.time() - started,
                                   gpu_hours=None, screenings=scores if valid else None,
                                   failure_category=None if valid else failure_category,
-                                  retry_of_trial_id=retry_of_trial_id)
+                                  retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
         result_summary = _summarize_receipt(result)
     except Exception as exc:  # persisted provenance intentionally survives pre-training failure
         result_summary, valid = {"exception": repr(exc)}, False
         records = _review_records(prepared_record, runtime_seconds=time.time() - started, gpu_hours=None,
                                   screenings=None, failure_category="technical_execution_failure",
-                                  retry_of_trial_id=retry_of_trial_id)
+                                  retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
     provenance.update({"execution_status": "VALID" if valid else "INVALID", "result": result_summary,
                        "objective_score": records["trial_summary"]["objective_score"]})
     _write_json(output_dir / "execution_provenance.json", provenance)
@@ -484,18 +510,67 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
     return {"valid": valid, "review_records": records, "provenance": provenance}
 
 
+def enrich_operations_slurm_accounting(*, output_dir: "str | Path", slurm_job_id: str,
+                                       slurm_state: str, gpu_hours: float) -> dict[str, Any]:
+    """Atomically patch an already-written trial's ``review_records.json``
+    ``operations`` block (and ``trial_summary.gpu_hours``) with post-hoc
+    Slurm accounting facts, once the job has terminated and ``sacct``/
+    ``seff`` data is available on the login node.
+
+    Never called before :func:`execute_prepared_trial` has already written
+    the file (there is nothing to enrich yet). Requires ``slurm_job_id`` to
+    exactly match the value already recorded in ``operations.slurm_job_id``
+    -- refuses to attach accounting facts to the wrong trial rather than
+    guessing. Does not touch VALID/INVALID, ``objective_score``, or any
+    other field -- Slurm accounting is operational provenance, never a
+    scientific gate. Performs no Slurm CLI call itself (keeps this module
+    free of the repo-wide "no Slurm-CLI-calling logic outside launcher
+    scripts" convention); the caller is responsible for having already
+    obtained ``slurm_state``/``gpu_hours`` from ``sacct``/``seff``.
+    """
+    output_dir = Path(output_dir)
+    path = output_dir / "review_records.json"
+    records = json.loads(path.read_text(encoding="utf-8"))
+    existing_job_id = records["operations"].get("slurm_job_id")
+    if existing_job_id != slurm_job_id:
+        raise SweepV1ExecutionError(
+            f"refusing to attach Slurm accounting for job {slurm_job_id!r}: "
+            f"{path} operations.slurm_job_id is {existing_job_id!r}"
+        )
+    records["operations"]["slurm_state"] = slurm_state
+    records["operations"]["gpu_hours"] = gpu_hours
+    records["trial_summary"]["gpu_hours"] = gpu_hours
+    sweep.validate_review_record("operations", records["operations"])
+    sweep.validate_review_record("trial_summary", records["trial_summary"])
+    _write_json_atomic(path, records)
+    return records
+
+
 def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], output_dir: Path,
                                      paths: PreparationPaths, base_pilot_policy_path: "str | Path",
-                                     retry_of_trial_id: "str | None" = None) -> dict[str, Any]:
+                                     retry_of_trial_id: "str | None" = None,
+                                     slurm_job_id: "str | None" = None) -> dict[str, Any]:
     """The real production entry point: builds the execution context, then
     executes and interprets exactly one prepared trial via the mature NH
-    orchestration. Arm-agnostic -- identical for ``search_arm="bayesian"``
-    and ``search_arm="random_control"`` prepared records, since neither
-    :func:`build_execution_context` nor :func:`execute_prepared_trial`
-    branches on ``search_arm``; only the prepare-time front door differs
+    orchestration's MONOLITHIC executor
+    (:func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run_monolithic`
+    -- Sweep-v1's generated config always bakes its full ``target_epoch``
+    budget in directly, per ``sweep_v1_production_adapter.py``'s single-shot
+    fidelity design; the bounded-chunk
+    :func:`~src.baseline.pilot_orchestration.execute_prepared_pilot_run` is
+    for a different class of campaign whose config trains only an initial
+    chunk and advances via repeated ``continue_run`` calls -- see that
+    function's docstring). Arm-agnostic -- identical for
+    ``search_arm="bayesian"`` and ``search_arm="random_control"`` prepared
+    records, since neither :func:`build_execution_context` nor
+    :func:`execute_prepared_trial` branches on ``search_arm``; only the
+    prepare-time front door differs
     (:func:`~src.baseline.sweep_v1_production_adapter.prepare_bayesian_proposal`
     vs
     :func:`~src.baseline.sweep_v1_production_adapter.prepare_random_control_row`).
+
+    ``slurm_job_id`` is forwarded unchanged to :func:`execute_prepared_trial`
+    -- see that function's docstring.
 
     Never called by local tests (it starts real NH training/evaluation).
     """
@@ -504,17 +579,19 @@ def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], outp
     )
 
     def _execute() -> "pilot_orchestration.PreparedPilotExecutionResult":
-        return pilot_orchestration.execute_prepared_pilot_run(
+        return pilot_orchestration.execute_prepared_pilot_run_monolithic(
             execution_policy=context.execution_policy, config_dir=context.config_dir,
             experiment_name=context.experiment_name, package_root=context.package_root,
             target_variable=context.target_variable, lead_hours=context.lead_hours,
-            screening_basin_ids=context.screening_basin_ids, run_id=context.experiment_name,
+            screening_basin_ids=context.screening_basin_ids,
+            target_epoch=int(prepared_record["target_epoch"]),
         )
 
     return execute_prepared_trial(
         prepared_record=prepared_record, output_dir=output_dir,
         expected_screening_population=len(context.screening_basin_ids),
         execute_prepared_run_fn=_execute, retry_of_trial_id=retry_of_trial_id,
+        slurm_job_id=slurm_job_id,
     )
 
 

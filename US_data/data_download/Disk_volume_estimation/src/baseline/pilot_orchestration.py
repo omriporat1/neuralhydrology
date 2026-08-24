@@ -275,6 +275,7 @@ __all__ = [
     "logged_screening_epochs",
     "PreparedPilotExecutionResult",
     "execute_prepared_pilot_run",
+    "execute_prepared_pilot_run_monolithic",
     "run_pilot",
 ]
 
@@ -2093,6 +2094,158 @@ def execute_prepared_pilot_run(
         stop_reason=last_chunk_result["stop_reason"],
         checkpoint_inventory=checkpoint_inventory,
         early_stopping_state=last_chunk_result["state"],
+        screening_events=screening_events,
+    )
+
+
+def execute_prepared_pilot_run_monolithic(
+    *, execution_policy: PilotPolicy, config_dir, experiment_name: str, package_root,
+    target_variable: str, lead_hours: int, screening_basin_ids, target_epoch: int,
+    train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
+    evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+) -> PreparedPilotExecutionResult:
+    """Execute one MONOLITHIC prepared NH training invocation -- for a
+    generated config whose own ``epochs`` key is already baked to
+    ``target_epoch`` (e.g. Sweep-v1's ``sweep_v1_production_adapter.py``
+    single-shot-fidelity design) -- then perform post-hoc raw-space
+    screening for every epoch ``1..target_epoch``.
+
+    This is a SIBLING to :func:`execute_prepared_pilot_run`, not a
+    modification of it: that function's bounded-chunk design (
+    :func:`chunk_epoch_targets` / :func:`run_pilot_chunk` /
+    :func:`_advance_chunk_via_continuation` /
+    :func:`resolve_trusted_chunk_checkpoint` /
+    :func:`untrusted_overshoot_epochs`) assumes the generated config trains
+    only an initial small chunk and relies on repeated ``continue_run`` calls
+    to advance further -- exactly the assumption a monolithic
+    already-``target_epoch``-baked config violates (this is the confirmed
+    root cause of the real ``blocked_continuation_overshoot_conflict``
+    trial-1 failure: a single ``start_run`` call trains straight through
+    every epoch, so the second chunk's continuation-trust check finds epoch 2
+    already sitting flat in the base run directory and refuses to proceed).
+
+    This function NEVER calls ``continue_run``: it invokes ``train_chunk_fn``
+    with ``is_first_chunk=True`` at most once, only when no NH run directory
+    yet exists for this experiment. If a run directory already exists but is
+    missing any required checkpoint ``1..target_epoch`` -- or has a
+    checkpoint for one of those epochs physically nested under a
+    continuation directory, something a genuine single ``start_run`` call
+    never produces -- this is reported as ``blocked`` rather than attempting
+    any continuation to complete it; resuming an interrupted monolithic run
+    is out of scope here and requires human review, exactly mirroring
+    :func:`execute_prepared_pilot_run`'s own refuse-rather-than-guess
+    posture for untrusted checkpoint state.
+
+    Reuses, unchanged: :func:`_try_discover_nh_run_dir`/
+    :func:`discover_nh_run_dir`, :func:`discover_physical_checkpoints`,
+    :func:`ensure_validation_results`,
+    :func:`~src.baseline.pilot_screening_eval.evaluate_screening_checkpoint`
+    (via :func:`_reconstruct_screening_history`), and
+    :func:`_load_orchestration_state`/:func:`_save_orchestration_state` for
+    restart-safe per-epoch screening idempotency. Every epoch
+    ``1..target_epoch`` must classify as a screening epoch under
+    ``execution_policy`` (i.e. ``screening_validation_every_n_epochs=1``) --
+    ``execution_policy``'s cadence field is used ONLY for
+    :func:`~src.baseline.pilot_screening_eval.classify_screening_epoch_role`
+    here, never for chunk scheduling (:func:`chunk_epoch_targets` is never
+    called by this function).
+
+    Requires ``performance_early_stopping_enabled=False`` -- this monolithic
+    mode has no notion of stopping training early (the config already bakes
+    in the full ``target_epoch`` budget before this function ever runs), so
+    a policy that claims otherwise indicates a caller/context mismatch and is
+    rejected immediately rather than silently ignored.
+
+    Returns the same generic, campaign-agnostic
+    :class:`PreparedPilotExecutionResult` :func:`execute_prepared_pilot_run`
+    returns, so a caller's VALID/INVALID interpretation layer (e.g.
+    ``sweep_v1_execution.py``'s ``_derive_validity``) needs zero changes to
+    consume either execution mode's receipt.
+    """
+    effective_policy = build_effective_policy(execution_policy)
+    if effective_policy["performance_early_stopping_enabled"] is not False:
+        raise PilotOrchestrationError(
+            "execute_prepared_pilot_run_monolithic requires performance_early_stopping_enabled=False "
+            f"in the effective policy, got {effective_policy['performance_early_stopping_enabled']!r}"
+        )
+
+    required = set(range(1, target_epoch + 1))
+    nh_run_dir = _try_discover_nh_run_dir(config_dir, experiment_name)
+    if nh_run_dir is None:
+        train_chunk_fn(
+            TrainChunkRequest(
+                is_first_chunk=True,
+                config_path=Path(config_dir) / "config.yaml",
+                nh_run_dir=None,
+                current_epoch=None,
+                logical_target_epoch=target_epoch,
+                additional_epochs=target_epoch,
+            )
+        )
+        nh_run_dir = discover_nh_run_dir(config_dir, experiment_name)
+
+    checkpoint_inventory = discover_physical_checkpoints(nh_run_dir)
+    missing = sorted(required - set(checkpoint_inventory))
+    nested = sorted(
+        epoch for epoch, ckpt in checkpoint_inventory.items()
+        if epoch in required and ckpt.owning_run_dir != Path(nh_run_dir)
+    )
+    if missing or nested:
+        reasons = []
+        if missing:
+            reasons.append(f"missing required checkpoint(s) {missing}")
+        if nested:
+            reasons.append(
+                f"checkpoint(s) for epoch(s) {nested} are physically nested under a continuation "
+                "directory, which a genuine single monolithic start_run call never produces"
+            )
+        return PreparedPilotExecutionResult(
+            final_status="blocked_incomplete_monolithic_training",
+            blocked_reason=(
+                f"monolithic training did not produce a complete, flat 1..{target_epoch} checkpoint "
+                f"set directly under {nh_run_dir}: " + "; ".join(reasons) + " -- this function never "
+                "attempts a continuation to complete an interrupted monolithic run; manual review is "
+                "required"
+            ),
+            effective_policy=effective_policy, nh_run_dir=nh_run_dir, blocked=True,
+            stopped=False, stop_reason=None, checkpoint_inventory=checkpoint_inventory,
+            early_stopping_state={}, screening_events=[],
+        )
+
+    orchestration_state = _load_orchestration_state(nh_run_dir)
+    already_logged = set(orchestration_state.get("logged_screening_epochs", []))
+    for epoch in sorted(required - already_logged):
+        ensure_validation_results(nh_run_dir=nh_run_dir, epoch=epoch, evaluate_checkpoint_fn=evaluate_checkpoint_fn)
+        evaluate_screening_checkpoint(
+            run_dir=nh_run_dir, epoch=epoch, package_root=package_root,
+            target_variable=target_variable, lead_hours=lead_hours,
+            screening_basin_ids=screening_basin_ids, pilot_policy=execution_policy,
+        )
+        already_logged.add(epoch)
+        orchestration_state["logged_screening_epochs"] = sorted(already_logged)
+        _save_orchestration_state(nh_run_dir, orchestration_state)
+
+    screening_events = _reconstruct_screening_history(
+        nh_run_dir=nh_run_dir, checkpoint_inventory=checkpoint_inventory,
+        package_root=package_root, target_variable=target_variable, lead_hours=lead_hours,
+        screening_basin_ids=screening_basin_ids, pilot_policy=execution_policy,
+    )
+    screened = {int(event["epoch"]) for event in screening_events}
+    missing_screening = sorted(required - screened)
+    if missing_screening:
+        return PreparedPilotExecutionResult(
+            final_status="blocked_incomplete_post_hoc_screening",
+            blocked_reason=f"post-hoc screening did not produce results for epoch(s) {missing_screening}",
+            effective_policy=effective_policy, nh_run_dir=nh_run_dir, blocked=True,
+            stopped=False, stop_reason=None, checkpoint_inventory=checkpoint_inventory,
+            early_stopping_state={}, screening_events=screening_events,
+        )
+
+    return PreparedPilotExecutionResult(
+        final_status="monolithic_training_and_screening_complete",
+        blocked_reason=None, effective_policy=effective_policy, nh_run_dir=nh_run_dir,
+        blocked=False, stopped=False, stop_reason=None,
+        checkpoint_inventory=checkpoint_inventory, early_stopping_state={},
         screening_events=screening_events,
     )
 

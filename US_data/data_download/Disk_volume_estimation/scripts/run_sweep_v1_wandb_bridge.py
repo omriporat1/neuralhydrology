@@ -27,10 +27,21 @@ proposal (see ``build_production_sweep_config`` /
      creating a second provenance authority.
   4. ``run_prepared_trial_in_production`` -- the real, fully-tested Sweep-v1
      execution/interpretation layer (``src/baseline/sweep_v1_execution.py``),
-     which wires the mature NH orchestration
-     (``pilot_orchestration.execute_prepared_pilot_run``) and derives
-     VALID/INVALID + ``best_score`` from the authoritative prepared-execution
-     receipt. This script never re-derives or second-guesses that result.
+     which wires the mature NH orchestration's monolithic executor
+     (``pilot_orchestration.execute_prepared_pilot_run_monolithic``) and
+     derives VALID/INVALID + ``best_score`` from the authoritative
+     prepared-execution receipt. This script never re-derives or
+     second-guesses that result. ``slurm_job_id`` is passed through from the
+     live ``SLURM_JOB_ID`` environment variable -- Slurm sets this itself in
+     every batch job's environment (unlike the four ``FLASHNH_SWEEP_V1_*``
+     values above, it needs no explicit export from the sbatch launcher) --
+     so ``review_records.json``'s ``operations`` block records the real
+     allocation identity even though ``slurm_state``/``gpu_hours`` remain
+     unknown until the job terminates (see
+     ``sweep_v1_execution.enrich_operations_slurm_accounting`` for that
+     later, out-of-band step). ``os.environ.get("SLURM_JOB_ID")`` is simply
+     ``None`` outside a Slurm allocation (e.g. local/manual invocation),
+     which ``execute_prepared_trial`` accepts.
   5. Logs ``flashnh/best_score`` (matching ``build_production_sweep_config``'s
      ``metric.name``) as a time-series metric so the Bayesian optimizer can
      use it, and records the remaining outcome fields as run-summary values.
@@ -219,6 +230,7 @@ def main() -> int:
         outcome = run_prepared_trial_in_production(
             prepared_record=record, output_dir=output_dir, paths=paths,
             base_pilot_policy_path=args.base_pilot_policy_path,
+            slurm_job_id=os.environ.get("SLURM_JOB_ID"),
         )
         valid = outcome["valid"]
         trial = outcome["review_records"]["trial_summary"]

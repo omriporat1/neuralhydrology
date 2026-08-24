@@ -24,9 +24,9 @@ Never imports the real ``wandb`` package; never starts real NH training for
 cases 1/2/6 (execute_prepared_trial/run_prepared_trial_in_production are not
 reached). Cases 3/4/5 use the same real, torch-backed checkpoint/optimizer-
 state fixture as tests/test_sweep_v1_execution.py, with
-pilot_orchestration.execute_prepared_pilot_run monkeypatched to a fake
-receipt -- exactly test_sweep_v1_execution.py's established pattern -- so no
-real NH/torch training ever starts.
+pilot_orchestration.execute_prepared_pilot_run_monolithic monkeypatched to a
+fake receipt -- exactly test_sweep_v1_execution.py's established pattern --
+so no real NH/torch training ever starts.
 """
 from __future__ import annotations
 
@@ -527,7 +527,7 @@ def test_bridge_main_valid_trial_logs_finite_objective_and_full_provenance_progr
     def fake_execute(**kwargs):
         return _fake_result(nh_run_dir, checkpoint_epochs=epochs, screening_scores=scores, n_basins=kwargs["screening_basin_ids"].__len__())
 
-    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run", fake_execute)
+    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run_monolithic", fake_execute)
 
     exit_code = bridge.main()
 
@@ -562,7 +562,7 @@ def test_bridge_main_invalid_trial_never_logs_a_finite_objective(tmp_path, monke
         return _fake_result(nh_run_dir, checkpoint_epochs=incomplete_epochs, screening_scores=scores,
                             n_basins=kwargs["screening_basin_ids"].__len__())
 
-    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run", fake_execute)
+    monkeypatch.setattr(orchestration, "execute_prepared_pilot_run_monolithic", fake_execute)
 
     exit_code = bridge.main()
 
