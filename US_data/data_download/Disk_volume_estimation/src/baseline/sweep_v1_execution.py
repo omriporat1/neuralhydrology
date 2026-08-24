@@ -519,8 +519,23 @@ def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], outp
 
 
 def build_production_sweep_config(*, program: str) -> dict[str, Any]:
-    """Deterministic W&B-facing proposal domain; budget is intentionally absent."""
+    """Deterministic W&B-facing proposal domain; budget is intentionally absent.
+
+    ``command`` is explicit and deliberately omits the ``${args}`` macro: W&B's
+    default command template appends every swept hyperparameter as a
+    ``--key=value`` CLI flag, which ``run_sweep_v1_wandb_bridge.py``'s
+    argparse does not accept (it reads the five proposed values from
+    ``run.config`` instead -- see that script's module docstring). It also
+    omits ``${env}`` and any hardcoded path: the four operational inputs the
+    bridge needs (package root, screening basin ids, output root, proposal
+    order) are supplied via the ``FLASHNH_SWEEP_V1_*`` environment variables
+    the sbatch launcher exports into ``wandb agent``'s own process
+    environment, which every child process it spawns inherits by standard OS
+    subprocess semantics -- keeping this portable search-space definition
+    free of machine-specific paths (docs/stage1_phase_b_sweep_v1_launch_contract.md).
+    """
     return {"method": "bayes", "metric": {"name": "flashnh/best_score", "goal": "maximize"}, "program": program,
+            "command": ["${interpreter}", "${program}"],
             "parameters": {"learning_rate": {"distribution": "log_uniform_values", "min": 1e-4, "max": 1e-3},
                            "hidden_size": {"values": [64, 128, 256]},
                            "embedding_dropout": {"distribution": "uniform", "min": 0.0, "max": 0.4},

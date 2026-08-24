@@ -1,5 +1,9 @@
 # Flash-NH Current State
 
+## Sweep-v1 launch-command seam repaired — no real trial consumed (2026-08-24)
+
+**[CLOSED, implementation only]** A launch-readiness inspection found the production W&B sweep config had no explicit `command`; W&B's default would have appended the five swept hyperparameters as CLI flags the bridge's argparse does not accept, failing before `wandb.init()`/proposal intake. `build_production_sweep_config` now declares `"command": ["${interpreter}", "${program}"]` (no `${args}`, no `${env}`, no hardcoded paths). Because W&B itself now constructs the bridge's argv, the four operational inputs (package root, screening basin ids, output root, proposal order) are supplied via `FLASHNH_SWEEP_V1_*` environment variables exported by `scripts/run_sweep_v1_wandb_agent_moriah.sbatch` and resolved by the bridge with strict CLI/environment precedence (agreement/one-supplied accepted; contradiction/absence hard-fails before proposal intake). The sweep-config builder now refuses to silently overwrite `--output` without `--force`. New `tests/test_sweep_v1_launch_command_contract.py` (20 tests) includes a real OS-level subprocess test of the exact W&B-constructed argv. Full focused Sweep-v1 suite: 97 passed, 14 skipped (no local torch), 0 failed. No sweep/run/proposal created, no Slurm submitted, no training run, no production trial consumed. See `docs/decision_log.md`'s 2026-08-24 entry. Next operational milestone remains one serialized real Bayesian proposal/trial (proposal order 1).
+
 ## Sweep-v1 local production integration CLOSED — independently approved for commit (2026-08-23)
 
 **[CLOSED]** Building on the prepared-execution consumer contract closure
