@@ -84,8 +84,14 @@ artifacts -- outside this task's authorized scope, and not done here.
 Two entry points share one execution core (``_execute_retry``), so
 production and a disposable rehearsal can never silently diverge:
 
-* :func:`main` -- the original, unchanged CLI-flag interface (kept for
-  back-compat; not used by new manifest-driven launches).
+* :func:`main` -- the original CLI-flag interface (kept only for
+  explicitly non-production compatibility, e.g. manual retries against a
+  non-production sweep; not used by new manifest-driven launches). It never
+  runs the commit/interpreter/HOME/netrc runtime contract, so ``_execute_retry``
+  hard-fails BEFORE any durable-intake write or W&B call if this route ever
+  resolves to the real production sweep (``PRODUCTION_WANDB_SWEEP_ID``) --
+  there is exactly one production entry path (:func:`main_from_manifest`),
+  never two with different safety contracts.
 * :func:`main_from_manifest` -- consumes one
   ``src.baseline.sweep_v1_launch_manifest`` JSON file instead of a long flag
   list. When ``manifest["mode"] == "rehearsal"``, the shared core runs the
@@ -114,6 +120,7 @@ from src.baseline.sweep_v1_execution import (
     enrich_layer_b_provenance, run_prepared_trial_in_production, select_executor_mode,
     write_proposal_intake_provenance,
 )
+from src.baseline.sweep_v1_launch_manifest import PRODUCTION_WANDB_SWEEP_ID
 from src.baseline.sweep_v1_production_adapter import (
     PreparationPaths, canonicalize_wandb_proposal, prepare_bayesian_proposal, write_prepared_proposal,
 )
@@ -131,9 +138,20 @@ def _execute_retry(
     baseline_policy_path: Path, base_pilot_policy_path: Path, project: str, entity: "str | None",
     target_sweep_id_override: "str | None", stop_before_training: bool,
     extra_intake_fields: "dict[str, Any] | None" = None,
+    runtime_contract_verified: bool = False,
 ) -> int:
     """Shared execution core for both :func:`main` (legacy CLI) and
     :func:`main_from_manifest`. See module docstring for the exact contract.
+
+    ``runtime_contract_verified`` must be ``True`` only when the caller has
+    already run ``src.baseline.sweep_v1_runtime_contract.run_full_runtime_contract``
+    (expected commit/interpreter/HOME/netrc) against a real launch manifest
+    -- currently only :func:`main_from_manifest` does this, before it ever
+    calls this function. If the resolved target is the real production
+    sweep (``PRODUCTION_WANDB_SWEEP_ID``) and that contract was not verified,
+    this function hard-fails before any durable-intake write or W&B call:
+    the legacy multi-flag CLI route (:func:`main`) must never be able to
+    reach production without it.
     """
     assert_matches_pinned_identity(record, pinned)
 
@@ -159,6 +177,16 @@ def _execute_retry(
     paths = PreparationPaths(baseline_policy_path, package_root, canonical_splits, screening_basin_ids)
 
     target_sweep_id = target_sweep_id_override if target_sweep_id_override is not None else retry["wandb_sweep_id"]
+
+    if target_sweep_id == PRODUCTION_WANDB_SWEEP_ID and not runtime_contract_verified:
+        raise SystemExit(
+            "REFUSING: target sweep is the real production sweep "
+            f"({PRODUCTION_WANDB_SWEEP_ID!r}) but the commit/interpreter/HOME/netrc runtime "
+            "contract (src.baseline.sweep_v1_runtime_contract.run_full_runtime_contract) was not "
+            "verified for this invocation. Production launches must go through "
+            "main_from_manifest(), which runs that contract before any durable-intake or W&B "
+            "step; the legacy multi-flag CLI route cannot target production."
+        )
 
     # Durable retry-intake BEFORE any W&B call: no fabricated wandb_run_id,
     # and this record (including the operational link to any prior failed
@@ -340,6 +368,7 @@ def main_from_manifest(manifest_path: "str | Path") -> int:
             "launch_manifest_sha256": manifest["manifest_sha256"],
             "launch_manifest_label": manifest["manifest_label"],
         },
+        runtime_contract_verified=True,
     )
 
 
@@ -388,6 +417,7 @@ def main() -> int:
         baseline_policy_path=args.baseline_policy_path, base_pilot_policy_path=args.base_pilot_policy_path,
         project=args.project, entity=args.entity,
         target_sweep_id_override=None, stop_before_training=False, extra_intake_fields=None,
+        runtime_contract_verified=False,
     )
 
 

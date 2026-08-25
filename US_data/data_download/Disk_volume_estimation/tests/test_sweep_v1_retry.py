@@ -617,3 +617,140 @@ def test_build_bounded_wandb_tags_real_attempt004_identity_matches_expected_set(
         "sweep-v1", "exact-retry", "proposal-001", "execution-generation-4", "sweep_v1_cfg_5731e180d1bf9d582afc",
     ]
     validate_wandb_tags(tags)  # must not raise
+
+
+# --- attempt005 derivation (production-launcher migration + attempt-history repair task) ----
+
+# The real, durable three-element prior-attempts record for this task
+# (.scratch_local/sweep_v1_incident_records/prior_attempts_after_attempt004.json):
+# attempt002/job 45939764 (wandb_tags_rejected), attempt003/job 45939848
+# (wandb_init_failed), and attempt004/job 45942761 -- a disposable,
+# non-scientific, zero-training exact-retry startup rehearsal (disposable
+# W&B sweep bgx4yovw / disposable run 6ikc3xgh) that completed successfully
+# but stopped before training and carries no objective. Reproduced here
+# verbatim, not invented -- see that file.
+_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004 = [
+    {
+        "execution_generation": 2,
+        "slurm_job_id": "45939764",
+        "status": "failed_before_wandb_association",
+        "failure_category": "wandb_tags_rejected",
+    },
+    {
+        "execution_generation": 3,
+        "slurm_job_id": "45939848",
+        "status": "failed_before_wandb_association",
+        "failure_category": "wandb_init_failed",
+    },
+    {
+        "execution_generation": 4,
+        "slurm_job_id": "45942761",
+        "wandb_sweep_id": "bgx4yovw",
+        "wandb_run_id": "6ikc3xgh",
+        "status": "disposable_rehearsal_stopped_before_training",
+        "failure_category": None,
+        "non_scientific": True,
+        "countable_toward_36": False,
+        "objective_score": None,
+        "notes": (
+            "Manifest-driven exact-retry startup rehearsal (main_from_manifest, mode=rehearsal, "
+            "stop_before_training=true) against a disposable, non-production W&B sweep/run. Completed "
+            "successfully through wandb association and executor-mode selection, then stopped before "
+            "run_prepared_trial_in_production. No NeuralHydrology training occurred. Not a scientific "
+            "result; permanently reserved and non-countable toward the 36-valid-trial Bayesian budget."
+        ),
+    },
+]
+
+
+def test_real_prior_attempts_after_attempt004_file_matches_the_fixture():
+    """Ties the in-test fixture above to the actual durable, project-local,
+    untracked artifact this repair authored -- proves generation 4 is
+    recorded exactly once, is objective-free, and is explicitly marked
+    non-countable, without editing or overwriting the existing
+    prior_attempts_after_attempt003.json sibling."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parent.parent
+    incident_dir = repo_root / ".scratch_local" / "sweep_v1_incident_records"
+    attempt003_file = incident_dir / "prior_attempts_after_attempt003.json"
+    attempt004_file = incident_dir / "prior_attempts_after_attempt004.json"
+
+    on_disk = _json.loads(attempt004_file.read_text(encoding="utf-8"))
+    assert on_disk == _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004
+
+    # The pre-existing attempt003 record (generations 2-3 only) is untouched,
+    # not overwritten by the new attempt004 record.
+    on_disk_003 = _json.loads(attempt003_file.read_text(encoding="utf-8"))
+    assert on_disk_003 == _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT003
+    assert [a["execution_generation"] for a in on_disk_003] == [2, 3]
+
+    gen4 = next(a for a in on_disk if a["execution_generation"] == 4)
+    assert gen4["objective_score"] is None
+    assert gen4["countable_toward_36"] is False
+    assert gen4["non_scientific"] is True
+
+
+def test_derive_exact_retry_identity_from_real_attempt001_envelope_to_attempt005(tmp_path):
+    """Real attempt001 envelope -> attempt005 derivation (execution_generation=5),
+    with ALL THREE prior recorded generations (2, 3, and 4) supplied -- the
+    exact derivation the next permissible production retry (attempt005)
+    requires. Proposal identity (proposal_order=1, proposal_id,
+    configuration_id) and all five hyperparameters and Seed A are unchanged
+    from attempt001 -- proposal 2 is never requested or substituted."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    retry = derive_exact_retry_identity(
+        loaded, execution_generation=5, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004,
+    )
+
+    assert retry["execution_generation"] == 5
+    assert retry["retry_of_trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] != _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"].endswith("__attempt005")
+    assert retry["trial_id"] == sweep.trial_id("sweep_v1_cfg_5731e180d1bf9d582afc", execution_generation=5)
+    assert retry["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert retry["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+    assert retry["proposal_order"] == 1  # proposal 2 is never requested or substituted
+    assert retry["hyperparameters"] == _REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"]
+    assert retry["wandb_sweep_id"] == "4x3btz2s"  # original record's historical sweep id, not a new target
+
+
+def test_derive_exact_retry_identity_refuses_to_reuse_generation_2_3_or_4_after_attempt004(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    for reused_generation in (2, 3, 4):
+        with pytest.raises(SweepV1RetryError, match="already reserved"):
+            derive_exact_retry_identity(
+                loaded, execution_generation=reused_generation,
+                prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004,
+            )
+
+
+def test_write_proposal_intake_provenance_attempt005_carries_the_complete_operational_history(tmp_path):
+    """attempt005's durable intake record (and therefore its W&B config/
+    provenance, per write_proposal_intake_provenance's contract) carries the
+    complete retry_history including all of generations 2, 3, and 4 -- never
+    losing the operational link to the earlier failed/disposable attempts."""
+    written = _write_record(
+        tmp_path, execution_generation=5, retry_of_trial_id=_REAL_ATTEMPT001_TRIAL_ID,
+        retry_history=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004,
+    )
+    assert written["retry_of_trial_id"] == _REAL_ATTEMPT001_TRIAL_ID
+    assert written["retry_history"] == _REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT004
+    assert [a["execution_generation"] for a in written["retry_history"]] == [2, 3, 4]
+
+
+def test_build_bounded_wandb_tags_real_attempt005_identity_matches_expected_set():
+    tags = build_bounded_wandb_tags(
+        proposal_order=1, execution_generation=5, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+    )
+    assert tags == [
+        "sweep-v1", "exact-retry", "proposal-001", "execution-generation-5", "sweep_v1_cfg_5731e180d1bf9d582afc",
+    ]
+    validate_wandb_tags(tags)  # must not raise

@@ -743,3 +743,44 @@ def test_resolve_only_allows_a_fresh_generation_with_prior_attempts_file_present
     printed = json.loads(capsys.readouterr().out)
     assert printed["retry_identity"]["execution_generation"] == 3
     assert printed["retry_identity"]["retry_of_trial_id"] == written["trial_id"]
+
+
+# --- production-launcher migration: legacy main() cannot bypass the runtime contract ----
+
+def test_legacy_cli_main_cannot_reach_the_real_production_sweep_without_runtime_contract(tmp_path, monkeypatch):
+    """The legacy multi-flag CLI route (main -> _execute_retry with the
+    default runtime_contract_verified=False) must hard-fail, BEFORE any
+    durable-intake write or wandb import, the moment it would resolve to the
+    real production sweep (PRODUCTION_WANDB_SWEEP_ID). Only main_from_manifest
+    (which runs run_full_runtime_contract first) is allowed to reach it. This
+    is deliberately NOT the ENV_SELFTEST=resolve_only path (which returns
+    before target_sweep_id is ever computed and so never exercises this
+    guard) -- this test goes through the real target_sweep_id resolution.
+    """
+    written = _write_frozen_record(tmp_path, wandb_sweep_id=retry_bridge.PRODUCTION_WANDB_SWEEP_ID)
+    record_path = tmp_path / "attempt1" / written["trial_id"] / "execution_provenance.json"
+    identity_path = _pinned_identity_path(tmp_path, written)
+    output_root = tmp_path / "out_retry"
+
+    monkeypatch.setattr(sys, "argv", _retry_argv(
+        tmp_path=tmp_path,
+        paths=PreparationPaths(BASELINE_POLICY_PATH, tmp_path / "unused_package", tmp_path / "unused_splits", tmp_path / "unused_screening.txt"),
+        frozen_record_path=record_path, expected_identity_path=identity_path, output_root=output_root,
+    ))
+
+    with pytest.raises(SystemExit, match="runtime contract"):
+        retry_bridge.main()
+
+    assert "wandb" not in sys.modules
+    assert not output_root.exists()
+
+
+# NOTE: that the legacy CLI route still functions end-to-end for a
+# non-production sweep id is already proven by
+# test_valid_retry_logs_objective_and_leaves_original_attempt_untouched
+# and test_invalid_retry_never_logs_a_finite_objective above, both of which
+# go through main() -> _execute_retry with the default
+# runtime_contract_verified=False and a non-production
+# wandb_sweep_id="prod-sweep-xyz" fixture default, and both passed
+# unchanged after this guard was added -- confirming the hard-fail is
+# scoped exactly to PRODUCTION_WANDB_SWEEP_ID, not to main() as a whole.
