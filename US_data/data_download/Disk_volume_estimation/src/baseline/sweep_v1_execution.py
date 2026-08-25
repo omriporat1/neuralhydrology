@@ -53,7 +53,15 @@ __all__ = [
     "SweepV1ExecutionError", "SweepV1ExecutionContext", "build_execution_context",
     "execute_prepared_trial", "run_prepared_trial_in_production", "build_production_sweep_config",
     "write_proposal_intake_provenance", "enrich_layer_b_provenance", "enrich_operations_slurm_accounting",
+    "select_executor_mode", "EXECUTOR_MODE_MONOLITHIC",
 ]
+
+# The only executor mode :func:`select_executor_mode` can currently return.
+# Sweep-v1's generated config always bakes its full ``target_epoch`` budget in
+# directly (single-shot fidelity design), so the monolithic executor is the
+# sole legal choice today; a future fidelity design that needs the bounded-
+# chunk executor would extend the selector, not bypass it.
+EXECUTOR_MODE_MONOLITHIC = "monolithic"
 
 # Mirrors the same frozen screening-population size already hardcoded and
 # doubly-asserted in sweep_v1_production_adapter._prepare_proposal
@@ -562,6 +570,28 @@ def enrich_operations_slurm_accounting(*, output_dir: "str | Path", slurm_job_id
     return records
 
 
+def select_executor_mode(prepared_record: Mapping[str, Any]) -> str:
+    """Pure, side-effect-free selection of which NH orchestration executor a
+    prepared Sweep-v1 trial must run under. Reuses the same
+    already-qualified :func:`_require_prepared` contract check (fidelity,
+    epoch/update budget, early-stopping-disabled, package/screening identity)
+    that :func:`build_execution_context` performs -- this function adds no
+    new legality rule, it only reads the already-validated record and
+    returns a constant.
+
+    Deliberately extracted so production and a disposable rehearsal can share
+    one executor-selection decision: production dispatches on the returned
+    mode; a rehearsal may call this and record the result without ever
+    invoking the executor itself. This is intentionally NOT a general
+    ``dry_run`` executor bypass -- there is exactly one selector, and exactly
+    one production dispatch path, shared by both callers.
+
+    Never imports or touches ``pilot_orchestration``/NH/torch.
+    """
+    _require_prepared(prepared_record)
+    return EXECUTOR_MODE_MONOLITHIC
+
+
 def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], output_dir: Path,
                                      paths: PreparationPaths, base_pilot_policy_path: "str | Path",
                                      retry_of_trial_id: "str | None" = None,
@@ -590,6 +620,10 @@ def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], outp
 
     Never called by local tests (it starts real NH training/evaluation).
     """
+    mode = select_executor_mode(prepared_record)
+    if mode != EXECUTOR_MODE_MONOLITHIC:
+        raise SweepV1ExecutionError(f"no production dispatch is wired for executor mode {mode!r}")
+
     context = build_execution_context(
         prepared_record=prepared_record, paths=paths, base_pilot_policy_path=base_pilot_policy_path
     )

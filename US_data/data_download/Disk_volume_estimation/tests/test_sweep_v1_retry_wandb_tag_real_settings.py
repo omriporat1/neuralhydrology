@@ -41,6 +41,13 @@ _REAL_PRODUCTION_ATTEMPT003_TAGS = build_bounded_wandb_tags(
     proposal_order=1, execution_generation=3, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
 )
 
+# The generation-4 tag set: the exact retry identity this task's disposable
+# rehearsal derives and would use for a real attempt004 launch (never
+# dispatched here -- see tests/test_sweep_v1_retry.py's attempt004 coverage).
+_REAL_PRODUCTION_ATTEMPT004_TAGS = build_bounded_wandb_tags(
+    proposal_order=1, execution_generation=4, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+)
+
 
 def _settings_accepts(tags: "list[str]") -> None:
     """Instantiate the REAL wandb Settings model with run_tags=tags -- the
@@ -72,3 +79,11 @@ def test_real_wandb_settings_rejects_boundary_65_character_tag():
 def test_real_wandb_settings_rejects_the_real_historical_offending_attempt002_tag():
     with pytest.raises(Exception):
         _settings_accepts([_REAL_OFFENDING_ATTEMPT002_TAG])
+
+
+def test_real_wandb_settings_accepts_the_production_bounded_tag_set_for_real_attempt004_identity():
+    """The exact tag set a real attempt004 launch (never dispatched in this
+    task) would use -- validated against the real wandb package the same way
+    attempt003's tag set was validated above, ahead of any real submission."""
+    validate_wandb_tags(_REAL_PRODUCTION_ATTEMPT004_TAGS)
+    _settings_accepts(_REAL_PRODUCTION_ATTEMPT004_TAGS)

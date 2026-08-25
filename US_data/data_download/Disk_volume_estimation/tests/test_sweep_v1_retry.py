@@ -546,3 +546,74 @@ def test_write_proposal_intake_provenance_persists_retry_history_without_touchin
 def test_write_proposal_intake_provenance_defaults_retry_history_to_empty_list(tmp_path):
     written = _write_record(tmp_path)
     assert written["retry_history"] == []
+
+
+# --- attempt004 derivation (Sweep-v1 exact-retry startup rehearsal task) ------
+
+# The real, durable two-element prior-attempts record for this task
+# (.scratch_local/sweep_v1_incident_records/prior_attempts_after_attempt003.json):
+# attempt002/job 45939764 (wandb_tags_rejected) and attempt003/job 45939848
+# (wandb_init_failed), both failed_before_wandb_association. Reproduced here
+# verbatim, not invented -- see that file and its sibling incident record.
+_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT003 = [
+    {
+        "execution_generation": 2,
+        "slurm_job_id": "45939764",
+        "status": "failed_before_wandb_association",
+        "failure_category": "wandb_tags_rejected",
+    },
+    {
+        "execution_generation": 3,
+        "slurm_job_id": "45939848",
+        "status": "failed_before_wandb_association",
+        "failure_category": "wandb_init_failed",
+    },
+]
+
+
+def test_derive_exact_retry_identity_from_real_attempt001_envelope_to_attempt004(tmp_path):
+    """Real attempt001 envelope -> attempt004 derivation (execution_generation=4),
+    with BOTH prior failed generations (2 and 3) supplied -- the exact
+    derivation the disposable exact-retry startup rehearsal exercises."""
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    retry = derive_exact_retry_identity(
+        loaded, execution_generation=4, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT003,
+    )
+
+    assert retry["execution_generation"] == 4
+    assert retry["retry_of_trial_id"] == _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] != _REAL_ATTEMPT001_PREPARATION_RECORD["trial_id"]
+    assert retry["trial_id"] == sweep.trial_id("sweep_v1_cfg_5731e180d1bf9d582afc", execution_generation=4)
+    assert retry["configuration_id"] == "sweep_v1_cfg_5731e180d1bf9d582afc"
+    assert retry["proposal_id"] == "stage1_phase_b_sweep_v1_original_domain_v001__bayesian__proposal001"
+    assert retry["proposal_order"] == 1
+    assert retry["hyperparameters"] == _REAL_ATTEMPT001_PREPARATION_RECORD["hyperparameters"]
+    assert retry["wandb_sweep_id"] == "4x3btz2s"  # original record's historical sweep id, not a new target
+
+
+def test_derive_exact_retry_identity_refuses_to_reuse_generation_2_or_3_after_attempt003(tmp_path):
+    envelope = copy.deepcopy(_REAL_ATTEMPT001_ENVELOPE)
+    path = _write_json(tmp_path, "execution_provenance.json", envelope)
+    loaded = load_frozen_proposal_record(path)
+
+    with pytest.raises(SweepV1RetryError, match="already reserved"):
+        derive_exact_retry_identity(
+            loaded, execution_generation=2, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT003,
+        )
+    with pytest.raises(SweepV1RetryError, match="already reserved"):
+        derive_exact_retry_identity(
+            loaded, execution_generation=3, prior_attempts=_REAL_PRIOR_ATTEMPTS_AFTER_ATTEMPT003,
+        )
+
+
+def test_build_bounded_wandb_tags_real_attempt004_identity_matches_expected_set():
+    tags = build_bounded_wandb_tags(
+        proposal_order=1, execution_generation=4, configuration_id="sweep_v1_cfg_5731e180d1bf9d582afc",
+    )
+    assert tags == [
+        "sweep-v1", "exact-retry", "proposal-001", "execution-generation-4", "sweep_v1_cfg_5731e180d1bf9d582afc",
+    ]
+    validate_wandb_tags(tags)  # must not raise
