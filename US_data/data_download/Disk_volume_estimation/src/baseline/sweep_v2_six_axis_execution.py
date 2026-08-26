@@ -27,6 +27,7 @@ real NH/W&B call.
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -56,12 +57,19 @@ from .sweep_v2_six_axis_campaign import (
     trial_id_v2,
     validate_review_record_v2,
 )
+from .sweep_v2_six_axis_config import V2_METRIC_NAME
+from .fixed_support_contract_v2 import (
+    evaluate_fixed_support_raw_space_metrics,
+    evaluate_natural_support_raw_space_metrics,
+)
 
 __all__ = [
     "SweepV2ExecutionError",
     "write_proposal_intake_provenance_v2",
     "select_executor_mode_v2",
     "execute_prepared_trial_v2",
+    "build_v2_epoch_evaluator",
+    "build_v2_objective_publication_payload",
     "enrich_operations_slurm_accounting_v2",
 ]
 
@@ -183,7 +191,8 @@ def select_executor_mode_v2(prepared_record: Mapping[str, Any]) -> str:
 
 
 def _review_records_v2(record: Mapping[str, Any], *, runtime_seconds: float, gpu_hours: "float | None",
-                       screenings: "Mapping[int, float] | None", failure_category: "str | None",
+                       fixed_scores: "Mapping[int, float] | None", natural_scores: "Mapping[int, float] | None",
+                       fixed_epoch_results: "Mapping[int, Mapping] | None", failure_category: "str | None",
                        retry_of_trial_id: "str | None", slurm_job_id: "str | None" = None) -> dict[str, Any]:
     """v2 sibling of :func:`sweep_v1_execution._review_records`. Identical
     shape and diagnostics math (``sweep.derive_trajectory_diagnostics`` is
@@ -196,8 +205,8 @@ def _review_records_v2(record: Mapping[str, Any], *, runtime_seconds: float, gpu
     and every record is validated via :func:`validate_review_record_v2`."""
     hp = dict(record["hyperparameters"])
     common = {key: record[key] for key in ("campaign_id", "domain_version", "search_arm", "proposal_id", "configuration_id", "trial_id")}
-    if screenings is not None:
-        diagnostics = sweep.derive_trajectory_diagnostics(screenings)
+    if fixed_scores is not None:
+        diagnostics = sweep.derive_trajectory_diagnostics(fixed_scores)
         status, objective = "pass", diagnostics["best_score"]
     else:
         diagnostics = {key: None for key in ("best_epoch", "best_score", "final_epoch_score", "best_minus_final", "best_score_10", "best_score_12", "late_gain_10_to_12", "late_best")}
@@ -205,7 +214,15 @@ def _review_records_v2(record: Mapping[str, Any], *, runtime_seconds: float, gpu
     trial = {**common, "workflow_status": status, "objective_score": objective, **diagnostics, **hp,
              "runtime_seconds": runtime_seconds, "gpu_hours": gpu_hours,
              "execution_generation": record["execution_generation"], "retry_of_trial_id": retry_of_trial_id,
-             "failure_category": failure_category}
+             "failure_category": failure_category,
+             "fixed_support_metric_name": V2_METRIC_NAME,
+             "fixed_support_epoch_trajectory": dict(fixed_scores or {}),
+             "natural_support_metric_name": "median_per_basin_raw_space_nse_natural_support",
+             "natural_support_epoch_trajectory": dict(natural_scores or {}),
+             "support_contract_version": record["support_contract_version"],
+             "support_contract_sha256": record["support_contract_sha256"],
+             "objective_eligible": fixed_scores is not None,
+             "publication_state": "not_published"}
     proposal = {key: trial[key] for key in PROPOSAL_RECORD_FIELDS_V2 if key in trial}
     proposal.update({"proposal_order": record["proposal_order"], "valid_result_order": None,
                      "boundary_review_checkpoint": None, "wave_id": f"{DOMAIN_VERSION_V2}_wave1"})
@@ -214,15 +231,84 @@ def _review_records_v2(record: Mapping[str, Any], *, runtime_seconds: float, gpu
     trajectory = [{"campaign_id": record["campaign_id"], "domain_version": record["domain_version"],
                    "configuration_id": record["configuration_id"], "trial_id": record["trial_id"],
                    "search_arm": record["search_arm"], "epoch": epoch,
-                   "median_raw_space_nse": value if screenings else None,
-                   "evaluation_status": "PASS" if screenings else "FAIL"}
-                  for epoch, value in ((sorted(screenings.items())) if screenings else [])]
+                   "median_raw_space_nse": value if fixed_scores else None,
+                   "evaluation_status": "PASS" if fixed_scores else "FAIL"}
+                  for epoch, value in ((sorted(fixed_scores.items())) if fixed_scores else [])]
     for kind, value in (("trial_summary", trial), ("proposal", proposal), ("operations", operations)):
         validate_review_record_v2(kind, value)
-    if screenings:
+    if fixed_scores:
         for row in trajectory:
             validate_review_record_v2("epoch_trajectory", row)
     return {"proposal": proposal, "trial_summary": trial, "operations": operations, "epoch_trajectory": trajectory}
+
+
+def _v2_trajectories(result: pilot_orchestration.PreparedPilotExecutionResult, *, expected_epochs: set[int]) -> tuple[dict[int, float], dict[int, float], dict[int, Mapping]]:
+    """Extract only fixed-support objective facts from the generic receipt."""
+    supplemental = result.supplemental_epoch_results
+    if set(supplemental) != expected_epochs:
+        raise SweepV2ExecutionError("fixed-support results must cover exactly every eligible epoch")
+    fixed, natural = {}, {}
+    for epoch in sorted(expected_epochs):
+        entry = supplemental[epoch]
+        fixed_result = entry.get("fixed_support")
+        natural_result = entry.get("natural_support")
+        if not isinstance(fixed_result, Mapping) or fixed_result.get("objective_scope") != "fixed_support":
+            raise SweepV2ExecutionError(f"epoch {epoch}: missing fixed_support-scoped result")
+        value = fixed_result.get("aggregate", {}).get("metrics", {}).get("nse", {}).get("median")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise SweepV2ExecutionError(f"epoch {epoch}: fixed-support objective is missing or non-finite")
+        if not isinstance(natural_result, Mapping) or natural_result.get("objective_scope") != "natural_support":
+            raise SweepV2ExecutionError(f"epoch {epoch}: missing natural-support diagnostic")
+        natural_value = natural_result.get("aggregate", {}).get("metrics", {}).get("nse", {}).get("median")
+        if isinstance(natural_value, bool) or not isinstance(natural_value, (int, float)) or not math.isfinite(natural_value):
+            raise SweepV2ExecutionError(f"epoch {epoch}: natural-support diagnostic is missing or non-finite")
+        fixed[epoch], natural[epoch] = float(value), float(natural_value)
+    return fixed, natural, supplemental
+
+
+def build_v2_epoch_evaluator(*, support_contract: Mapping[str, Any], package_root: "str | Path",
+                             screening_basin_ids: Sequence[str]) -> Callable[[Path, int], Mapping[str, Any]]:
+    """Return the narrow per-checkpoint v2 evaluator consumed by the existing
+    monolithic loop.  It reads the NeuralHydrology pickle already written for
+    that epoch; it never invokes model inference or changes v1 execution."""
+    contract = dict(support_contract)
+    package_root = Path(package_root)
+    basins = tuple(sorted(str(b) for b in screening_basin_ids))
+
+    def evaluate_epoch(run_dir: Path, epoch: int) -> Mapping[str, Any]:
+        fixed = evaluate_fixed_support_raw_space_metrics(
+            run_dir=run_dir, epoch=epoch, package_root=package_root,
+            contract=contract, basin_ids=basins, require_full_screening_population=True,
+        )
+        natural = evaluate_natural_support_raw_space_metrics(
+            run_dir=run_dir, period=contract["period"], epoch=epoch,
+            package_root=package_root, target_variable=contract["target_variable"],
+            lead_hours=contract["lead_hours"], basin_ids=basins,
+        )
+        return {"fixed_support": fixed, "natural_support": natural}
+
+    return evaluate_epoch
+
+
+def build_v2_objective_publication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The sole v2 optimizer payload; natural/screening fields are ignored."""
+    if record.get("execution_status") != "VALID" or record.get("objective_eligible") is not True:
+        raise SweepV2ExecutionError("only an objective-eligible VALID v2 record may publish")
+    value = record.get("objective_score")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise SweepV2ExecutionError("v2 fixed-support objective is missing or non-finite")
+    if record.get("fixed_support_metric_name") != V2_METRIC_NAME:
+        raise SweepV2ExecutionError("v2 record does not identify the fixed-support optimizer metric")
+    selected_epoch = record.get("best_epoch")
+    trajectory = record.get("fixed_support_epoch_trajectory")
+    if isinstance(selected_epoch, bool) or not isinstance(selected_epoch, int) or not isinstance(trajectory, Mapping):
+        raise SweepV2ExecutionError("v2 record lacks a selected fixed-support epoch trajectory")
+    selected_value = trajectory.get(selected_epoch, trajectory.get(str(selected_epoch)))
+    if isinstance(selected_value, bool) or not isinstance(selected_value, (int, float)) or not math.isfinite(selected_value):
+        raise SweepV2ExecutionError("selected v2 fixed-support epoch is missing or non-finite")
+    if float(selected_value) != float(value):
+        raise SweepV2ExecutionError("v2 objective does not equal its selected fixed-support epoch value")
+    return {V2_METRIC_NAME: float(value), "flashnh/valid": True, "flashnh/trial_id": record["trial_id"]}
 
 
 def execute_prepared_trial_v2(*, prepared_record: Mapping[str, Any], output_dir: Path,
@@ -265,18 +351,33 @@ def execute_prepared_trial_v2(*, prepared_record: Mapping[str, Any], output_dir:
         valid, scores, failure_category = _derive_validity(
             result, prepared_record, expected_screening_population=expected_screening_population
         )
+        fixed_scores = natural_scores = fixed_results = None
+        if valid:
+            fixed_scores, natural_scores, fixed_results = _v2_trajectories(
+                result, expected_epochs=set(range(1, int(prepared_record["target_epoch"]) + 1))
+            )
         records = _review_records_v2(prepared_record, runtime_seconds=time.time() - started,
-                                     gpu_hours=None, screenings=scores if valid else None,
+                                     gpu_hours=None, fixed_scores=fixed_scores,
+                                     natural_scores=natural_scores, fixed_epoch_results=fixed_results,
                                      failure_category=None if valid else failure_category,
                                      retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
         result_summary = _summarize_receipt(result)
     except Exception as exc:  # persisted provenance intentionally survives pre-training failure
         result_summary, valid = {"exception": repr(exc)}, False
         records = _review_records_v2(prepared_record, runtime_seconds=time.time() - started, gpu_hours=None,
-                                     screenings=None, failure_category="technical_execution_failure",
+                                     fixed_scores=None, natural_scores=None, fixed_epoch_results=None,
+                                     failure_category="technical_execution_failure",
                                      retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
     terminal_fields = {"execution_status": "VALID" if valid else "INVALID", "result": result_summary,
-                       "objective_score": records["trial_summary"]["objective_score"]}
+                       "objective_score": records["trial_summary"]["objective_score"],
+                       "objective_eligible": records["trial_summary"]["objective_eligible"],
+                       "fixed_support_metric_name": records["trial_summary"]["fixed_support_metric_name"],
+                       "fixed_support_epoch_trajectory": records["trial_summary"]["fixed_support_epoch_trajectory"],
+                       "natural_support_metric_name": records["trial_summary"]["natural_support_metric_name"],
+                       "natural_support_epoch_trajectory": records["trial_summary"]["natural_support_epoch_trajectory"],
+                       "best_epoch": records["trial_summary"]["best_epoch"],
+                       "support_contract_version": prepared_record["support_contract_version"],
+                       "support_contract_sha256": prepared_record["support_contract_sha256"]}
     provenance = enrich_layer_b_provenance(
         output_dir=output_dir, stage="VALID" if valid else "INVALID", fields=terminal_fields
     )

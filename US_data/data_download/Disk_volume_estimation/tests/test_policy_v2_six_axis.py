@@ -24,6 +24,7 @@ import yaml
 from src.baseline.policy_v2_six_axis import (
     PolicyOverlayError,
     load_stage1_baseline_policy_v2_six_axis,
+    validate_v2_six_axis_policy_override,
     validate_v2_six_axis_policy_overlay,
 )
 from src.baseline.sweep_v2_six_axis_campaign import SEQ_LENGTH_DOMAIN_V2
@@ -57,6 +58,12 @@ def test_load_against_the_real_committed_base_policy_and_overlay():
     # Every other v1-validated key survives untouched.
     assert merged["policy_name"] == "stage1_scientific_baseline_v001"
     assert merged["policy_version"] == 2
+
+
+def test_shared_boundary_rejects_an_arbitrary_v2_looking_policy_mapping():
+    merged = load_stage1_baseline_policy_v2_six_axis(BASELINE_POLICY_PATH, _REAL_OVERLAY_PATH)
+    with pytest.raises(PolicyOverlayError, match="approved overlay loader"):
+        validate_v2_six_axis_policy_override(dict(merged))
 
 
 def test_load_never_mutates_the_v1_committed_overlay_or_base_policy_files():

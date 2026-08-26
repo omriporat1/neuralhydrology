@@ -196,9 +196,9 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 import yaml
 
@@ -1975,6 +1975,11 @@ class PreparedPilotExecutionResult:
     checkpoint_inventory: "dict[int, PhysicalCheckpoint]"
     early_stopping_state: dict
     screening_events: list
+    # Optional campaign-supplied, post-pickle facts keyed by epoch.  The
+    # generic executor never interprets these values; this narrow callback
+    # seam lets a scientific consumer evaluate already-materialized NH
+    # results without changing v1 screening or triggering inference.
+    supplemental_epoch_results: dict = field(default_factory=dict)
 
 
 def _reconstruct_screening_history(
@@ -2103,6 +2108,7 @@ def execute_prepared_pilot_run_monolithic(
     target_variable: str, lead_hours: int, screening_basin_ids, target_epoch: int,
     train_chunk_fn: "Callable[[TrainChunkRequest], None]" = default_train_chunk,
     evaluate_checkpoint_fn: "Callable[[EvaluationRequest], None]" = default_evaluate_checkpoint,
+    supplemental_epoch_evaluator: "Callable[[Path, int], Mapping] | None" = None,
 ) -> PreparedPilotExecutionResult:
     """Execute one MONOLITHIC prepared NH training invocation -- for a
     generated config whose own ``epochs`` key is already baked to
@@ -2241,12 +2247,20 @@ def execute_prepared_pilot_run_monolithic(
             early_stopping_state={}, screening_events=screening_events,
         )
 
+    supplemental_epoch_results = {}
+    if supplemental_epoch_evaluator is not None:
+        for epoch in sorted(required):
+            # The evaluator receives the existing run directory and epoch only;
+            # it must consume the validation pickle just established above.
+            supplemental_epoch_results[epoch] = dict(supplemental_epoch_evaluator(nh_run_dir, epoch))
+
     return PreparedPilotExecutionResult(
         final_status="monolithic_training_and_screening_complete",
         blocked_reason=None, effective_policy=effective_policy, nh_run_dir=nh_run_dir,
         blocked=False, stopped=False, stop_reason=None,
         checkpoint_inventory=checkpoint_inventory, early_stopping_state={},
         screening_events=screening_events,
+        supplemental_epoch_results=supplemental_epoch_results,
     )
 
 

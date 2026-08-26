@@ -285,6 +285,7 @@ def evaluate_fixed_support_raw_space_metrics(
     package_root,
     contract: dict,
     basin_ids: Optional[Sequence[str]] = None,
+    require_full_screening_population: bool = False,
     min_area_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
 ) -> dict:
@@ -310,6 +311,11 @@ def evaluate_fixed_support_raw_space_metrics(
     unknown = set(requested) - set(contract["basin_ids"])
     if unknown:
         raise FixedSupportContractError(f"basin_ids not present in the fixed-support contract: {sorted(unknown)}")
+    if require_full_screening_population:
+        if len(contract["basin_ids"]) != 400 or len(set(contract["basin_ids"])) != 400:
+            raise FixedSupportContractError("production fixed-support contract must contain exactly 400 unique screening basins")
+        if requested != contract["basin_ids"]:
+            raise FixedSupportContractError("production fixed-support evaluation must use the complete frozen screening population")
 
     period_results = load_period_results(run_dir, contract["period"], epoch)
 
@@ -334,6 +340,10 @@ def evaluate_fixed_support_raw_space_metrics(
 
         run_date_values = np.asarray(xr_ds.coords["date"].values)
         support_dates = _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+        if len(np.unique(run_date_values)) != len(run_date_values):
+            raise FixedSupportContractError(f"basin {basin_id!r}: run date coordinate contains duplicates")
+        if len(np.unique(support_dates)) != len(support_dates):
+            raise FixedSupportContractError(f"basin {basin_id!r}: frozen support contains duplicate timestamps")
         support_mask = np.isin(run_date_values, support_dates)
         n_matched = int(support_mask.sum())
         if n_matched != len(support_dates):
@@ -346,6 +356,10 @@ def evaluate_fixed_support_raw_space_metrics(
         obs_mm_per_h = xr_ds[obs_key].values.reshape(-1)
         sim_mm_per_h = xr_ds[sim_key].values.reshape(-1)
         obs_support = np.where(support_mask, obs_mm_per_h, np.nan)
+        if not np.isfinite(obs_support[support_mask]).all():
+            raise FixedSupportContractError(
+                f"basin {basin_id!r}: frozen admitted timestamps are not naturally admitted observations"
+            )
 
         nc_path = basin_netcdf_path(package_root, basin_id)
         try:

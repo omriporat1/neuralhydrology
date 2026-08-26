@@ -38,12 +38,12 @@ from .sweep_v1_objective_recovery import (
     ObjectiveRecoveryError,
     REQUIRED_TERMINAL_STATUSES,
     assert_recovery_eligible,
-    build_objective_publication_payload,
     is_already_published,
     load_immutable_trial_record,
     record_publication,
 )
 from .sweep_v2_six_axis_campaign import CAMPAIGN_ID_V2, DOMAIN_VERSION_V2
+from .sweep_v2_six_axis_execution import build_v2_objective_publication_payload
 
 __all__ = [
     "SweepV2ObjectiveRecoveryError",
@@ -53,7 +53,7 @@ __all__ = [
     "assert_recovery_eligible",
     "assert_v2_campaign_identity",
     "assert_matches_expected_identity_v2",
-    "build_objective_publication_payload",
+    "build_v2_objective_publication_payload",
     "is_already_published",
     "record_publication",
     "recover_and_publish_objective_v2",
@@ -118,7 +118,7 @@ def recover_and_publish_objective_v2(
     assert_recovery_eligible(record)
     assert_matches_expected_identity_v2(record, expected_identity)
 
-    payload = build_objective_publication_payload(record)
+    payload = build_v2_objective_publication_payload(record)
 
     if is_already_published(marker_path):
         existing_marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))

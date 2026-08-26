@@ -25,7 +25,9 @@ from .sweep_v2_six_axis_campaign import SEQ_LENGTH_DOMAIN_V2
 
 __all__ = [
     "PolicyOverlayError",
+    "V2SixAxisPolicyOverride",
     "load_stage1_baseline_policy_v2_six_axis",
+    "validate_v2_six_axis_policy_override",
     "validate_v2_six_axis_policy_overlay",
 ]
 
@@ -39,6 +41,10 @@ class PolicyOverlayError(ValueError):
     """Raised when the v2 six-axis policy overlay is missing, invalid, or
     contradicts either its declared base policy or the v2 sweep's own
     seq_length domain."""
+
+
+class V2SixAxisPolicyOverride(dict):
+    """Marker returned only by the approved v2 overlay loader."""
 
 
 def validate_v2_six_axis_policy_overlay(overlay_data) -> dict:
@@ -72,6 +78,16 @@ def validate_v2_six_axis_policy_overlay(overlay_data) -> dict:
     return overlay_data
 
 
+def validate_v2_six_axis_policy_override(policy_data) -> dict:
+    """Validate the loader-produced effective policy at the shared boundary."""
+    if not isinstance(policy_data, V2SixAxisPolicyOverride):
+        raise PolicyOverlayError("effective v2 policy was not produced by the approved overlay loader")
+    overlay = dict(policy_data.get("policy_overlay") or {})
+    overlay["seq_lengths_hours"] = policy_data.get("seq_lengths_hours")
+    validate_v2_six_axis_policy_overlay(overlay)
+    return policy_data
+
+
 def load_stage1_baseline_policy_v2_six_axis(base_policy_path, overlay_path) -> dict:
     """Load + fully validate the unmodified v1 baseline policy, load +
     validate the v2 six-axis overlay, cross-check overlay/base identity,
@@ -83,6 +99,7 @@ def load_stage1_baseline_policy_v2_six_axis(base_policy_path, overlay_path) -> d
     it is never written back to ``config/stage1_scientific_baseline_v001.yaml``
     and the v1 validator/file are never touched.
     """
+
     try:
         base_policy = load_stage1_baseline_policy(base_policy_path)
     except Stage1BaselinePolicyError as exc:
@@ -116,4 +133,4 @@ def load_stage1_baseline_policy_v2_six_axis(base_policy_path, overlay_path) -> d
         "base_policy_name": overlay_data["base_policy_name"],
         "base_policy_version": overlay_data["base_policy_version"],
     }
-    return merged
+    return V2SixAxisPolicyOverride(merged)

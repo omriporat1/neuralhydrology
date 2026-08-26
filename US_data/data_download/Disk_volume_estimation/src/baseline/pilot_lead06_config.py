@@ -566,11 +566,9 @@ def build_pilot_bundle_with_validation_scope(
     extended domain) -- this is the sole additive integration point that lets
     a v2 six-axis caller supply an extended-``seq_lengths_hours`` policy
     overlay without touching v1's policy loading/validation path at all. The
-    caller is responsible for having already validated ``policy_override``
-    against whatever contract applies to it; this function does not attempt
-    to re-validate an overridden policy's shape beyond the same
-    ``validate_seq_length``/``validate_lead_hours`` calls used for the v1
-    path. When set, ``policy_sha256`` is computed over the override's own
+    only the approved v2 overlay loader's marked result is accepted, and its
+    embedded overlay provenance is checked again here. When set,
+    ``policy_sha256`` is computed over the override's own
     canonical JSON (not ``baseline_policy_path``'s file bytes), so bundle
     provenance never claims a checksum for a policy document that was not
     actually used.
@@ -580,6 +578,21 @@ def build_pilot_bundle_with_validation_scope(
     splits_dir = Path(splits_dir)
 
     if policy_override is not None:
+        # This is deliberately the sole v2 exception to the frozen v1 policy
+        # loading path.  Do not accept an arbitrary mapping: only the v2
+        # overlay loader can produce the marker and its provenance is checked
+        # again here at the shared-builder boundary.
+        from .policy_v2_six_axis import (
+            PolicyOverlayError,
+            V2SixAxisPolicyOverride,
+            validate_v2_six_axis_policy_override,
+        )
+        if not isinstance(policy_override, V2SixAxisPolicyOverride):
+            raise PilotConfigError("policy_override must be the approved v2 six-axis overlay result")
+        try:
+            validate_v2_six_axis_policy_override(policy_override)
+        except PolicyOverlayError as exc:
+            raise PilotConfigError(f"v2 policy overlay provenance failed validation: {exc}") from exc
         policy = policy_override
         policy_sha256_value = hashlib.sha256(
             json.dumps(policy_override, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -224,6 +224,9 @@ TRIAL_SUMMARY_FIELDS_V2 = frozenset({
     "workflow_status", "objective_score", "best_epoch", "best_score", "final_epoch_score", "best_minus_final",
     "best_score_10", "best_score_12", "late_gain_10_to_12", "late_best", *_AXES_V2,
     "runtime_seconds", "gpu_hours", "execution_generation", "retry_of_trial_id", "failure_category",
+    "fixed_support_metric_name", "fixed_support_epoch_trajectory",
+    "natural_support_metric_name", "natural_support_epoch_trajectory",
+    "support_contract_version", "support_contract_sha256", "objective_eligible", "publication_state",
 })
 PROPOSAL_RECORD_FIELDS_V2 = frozenset({
     "campaign_id", "domain_version", "search_arm", "proposal_id", "proposal_order", "configuration_id",

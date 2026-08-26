@@ -25,12 +25,13 @@ import pytest
 
 from src.baseline import sweep_v1_campaign as sweep_v1
 from src.baseline.sweep_v2_six_axis_campaign import CAMPAIGN_ID_V2, DOMAIN_VERSION_V2
+from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME
 from src.baseline.sweep_v2_six_axis_objective_recovery import (
     ObjectiveRecoveryError,
     SweepV2ObjectiveRecoveryError,
     assert_matches_expected_identity_v2,
     assert_v2_campaign_identity,
-    build_objective_publication_payload,
+    build_v2_objective_publication_payload,
     is_already_published,
     record_publication,
     recover_and_publish_objective_v2,
@@ -48,6 +49,12 @@ _VALID_RECORD = {
     "execution_generation": 2,
     "execution_status": "VALID",
     "objective_score": 0.40,
+    "objective_eligible": True,
+    "fixed_support_metric_name": V2_METRIC_NAME,
+    "fixed_support_epoch_trajectory": {1: 0.25, 3: 0.40, 12: 0.35},
+    "natural_support_metric_name": "median_per_basin_raw_space_nse_natural_support",
+    "natural_support_epoch_trajectory": {1: 0.20, 3: 0.30, 12: 0.50},
+    "best_epoch": 3,
     "generated_nh_config_sha256": "a" * 64,
     "wandb_run_id": "fake-run-0001",
     "wandb_sweep_id": "rehearsal-sweep-v2-abc",
@@ -60,6 +67,18 @@ _VALID_RECORD = {
 }
 
 _INVALID_RECORD = {**_VALID_RECORD, "execution_status": "INVALID", "objective_score": None}
+
+
+def test_v2_payload_uses_only_the_fixed_support_metric_key():
+    assert build_v2_objective_publication_payload(_VALID_RECORD) == {
+        V2_METRIC_NAME: 0.40, "flashnh/valid": True, "flashnh/trial_id": _VALID_RECORD["trial_id"],
+    }
+
+
+def test_v2_payload_refuses_a_screening_or_natural_score_substitution():
+    altered = {**_VALID_RECORD, "objective_score": 0.50}
+    with pytest.raises(ValueError, match="selected fixed-support"):
+        build_v2_objective_publication_payload(altered)
 
 _V1_SHAPED_RECORD = {
     **_VALID_RECORD,
@@ -176,7 +195,7 @@ def test_recover_and_publish_objective_v2_is_idempotent_and_never_imports_wandb_
     marker_path = tmp_path / "marker.json"
     record_publication(
         marker_path, wandb_run_id=_VALID_RECORD["wandb_run_id"],
-        payload=build_objective_publication_payload(_VALID_RECORD),
+        payload=build_v2_objective_publication_payload(_VALID_RECORD),
     )
 
     monkeypatch.setitem(sys.modules, "wandb", None)  # poison: any import attempt raises ImportError
@@ -192,8 +211,8 @@ def test_recover_and_publish_objective_v2_is_idempotent_and_never_imports_wandb_
 def test_recover_and_publish_objective_v2_refuses_a_changed_objective_under_the_same_marker(tmp_path, monkeypatch):
     record_path = _write_record(tmp_path, _VALID_RECORD)
     marker_path = tmp_path / "marker.json"
-    stale_payload = build_objective_publication_payload(_VALID_RECORD)
-    stale_payload["flashnh/objective_score"] = 0.999999
+    stale_payload = build_v2_objective_publication_payload(_VALID_RECORD)
+    stale_payload[V2_METRIC_NAME] = 0.999999
     record_publication(marker_path, wandb_run_id=_VALID_RECORD["wandb_run_id"], payload=stale_payload)
 
     monkeypatch.setitem(sys.modules, "wandb", None)
@@ -256,7 +275,7 @@ def test_recover_and_publish_objective_v2_full_path_publishes_and_writes_marker(
     assert result["status"] == "published"
     assert fake_module.captured["run_path"] == f"flashnh-stage1-test/{_VALID_RECORD['wandb_run_id']}"
     assert fake_run.summary["flashnh/valid"] is True
-    assert fake_run.summary["flashnh/objective_score"] == 0.40
+    assert fake_run.summary[V2_METRIC_NAME] == 0.40
     assert marker_path.is_file()
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     assert marker["wandb_run_id"] == _VALID_RECORD["wandb_run_id"]
@@ -286,10 +305,6 @@ def test_recover_and_publish_objective_v2_refuses_sweep_mismatch_and_does_not_wr
     assert not marker_path.exists()
 
 
-def test_recover_and_publish_objective_v2_reuses_v1_payload_shape():
-    """build_objective_publication_payload is imported unchanged from v1 --
-    confirm identity, not just behavior, to lock in the reuse-vs-sibling
-    decision recorded in the module docstring."""
+def test_recover_and_publish_objective_v2_does_not_reuse_v1_payload_shape():
     from src.baseline.sweep_v1_objective_recovery import build_objective_publication_payload as v1_fn
-
-    assert build_objective_publication_payload is v1_fn
+    assert build_v2_objective_publication_payload is not v1_fn

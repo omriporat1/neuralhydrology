@@ -35,6 +35,7 @@ from src.baseline.pilot_screening_eval import PRIMARY_METRIC_NAME, SCREENING_MET
 from src.baseline.sweep_v2_six_axis_campaign import (
     CAMPAIGN_ID_V2, DOMAIN_VERSION_V2, OBJECTIVE_ID_V2, SweepV2CampaignError,
 )
+from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME
 from src.baseline.sweep_v2_six_axis_execution import (
     EXECUTOR_MODE_MONOLITHIC, SweepV2ExecutionError, enrich_operations_slurm_accounting_v2,
     execute_prepared_trial_v2, select_executor_mode_v2, write_proposal_intake_provenance_v2,
@@ -137,12 +138,21 @@ def _fake_result(nh_run_dir: Path, *, checkpoint_epochs, screening_scores: "dict
         for epoch in checkpoint_epochs
     }
     screening_events = [_screening_event(epoch, score, n_basins=n_basins) for epoch, score in sorted(screening_scores.items())]
+    fixed_scores = {epoch: 0.50 - abs(epoch - 3) * 0.01 for epoch in screening_scores}
+    def metric(scope, value):
+        return {"objective_scope": scope, "aggregate": {"metrics": {"nse": {"median": value}}}}
+    supplemental = {
+        epoch: {"fixed_support": metric("fixed_support", fixed_scores[epoch]),
+                "natural_support": metric("natural_support", screening_scores[epoch])}
+        for epoch in screening_scores
+    }
     return orchestration.PreparedPilotExecutionResult(
         final_status="blocked_or_stopped" if (blocked or stopped) else "completed_at_full_budget",
         blocked_reason=blocked_reason,
         effective_policy={"max_epoch_budget": max_epoch_budget, "performance_early_stopping_enabled": False},
         nh_run_dir=nh_run_dir, blocked=blocked, stopped=stopped, stop_reason=stop_reason,
         checkpoint_inventory=checkpoint_inventory, early_stopping_state={}, screening_events=screening_events,
+        supplemental_epoch_results=supplemental,
     )
 
 
@@ -266,10 +276,11 @@ def test_vertical_prepared_execution_consumer_contract_v2(tmp_path, monkeypatch)
     trial = outcome["review_records"]["trial_summary"]
     assert trial["campaign_id"] == CAMPAIGN_ID_V2 and trial["domain_version"] == DOMAIN_VERSION_V2
     assert trial["workflow_status"] == "pass"
-    assert trial["objective_score"] == pytest.approx(0.40)
-    assert trial["best_epoch"] == 9
-    assert trial["best_score"] == pytest.approx(0.40)
-    assert trial["final_epoch_score"] == pytest.approx(0.35)
+    assert trial["objective_score"] == pytest.approx(0.50)
+    assert trial["best_epoch"] == 3
+    assert trial["best_score"] == pytest.approx(0.50)
+    assert trial["natural_support_epoch_trajectory"][9] == pytest.approx(0.40)
+    assert trial["fixed_support_metric_name"] == V2_METRIC_NAME
     assert trial["seq_length"] == 96
     assert trial["gpu_hours"] is None
     assert trial["failure_category"] is None
@@ -284,9 +295,9 @@ def test_vertical_prepared_execution_consumer_contract_v2(tmp_path, monkeypatch)
 
     provenance = json.loads((output_dir / "execution_provenance.json").read_text(encoding="utf-8"))
     assert provenance["execution_status"] == "VALID"
-    assert provenance["objective_score"] == pytest.approx(0.40)
+    assert provenance["objective_score"] == pytest.approx(0.50)
     review = json.loads((output_dir / "review_records.json").read_text(encoding="utf-8"))
-    assert review["trial_summary"]["objective_score"] == pytest.approx(0.40)
+    assert review["trial_summary"]["objective_score"] == pytest.approx(0.50)
     assert review["trial_summary"]["seq_length"] == 96
 
 
@@ -367,7 +378,7 @@ def test_enrich_operations_slurm_accounting_v2_patches_state_and_gpu_hours(tmp_p
     assert patched["operations"]["slurm_state"] == "COMPLETED"
     assert patched["operations"]["gpu_hours"] == pytest.approx(2.25)
     assert patched["trial_summary"]["gpu_hours"] == pytest.approx(2.25)
-    assert patched["trial_summary"]["objective_score"] == pytest.approx(0.40)
+    assert patched["trial_summary"]["objective_score"] == pytest.approx(0.50)
 
     on_disk = json.loads((output_dir / "review_records.json").read_text(encoding="utf-8"))
     assert on_disk["operations"]["slurm_state"] == "COMPLETED"
