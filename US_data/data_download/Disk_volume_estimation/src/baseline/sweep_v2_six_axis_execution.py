@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -62,6 +63,9 @@ from .fixed_support_contract_v2 import (
     evaluate_fixed_support_raw_space_metrics,
     evaluate_natural_support_raw_space_metrics,
 )
+from .nh_config_generation import read_package_manifest, validate_full_population_basin_membership
+from .pilot_lead06_config import load_pilot_policy, load_screening_basin_ids
+from .sweep_v1_execution import SweepV1ExecutionContext
 
 __all__ = [
     "SweepV2ExecutionError",
@@ -69,6 +73,7 @@ __all__ = [
     "select_executor_mode_v2",
     "execute_prepared_trial_v2",
     "build_v2_epoch_evaluator",
+    "build_execution_context_v2",
     "build_v2_objective_publication_payload",
     "enrich_operations_slurm_accounting_v2",
 ]
@@ -288,6 +293,23 @@ def build_v2_epoch_evaluator(*, support_contract: Mapping[str, Any], package_roo
         return {"fixed_support": fixed, "natural_support": natural}
 
     return evaluate_epoch
+
+
+def build_execution_context_v2(*, prepared_record: Mapping[str, Any], paths, base_pilot_policy_path: "str | Path") -> SweepV1ExecutionContext:
+    """V2 identity-aware sibling of the v1 generic monolithic context builder."""
+    _require_prepared_v2(prepared_record)
+    manifest = json.loads(Path(prepared_record["generation_manifest_path"]).read_text(encoding="utf-8"))
+    membership = validate_full_population_basin_membership(read_package_manifest(paths.package_root), paths.splits_dir)
+    screening = load_screening_basin_ids(paths.screening_basin_ids_path, development_basins=membership.development_basins,
+                                         expected_count=400, expected_sha256=sweep.SCREENING_ARTIFACT_SHA256)
+    base = load_pilot_policy(base_pilot_policy_path)
+    policy = replace(base, lead_hours=int(manifest["lead_hours"]), screening_validation_every_n_epochs=1,
+                     initial_training_epochs=1, pilot_max_epoch_budget=int(prepared_record["target_epoch"]),
+                     performance_early_stopping_enabled=False, screening_basin_ids_path=str(paths.screening_basin_ids_path),
+                     screening_expected_count=400, screening_expected_sha256=sweep.SCREENING_ARTIFACT_SHA256)
+    return SweepV1ExecutionContext(execution_policy=policy, config_dir=Path(prepared_record["expected_output_dir"]),
+        experiment_name=str(prepared_record["trial_id"]), target_variable=str(manifest["target_variable"]),
+        lead_hours=int(manifest["lead_hours"]), screening_basin_ids=screening, package_root=Path(paths.package_root))
 
 
 def build_v2_objective_publication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
