@@ -219,7 +219,15 @@ def main() -> int:
     )
     checks["positive_publish_result"] = result1
 
-    refetched = api.run(run_path)
+    # A fresh wandb.Api() instance -- NOT the `api` object above -- is used
+    # deliberately: wandb.Api() caches Run objects per-instance by path, so
+    # reusing `api` here would silently return the SAME cached (pre-publish)
+    # Run/Summary object rather than a genuine server round-trip, making
+    # this readback check pass or fail on stale local state instead of the
+    # real thing recover_and_publish_objective just wrote (confirmed via a
+    # live wandb.Api() inspection on Moriah: this is exactly what happened
+    # in the first real run of this script, job 45950133).
+    refetched = wandb.Api().run(run_path)
     checks["summary_flashnh_objective_score_readback"] = refetched.summary.get("flashnh/objective_score")
     checks["summary_matches_record"] = refetched.summary.get("flashnh/objective_score") == record["objective_score"]
     checks["summary_flashnh_valid_readback"] = refetched.summary.get("flashnh/valid")
