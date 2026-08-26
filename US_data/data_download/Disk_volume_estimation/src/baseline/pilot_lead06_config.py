@@ -36,6 +36,8 @@ which refuses to write into an existing non-empty directory without
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -530,6 +532,7 @@ def build_pilot_bundle_with_validation_scope(
     output_dropout: "float | None" = None,
     batch_size: "int | None" = None,
     dynamic_inputs: "list | None" = None,
+    policy_override: "dict | None" = None,
 ) -> GeneratedConfigBundle:
     """Shared builder underlying both this module's screening-validation
     bundle (task item 1) and ``pilot_full_validation.py``'s full-population
@@ -553,15 +556,40 @@ def build_pilot_bundle_with_validation_scope(
     ``validate_dynamic_inputs_override`` against the package's actually-
     advertised schema and used as this bundle's dynamic_inputs verbatim
     (order preserved), instead of the policy's full list.
+
+    ``policy_override``: None (the default) preserves the exact, unmodified
+    v1 behavior of this function byte-for-byte -- ``baseline_policy_path`` is
+    loaded and validated via ``load_stage1_baseline_policy``/
+    ``validate_stage1_baseline_policy`` as before. A non-None dict is used
+    directly as the effective policy instead (skipping the v1 loader/
+    validator, which hard-pins ``seq_lengths_hours`` and cannot accept an
+    extended domain) -- this is the sole additive integration point that lets
+    a v2 six-axis caller supply an extended-``seq_lengths_hours`` policy
+    overlay without touching v1's policy loading/validation path at all. The
+    caller is responsible for having already validated ``policy_override``
+    against whatever contract applies to it; this function does not attempt
+    to re-validate an overridden policy's shape beyond the same
+    ``validate_seq_length``/``validate_lead_hours`` calls used for the v1
+    path. When set, ``policy_sha256`` is computed over the override's own
+    canonical JSON (not ``baseline_policy_path``'s file bytes), so bundle
+    provenance never claims a checksum for a policy document that was not
+    actually used.
     """
     baseline_policy_path = Path(baseline_policy_path)
     package_root = Path(package_root)
     splits_dir = Path(splits_dir)
 
-    try:
-        policy = load_stage1_baseline_policy(baseline_policy_path)
-    except Stage1BaselinePolicyError as exc:
-        raise PilotConfigError(f"scientific baseline policy failed validation: {exc}") from exc
+    if policy_override is not None:
+        policy = policy_override
+        policy_sha256_value = hashlib.sha256(
+            json.dumps(policy_override, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    else:
+        try:
+            policy = load_stage1_baseline_policy(baseline_policy_path)
+        except Stage1BaselinePolicyError as exc:
+            raise PilotConfigError(f"scientific baseline policy failed validation: {exc}") from exc
+        policy_sha256_value = sha256_of(baseline_policy_path)
 
     validate_seq_length(seq_length, policy)
     validate_lead_hours(lead_hours, policy)
@@ -629,7 +657,7 @@ def build_pilot_bundle_with_validation_scope(
         package_root=str(package_root),
         package_manifest_identity=package_manifest_identity,
         policy_path=str(baseline_policy_path),
-        policy_sha256=sha256_of(baseline_policy_path),
+        policy_sha256=policy_sha256_value,
         splits_dir=str(splits_dir),
         generated_at_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         git_commit=_get_git_commit(),

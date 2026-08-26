@@ -1,0 +1,40 @@
+# Stage 1 six-axis (v2) seq_length policy overlay.
+#
+# NOT a standalone policy: this document only ever extends the seq_length
+# allowlist of the existing, unmodified v1 baseline policy
+# (config/stage1_scientific_baseline_v001.yaml) for consumers that opt into
+# the v2 six-axis campaign contract. It does not authorize, qualify, or
+# imply readiness of any six-axis campaign for production launch -- see
+# src/baseline/sweep_v2_six_axis_campaign.py and
+# tmp/seq_length_sixth_axis_design_gate_v001/ for the underlying design
+# gate and open items. Loading this overlay never mutates, re-validates
+# with weaker rules, or replaces config/stage1_scientific_baseline_v001.yaml
+# -- src/baseline/policy_v2_six_axis.py always fully validates the v1
+# document first via the existing, untouched v1 validator, then applies
+# this overlay only in-memory on a copy.
+
+overlay_name: stage1_scientific_baseline_v2_six_axis_overlay_v001
+overlay_version: 1
+
+# Identity of the exact v1 base policy this overlay is authorized to
+# extend. src/baseline/policy_v2_six_axis.py refuses to apply this overlay
+# against any other base policy_name/policy_version.
+base_policy_name: stage1_scientific_baseline_v001
+base_policy_version: 2
+
+# Six-axis campaign seq_length domain (min=48, max=120, step=12), exactly
+# matching src.baseline.sweep_v2_six_axis_campaign.SEQ_LENGTH_DOMAIN_V2 --
+# the two are cross-checked for exact equality at load time so the policy
+# overlay and the sweep search domain can never silently diverge. This is a
+# genuinely different list from v1's seq_lengths_hours ([12, 24, 48, 72]):
+# the v2 six-axis campaign never proposes 12h/24h, and this overlay does
+# not attempt to keep them legal.
+seq_lengths_hours: [48, 60, 72, 84, 96, 108, 120]
+
+rationale: >
+  Extends the seq_length allowlist for the additive six-axis campaign
+  foundation per the user's binding six-axis scientific design mandate
+  (2026-08-26): min=48h, max=120h, step=12h, W&B q_uniform representation.
+  Superseding the prior design gate's categorical-values recommendation
+  for the wire representation only; the domain bounds/step themselves are
+  unchanged from that design gate's Section K item 2.
