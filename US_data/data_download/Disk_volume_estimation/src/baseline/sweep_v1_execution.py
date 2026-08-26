@@ -182,33 +182,57 @@ def write_proposal_intake_provenance(*, output_root: "str | Path", axes: Mapping
     return provenance
 
 
+_LAYER_B_IDENTITY_KEYS = (
+    "campaign_id", "proposal_id", "configuration_id", "trial_id", "execution_generation", "search_arm",
+    "retry_of_trial_id",
+)
+
+
 def enrich_layer_b_provenance(*, output_dir: "str | Path", stage: str, fields: Mapping[str, Any]) -> dict[str, Any]:
     """Progressively enrich the SAME durable Layer-B
     ``execution_provenance.json`` record written by
     :func:`write_proposal_intake_provenance` -- one coherent record, never a
     second competing provenance authority. Merges ``fields`` over the
-    existing record and advances ``provenance_stage``; prior-stage fields
-    are retained (not discarded), so the full progression
-    (``proposal_intake`` -> ``prepared`` -> ``prepared_with_config``) stays
+    existing record (or an empty record, when none exists yet on disk -- the
+    same tolerant idiom used for direct/local/test invocation that never
+    ran :func:`write_proposal_intake_provenance` first) and advances
+    ``provenance_stage``; prior-stage fields are retained (not discarded), so
+    the full progression (``proposal_intake`` -> ``prepared`` ->
+    ``prepared_with_config`` -> ``STARTED`` -> ``VALID``/``INVALID``) stays
     inspectable from the final file alone even if a later step never runs.
+    This is the single shared provenance-transition helper reused by every
+    stage writer in this module, including :func:`execute_prepared_trial`'s
+    STARTED/terminal writes -- no stage may replace the envelope wholesale.
 
-    Raises :class:`SweepV1ExecutionError` if ``fields`` carries a
-    ``trial_id`` that disagrees with the record already on disk -- a defensive
-    check against enriching the wrong trial's record, not a new identity
-    authority (the identity itself always comes from the canonical helpers
-    via :func:`write_proposal_intake_provenance` /
-    ``sweep_v1_production_adapter``).
+    Raises :class:`SweepV1ExecutionError` if the existing on-disk record is
+    not valid JSON or not a JSON object, or if ``fields`` carries any of
+    :data:`_LAYER_B_IDENTITY_KEYS` that disagrees with the value already on
+    disk -- a defensive check against enriching the wrong trial's record
+    (or silently accepting a contradictory identity field), not a new
+    identity authority (the identity itself always comes from the canonical
+    helpers via :func:`write_proposal_intake_provenance` /
+    ``sweep_v1_production_adapter``). A key absent from either side is never
+    a conflict -- this only rejects an actual disagreement between two
+    present values, exactly :func:`~src.baseline.sweep_v1_campaign.trial_identity_conflicts`'s
+    existing semantics, reused (not re-implemented) for every identity key.
     """
     output_dir = Path(output_dir)
     path = output_dir / "execution_provenance.json"
-    existing = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    new_trial_id = fields.get("trial_id")
-    existing_trial_id = existing.get("trial_id")
-    if sweep.trial_identity_conflicts(existing_trial_id, new_trial_id):
-        raise SweepV1ExecutionError(
-            f"Layer-B provenance trial_id mismatch while enriching to stage {stage!r}: "
-            f"{existing_trial_id!r} != {new_trial_id!r}"
-        )
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SweepV1ExecutionError(f"existing {path} is not valid JSON: {exc}") from exc
+        if not isinstance(existing, dict):
+            raise SweepV1ExecutionError(f"existing {path} does not contain a JSON object")
+    else:
+        existing = {}
+    for key in _LAYER_B_IDENTITY_KEYS:
+        if sweep.trial_identity_conflicts(existing.get(key), fields.get(key)):
+            raise SweepV1ExecutionError(
+                f"Layer-B provenance {key} mismatch while enriching to stage {stage!r}: "
+                f"{existing.get(key)!r} != {fields.get(key)!r}"
+            )
     provenance = {**existing, **dict(fields), "provenance_stage": stage}
     _write_json_atomic(path, provenance)
     return provenance
@@ -469,7 +493,8 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
                            expected_screening_population: int = SCREENING_POPULATION_SIZE,
                            execute_prepared_run_fn: "Callable[[], pilot_orchestration.PreparedPilotExecutionResult]",
                            retry_of_trial_id: "str | None" = None,
-                           slurm_job_id: "str | None" = None) -> dict[str, Any]:
+                           slurm_job_id: "str | None" = None,
+                           executor_mode: "str | None" = None) -> dict[str, Any]:
     """Persist retry provenance, then execute exactly one continuous prepared
     trial and interpret it using Sweep-v1's scientific contract.
 
@@ -483,6 +508,41 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
     structured facts plus
     :func:`~src.baseline.pilot_orchestration.actual_optimizer_updates_by_epoch`
     -- see :func:`_derive_validity`.
+
+    Both the STARTED-stage and the terminal (VALID/INVALID) writes go
+    through :func:`enrich_layer_b_provenance` -- the same shared
+    provenance-transition helper :func:`write_proposal_intake_provenance` /
+    the production bridge's ``prepared``/``prepared_with_config`` stages use
+    -- so this function MERGES onto whatever durable Layer-B envelope
+    already exists at ``output_dir`` (e.g. ``retry_history``,
+    ``wandb_sweep_id``/``wandb_run_id``, ``raw_proposed_axes``) instead of
+    replacing it with a smaller literal. When no prior envelope exists (a
+    direct/local/test invocation that never called
+    :func:`write_proposal_intake_provenance` first), this degrades exactly
+    to the previous overwrite-shaped behavior, since there is nothing to
+    merge onto. A later stage's failure never discards an earlier stage's
+    accumulated fields: the STARTED write lands durably on disk before
+    ``execute_prepared_run_fn`` ever runs, so even a pre-training exception
+    still terminates from that already-merged envelope.
+
+    ``retry_of_trial_id`` is only contributed to the STARTED-stage merge when
+    the caller passes a non-``None`` value: it is now one of
+    :data:`_LAYER_B_IDENTITY_KEYS`, so a genuinely conflicting non-``None``
+    value still hard-fails via :func:`enrich_layer_b_provenance`, but the
+    unsupplied default (``None``) never clobbers a value already durably
+    recorded at the ``proposal_intake`` stage by
+    :func:`write_proposal_intake_provenance`. A caller that never recorded
+    one at intake either (direct/local/test invocation) simply never gets
+    the key at all, matching the pre-existing minimal-record shape for that
+    case.
+
+    ``executor_mode`` is the value :func:`select_executor_mode` already
+    computes for dispatch in :func:`run_prepared_trial_in_production`;
+    passing it through here is what makes it durably recorded at all (it is
+    otherwise a purely in-memory dispatch decision). ``None`` for
+    direct/local/test invocation that never selected an executor mode --
+    recorded as an explicit ``None``, never fabricated, the same convention
+    already used for ``slurm_state``/``gpu_hours`` below.
 
     ``slurm_job_id`` is the live ``SLURM_JOB_ID`` allocation identity, when
     the caller has one (production always does when launched under
@@ -500,14 +560,28 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
     """
     _require_prepared(prepared_record)
     output_dir = Path(output_dir); started = time.time()
-    provenance = {"campaign_id": prepared_record["campaign_id"], "proposal_id": prepared_record["proposal_id"],
-                  "configuration_id": prepared_record["configuration_id"], "trial_id": prepared_record["trial_id"],
-                  "execution_generation": prepared_record["execution_generation"], "search_arm": prepared_record["search_arm"],
-                  "retry_of_trial_id": retry_of_trial_id, "git_commit": _git_commit(),
-                  "generated_nh_config_path": prepared_record["generated_nh_config_path"],
-                  "generated_nh_config_sha256": prepared_record["generated_nh_config_sha256"],
-                  "preparation_record": dict(prepared_record), "execution_status": "STARTED"}
-    _write_json(output_dir / "execution_provenance.json", provenance)
+    started_fields: dict[str, Any] = {
+        "campaign_id": prepared_record["campaign_id"], "proposal_id": prepared_record["proposal_id"],
+        "configuration_id": prepared_record["configuration_id"], "trial_id": prepared_record["trial_id"],
+        "execution_generation": prepared_record["execution_generation"], "search_arm": prepared_record["search_arm"],
+        "git_commit": _git_commit(),
+        "generated_nh_config_path": prepared_record["generated_nh_config_path"],
+        "generated_nh_config_sha256": prepared_record["generated_nh_config_sha256"],
+        "preparation_record": dict(prepared_record), "executor_mode": executor_mode,
+        "execution_status": "STARTED",
+    }
+    if retry_of_trial_id is not None:
+        # Only contribute this key when the caller actually has a value:
+        # `retry_of_trial_id` is now in `_LAYER_B_IDENTITY_KEYS`, so a real
+        # disagreement with an already-accumulated intake value still hard
+        # fails via enrich_layer_b_provenance's conflict check below, but an
+        # unsupplied (default None) argument here must never silently
+        # overwrite -- i.e. clobber -- a non-None value already durably
+        # recorded at the proposal_intake stage. This mirrors how
+        # `retry_history`/`wandb_sweep_id`/`wandb_run_id` are already
+        # preserved across this merge without needing to be re-passed here.
+        started_fields["retry_of_trial_id"] = retry_of_trial_id
+    provenance = enrich_layer_b_provenance(output_dir=output_dir, stage="STARTED", fields=started_fields)
     try:
         result = execute_prepared_run_fn()
         if not isinstance(result, pilot_orchestration.PreparedPilotExecutionResult):
@@ -527,9 +601,11 @@ def execute_prepared_trial(*, prepared_record: Mapping[str, Any], output_dir: Pa
         records = _review_records(prepared_record, runtime_seconds=time.time() - started, gpu_hours=None,
                                   screenings=None, failure_category="technical_execution_failure",
                                   retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
-    provenance.update({"execution_status": "VALID" if valid else "INVALID", "result": result_summary,
-                       "objective_score": records["trial_summary"]["objective_score"]})
-    _write_json(output_dir / "execution_provenance.json", provenance)
+    terminal_fields = {"execution_status": "VALID" if valid else "INVALID", "result": result_summary,
+                       "objective_score": records["trial_summary"]["objective_score"]}
+    provenance = enrich_layer_b_provenance(
+        output_dir=output_dir, stage="VALID" if valid else "INVALID", fields=terminal_fields
+    )
     _write_json(output_dir / "review_records.json", records)
     return {"valid": valid, "review_records": records, "provenance": provenance}
 
@@ -641,7 +717,7 @@ def run_prepared_trial_in_production(*, prepared_record: Mapping[str, Any], outp
         prepared_record=prepared_record, output_dir=output_dir,
         expected_screening_population=len(context.screening_basin_ids),
         execute_prepared_run_fn=_execute, retry_of_trial_id=retry_of_trial_id,
-        slurm_job_id=slurm_job_id,
+        slurm_job_id=slurm_job_id, executor_mode=mode,
     )
 
 

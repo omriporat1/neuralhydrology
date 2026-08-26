@@ -17,20 +17,43 @@ to the Flash-NH record; it only ever writes to W&B (an already-associated
 run's summary, via ``wandb.Api()``, never ``wandb.init()``/``wandb.agent()``)
 and to its own small local idempotency marker.
 
-NOT EXERCISED against the production sweep in this task: the pure/local
-logic below (record loading, identity check, payload derivation, and the
-idempotency marker) is fully implemented and unit-tested; the network-facing
-``recover_and_publish_objective`` W&B-Api call path is implemented but
-deliberately not run against any real sweep here, per the task's explicit
-scope boundary.
+Eligibility (:func:`assert_recovery_eligible`), beyond the earlier
+Section F design's generic terminal-status check
+(:func:`load_immutable_trial_record`), additionally refuses to recover: a
+non-``VALID`` (e.g. ``INVALID``) record; an incomplete record missing a core
+identity field; a record with no ``generated_nh_config_sha256`` (missing
+source hash); and a missing/non-finite ``objective_score``. Identity
+matching (:func:`assert_matches_expected_identity`, via
+``sweep_v1_retry.assert_matches_pinned_identity``) additionally rejects a
+pinned-but-mismatched ``wandb_run_id``. Idempotent re-publication
+(:func:`recover_and_publish_objective`) additionally refuses a repeated
+reconciliation whose freshly derived payload disagrees with what was
+already durably published under the same marker (changed objective). These
+checks were authored in this task, at the operator's explicit direction, to
+close a gap identified while attempting the disposable objective-recovery
+qualification below: the mechanism previously had no way to demonstrate 5
+of 8 required negative-case rejections.
 """
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
 REQUIRED_TERMINAL_STATUSES = ("VALID", "INVALID")
+
+# Fields a publishable record must carry a non-empty value for, beyond the
+# generic terminal-status/wandb-association check in
+# ``load_immutable_trial_record``. These are the identity fields
+# ``build_objective_publication_payload``/``assert_matches_expected_identity``
+# rely on; a record missing any of them is "incomplete" for recovery
+# purposes even though it may still be a well-formed terminal record for
+# other (non-recovery) consumers.
+_REQUIRED_RECOVERY_IDENTITY_FIELDS = (
+    "campaign_id", "proposal_id", "configuration_id", "trial_id",
+    "execution_generation", "search_arm",
+)
 
 
 class ObjectiveRecoveryError(ValueError):
@@ -63,6 +86,61 @@ def load_immutable_trial_record(execution_provenance_path: "str | Path") -> dict
             "was never reached) -- there is no run to republish an objective onto"
         )
     return record
+
+
+def assert_recovery_eligible(record: Mapping[str, Any]) -> None:
+    """Publication-eligibility checks beyond
+    :func:`load_immutable_trial_record`'s generic terminal-status check.
+
+    ``load_immutable_trial_record`` intentionally accepts BOTH ``VALID`` and
+    ``INVALID`` terminal records -- that generic loader is also usable by
+    other (non-publishing) callers that legitimately need to inspect a
+    failed trial's terminal record. Objective RECOVERY specifically only
+    ever republishes an already-earned objective, so this function narrows
+    eligibility to exactly the trials a recovery may act on. Called by
+    :func:`recover_and_publish_objective` before any identity check or W&B
+    call.
+
+    Raises :class:`ObjectiveRecoveryError` for:
+
+    * a non-``VALID`` record (e.g. ``INVALID``) -- there is no earned
+      objective to recover for a trial that did not pass;
+    * an incomplete record missing any of
+      :data:`_REQUIRED_RECOVERY_IDENTITY_FIELDS`;
+    * a record with no ``generated_nh_config_sha256`` (missing source hash)
+      -- without it there is no verifiable provenance link between the
+      objective being republished and the exact config that produced it;
+    * a missing or non-finite ``objective_score`` (``None``/``NaN``/``Inf``)
+      -- defends against a corrupted or hand-edited record, even though a
+      genuine VALID record produced by ``execute_prepared_trial`` should
+      never have one.
+    """
+    status = record.get("execution_status")
+    if status != "VALID":
+        raise ObjectiveRecoveryError(
+            f"refusing to recover a non-VALID record (execution_status={status!r}); "
+            "objective recovery only republishes an already-earned VALID objective"
+        )
+
+    missing = [key for key in _REQUIRED_RECOVERY_IDENTITY_FIELDS if record.get(key) in (None, "")]
+    if missing:
+        raise ObjectiveRecoveryError(f"refusing to recover an incomplete record: missing {missing}")
+
+    if not record.get("generated_nh_config_sha256"):
+        raise ObjectiveRecoveryError(
+            "refusing to recover a record with no generated_nh_config_sha256 (missing source hash): "
+            "cannot verify provenance of the objective being republished"
+        )
+
+    objective_score = record.get("objective_score")
+    if (
+        not isinstance(objective_score, (int, float))
+        or isinstance(objective_score, bool)
+        or not math.isfinite(objective_score)
+    ):
+        raise ObjectiveRecoveryError(
+            f"refusing to recover a missing/non-finite objective_score: {objective_score!r}"
+        )
 
 
 def assert_matches_expected_identity(record: Mapping[str, Any], expected_identity: Mapping[str, Any]) -> None:
@@ -118,16 +196,32 @@ def recover_and_publish_objective(
     run's summary -- no new run is created, no controller proposal is
     requested, nothing is retrained.
 
+    The idempotency short-circuit is not a bare "marker file exists" check:
+    it recomputes today's publication payload from the record and compares
+    it against the payload actually recorded by the prior publication. A
+    identical repeat is a true no-op (no W&B call). A DIFFERENT payload
+    under the same marker path -- e.g. a tampered/re-executed record
+    disagreeing with what was already durably published for this trial
+    identity -- is a hard failure, never a silent republish.
+
     NOT exercised against the production sweep in this task -- see module
     docstring.
     """
     record = load_immutable_trial_record(execution_provenance_path)
+    assert_recovery_eligible(record)
     assert_matches_expected_identity(record, expected_identity)
 
-    if is_already_published(marker_path):
-        return {"status": "already_published", "wandb_run_id": record["wandb_run_id"]}
-
     payload = build_objective_publication_payload(record)
+
+    if is_already_published(marker_path):
+        existing_marker = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        if existing_marker.get("published_payload") != payload:
+            raise ObjectiveRecoveryError(
+                "refusing: a previously published payload for this trial identity disagrees with the "
+                f"freshly derived payload (changed objective) -- previously published="
+                f"{existing_marker.get('published_payload')!r}, freshly derived={payload!r}"
+            )
+        return {"status": "already_published", "wandb_run_id": record["wandb_run_id"]}
 
     import wandb  # lazy import, repo-wide convention
 

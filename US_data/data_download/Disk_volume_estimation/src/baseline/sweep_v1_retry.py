@@ -196,15 +196,17 @@ def assert_matches_pinned_identity(record: Mapping[str, Any], pinned: Mapping[st
 
     ``pinned`` may include any of: ``proposal_order``, ``proposal_id``,
     ``configuration_id``, ``trial_id`` (the ORIGINAL record's own trial id),
-    ``search_arm``, ``wandb_sweep_id``, ``model_seed``, and the five
-    hyperparameter axes. Every key present in ``pinned`` is checked; a
-    mismatch on ANY of them is a hard failure (never a warning, never a
+    ``search_arm``, ``wandb_sweep_id``, ``wandb_run_id``, ``model_seed``, and
+    the five hyperparameter axes. Every key present in ``pinned`` is checked;
+    a mismatch on ANY of them is a hard failure (never a warning, never a
     silently-preferred value) -- this is the retry seam's contradiction
-    rejection contract. ``model_seed`` is checked against the campaign-wide
-    :data:`sweep_v1_campaign.MODEL_SEED_A` constant (Sweep-v1 has one model
-    seed for the whole campaign, not a per-proposal field), guarding against
-    a future code change silently altering it out from under a pinned
-    expectation.
+    rejection contract. ``wandb_run_id`` is opt-in like every other key here:
+    a caller that never pins it (e.g. a retry manifest authored before a run
+    id exists) is completely unaffected. ``model_seed`` is checked against
+    the campaign-wide :data:`sweep_v1_campaign.MODEL_SEED_A` constant
+    (Sweep-v1 has one model seed for the whole campaign, not a per-proposal
+    field), guarding against a future code change silently altering it out
+    from under a pinned expectation.
     """
     identity_fields = {
         "proposal_order": record.get("proposal_order"),
@@ -213,6 +215,7 @@ def assert_matches_pinned_identity(record: Mapping[str, Any], pinned: Mapping[st
         "trial_id": record.get("trial_id"),
         "search_arm": record.get("search_arm"),
         "wandb_sweep_id": record.get("wandb_sweep_id"),
+        "wandb_run_id": record.get("wandb_run_id"),
     }
     mismatches: dict[str, Any] = {}
     for key, expected in pinned.items():

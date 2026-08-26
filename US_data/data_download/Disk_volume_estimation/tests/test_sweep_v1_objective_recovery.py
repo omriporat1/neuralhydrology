@@ -16,33 +16,45 @@ Covers, in order:
      missing file, a non-terminal ``execution_status``, and a terminal
      record that never reached ``wandb_associated`` (no run to republish
      onto).
+  1b. ``assert_recovery_eligible``: authored in the follow-up closure task to
+     close a gap found while attempting Section F qualification -- narrows
+     eligibility beyond ``load_immutable_trial_record``'s generic
+     terminal-status check. Refuses a non-VALID (e.g. INVALID) record, an
+     incomplete record, a record with no ``generated_nh_config_sha256``
+     (missing source hash), and a missing/non-finite ``objective_score``.
   2. ``assert_matches_expected_identity``: passes on a matching subset,
-     raises on any contradiction -- delegates to
-     ``sweep_v1_retry.assert_matches_pinned_identity`` with no parallel
-     identity rule.
+     raises on any contradiction (including a pinned-but-mismatched
+     ``wandb_run_id``, also authored in the follow-up closure task) --
+     delegates to ``sweep_v1_retry.assert_matches_pinned_identity`` with no
+     parallel identity rule.
   3. ``build_objective_publication_payload``: pure derivation of exactly the
      W&B summary fields a recovery would publish, for both VALID and
      INVALID records; never imports wandb as a side effect of being called.
   4. ``is_already_published`` / ``record_publication``: the local
      idempotency marker's presence check and write path.
   5. ``recover_and_publish_objective``: idempotent short-circuit (already
-     published) and both pre-wandb refusal paths (non-terminal record,
-     identity mismatch) never import wandb; the full path against a fake
-     ``wandb.Api()`` module publishes the payload and writes the marker; a
-     sweep-association mismatch refuses and leaves no marker behind.
+     published, with a payload-equality check refusing a changed objective
+     under the same marker) and pre-wandb refusal paths (non-terminal
+     record, non-VALID record, incomplete record, missing source hash,
+     non-finite objective, identity mismatch) never import wandb; the full
+     path against a fake ``wandb.Api()`` module publishes the payload and
+     writes the marker; a sweep-association mismatch refuses and leaves no
+     marker behind.
 """
 from __future__ import annotations
 
 import copy
 import json
+import math
 import sys
 import types
 
 import pytest
 
 from src.baseline.sweep_v1_objective_recovery import (
-    ObjectiveRecoveryError, assert_matches_expected_identity, build_objective_publication_payload,
-    is_already_published, load_immutable_trial_record, record_publication, recover_and_publish_objective,
+    ObjectiveRecoveryError, assert_matches_expected_identity, assert_recovery_eligible,
+    build_objective_publication_payload, is_already_published, load_immutable_trial_record, record_publication,
+    recover_and_publish_objective,
 )
 from src.baseline.sweep_v1_retry import SweepV1RetryError
 
@@ -57,6 +69,7 @@ _VALID_RECORD = {
     "execution_generation": 2,
     "execution_status": "VALID",
     "objective_score": 0.40,
+    "generated_nh_config_sha256": "a" * 64,
     "wandb_run_id": "fake-run-0001",
     "wandb_sweep_id": "rehearsal-sweep-abc",
 }
@@ -113,6 +126,121 @@ def test_load_immutable_trial_record_raises_when_wandb_identity_missing(tmp_path
         load_immutable_trial_record(path)
 
 
+# --- assert_recovery_eligible --------------------------------------------------
+
+def test_assert_recovery_eligible_passes_on_a_complete_valid_record():
+    assert_recovery_eligible(_VALID_RECORD)  # must not raise
+
+
+def test_assert_recovery_eligible_rejects_an_invalid_record():
+    with pytest.raises(ObjectiveRecoveryError, match="non-VALID"):
+        assert_recovery_eligible(_INVALID_RECORD)
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ["campaign_id", "proposal_id", "configuration_id", "trial_id", "execution_generation", "search_arm"],
+)
+def test_assert_recovery_eligible_rejects_an_incomplete_record(missing_key):
+    record = dict(_VALID_RECORD)
+    record[missing_key] = None
+    with pytest.raises(ObjectiveRecoveryError, match="incomplete"):
+        assert_recovery_eligible(record)
+
+
+def test_assert_recovery_eligible_rejects_a_record_missing_the_source_config_checksum():
+    record = dict(_VALID_RECORD)
+    del record["generated_nh_config_sha256"]
+    with pytest.raises(ObjectiveRecoveryError, match="source hash"):
+        assert_recovery_eligible(record)
+
+
+@pytest.mark.parametrize("bad_objective", [None, math.nan, math.inf, -math.inf])
+def test_assert_recovery_eligible_rejects_a_missing_or_non_finite_objective(bad_objective):
+    record = dict(_VALID_RECORD)
+    record["objective_score"] = bad_objective
+    with pytest.raises(ObjectiveRecoveryError, match="non-finite"):
+        assert_recovery_eligible(record)
+
+
+def test_recover_and_publish_objective_refuses_invalid_record_before_any_wandb_import(tmp_path, monkeypatch):
+    record_path = _write_record(tmp_path, _INVALID_RECORD)
+    marker_path = tmp_path / "marker.json"
+
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+    with pytest.raises(ObjectiveRecoveryError, match="non-VALID"):
+        recover_and_publish_objective(
+            execution_provenance_path=record_path, expected_identity={},
+            marker_path=marker_path, project="flashnh-stage1-test",
+        )
+    assert not marker_path.exists()
+
+
+def test_recover_and_publish_objective_refuses_incomplete_record_before_any_wandb_import(tmp_path, monkeypatch):
+    record = dict(_VALID_RECORD)
+    record["trial_id"] = None
+    record_path = _write_record(tmp_path, record)
+    marker_path = tmp_path / "marker.json"
+
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+    with pytest.raises(ObjectiveRecoveryError, match="incomplete"):
+        recover_and_publish_objective(
+            execution_provenance_path=record_path, expected_identity={},
+            marker_path=marker_path, project="flashnh-stage1-test",
+        )
+    assert not marker_path.exists()
+
+
+def test_recover_and_publish_objective_refuses_missing_source_hash_before_any_wandb_import(tmp_path, monkeypatch):
+    record = dict(_VALID_RECORD)
+    del record["generated_nh_config_sha256"]
+    record_path = _write_record(tmp_path, record)
+    marker_path = tmp_path / "marker.json"
+
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+    with pytest.raises(ObjectiveRecoveryError, match="source hash"):
+        recover_and_publish_objective(
+            execution_provenance_path=record_path, expected_identity={},
+            marker_path=marker_path, project="flashnh-stage1-test",
+        )
+    assert not marker_path.exists()
+
+
+def test_recover_and_publish_objective_refuses_non_finite_objective_before_any_wandb_import(tmp_path, monkeypatch):
+    record = dict(_VALID_RECORD)
+    record["objective_score"] = math.nan
+    record_path = _write_record(tmp_path, record)
+    marker_path = tmp_path / "marker.json"
+
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+    with pytest.raises(ObjectiveRecoveryError, match="non-finite"):
+        recover_and_publish_objective(
+            execution_provenance_path=record_path, expected_identity={},
+            marker_path=marker_path, project="flashnh-stage1-test",
+        )
+    assert not marker_path.exists()
+
+
+def test_recover_and_publish_objective_refuses_a_changed_objective_under_the_same_marker(tmp_path, monkeypatch):
+    record_path = _write_record(tmp_path, _VALID_RECORD)
+    marker_path = tmp_path / "marker.json"
+    stale_payload = build_objective_publication_payload(_VALID_RECORD)
+    stale_payload["flashnh/objective_score"] = 0.999999  # simulates a since-changed/tampered record
+    record_publication(marker_path, wandb_run_id=_VALID_RECORD["wandb_run_id"], payload=stale_payload)
+
+    monkeypatch.setitem(sys.modules, "wandb", None)  # must never even get to a wandb import
+
+    with pytest.raises(ObjectiveRecoveryError, match="changed objective"):
+        recover_and_publish_objective(
+            execution_provenance_path=record_path, expected_identity={"trial_id": _VALID_RECORD["trial_id"]},
+            marker_path=marker_path, project="flashnh-stage1-test",
+        )
+
+
 # --- assert_matches_expected_identity -----------------------------------------
 
 def test_assert_matches_expected_identity_passes_on_matching_subset():
@@ -124,6 +252,11 @@ def test_assert_matches_expected_identity_passes_on_matching_subset():
 def test_assert_matches_expected_identity_raises_on_mismatch():
     with pytest.raises(SweepV1RetryError):
         assert_matches_expected_identity(_VALID_RECORD, {"configuration_id": "sweep_v1_cfg_wrongwrongwrongwrong"})
+
+
+def test_assert_matches_expected_identity_raises_on_mismatched_wandb_run_id():
+    with pytest.raises(SweepV1RetryError, match="wandb_run_id"):
+        assert_matches_expected_identity(_VALID_RECORD, {"wandb_run_id": "some-other-run-id"})
 
 
 # --- build_objective_publication_payload --------------------------------------
@@ -206,7 +339,10 @@ def test_recover_and_publish_objective_is_idempotent_and_never_imports_wandb_whe
 ):
     record_path = _write_record(tmp_path, _VALID_RECORD)
     marker_path = tmp_path / "marker.json"
-    record_publication(marker_path, wandb_run_id=_VALID_RECORD["wandb_run_id"], payload={"flashnh/valid": True})
+    record_publication(
+        marker_path, wandb_run_id=_VALID_RECORD["wandb_run_id"],
+        payload=build_objective_publication_payload(_VALID_RECORD),
+    )
 
     monkeypatch.setitem(sys.modules, "wandb", None)  # poison: any import attempt raises ImportError
 
