@@ -122,10 +122,12 @@ def _fake_result(nh_run_dir: Path, *, checkpoint_epochs, screening_scores: "dict
 # --- fake in-process wandb module for full bridge main() tests --------------
 
 class _FakeWandbRun:
-    def __init__(self, run_id: str, sweep_id: str, config: dict):
+    def __init__(self, run_id: str, sweep_id: str, config: dict, *, entity: str = "test-entity", project: str = "test-project"):
         self.id = run_id
         self.sweep_id = sweep_id
         self.config = dict(config)
+        self.entity = entity
+        self.project = project
         self.summary: "dict[str, object]" = {}
         self.logged: "list[dict]" = []
         self.finished = False
@@ -137,23 +139,44 @@ class _FakeWandbRun:
         self.finished = True
 
 
+class _FakeWandbSweepHandle:
+    def __init__(self, config: dict):
+        self.config = config
+
+
+class _FakeWandbApi:
+    def __init__(self, sweep_config: dict):
+        self._sweep_config = sweep_config
+
+    def sweep(self, path):
+        return _FakeWandbSweepHandle(self._sweep_config)
+
+
+_PRODUCTION_METRIC_CONTRACT = {"method": "bayes", "metric": {"name": "flashnh/best_score", "goal": "maximize"}}
+
+
 class _FakeWandbModule(types.ModuleType):
-    def __init__(self, *, config: dict, run_id: str = "fake-run-0001", sweep_id: str = "fake-sweep-0001"):
+    def __init__(self, *, config: dict, run_id: str = "fake-run-0001", sweep_id: str = bridge.PRODUCTION_WANDB_SWEEP_ID,
+                 sweep_config: "dict | None" = None):
         super().__init__("wandb")
         self._config = config
         self._run_id = run_id
         self._sweep_id = sweep_id
+        self._sweep_config = sweep_config if sweep_config is not None else dict(_PRODUCTION_METRIC_CONTRACT)
         self.run: "_FakeWandbRun | None" = None
 
     def init(self, **kwargs):
         self.run = _FakeWandbRun(self._run_id, self._sweep_id, self._config)
         return self.run
 
+    def Api(self):
+        return _FakeWandbApi(self._sweep_config)
+
 
 @pytest.fixture
 def fake_wandb_module(monkeypatch):
-    def _make(config):
-        fake = _FakeWandbModule(config=config)
+    def _make(config, *, sweep_id: str = bridge.PRODUCTION_WANDB_SWEEP_ID, sweep_config: "dict | None" = None):
+        fake = _FakeWandbModule(config=config, sweep_id=sweep_id, sweep_config=sweep_config)
         monkeypatch.setitem(sys.modules, "wandb", fake)
         return fake
     return _make
@@ -516,7 +539,9 @@ def test_bridge_main_valid_trial_logs_finite_objective_and_full_provenance_progr
     _patch_real_canonical_split_shas_for_local_checkout(monkeypatch)
     fake = fake_wandb_module(_AXES)
     output_root = tmp_path / "out"
-    monkeypatch.setattr(sys, "argv", _bridge_argv(paths=paths, output_root=output_root, proposal_order=7))
+    monkeypatch.setattr(sys, "argv", _bridge_argv(
+        paths=paths, output_root=output_root, proposal_order=bridge.PRODUCTION_NEXT_PERMISSIBLE_PROPOSAL_ORDER,
+    ))
 
     nh_run_dir = tmp_path / "nh_run"
     epochs = list(range(1, 13))
@@ -551,7 +576,9 @@ def test_bridge_main_invalid_trial_never_logs_a_finite_objective(tmp_path, monke
     _patch_real_canonical_split_shas_for_local_checkout(monkeypatch)
     fake = fake_wandb_module(_AXES)
     output_root = tmp_path / "out"
-    monkeypatch.setattr(sys, "argv", _bridge_argv(paths=paths, output_root=output_root, proposal_order=7))
+    monkeypatch.setattr(sys, "argv", _bridge_argv(
+        paths=paths, output_root=output_root, proposal_order=bridge.PRODUCTION_NEXT_PERMISSIBLE_PROPOSAL_ORDER,
+    ))
 
     nh_run_dir = tmp_path / "nh_run"
     incomplete_epochs = [e for e in range(1, 13) if e != 7]

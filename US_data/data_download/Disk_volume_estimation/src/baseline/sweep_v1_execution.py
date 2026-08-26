@@ -174,11 +174,20 @@ def write_proposal_intake_provenance(*, output_root: "str | Path", axes: Mapping
             **common, "provenance_stage": "proposal_intake_rejected", "rejection_reason": str(exc),
         })
         raise
+    output_dir = output_root / trial_id
+    if output_dir.exists():
+        raise SweepV1ExecutionError(
+            f"proposal intake output already exists for trial_id {trial_id!r} at {output_dir} -- a "
+            "fresh proposal must never overwrite existing durable intake (this indicates either a "
+            "controller-assigned axis collision with a previously intaked proposal, or a duplicate "
+            "intake attempt for the same identity); a genuine retry must use a strictly greater "
+            "execution_generation, which always derives a distinct trial_id"
+        )
     provenance = {
         **common, "provenance_stage": "proposal_intake", "hyperparameters": canonical_axes,
         "configuration_id": configuration_id, "proposal_id": proposal_id, "trial_id": trial_id,
     }
-    _write_json_atomic(output_root / trial_id / "execution_provenance.json", provenance)
+    _write_json_atomic(output_dir / "execution_provenance.json", provenance)
     return provenance
 
 
@@ -744,3 +753,36 @@ def build_production_sweep_config(*, program: str) -> dict[str, Any]:
                            "embedding_dropout": {"distribution": "uniform", "min": 0.0, "max": 0.4},
                            "output_dropout": {"distribution": "uniform", "min": 0.0, "max": 0.4},
                            "batch_size": {"values": [128, 256, 512]}}}
+
+
+def build_wandb_bridge_rehearsal_sweep_config(*, program: str, manifest_path: str) -> dict[str, Any]:
+    """Disposable-sweep sibling of :func:`build_production_sweep_config`.
+
+    Reuses the exact same five-axis parameter domain (Section G: "use the
+    same five-axis parameter schema/distributions as production where
+    practical") but diverges in exactly the two ways a rehearsal is allowed
+    to: the ``metric`` name is a disposable, non-scientific placeholder (this
+    config's run stops before any objective could be computed, so nothing
+    ever logs against it -- it exists only to satisfy W&B's required
+    ``bayes`` sweep schema), and ``command`` carries one literal, static
+    extra positional argument: the absolute path to a pre-built rehearsal
+    launch manifest.
+
+    That third argv token is what makes a REAL ``wandb agent --count 1``
+    round trip reach ``main_from_manifest`` (the only entry point that
+    supports ``mode="rehearsal"``) instead of ``main()`` (hardcoded to
+    ``mode="production"`` because the production sweep config's own
+    ``command`` is argless -- see ``build_production_sweep_config``): the
+    bridge script's own ``if __name__ == "__main__":`` dispatch already
+    routes ``len(sys.argv) == 2 and not sys.argv[1].startswith("-")`` to
+    ``main_from_manifest(sys.argv[1])``, with no changes needed there.
+
+    ``manifest_path`` must point at a manifest already validated by
+    ``src.baseline.sweep_v1_wandb_bridge_manifest`` with ``mode="rehearsal"``
+    (which itself refuses the real production sweep id) -- this function
+    does not re-validate the manifest's contents, only embeds its path.
+    """
+    config = build_production_sweep_config(program=program)
+    config["metric"] = {"name": "qualification/rehearsal_placeholder_metric", "goal": "maximize"}
+    config["command"] = ["${interpreter}", "${program}", manifest_path]
+    return config
