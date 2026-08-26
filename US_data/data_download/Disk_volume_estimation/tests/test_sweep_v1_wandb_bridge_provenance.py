@@ -657,3 +657,52 @@ def test_domain_invalid_proposal_is_rejected_with_a_durable_local_record(tmp_pat
     assert record["wandb_run_id"] == "run-99"
     assert record["raw_proposed_axes"]["learning_rate"] == 9e-5
     assert "rejection_reason" in record
+
+
+# --- controller_config_shape: exactly the five frozen axes, no more/less ----
+# (per-axis type/domain validation is exercised separately above by
+# test_domain_invalid_proposal_is_rejected_with_a_durable_local_record; this
+# guards only the key SET, which happens before any durable proposal-intake
+# write and thus produces a bootstrap incident record rather than a
+# proposal_intake_rejected one.)
+
+def test_bridge_main_rejects_missing_axis_before_any_durable_intake(tmp_path, monkeypatch, fake_wandb_module):
+    paths = _paths(tmp_path / "prep", monkeypatch)
+    incomplete_axes = {k: v for k, v in _AXES.items() if k != "hidden_size"}
+    fake = fake_wandb_module(incomplete_axes)
+    output_root = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", _bridge_argv(
+        paths=paths, output_root=output_root, proposal_order=bridge.PRODUCTION_NEXT_PERMISSIBLE_PROPOSAL_ORDER,
+    ))
+
+    with pytest.raises(SystemExit) as exc_info:
+        bridge.main()
+    assert "missing=['hidden_size']" in str(exc_info.value)
+    assert "unexpected=[]" in str(exc_info.value)
+
+    assert fake.run.finished is True
+    incident_dir = output_root / f"bootstrap_assignment_rejected__wandb_run_{fake._run_id}"
+    assert [p.name for p in output_root.iterdir()] == [incident_dir.name]
+    incident = json.loads((incident_dir / "execution_provenance.json").read_text(encoding="utf-8"))
+    assert incident["provenance_stage"] == "controller_config_shape_rejected"
+
+
+def test_bridge_main_rejects_unexpected_axis_before_any_durable_intake(tmp_path, monkeypatch, fake_wandb_module):
+    paths = _paths(tmp_path / "prep", monkeypatch)
+    extra_axes = {**_AXES, "unexpected_extra_axis": 1.0}
+    fake = fake_wandb_module(extra_axes)
+    output_root = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", _bridge_argv(
+        paths=paths, output_root=output_root, proposal_order=bridge.PRODUCTION_NEXT_PERMISSIBLE_PROPOSAL_ORDER,
+    ))
+
+    with pytest.raises(SystemExit) as exc_info:
+        bridge.main()
+    assert "missing=[]" in str(exc_info.value)
+    assert "unexpected=['unexpected_extra_axis']" in str(exc_info.value)
+
+    assert fake.run.finished is True
+    incident_dir = output_root / f"bootstrap_assignment_rejected__wandb_run_{fake._run_id}"
+    assert [p.name for p in output_root.iterdir()] == [incident_dir.name]
+    incident = json.loads((incident_dir / "execution_provenance.json").read_text(encoding="utf-8"))
+    assert incident["provenance_stage"] == "controller_config_shape_rejected"
