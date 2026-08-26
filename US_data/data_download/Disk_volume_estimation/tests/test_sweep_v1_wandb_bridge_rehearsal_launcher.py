@@ -71,6 +71,17 @@ def test_wandb_sweep_id_required_and_production_sweep_explicitly_refused():
     assert "exit 1" in code_text
 
 
+def test_wandb_project_and_entity_required_and_exported():
+    # wandb agent's internal sweep-lookup query needs an explicit
+    # project/entity to resolve WANDB_SWEEP_ID against -- there is no local
+    # `wandb/settings` file on a fresh Slurm allocation to infer them from.
+    text = SBATCH_SCRIPT.read_text(encoding="utf-8")
+    code_text = _code_text()
+    assert '"${WANDB_PROJECT:?' in text
+    assert '"${WANDB_ENTITY:?' in text
+    assert "export WANDB_PROJECT WANDB_ENTITY" in code_text
+
+
 def test_no_credential_exposure():
     text = SBATCH_SCRIPT.read_text(encoding="utf-8")
     assert "WANDB_API_KEY" not in text

@@ -35,12 +35,24 @@
 set -euo pipefail
 
 : "${WANDB_SWEEP_ID:?set the disposable rehearsal sweep id (never the production sweep)}"
+: "${WANDB_PROJECT:?set the disposable rehearsal sweep's W&B project (must match its registration)}"
+: "${WANDB_ENTITY:?set the disposable rehearsal sweep's W&B entity (must match its registration)}"
 
 FORBIDDEN_PRODUCTION_SWEEP_ID="4x3btz2s"
 if [ "${WANDB_SWEEP_ID}" = "${FORBIDDEN_PRODUCTION_SWEEP_ID}" ]; then
     echo "REFUSING: WANDB_SWEEP_ID must never be the production sweep ${FORBIDDEN_PRODUCTION_SWEEP_ID}" >&2
     exit 1
 fi
+
+# wandb agent's internal sweep-lookup GraphQL query needs an explicit
+# project/entity to resolve WANDB_SWEEP_ID against (there is no local
+# `wandb/settings` file on a fresh Slurm allocation to infer them from) --
+# without these two exported, `wandb agent` fails before ever invoking this
+# bridge with `wandb.errors.errors.CommError: name required for project
+# query`. Exporting them here (rather than baking a fixed value into this
+# script) keeps this launcher usable for any disposable rehearsal sweep,
+# never only the one qualified on any particular day.
+export WANDB_PROJECT WANDB_ENTITY
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 REPO_WORKDIR="${REPO_WORKDIR:-${FLASHNH_BASE}/repos/flash-nh/US_data/data_download/Disk_volume_estimation}"
