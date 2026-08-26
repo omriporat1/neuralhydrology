@@ -321,10 +321,25 @@ def _fake_wandb_api_module(run):
     return module
 
 
+class _FakeSweep:
+    def __init__(self, sweep_id: str):
+        self.id = sweep_id
+
+
 class _FakeApiRun:
+    """Mirrors the REAL wandb.apis.public Run shape verified against a live
+    wandb.Api() call (there is no ``run.sweepId`` attribute -- the sweep
+    association is ``run.sweep`` (a ``Sweep`` object with ``.id``), or
+    ``None`` for a run with no sweep). A prior version of this fake used a
+    fictitious ``sweepId`` attribute that happened to match this module's
+    (buggy) production code instead of the real wandb API -- exactly the
+    kind of fake-backend/real-backend divergence the disposable Moriah
+    online qualification exists to catch, and did catch.
+    """
+
     def __init__(self, run_id: str, sweep_id: "str | None"):
         self.id = run_id
-        self.sweepId = sweep_id
+        self.sweep = _FakeSweep(sweep_id) if sweep_id is not None else None
         self.summary: "dict[str, object]" = {}
 
     def update(self):

@@ -228,9 +228,10 @@ def recover_and_publish_objective(
     api = wandb.Api()
     run_path = f"{entity}/{project}/{record['wandb_run_id']}" if entity else f"{project}/{record['wandb_run_id']}"
     run = api.run(run_path)
-    if run.sweepId not in (None, record["wandb_sweep_id"]):
+    actual_sweep_id = run.sweep.id if run.sweep is not None else None
+    if actual_sweep_id not in (None, record["wandb_sweep_id"]):
         raise ObjectiveRecoveryError(
-            f"refusing: run {record['wandb_run_id']!r} is associated with sweep {run.sweepId!r}, "
+            f"refusing: run {record['wandb_run_id']!r} is associated with sweep {actual_sweep_id!r}, "
             f"not the expected {record['wandb_sweep_id']!r}"
         )
     for key, value in payload.items():
