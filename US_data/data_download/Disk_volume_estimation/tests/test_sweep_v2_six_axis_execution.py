@@ -317,6 +317,21 @@ def test_missing_required_checkpoint_epoch_is_invalid_v2(tmp_path, monkeypatch):
     assert outcome["review_records"]["trial_summary"]["workflow_status"] == "failed"
 
 
+def test_callback_or_fixed_support_failure_is_invalid_and_objective_free_v2(tmp_path, monkeypatch):
+    fx = _baseline_v2(tmp_path, monkeypatch)
+
+    def interrupted_pure_callback_executor():
+        raise RuntimeError("supplemental callback failed before a complete trajectory existed")
+
+    outcome = execute_prepared_trial_v2(
+        prepared_record=fx["record"], output_dir=tmp_path / "trial_out",
+        expected_screening_population=fx["n_basins"], execute_prepared_run_fn=interrupted_pure_callback_executor,
+    )
+    assert outcome["valid"] is False
+    assert outcome["review_records"]["trial_summary"]["objective_score"] is None
+    assert outcome["provenance"]["execution_status"] == "INVALID"
+
+
 def test_wrong_result_type_from_injected_executor_is_invalid_v2(tmp_path, monkeypatch):
     fx = _baseline_v2(tmp_path, monkeypatch)
     old_style_dict = {"epochs_reached": 12, "checkpoint_epochs": fx["epochs"], "screening_scores": fx["scores"]}

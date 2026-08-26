@@ -2162,6 +2162,13 @@ def execute_prepared_pilot_run_monolithic(
     a policy that claims otherwise indicates a caller/context mismatch and is
     rejected immediately rather than silently ignored.
 
+    ``supplemental_epoch_evaluator``, when supplied, is an optional pure
+    post-pickle evaluator. It receives only the already-materialized run
+    directory and epoch, must not train, infer, publish, or otherwise mutate
+    external state, and is intentionally at-least-once: an interrupted call
+    returns no receipt and a later call recomputes the complete trajectory
+    from immutable epoch artifacts. V1 callers leave it unset.
+
     Returns the same generic, campaign-agnostic
     :class:`PreparedPilotExecutionResult` :func:`execute_prepared_pilot_run`
     returns, so a caller's VALID/INVALID interpretation layer (e.g.

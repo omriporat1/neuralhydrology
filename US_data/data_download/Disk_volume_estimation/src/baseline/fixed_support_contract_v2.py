@@ -393,7 +393,7 @@ def evaluate_fixed_support_raw_space_metrics(
         basin_metrics["n_fixed_support_eligible"] = len(support_dates)
         per_basin.append(basin_metrics)
 
-    return {
+    result = {
         "objective_scope": "fixed_support",
         "contract_id": contract["contract_id"],
         "contract_checksum_sha256": contract["checksum_sha256"],
@@ -407,6 +407,55 @@ def evaluate_fixed_support_raw_space_metrics(
         if per_basin
         else {"n_basins": 0, "n_admitted_total": 0, "n_sim_nonfinite_at_admitted_total": 0, "metrics": {}},
     }
+    if require_full_screening_population:
+        _require_complete_production_fixed_support_population(result, required_basin_ids=contract["basin_ids"])
+    return result
+
+
+def _require_complete_production_fixed_support_population(
+    result: Mapping,
+    *,
+    required_basin_ids: Sequence[str],
+) -> None:
+    """Reject a v2 objective result unless all 400 frozen basins contributed.
+
+    This is deliberately applied only to the explicitly production-shaped
+    ``require_full_screening_population`` path. Small synthetic fixtures may
+    still exercise the generic evaluator, but no partial population (including
+    a finite aggregate over 399 basins) can enter the v2 objective route.
+    """
+    required = list(required_basin_ids)
+    expected = set(required)
+    if len(required) != 400 or len(expected) != 400:
+        raise FixedSupportContractError("production fixed-support contract must contain exactly 400 unique screening basins")
+
+    requested = result.get("n_basins_requested")
+    evaluated = result.get("n_basins_evaluated")
+    excluded = result.get("n_basins_excluded")
+    per_basin = result.get("per_basin")
+    if (requested, evaluated, excluded) != (400, 400, 0) or not isinstance(per_basin, list):
+        raise FixedSupportContractError(
+            "production fixed-support evaluation requires 400 requested, 400 evaluated, zero excluded basins, "
+            "and a complete per-basin receipt"
+        )
+
+    evaluated_ids = [row.get("basin_id") if isinstance(row, Mapping) else None for row in per_basin]
+    if len(evaluated_ids) != 400 or len(set(evaluated_ids)) != 400 or set(evaluated_ids) != expected:
+        raise FixedSupportContractError(
+            "production fixed-support evaluated basin IDs must be exactly the 400 unique frozen support-contract basins"
+        )
+    for row in per_basin:
+        nse = row.get("nse")
+        nonfinite_sim = row.get("n_sim_nonfinite_at_admitted")
+        if isinstance(nse, bool) or not isinstance(nse, (int, float)) or not np.isfinite(nse):
+            raise FixedSupportContractError("every production fixed-support basin must contribute a finite NSE")
+        if nonfinite_sim != 0:
+            raise FixedSupportContractError("production fixed-support basin has non-finite simulated values at admitted timestamps")
+
+    aggregate = result.get("aggregate")
+    nse_summary = aggregate.get("metrics", {}).get("nse", {}) if isinstance(aggregate, Mapping) else {}
+    if not isinstance(aggregate, Mapping) or aggregate.get("n_basins") != 400 or nse_summary.get("n_finite_basins") != 400:
+        raise FixedSupportContractError("production fixed-support aggregate does not represent all 400 finite basin NSE values")
 
 
 def evaluate_natural_support_raw_space_metrics(

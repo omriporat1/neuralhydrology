@@ -192,7 +192,7 @@ def select_executor_mode_v2(prepared_record: Mapping[str, Any]) -> str:
 
 def _review_records_v2(record: Mapping[str, Any], *, runtime_seconds: float, gpu_hours: "float | None",
                        fixed_scores: "Mapping[int, float] | None", natural_scores: "Mapping[int, float] | None",
-                       fixed_epoch_results: "Mapping[int, Mapping] | None", failure_category: "str | None",
+                       failure_category: "str | None",
                        retry_of_trial_id: "str | None", slurm_job_id: "str | None" = None) -> dict[str, Any]:
     """v2 sibling of :func:`sweep_v1_execution._review_records`. Identical
     shape and diagnostics math (``sweep.derive_trajectory_diagnostics`` is
@@ -351,21 +351,21 @@ def execute_prepared_trial_v2(*, prepared_record: Mapping[str, Any], output_dir:
         valid, scores, failure_category = _derive_validity(
             result, prepared_record, expected_screening_population=expected_screening_population
         )
-        fixed_scores = natural_scores = fixed_results = None
+        fixed_scores = natural_scores = None
         if valid:
-            fixed_scores, natural_scores, fixed_results = _v2_trajectories(
+            fixed_scores, natural_scores, _ = _v2_trajectories(
                 result, expected_epochs=set(range(1, int(prepared_record["target_epoch"]) + 1))
             )
         records = _review_records_v2(prepared_record, runtime_seconds=time.time() - started,
                                      gpu_hours=None, fixed_scores=fixed_scores,
-                                     natural_scores=natural_scores, fixed_epoch_results=fixed_results,
+                                     natural_scores=natural_scores,
                                      failure_category=None if valid else failure_category,
                                      retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
         result_summary = _summarize_receipt(result)
     except Exception as exc:  # persisted provenance intentionally survives pre-training failure
         result_summary, valid = {"exception": repr(exc)}, False
         records = _review_records_v2(prepared_record, runtime_seconds=time.time() - started, gpu_hours=None,
-                                     fixed_scores=None, natural_scores=None, fixed_epoch_results=None,
+                                     fixed_scores=None, natural_scores=None,
                                      failure_category="technical_execution_failure",
                                      retry_of_trial_id=retry_of_trial_id, slurm_job_id=slurm_job_id)
     terminal_fields = {"execution_status": "VALID" if valid else "INVALID", "result": result_summary,

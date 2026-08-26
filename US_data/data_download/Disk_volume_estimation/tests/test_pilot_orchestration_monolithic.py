@@ -128,12 +128,14 @@ def prepared_monolithic_fixture(short_tmp_path, monolithic_policy):
     }
 
 
-def _run_monolithic(fx, *, train_chunk_fn, evaluate_checkpoint_fn, target_epoch: int = 12):
+def _run_monolithic(fx, *, train_chunk_fn, evaluate_checkpoint_fn, target_epoch: int = 12,
+                    supplemental_epoch_evaluator=None):
     return orchestration.execute_prepared_pilot_run_monolithic(
         execution_policy=fx["pilot_policy"], config_dir=fx["config_dir"], experiment_name=fx["experiment_name"],
         package_root=fx["package_root"], target_variable=fx["target_variable"],
         lead_hours=fx["pilot_policy"].lead_hours, screening_basin_ids=fx["basins"], target_epoch=target_epoch,
         train_chunk_fn=train_chunk_fn, evaluate_checkpoint_fn=evaluate_checkpoint_fn,
+        supplemental_epoch_evaluator=supplemental_epoch_evaluator,
     )
 
 
@@ -206,6 +208,47 @@ def test_post_hoc_screening_invoked_exactly_once_per_epoch_and_is_restart_safe(p
     )
     assert sorted(eval_calls) == list(range(1, 13)), "resume must not re-run evaluation for already-logged epochs"
     assert {int(e["epoch"]) for e in result2.screening_events} == set(range(1, 13))
+
+
+def test_supplemental_callback_is_pure_at_least_once_and_recomputes_complete_trajectory_after_interruption(
+    prepared_monolithic_fixture,
+):
+    """The callback is deliberately stateless: immutable epoch artifacts make
+    a retry safe, while a partial in-memory trajectory is never returned."""
+    fx = prepared_monolithic_fixture
+    train_calls, eval_calls, first_values = [], [], {}
+
+    def interrupted_callback(run_dir, epoch):
+        assert (run_dir / f"model_epoch{epoch:03d}.pt").is_file()
+        if epoch == 5:
+            raise RuntimeError("injected callback interruption")
+        first_values[epoch] = epoch / 100.0
+        return {"fixed_support": {"epoch": epoch, "value": first_values[epoch]}}
+
+    with pytest.raises(RuntimeError, match="injected callback interruption"):
+        _run_monolithic(
+            fx, train_chunk_fn=_fake_monolithic_train_chunk_fn(fx["experiment_name"], train_calls),
+            evaluate_checkpoint_fn=_fake_evaluate_checkpoint_fn(fx["package_root"], fx["basins"], eval_calls),
+            supplemental_epoch_evaluator=interrupted_callback,
+        )
+    assert first_values == {epoch: epoch / 100.0 for epoch in range(1, 5)}
+    assert len(train_calls) == 1 and sorted(eval_calls) == list(range(1, 13))
+
+    retry_values = {}
+
+    def pure_callback(run_dir, epoch):
+        assert (run_dir / f"model_epoch{epoch:03d}.pt").is_file()
+        retry_values[epoch] = epoch / 100.0
+        return {"fixed_support": {"epoch": epoch, "value": retry_values[epoch]}}
+
+    result = _run_monolithic(
+        fx, train_chunk_fn=_fake_monolithic_train_chunk_fn(fx["experiment_name"], train_calls),
+        evaluate_checkpoint_fn=_fake_evaluate_checkpoint_fn(fx["package_root"], fx["basins"], eval_calls),
+        supplemental_epoch_evaluator=pure_callback,
+    )
+    assert retry_values == {epoch: epoch / 100.0 for epoch in range(1, 13)}
+    assert {epoch: value["fixed_support"]["value"] for epoch, value in result.supplemental_epoch_results.items()} == retry_values
+    assert len(train_calls) == 1 and sorted(eval_calls) == list(range(1, 13))
 
 
 # --- Item 4: complete population accounting per epoch -----------------------
