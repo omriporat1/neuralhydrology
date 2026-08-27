@@ -11,6 +11,7 @@ import pandas as pd
 import xarray as xr
 
 from .fixed_support_contract_v2 import build_fixed_support_contract, validate_fixed_support_contract
+from .nh_seed_evaluation import basin_netcdf_path
 from .gap_mask_io import MRMS_PRODUCT, RTMA_PRODUCT, load_gap_timestamps_json
 from .nh_config_generation import read_package_manifest, validate_full_population_basin_membership
 from .pilot_lead06_config import load_screening_basin_ids
@@ -59,6 +60,8 @@ def build_common120_support(*, package_root, splits_dir, screening_basin_ids_pat
     if effective["gap_policy"]["include_rtma_in_history_mask"] is not True:
         raise Common120SupportError("frozen production policy must include RTMA in the package gap mask")
     validation = baseline["temporal_split"]["validation"]
+    # For hourly grids, +23h is the final point of an inclusive end date,
+    # equivalent to NeuralHydrology's date + 1 day - 1 second convention.
     start, end = pd.Timestamp(validation["start"]), pd.Timestamp(validation["end"]) + pd.Timedelta(hours=23)
     target, lead = "qobs_mm_per_h_lead06", 6
     identities = _verify_artifact_identities(PreparationPaths(
@@ -77,7 +80,7 @@ def build_common120_support(*, package_root, splits_dir, screening_basin_ids_pat
     actual_gap = hashlib.sha256(gap_path.read_bytes()).hexdigest() if gap_path.is_file() else None
     if not isinstance(declared_gap, str) or actual_gap != declared_gap:
         raise Common120SupportError("package gap-timestamp artifact checksum contradicts package manifest")
-    first_dates, _ = _dates_and_target(Path(package_root) / "time_series" / f"{basins[0]}.nc", target)
+    first_dates, _ = _dates_and_target(basin_netcdf_path(package_root, basins[0]), target)
     gaps = load_gap_timestamps_json(gap_path)
     try:
         bad = bad_hour_mask_from_timestamps(first_dates, gaps, on_out_of_range="ignore")
@@ -87,7 +90,7 @@ def build_common120_support(*, package_root, splits_dir, screening_basin_ids_pat
     global_valid = history & (first_dates >= start) & (first_dates <= end) & (first_dates + pd.Timedelta(hours=lead) <= end)
     per_dates, per_admitted, counts = {}, {}, {}
     for basin in basins:
-        dates, qobs = _dates_and_target(Path(package_root) / "time_series" / f"{basin}.nc", target)
+        dates, qobs = _dates_and_target(basin_netcdf_path(package_root, basin), target)
         if not dates.equals(first_dates):
             raise Common120SupportError(f"{basin}: timeline differs from package-native authoritative timeline")
         admitted = global_valid & np.isfinite(qobs)

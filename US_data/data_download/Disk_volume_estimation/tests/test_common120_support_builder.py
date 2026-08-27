@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,10 @@ import xarray as xr
 from src.baseline import common120_support_builder as builder
 from src.baseline.fixed_support_contract_v2 import FixedSupportContractError, load_fixed_support_contract, validate_fixed_support_contract, write_fixed_support_contract
 from src.baseline.gap_mask_io import MRMS_PRODUCT, RTMA_PRODUCT
+
+
+_CLI_SPEC = importlib.util.spec_from_file_location("common120_builder_cli", Path(__file__).parents[1] / "scripts" / "build_common120_fixed_support_contract.py")
+cli = importlib.util.module_from_spec(_CLI_SPEC); _CLI_SPEC.loader.exec_module(cli)
 
 
 IDS = [f"{i:08d}" for i in range(400)]
@@ -84,3 +90,27 @@ def test_schema_two_package_hashes_are_strict_and_roundtrip(tmp_path):
     with pytest.raises(FixedSupportContractError, match="checksum"):
         validate_fixed_support_contract(altered)
     mp.undo()
+
+
+def test_cli_dry_run_builds_without_writing(monkeypatch, tmp_path, capsys):
+    contract = {"checksum_sha256": "a" * 64}
+    monkeypatch.setattr(cli, "build_common120_support", lambda **_: type("R", (), {"contract": contract, "accounting": {"n_basins": 400}})())
+    monkeypatch.setattr(cli, "write_fixed_support_contract", lambda *_: pytest.fail("dry run must not write"))
+    code = cli.main(["--package-root", "package", "--splits-dir", "splits", "--screening-basin-ids-path", "screening", "--baseline-policy-path", "baseline", "--policy-overlay-path", "overlay", "--dry-run"])
+    assert code == 0 and json.loads(capsys.readouterr().out)["dry_run"] is True
+
+
+def test_cli_write_reload_and_controlled_failure_are_safe(monkeypatch, tmp_path, capsys):
+    contract = {"checksum_sha256": "a" * 64}; calls = []
+    monkeypatch.setattr(cli, "build_common120_support", lambda **_: type("R", (), {"contract": contract, "accounting": {}})())
+    monkeypatch.setattr(cli, "write_fixed_support_contract", lambda value, path: calls.append((value, path)))
+    monkeypatch.setattr(cli, "load_fixed_support_contract", lambda path: calls.append(("reload", path)))
+    args = ["--package-root", "package", "--splits-dir", "splits", "--screening-basin-ids-path", "screening", "--baseline-policy-path", "baseline", "--policy-overlay-path", "overlay", "--output", str(tmp_path / "out.json")]
+    assert cli.main(args) == 0 and calls == [(contract, str(tmp_path / "out.json")), ("reload", str(tmp_path / "out.json"))]
+    monkeypatch.setattr(cli, "write_fixed_support_contract", lambda *_: (_ for _ in ()).throw(FixedSupportContractError("refusing to overwrite existing fixed-support contract")))
+    assert cli.main(args) == 2
+    assert json.loads(capsys.readouterr().err)["error"] == "FixedSupportContractError"
+    monkeypatch.setattr(cli, "build_common120_support", lambda **_: (_ for _ in ()).throw(builder.Common120SupportError("safe refusal")))
+    assert cli.main(args) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error == {"error": "Common120SupportError", "message": "safe refusal"}

@@ -42,7 +42,7 @@ def _build_fixed_support_contract(tmp_path, **identities) -> Path:
     return path
 
 
-def _paths(tmp_path, monkeypatch, *, contract_manifest_sha256=None):
+def _paths(tmp_path, monkeypatch, *, contract_identity_overrides=None):
     package = build_full_union_package(tmp_path / "package")
     manifests = package / "manifests"
     (manifests / "file_checksums.csv").write_text("relative_path,sha256,size_bytes,artifact_role\n", encoding="utf-8")
@@ -56,13 +56,17 @@ def _paths(tmp_path, monkeypatch, *, contract_manifest_sha256=None):
         (splits / source.name).write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
     screening = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:400])
     monkeypatch.setattr("src.baseline.pilot_lead06_config.sha256_of", lambda _: sweep.SCREENING_ARTIFACT_SHA256)
+    identities = {
+        "package_manifest_sha256": hashlib.sha256((manifests / "package_manifest.json").read_bytes()).hexdigest(),
+        "package_file_checksums_sha256": hashlib.sha256((manifests / "file_checksums.csv").read_bytes()).hexdigest(),
+        "package_run_provenance_sha256": hashlib.sha256((package / "run_provenance.json").read_bytes()).hexdigest(),
+        "development_split_sha256": hashlib.sha256((splits / "development_train.txt").read_bytes()).hexdigest(),
+        "spatial_holdout_split_sha256": hashlib.sha256((splits / "spatial_holdout_nonca.txt").read_bytes()).hexdigest(),
+    }
+    identities.update(contract_identity_overrides or {})
     contract_path = _build_fixed_support_contract(
         tmp_path,
-        package_manifest_sha256=contract_manifest_sha256 or hashlib.sha256((manifests / "package_manifest.json").read_bytes()).hexdigest(),
-        package_file_checksums_sha256=hashlib.sha256((manifests / "file_checksums.csv").read_bytes()).hexdigest(),
-        package_run_provenance_sha256=hashlib.sha256((package / "run_provenance.json").read_bytes()).hexdigest(),
-        development_split_sha256=hashlib.sha256((splits / "development_train.txt").read_bytes()).hexdigest(),
-        spatial_holdout_split_sha256=hashlib.sha256((splits / "spatial_holdout_nonca.txt").read_bytes()).hexdigest(),
+        **identities,
     )
     return PreparationPathsV2(BASELINE_POLICY_PATH, _OVERLAY_PATH, package, splits, screening, contract_path)
 
@@ -93,9 +97,14 @@ def test_accepts_integral_float_seq_length_from_q_uniform(tmp_path, monkeypatch)
     assert isinstance(prepared.evidence["seq_length_normalized"], int)
 
 
-def test_refuses_support_from_a_different_package_before_preparation(tmp_path, monkeypatch):
-    paths = _paths(tmp_path, monkeypatch, contract_manifest_sha256="f" * 64)
-    with pytest.raises(SweepV2PreparationError, match="package_manifest_sha256"):
+@pytest.mark.parametrize("field", (
+    "package_manifest_sha256", "package_file_checksums_sha256", "package_run_provenance_sha256",
+    "development_split_sha256", "spatial_holdout_split_sha256",
+))
+def test_refuses_support_from_a_different_package_before_preparation(tmp_path, monkeypatch, field):
+    paths = _paths(tmp_path, monkeypatch, contract_identity_overrides={field: "f" * 64})
+    monkeypatch.setattr("src.baseline.sweep_v2_six_axis_production_adapter.build_pilot_bundle_with_validation_scope", lambda **_: pytest.fail("preparation must not run"))
+    with pytest.raises(SweepV2PreparationError, match=field):
         prepare_bayesian_proposal_v2(proposal=_proposal(), paths=paths)
 
 
