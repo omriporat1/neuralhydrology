@@ -26,6 +26,17 @@ cd "${REPO_WORKDIR}"
 test -x "${CANONICAL_PYTHON}" || { echo "MISSING canonical interpreter" >&2; exit 1; }
 export PATH="$(dirname "${CANONICAL_PYTHON}"):${PATH}"
 
+echo "=== Flash-NH v2 bridge rehearsal (one proposal; stop before training) ==="
+date -u
+hostname
+pwd
+echo "MODE: rehearsal"
+echo "EXPECTED_COMMIT: ${EXPECTED_COMMIT:-validated by bridge manifest}"
+echo "CANONICAL_PYTHON: ${CANONICAL_PYTHON}"
+# The manifest path is supplied as the disposable sweep command's sole static
+# bridge argument; do not expose credentials or dump the environment here.
+echo "V2_BRIDGE_MANIFEST: ${V2_BRIDGE_MANIFEST:-supplied by sweep command}"
+
 # The disposable sweep's static command supplies the single checked manifest
 # path to the bridge; this launcher consumes exactly one controller proposal.
 wandb agent --count 1 "${WANDB_SWEEP_ID}"
