@@ -78,7 +78,7 @@ class FixedSupportContractError(ValueError):
 
 
 CONTRACT_SCHEMA_NAME = "flashnh_stage1_v2_fixed_support_contract"
-CONTRACT_SCHEMA_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 2
 
 _REQUIRED_KEYS = {
     "schema_name",
@@ -92,6 +92,11 @@ _REQUIRED_KEYS = {
     "date_end",
     "source_gap_policy_identity",
     "screening_basin_ids_sha256",
+    "package_manifest_sha256",
+    "package_file_checksums_sha256",
+    "package_run_provenance_sha256",
+    "development_split_sha256",
+    "spatial_holdout_split_sha256",
     "basin_ids",
     "date_dtype",
     "per_basin_support",
@@ -134,6 +139,11 @@ def build_fixed_support_contract(
     date_end: str,
     source_gap_policy_identity: str,
     screening_basin_ids_sha256: str,
+    package_manifest_sha256: str,
+    package_file_checksums_sha256: str,
+    package_run_provenance_sha256: str,
+    development_split_sha256: str,
+    spatial_holdout_split_sha256: str,
     per_basin_date: Mapping[str, np.ndarray],
     per_basin_admitted: Mapping[str, np.ndarray],
     seq_length_floor: int = SEQ_LENGTH_MAX,
@@ -192,6 +202,11 @@ def build_fixed_support_contract(
         "date_end": date_end,
         "source_gap_policy_identity": source_gap_policy_identity,
         "screening_basin_ids_sha256": screening_basin_ids_sha256,
+        "package_manifest_sha256": package_manifest_sha256,
+        "package_file_checksums_sha256": package_file_checksums_sha256,
+        "package_run_provenance_sha256": package_run_provenance_sha256,
+        "development_split_sha256": development_split_sha256,
+        "spatial_holdout_split_sha256": spatial_holdout_split_sha256,
         "basin_ids": basin_ids,
         "date_dtype": date_dtype,
         "per_basin_support": per_basin_support,
@@ -228,6 +243,13 @@ def validate_fixed_support_contract(data: dict, *, expected_contract_id: str = O
         raise FixedSupportContractError(
             f"seq_length_floor must be {SEQ_LENGTH_MAX!r} (the v2 domain ceiling), got {data['seq_length_floor']!r}"
         )
+    for key in (
+        "screening_basin_ids_sha256", "package_manifest_sha256", "package_file_checksums_sha256",
+        "package_run_provenance_sha256", "development_split_sha256", "spatial_holdout_split_sha256",
+    ):
+        value = data[key]
+        if not isinstance(value, str) or len(value) != 64 or value != value.lower() or any(c not in "0123456789abcdef" for c in value):
+            raise FixedSupportContractError(f"{key} must be a lowercase 64-character SHA-256")
 
     basin_ids = data["basin_ids"]
     if not isinstance(basin_ids, list) or basin_ids != sorted(set(basin_ids)):

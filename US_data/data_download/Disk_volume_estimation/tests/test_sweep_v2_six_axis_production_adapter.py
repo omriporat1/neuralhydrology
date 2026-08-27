@@ -22,7 +22,7 @@ from tests._pilot_support import (
 _OVERLAY_PATH = Path(__file__).parents[1] / "config" / "stage1_scientific_baseline_v2_six_axis_overlay_v001.yaml"
 
 
-def _build_fixed_support_contract(tmp_path) -> Path:
+def _build_fixed_support_contract(tmp_path, **identities) -> Path:
     n = 10
     per_basin_date = {"01234567": np.arange(n)}
     per_basin_admitted = {"01234567": np.zeros(n, dtype=bool)}
@@ -31,13 +31,18 @@ def _build_fixed_support_contract(tmp_path) -> Path:
         contract_id=OBJECTIVE_ID_V2, lead_hours=6, target_variable="qobs_mm_per_h_lead06",
         period="test_period", date_start="2024-01-01", date_end="2024-01-01",
         source_gap_policy_identity="test_gap_policy_v001", screening_basin_ids_sha256="0" * 64,
+        package_manifest_sha256=identities.get("package_manifest_sha256", "a"*64),
+        package_file_checksums_sha256=identities.get("package_file_checksums_sha256", "b"*64),
+        package_run_provenance_sha256=identities.get("package_run_provenance_sha256", "c"*64),
+        development_split_sha256=identities.get("development_split_sha256", "d"*64),
+        spatial_holdout_split_sha256=identities.get("spatial_holdout_split_sha256", "e"*64),
         per_basin_date=per_basin_date, per_basin_admitted=per_basin_admitted,
     )
     path = write_fixed_support_contract(contract, tmp_path / "fixed_support_contract.json")
     return path
 
 
-def _paths(tmp_path, monkeypatch):
+def _paths(tmp_path, monkeypatch, *, contract_manifest_sha256=None):
     package = build_full_union_package(tmp_path / "package")
     manifests = package / "manifests"
     (manifests / "file_checksums.csv").write_text("relative_path,sha256,size_bytes,artifact_role\n", encoding="utf-8")
@@ -51,7 +56,14 @@ def _paths(tmp_path, monkeypatch):
         (splits / source.name).write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
     screening = write_screening_basin_ids_file(tmp_path / "screening.txt", REAL_DEVELOPMENT[:400])
     monkeypatch.setattr("src.baseline.pilot_lead06_config.sha256_of", lambda _: sweep.SCREENING_ARTIFACT_SHA256)
-    contract_path = _build_fixed_support_contract(tmp_path)
+    contract_path = _build_fixed_support_contract(
+        tmp_path,
+        package_manifest_sha256=contract_manifest_sha256 or hashlib.sha256((manifests / "package_manifest.json").read_bytes()).hexdigest(),
+        package_file_checksums_sha256=hashlib.sha256((manifests / "file_checksums.csv").read_bytes()).hexdigest(),
+        package_run_provenance_sha256=hashlib.sha256((package / "run_provenance.json").read_bytes()).hexdigest(),
+        development_split_sha256=hashlib.sha256((splits / "development_train.txt").read_bytes()).hexdigest(),
+        spatial_holdout_split_sha256=hashlib.sha256((splits / "spatial_holdout_nonca.txt").read_bytes()).hexdigest(),
+    )
     return PreparationPathsV2(BASELINE_POLICY_PATH, _OVERLAY_PATH, package, splits, screening, contract_path)
 
 
@@ -79,6 +91,12 @@ def test_accepts_integral_float_seq_length_from_q_uniform(tmp_path, monkeypatch)
     prepared = prepare_bayesian_proposal_v2(proposal=_proposal(seq_length=72.0), paths=_paths(tmp_path, monkeypatch))
     assert prepared.bundle.config_mapping["seq_length"] == 72
     assert isinstance(prepared.evidence["seq_length_normalized"], int)
+
+
+def test_refuses_support_from_a_different_package_before_preparation(tmp_path, monkeypatch):
+    paths = _paths(tmp_path, monkeypatch, contract_manifest_sha256="f" * 64)
+    with pytest.raises(SweepV2PreparationError, match="package_manifest_sha256"):
+        prepare_bayesian_proposal_v2(proposal=_proposal(), paths=paths)
 
 
 @pytest.mark.parametrize("seq_length", [72, 48, 120])

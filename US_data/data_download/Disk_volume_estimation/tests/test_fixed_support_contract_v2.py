@@ -40,6 +40,8 @@ def _contract(n_basins: int) -> dict:
         contract_id=OBJECTIVE_ID_V2, lead_hours=6, target_variable="qobs_mm_per_h_lead06",
         period="fixture", date_start="2024-01-01", date_end="2024-01-01",
         source_gap_policy_identity="fixture_gap_v001", screening_basin_ids_sha256="0" * 64,
+        package_manifest_sha256="a"*64, package_file_checksums_sha256="b"*64, package_run_provenance_sha256="c"*64,
+        development_split_sha256="d"*64, spatial_holdout_split_sha256="e"*64,
         per_basin_date={basin_id: np.array([0, 1, 2]) for basin_id in ids},
         per_basin_admitted={basin_id: np.array([True, True, True]) for basin_id in ids},
     )

@@ -137,6 +137,12 @@ def _prepare_proposal_v2(*, proposal: Mapping[str, Any], paths: PreparationPaths
 
     policy_v2 = load_stage1_baseline_policy_v2_six_axis(paths.baseline_policy_path, paths.policy_overlay_path)
     contract = load_fixed_support_contract(paths.fixed_support_contract_path)
+    for key in (
+        "package_manifest_sha256", "package_file_checksums_sha256", "package_run_provenance_sha256",
+        "development_split_sha256", "spatial_holdout_split_sha256",
+    ):
+        if contract[key] != artifact_identities[key]:
+            raise SweepV2PreparationError(f"fixed-support contract {key} does not match the verified package identity")
     support_contract_version = contract["contract_id"]
     support_contract_sha256 = contract["checksum_sha256"]
 
