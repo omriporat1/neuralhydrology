@@ -43,7 +43,10 @@ def test_controller_shape_normalizes_before_identity_or_intake(tmp_path):
 def test_controller_rejects_bad_seq_length(tmp_path,bad):
     bridge=_bridge_module()
     class Run: id='fake'; config={'learning_rate':3e-4,'hidden_size':128,'embedding_dropout':.1,'output_dropout':.2,'batch_size':256,'seq_length':bad}
-    with pytest.raises(Exception): bridge._controller_axes(Run(),tmp_path)
+    with pytest.raises(bridge.SweepV2BridgeRefusal, match='controller_axis_value_rejected'):
+        bridge._controller_axes(Run(),tmp_path)
+    incident = json.loads((tmp_path/'bootstrap_assignment_rejected__wandb_run_fake'/'execution_provenance.json').read_text())
+    assert incident['provenance_stage'] == 'controller_axis_value_rejected'
 
 def test_sweep_config_and_launchers_have_exact_v2_metric_and_one_agent():
     cfg=build_production_sweep_config_v2(program='bridge.py')
@@ -175,6 +178,32 @@ def test_metric_mismatch_refuses_before_intake_and_finishes(tmp_path, monkeypatc
         bridge._execute(manifest)
     assert run.logged == [] and run.finished == 1
     assert (tmp_path/'out'/f'bootstrap_assignment_rejected__wandb_run_{run.id}'/'execution_provenance.json').is_file()
+
+
+@pytest.mark.parametrize('bad',[61.3,47,float('nan'),float('inf'),'72',True])
+def test_invalid_seq_length_is_a_controlled_pre_intake_refusal(tmp_path, monkeypatch, bad):
+    bridge = _bridge_module(); run = _FakeRun(_bridge_axes(bad))
+    monkeypatch.setitem(sys.modules, 'wandb', _fake_wandb(run))
+    _, events = _wire_fake_bridge(monkeypatch, bridge, tmp_path)
+    manifest = build_v2_wandb_bridge_manifest(**_fields(output_root=str(tmp_path/'out'), repository_root=str(ROOT)))
+    with pytest.raises(bridge.SweepV2BridgeRefusal, match='controller_axis_value_rejected'):
+        bridge._execute(manifest)
+    incident = json.loads((tmp_path/'out'/f'bootstrap_assignment_rejected__wandb_run_{run.id}'/'execution_provenance.json').read_text())
+    assert incident['provenance_stage'] == 'controller_axis_value_rejected'
+    assert events == [] and run.logged == [] and run.finished == 1
+
+
+def test_sweep_lookup_failure_is_a_controlled_pre_intake_refusal(tmp_path, monkeypatch):
+    bridge = _bridge_module(); run = _FakeRun(_bridge_axes())
+    fake = SimpleNamespace(init=lambda: run, Api=lambda: SimpleNamespace(sweep=lambda _: (_ for _ in ()).throw(RuntimeError('offline'))))
+    monkeypatch.setitem(sys.modules, 'wandb', fake)
+    _, events = _wire_fake_bridge(monkeypatch, bridge, tmp_path)
+    manifest = build_v2_wandb_bridge_manifest(**_fields(output_root=str(tmp_path/'out'), repository_root=str(ROOT)))
+    with pytest.raises(bridge.SweepV2BridgeRefusal, match='objective_metric_contract_unverifiable'):
+        bridge._execute(manifest)
+    incident = json.loads((tmp_path/'out'/f'bootstrap_assignment_rejected__wandb_run_{run.id}'/'execution_provenance.json').read_text())
+    assert incident['provenance_stage'] == 'objective_metric_contract_unverifiable'
+    assert events == [] and run.logged == [] and run.finished == 1
 
 
 def test_support_mismatch_refuses_before_wandb_init(tmp_path, monkeypatch):

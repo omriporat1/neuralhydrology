@@ -17,7 +17,7 @@ from src.baseline.pilot_lead06_config import load_screening_basin_ids
 from src.baseline import sweep_v1_campaign as sweep
 from src.baseline.sweep_v1_execution import enrich_layer_b_provenance
 from src.baseline.sweep_v2_six_axis_campaign import (
-    FORBIDDEN_V1_SWEEP_ID, canonical_hyperparameters_v2, normalize_seq_length_axis,
+    FORBIDDEN_V1_SWEEP_ID, SweepV2CampaignError, canonical_hyperparameters_v2, normalize_seq_length_axis,
 )
 from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME, build_production_sweep_config_v2
 from src.baseline.sweep_v2_six_axis_execution import (
@@ -58,7 +58,12 @@ def _controller_axes(run: Any, output_root: Path) -> tuple[dict[str, Any], dict[
         raise SweepV2BridgeRefusal(reason)
     raw = {key: run.config[key] for key in _AXES}
     canonical = dict(raw)
-    canonical["seq_length"] = normalize_seq_length_axis(raw["seq_length"])
+    try:
+        canonical["seq_length"] = normalize_seq_length_axis(raw["seq_length"])
+    except SweepV2CampaignError as exc:
+        reason = "controller_axis_value_rejected"
+        _incident(output_root, getattr(run, "id", None), reason, "controller seq_length violates the v2 domain")
+        raise SweepV2BridgeRefusal(reason) from exc
     return raw, canonical_hyperparameters_v2(canonical)
 
 
@@ -67,7 +72,15 @@ def _validate_objective_metric_contract(run: Any, *, output_root: Path) -> None:
     import wandb
 
     sweep_path = f"{getattr(run, 'entity', None)}/{getattr(run, 'project', None)}/{run.sweep_id}"
-    config = wandb.Api().sweep(sweep_path).config
+    try:
+        config = wandb.Api().sweep(sweep_path).config
+    # W&B does not guarantee one stable public exception base across client
+    # versions.  Keep this broad boundary confined to the sole external call;
+    # no later local metric/configuration validation is caught here.
+    except Exception as exc:
+        reason = "objective_metric_contract_unverifiable"
+        _incident(output_root, getattr(run, "id", None), reason, "unable to verify the joined sweep metric contract")
+        raise SweepV2BridgeRefusal(reason) from exc
     expected = build_production_sweep_config_v2(program="scripts/run_sweep_v2_six_axis_wandb_bridge.py")
     metric = config.get("metric") or {}
     if (config.get("method") != expected["method"] or metric.get("name") != V2_METRIC_NAME
