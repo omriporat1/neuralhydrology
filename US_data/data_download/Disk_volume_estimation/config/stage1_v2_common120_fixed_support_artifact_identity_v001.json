@@ -1,0 +1,69 @@
+{
+  "schema_name": "flashnh_stage1_v2_fixed_support_artifact_identity_record",
+  "schema_version": 1,
+  "record_id": "stage1_v2_common120_fixed_support_artifact_identity_v001",
+  "artifact": {
+    "project_relative_path": "data/fixed_support_contracts/stage1_v2_common120_fixed_support_contract_v001.json",
+    "deployment_provenance_moriah_absolute_path": "/sci/labs/efratmorin/omripo/Flash-NH/data/fixed_support_contracts/stage1_v2_common120_fixed_support_contract_v001.json",
+    "serialized_file_size_bytes": 130593808,
+    "serialized_file_sha256": "99fdc4f44768779661a735d25974e25b64a5d7f502ec8ffa4c5d2bab42bc34d6",
+    "internal_canonical_contract_sha256": "cb4ebe86afa501ef3d5929ead5b455f8df06e7d38b58ebf4148f8545fe6851ef",
+    "tracking_status": "external_untracked_large_artifact"
+  },
+  "fixed_support_contract": {
+    "schema_name": "flashnh_stage1_v2_fixed_support_contract",
+    "schema_version": 2,
+    "contract_id": "common120_raw_space_nse_v001",
+    "optimizer_metric": "flashnh/common120_raw_space_nse_v001"
+  },
+  "membership_semantics": {
+    "predicate": "history_valid_120(t) AND validation_start <= t <= validation_end AND t + 6h <= validation_end AND finite(qobs_mm_per_h_lead06[b, t])",
+    "qobs_lead_semantics": "qobs_mm_per_h_lead06[t] is the observation at target time t + 6h; no second lead shift is applied.",
+    "sequence_length_floor_hours": 120,
+    "lead_hours": 6,
+    "target_variable": "qobs_mm_per_h_lead06",
+    "period_name": "validation",
+    "period_start": "2024-01-01",
+    "period_end": "2024-12-31"
+  },
+  "source_gap_policy": {
+    "identity": "stage1_policy_mrms_rtma_history_v001",
+    "include_rtma_in_history_mask": true,
+    "required_packaged_gap_product_scope": ["mrms_qpe_1h_pass1", "rtma_conus_aws_2p5km"],
+    "packaged_gap_timestamp_artifact_sha256": "93b58aa2cb1d0467447a45c08e95cb8926a536229f2aa755d42095ef9411a2d5",
+    "packaged_gap_count": 138,
+    "mrms_only_support_is_valid": false
+  },
+  "bindings": {
+    "screening_population": {
+      "policy_identity": "stage1_provisional_operational_screening_subset_v001",
+      "basin_count": 400,
+      "basin_ids_sha256": "d4395d93ebc567cf09e149c0121463d75cf4f7ecc02c07a7c4a7999763baa372"
+    },
+    "package_and_split_sha256": {
+      "package_manifest_sha256": "6c52fb1b81f6a5f730b805d0c273e9d00cbf5bb93d1cd0da58452f5a0e5bcc4a",
+      "package_file_checksums_sha256": "83b47374725d418b130a8e28dcf1cb118cee88f99624907238e25ee2a9067d13",
+      "package_run_provenance_sha256": "030de2f9458aa40deba74d84910904f02468adb9eb1786ee3a71556bfcb11a8b",
+      "development_split_sha256": "397ab432564c18c3abc5158a47ada2b28840bbf6f0c213d2475444fded33858f",
+      "spatial_holdout_split_sha256": "76d1c546e703b1b5aa8f4a3ead971327de0151dae4fcce0c90b1272da0f587b7"
+    }
+  },
+  "support_accounting": {
+    "global_common120_history_valid_issue_times": 8537,
+    "total_retained_finite_qobs_basin_issue_time_memberships": 3347893,
+    "minimum_retained_per_basin": 6983,
+    "maximum_retained_per_basin": 8537,
+    "median_retained_per_basin": 8489.5,
+    "mean_retained_per_basin": 8369.7325,
+    "zero_support_basin_count": 0,
+    "mean_retained_finite_qobs_membership_percent_of_history_valid_common120_grid": 98.04,
+    "mean_retained_finite_qobs_membership_percent_interpretation": "3347893 / (400 * 8537), meaning mean retained finite-qobs membership divided by the already-history-valid Common-120 issue times; it is not a 72-hour-to-120-hour sequence-length retention ratio."
+  },
+  "provenance": {
+    "corrected_linux_regression": {"slurm_job_id": 45959191, "result": "503 passed, 0 failed, 0 errors"},
+    "real_package_dry_run_preflight": {"slurm_job_id": 45959214, "result": "successful full 400-basin dry run; no artifact written"},
+    "controlled_generation": {"slurm_job_id": 45959430, "generation_attempt_count": 1, "slurm_and_cli_exit_code": 0, "dry_run_and_written_contract_checksum_and_accounting_match": true},
+    "independent_qualification": {"slurm_job_id": 45968946, "job_count": 1, "retry_count": 0, "verdict": "QUALIFIED", "mismatched_basins": 0, "mismatched_timestamps": 0, "all_five_package_split_identities_matched": true, "screening_and_gap_identities_matched": true, "external_and_internal_artifact_checksums_matched": true, "artifact_inode_size_mtime_and_checksum_unchanged": true},
+    "local_evidence_bundle_paths": [".scratch_local/v2_regression_gate_e630a52_rerun_20260827T133557Z/", ".scratch_local/common120_real_package_preflight_e630a52_20260827T135730Z/", ".scratch_local/common120_artifact_generation_e630a52_20260827T142356Z/", ".scratch_local/common120_independent_qualification_e630a52_20260828T083345Z/"]
+  }
+}
