@@ -30,11 +30,13 @@ from .sweep_v2_six_axis_campaign import OBJECTIVE_ID_V2, SEQ_LENGTH_MAX, SEQ_LEN
 
 __all__ = [
     "V2_METRIC_NAME",
+    "V2_REHEARSAL_PLACEHOLDER_METRIC_NAME",
     "build_production_sweep_config_v2",
     "build_wandb_bridge_rehearsal_sweep_config_v2",
 ]
 
 V2_METRIC_NAME = f"flashnh/{OBJECTIVE_ID_V2}"
+V2_REHEARSAL_PLACEHOLDER_METRIC_NAME = "qualification/rehearsal_placeholder_metric_v2"
 
 
 def build_production_sweep_config_v2(*, program: str) -> dict[str, Any]:
@@ -74,7 +76,7 @@ def build_wandb_bridge_rehearsal_sweep_config_v2(*, program: str, manifest_path:
     positional argument -- the absolute path to a pre-built v2 rehearsal
     launch manifest. Does not create or contact a real W&B sweep."""
     config = build_production_sweep_config_v2(program=program)
-    config["metric"] = {"name": "qualification/rehearsal_placeholder_metric_v2", "goal": "maximize"}
+    config["metric"] = {"name": V2_REHEARSAL_PLACEHOLDER_METRIC_NAME, "goal": "maximize"}
     config["command"] = ["${interpreter}", "${program}", manifest_path]
     return config
 

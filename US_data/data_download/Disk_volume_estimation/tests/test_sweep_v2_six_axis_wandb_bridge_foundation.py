@@ -7,7 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from src.baseline.sweep_v2_six_axis_campaign import *
-from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME, build_production_sweep_config_v2
+from src.baseline.sweep_v2_six_axis_config import (
+    V2_METRIC_NAME,
+    V2_REHEARSAL_PLACEHOLDER_METRIC_NAME,
+    build_production_sweep_config_v2,
+    build_wandb_bridge_rehearsal_sweep_config_v2,
+)
 from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import *
 
 ROOT=Path(__file__).parents[1]
@@ -138,7 +143,10 @@ def test_rehearsal_main_from_manifest_persists_raw_and_canonical_before_stop(tmp
     output = tmp_path/'out'
     manifest_path = tmp_path/'manifest.json'
     write_v2_wandb_bridge_manifest(manifest_path, **_fields(output_root=str(output), repository_root=str(ROOT)))
-    run = _FakeRun(_bridge_axes(72.0))
+    rehearsal_sweep = build_wandb_bridge_rehearsal_sweep_config_v2(
+        program='bridge.py', manifest_path=str(manifest_path),
+    )
+    run = _FakeRun(_bridge_axes(72.0), metric=rehearsal_sweep['metric']['name'])
     monkeypatch.setitem(sys.modules, 'wandb', _fake_wandb(run))
     _, events = _wire_fake_bridge(monkeypatch, bridge, tmp_path)
     monkeypatch.setattr('src.baseline.sweep_v1_runtime_contract.run_full_runtime_contract', lambda **_: None)
@@ -150,6 +158,7 @@ def test_rehearsal_main_from_manifest_persists_raw_and_canonical_before_stop(tmp
     assert enrichment['fields']['normalized_controller_axes']['seq_length'] == 72
     assert run.logged == [] and run.finished == 1
     assert run.summary['flashnh/rehearsal_stopped_before_training'] is True
+    assert rehearsal_sweep['metric']['name'] == V2_REHEARSAL_PLACEHOLDER_METRIC_NAME
 
 
 def test_production_valid_publishes_only_fixed_support_metric_once(tmp_path, monkeypatch):
@@ -180,9 +189,31 @@ def test_metric_mismatch_refuses_before_intake_and_finishes(tmp_path, monkeypatc
     assert (tmp_path/'out'/f'bootstrap_assignment_rejected__wandb_run_{run.id}'/'execution_provenance.json').is_file()
 
 
+@pytest.mark.parametrize(
+    ('mode', 'stop_before_training', 'metric'),
+    [
+        ('rehearsal', True, V2_METRIC_NAME),
+        ('production', False, V2_REHEARSAL_PLACEHOLDER_METRIC_NAME),
+    ],
+)
+def test_cross_mode_metric_substitution_refuses_before_intake(
+    tmp_path, monkeypatch, mode, stop_before_training, metric,
+):
+    bridge = _bridge_module(); run = _FakeRun(_bridge_axes(), metric=metric)
+    monkeypatch.setitem(sys.modules, 'wandb', _fake_wandb(run))
+    _, events = _wire_fake_bridge(monkeypatch, bridge, tmp_path)
+    manifest = build_v2_wandb_bridge_manifest(**_fields(
+        mode=mode, stop_before_training=stop_before_training,
+        output_root=str(tmp_path/'out'), repository_root=str(ROOT),
+    ))
+    with pytest.raises(bridge.SweepV2BridgeRefusal, match='metric contract'):
+        bridge._execute(manifest)
+    assert events == [] and run.logged == [] and run.finished == 1
+
+
 @pytest.mark.parametrize('bad',[61.3,47,float('nan'),float('inf'),'72',True])
 def test_invalid_seq_length_is_a_controlled_pre_intake_refusal(tmp_path, monkeypatch, bad):
-    bridge = _bridge_module(); run = _FakeRun(_bridge_axes(bad))
+    bridge = _bridge_module(); run = _FakeRun(_bridge_axes(bad), metric=V2_REHEARSAL_PLACEHOLDER_METRIC_NAME)
     monkeypatch.setitem(sys.modules, 'wandb', _fake_wandb(run))
     _, events = _wire_fake_bridge(monkeypatch, bridge, tmp_path)
     manifest = build_v2_wandb_bridge_manifest(**_fields(output_root=str(tmp_path/'out'), repository_root=str(ROOT)))

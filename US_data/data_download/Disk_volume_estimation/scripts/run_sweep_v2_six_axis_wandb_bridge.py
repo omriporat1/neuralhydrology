@@ -19,7 +19,7 @@ from src.baseline.sweep_v1_execution import enrich_layer_b_provenance
 from src.baseline.sweep_v2_six_axis_campaign import (
     FORBIDDEN_V1_SWEEP_ID, SweepV2CampaignError, canonical_hyperparameters_v2, normalize_seq_length_axis,
 )
-from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME, build_production_sweep_config_v2
+from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME, V2_REHEARSAL_PLACEHOLDER_METRIC_NAME
 from src.baseline.sweep_v2_six_axis_execution import (
     build_execution_context_v2, build_v2_epoch_evaluator, build_v2_objective_publication_payload,
     execute_prepared_trial_v2, select_executor_mode_v2, write_proposal_intake_provenance_v2,
@@ -67,7 +67,7 @@ def _controller_axes(run: Any, output_root: Path) -> tuple[dict[str, Any], dict[
     return raw, canonical_hyperparameters_v2(canonical)
 
 
-def _validate_objective_metric_contract(run: Any, *, output_root: Path) -> None:
+def _validate_objective_metric_contract(run: Any, *, manifest: Mapping[str, Any], output_root: Path) -> None:
     """Check the joined live sweep's optimizer metric before proposal intake."""
     import wandb
 
@@ -81,11 +81,19 @@ def _validate_objective_metric_contract(run: Any, *, output_root: Path) -> None:
         reason = "objective_metric_contract_unverifiable"
         _incident(output_root, getattr(run, "id", None), reason, "unable to verify the joined sweep metric contract")
         raise SweepV2BridgeRefusal(reason) from exc
-    expected = build_production_sweep_config_v2(program="scripts/run_sweep_v2_six_axis_wandb_bridge.py")
+    expected_metric_name = (
+        V2_METRIC_NAME
+        if manifest["mode"] == "production"
+        else V2_REHEARSAL_PLACEHOLDER_METRIC_NAME
+    )
     metric = config.get("metric") or {}
-    if (config.get("method") != expected["method"] or metric.get("name") != V2_METRIC_NAME
-            or metric.get("goal") != expected["metric"]["goal"]):
-        reason = f"joined sweep metric contract mismatch: method={config.get('method')!r} metric={metric!r} expected={expected['metric']!r}"
+    if (config.get("method") != "bayes" or metric.get("name") != expected_metric_name
+            or metric.get("goal") != "maximize"):
+        reason = (
+            f"joined sweep metric contract mismatch: mode={manifest['mode']!r} "
+            f"method={config.get('method')!r} metric={metric!r} "
+            f"expected={{'name': {expected_metric_name!r}, 'goal': 'maximize'}}"
+        )
         _incident(output_root, getattr(run, "id", None), "objective_metric_contract_rejected", reason)
         raise SweepV2BridgeRefusal(reason)
 
@@ -129,7 +137,7 @@ def _execute(manifest: Mapping[str, Any]) -> int:
         if run.sweep_id != manifest["wandb_sweep_id"]:
             _incident(Path(manifest["output_root"]), run.id, "sweep_identity_rejected", "unexpected sweep")
             raise SweepV2BridgeRefusal("unexpected sweep")
-        _validate_objective_metric_contract(run, output_root=Path(manifest["output_root"]))
+        _validate_objective_metric_contract(run, manifest=manifest, output_root=Path(manifest["output_root"]))
         raw_axes, canonical_axes = _controller_axes(run, Path(manifest["output_root"]))
         intake = write_proposal_intake_provenance_v2(
             output_root=manifest["output_root"], axes=canonical_axes, search_arm="bayesian",

@@ -89,7 +89,7 @@ def test_rehearsal_config_uses_a_disposable_placeholder_metric():
     rehearsal = config_v2.build_wandb_bridge_rehearsal_sweep_config_v2(
         program="p", manifest_path="/abs/path/manifest.json"
     )
-    assert rehearsal["metric"]["name"] == "qualification/rehearsal_placeholder_metric_v2"
+    assert rehearsal["metric"]["name"] == config_v2.V2_REHEARSAL_PLACEHOLDER_METRIC_NAME
     assert rehearsal["metric"]["name"] != config_v2.V2_METRIC_NAME
 
 
