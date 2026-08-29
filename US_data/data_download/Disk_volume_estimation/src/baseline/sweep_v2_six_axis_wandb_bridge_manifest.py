@@ -69,6 +69,13 @@ def build_v2_wandb_bridge_manifest(**fields: Any) -> dict[str, Any]:
     return data
 
 def write_v2_wandb_bridge_manifest(path: "str | Path", **fields: Any) -> dict[str, Any]:
+    """Write the manifest via a genuinely atomic no-clobber publication: the
+    complete payload is written to a same-directory temp file, then
+    published with ``os.link`` (never ``os.replace``), which fails with
+    ``FileExistsError`` -- without touching the destination -- if a
+    concurrent writer created ``path`` first. The temp file is always
+    removed, on both success and failure, and the destination's bytes are
+    never altered by a losing writer."""
     path = Path(path)
     if path.exists(): raise SweepV2BridgeManifestError("refusing manifest overwrite")
     data = build_v2_wandb_bridge_manifest(**fields)
@@ -76,10 +83,14 @@ def write_v2_wandb_bridge_manifest(path: "str | Path", **fields: Any) -> dict[st
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle: handle.write(json.dumps(data, sort_keys=True, indent=2) + "\n")
-        if path.exists(): raise SweepV2BridgeManifestError("refusing manifest overwrite")
-        os.replace(tmp, path); tmp = None
+        try:
+            os.link(tmp, path)
+        except FileExistsError as exc:
+            raise SweepV2BridgeManifestError(
+                f"refusing manifest overwrite: destination appeared during publication: {path}"
+            ) from exc
     finally:
-        if tmp and os.path.exists(tmp): os.remove(tmp)
+        if os.path.exists(tmp): os.remove(tmp)
     return data
 
 def load_v2_wandb_bridge_manifest(path: "str | Path") -> dict[str, Any]:

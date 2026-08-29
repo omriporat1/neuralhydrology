@@ -3,8 +3,9 @@
 This tool only writes the authoritative configuration returned by
 ``build_wandb_bridge_rehearsal_sweep_config_v2``.  It neither imports W&B
 nor registers a sweep.  Registration is a separate, explicitly authorized
-step after the strict rehearsal manifest has been created with a real
-disposable sweep ID.
+step: this tool fixes the future strict rehearsal manifest's PATH before
+registration, but the manifest itself is written only after registration
+returns the real disposable sweep ID.
 """
 from __future__ import annotations
 
