@@ -32,7 +32,8 @@ __all__ = [
     "CAMPAIGN_ID_V2", "DOMAIN_VERSION_V2", "CONFIGURATION_CANONICALIZATION_VERSION_V2",
     "OBJECTIVE_ID_V2", "FIDELITY_ID_V2",
     "SEQ_LENGTH_MIN", "SEQ_LENGTH_MAX", "SEQ_LENGTH_STEP", "SEQ_LENGTH_DOMAIN_V2",
-    "FORBIDDEN_V1_SWEEP_ID", "SEARCH_ARMS_V2",
+    "FORBIDDEN_V1_SWEEP_ID", "CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID",
+    "FORBIDDEN_PRODUCTION_SWEEP_IDS", "SEARCH_ARMS_V2",
     "FROZEN_FIXED_CONFIGURATION_V2", "SEARCH_DOMAIN_V2",
     "TRIAL_SUMMARY_FIELDS_V2", "PROPOSAL_RECORD_FIELDS_V2",
     "normalize_seq_length_axis", "canonical_hyperparameters_v2", "configuration_id_v2",
@@ -65,6 +66,22 @@ SEQ_LENGTH_DOMAIN_V2 = tuple(range(SEQ_LENGTH_MIN, SEQ_LENGTH_MAX + 1, SEQ_LENGT
 assert SEQ_LENGTH_DOMAIN_V2 == (48, 60, 72, 84, 96, 108, 120)
 
 FORBIDDEN_V1_SWEEP_ID = "4x3btz2s"
+
+# The CLOSED disposable v2 rehearsal controller. It was registered once for an
+# operational rehearsal, consumed its single authorized disposable proposal,
+# and is not reusable for any production path. Only historical
+# ``mode=rehearsal`` launch manifests may still legitimately name it.
+CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID = "oz5p4csb"
+
+# The single authoritative set of W&B sweep ids that every v2 PRODUCTION path
+# must refuse: the frozen v1 production sweep and the closed disposable
+# rehearsal sweep. Production controller registration, production manifest
+# construction, production one-agent invocation construction, the strict
+# ``mode=production`` manifest loader, the production bridge, and the
+# production launcher all consult this set (the launcher mirrors the literals
+# at shell level for pre-contact refusal, guarded against drift by a test).
+FORBIDDEN_PRODUCTION_SWEEP_IDS = frozenset({FORBIDDEN_V1_SWEEP_ID, CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID})
+
 SEARCH_ARMS_V2 = frozenset({"bayesian"})
 
 _AXES_V2 = ("learning_rate", "hidden_size", "embedding_dropout", "output_dropout", "batch_size", "seq_length")

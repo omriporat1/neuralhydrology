@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .sweep_v1_launch_manifest import MODE_PRODUCTION, MODE_REHEARSAL, _reject_credential_shaped_fields
-from .sweep_v2_six_axis_campaign import CAMPAIGN_ID_V2, CONFIGURATION_CANONICALIZATION_VERSION_V2, DOMAIN_VERSION_V2, FORBIDDEN_V1_SWEEP_ID, OBJECTIVE_ID_V2
+from .sweep_v2_six_axis_campaign import CAMPAIGN_ID_V2, CONFIGURATION_CANONICALIZATION_VERSION_V2, DOMAIN_VERSION_V2, FORBIDDEN_PRODUCTION_SWEEP_IDS, FORBIDDEN_V1_SWEEP_ID, OBJECTIVE_ID_V2
 
 MANIFEST_SCHEMA_VERSION = 1
 _REQUIRED = frozenset({"manifest_label", "created_at_utc", "mode", "expected_commit", "repository_root", "expected_runtime_python", "wandb_project", "wandb_sweep_id", "output_root", "package_root", "screening_basin_ids_path", "screening_basin_ids_sha256", "fixed_support_contract_path", "fixed_support_contract_version", "fixed_support_contract_sha256", "baseline_policy_path", "policy_overlay_path", "base_pilot_policy_path", "proposal_order", "execution_generation", "stop_before_training", "max_agents", "campaign_id", "domain_version", "canonicalization_version", "objective_id", "manifest_sha256"})
@@ -44,6 +44,15 @@ def _validate(data: Mapping[str, Any]) -> None:
         raise SweepV2BridgeManifestError("v1 production sweep is forbidden")
     if data["mode"] not in (MODE_PRODUCTION, MODE_REHEARSAL):
         raise SweepV2BridgeManifestError("mode must be production or rehearsal")
+    # Mode-sensitive rule: a mode=production manifest must never target the
+    # frozen v1 production sweep OR the CLOSED disposable rehearsal sweep.
+    # Historical mode=rehearsal manifests naming the disposable rehearsal
+    # sweep stay valid (only the generic v1 refusal above applies to them).
+    if data["mode"] == MODE_PRODUCTION and data["wandb_sweep_id"] in FORBIDDEN_PRODUCTION_SWEEP_IDS:
+        raise SweepV2BridgeManifestError(
+            "a mode=production manifest must not target the frozen v1 production sweep "
+            "or the CLOSED disposable rehearsal sweep"
+        )
     if data["mode"] == MODE_REHEARSAL and data["stop_before_training"] is not True:
         raise SweepV2BridgeManifestError("rehearsal requires stop_before_training=True")
     if data["mode"] == MODE_PRODUCTION and data["stop_before_training"] is not False:

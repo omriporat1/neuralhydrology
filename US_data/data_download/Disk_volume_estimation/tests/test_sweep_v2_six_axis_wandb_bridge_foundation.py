@@ -33,6 +33,25 @@ def test_manifest_checksum_unknown_secret_modes_and_single_agent(tmp_path):
                     {'wandb_sweep_id':FORBIDDEN_V1_SWEEP_ID},{'screening_basin_ids_sha256':'not-a-sha'}):
         with pytest.raises(SweepV2BridgeManifestError): build_v2_wandb_bridge_manifest(**_fields(**changed))
 
+def test_production_manifest_rejects_forbidden_ids_but_rehearsal_disposable_stays_valid(tmp_path):
+    # A mode=production manifest targeting either forbidden production sweep id
+    # is rejected by build + strict loader.
+    for forbidden in FORBIDDEN_PRODUCTION_SWEEP_IDS:
+        with pytest.raises(SweepV2BridgeManifestError):
+            build_v2_wandb_bridge_manifest(**_fields(
+                mode='production', stop_before_training=False, wandb_sweep_id=forbidden,
+            ))
+    # Historical mode=rehearsal compatibility: a manifest naming the CLOSED
+    # disposable rehearsal sweep stays loader-valid.
+    path = tmp_path/'rehearsal_disposable.json'
+    data = write_v2_wandb_bridge_manifest(path, **_fields(
+        mode='rehearsal', stop_before_training=True,
+        wandb_sweep_id=CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID,
+    ))
+    assert load_v2_wandb_bridge_manifest(path) == data
+    assert data['wandb_sweep_id'] == CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID
+
+
 def test_controller_shape_normalizes_before_identity_or_intake(tmp_path):
     bridge=_bridge_module()
     class Run: id='fake'; config={'learning_rate':3e-4,'hidden_size':128,'embedding_dropout':.1,'output_dropout':.2,'batch_size':256,'seq_length':72.0}
@@ -53,29 +72,89 @@ def test_controller_rejects_bad_seq_length(tmp_path,bad):
     incident = json.loads((tmp_path/'bootstrap_assignment_rejected__wandb_run_fake'/'execution_provenance.json').read_text())
     assert incident['provenance_stage'] == 'controller_axis_value_rejected'
 
+def _noncomment(path):
+    text = path.read_text()
+    return text, '\n'.join(line for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#'))
+
+
 def test_sweep_config_and_launchers_have_exact_v2_metric_and_one_agent():
     cfg=build_production_sweep_config_v2(program='bridge.py')
     assert cfg['metric']['name']==V2_METRIC_NAME and cfg['parameters']['seq_length']=={'distribution':'q_uniform','min':48,'max':120,'q':12}
     assert 'flashnh/best_score' not in str(cfg)
-    scripts = [
-        ROOT/'scripts/run_sweep_v2_six_axis_wandb_bridge_rehearsal_moriah.sbatch',
-        ROOT/'scripts/run_sweep_v2_six_axis_wandb_agent_moriah.sbatch',
-    ]
-    for script in scripts:
-        text = script.read_text()
-        code = '\n'.join(line for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#'))
+    rehearsal_path = ROOT/'scripts/run_sweep_v2_six_axis_wandb_bridge_rehearsal_moriah.sbatch'
+    production_path = ROOT/'scripts/run_sweep_v2_six_axis_wandb_agent_moriah.sbatch'
+
+    for path in (rehearsal_path, production_path):
+        _text, code = _noncomment(path)
+        # Exactly one agent invocation, count 1, in both launchers.
         assert code.count('wandb agent') == 1
-        assert 'wandb agent --count 1 "${WANDB_SWEEP_ID}"' in code
+        assert 'wandb agent --count 1 ' in code
         assert 'FORBIDDEN_PRODUCTION_SWEEP_ID="4x3btz2s"' in code
-        assert 'if [ "${WANDB_SWEEP_ID}" = "${FORBIDDEN_PRODUCTION_SWEEP_ID}" ]' in code
         assert 'export WANDB_PROJECT WANDB_ENTITY' in code
         assert 'export PATH="$(dirname "${CANONICAL_PYTHON}"):${PATH}"' in code
         assert 'date -u' in code and 'hostname' in code and 'pwd' in code
         assert 'EXPECTED_COMMIT:' in code and 'V2_BRIDGE_MANIFEST:' in code
-    rehearsal = scripts[0].read_text()
-    production = scripts[1].read_text()
+
+    rehearsal, rehearsal_code = _noncomment(rehearsal_path)
+    production, production_code = _noncomment(production_path)
+
+    # The CLOSED rehearsal launcher keeps its operator-supplied sweep id and
+    # its single frozen-v1 shell guard, unchanged.
+    assert 'wandb agent --count 1 "${WANDB_SWEEP_ID}"' in rehearsal_code
+    assert 'if [ "${WANDB_SWEEP_ID}" = "${FORBIDDEN_PRODUCTION_SWEEP_ID}" ]' in rehearsal_code
     assert '#SBATCH --partition=glacier' in rehearsal and '--gres=' not in rehearsal
+
+    # The production launcher targets the loader-validated manifest-derived
+    # sweep id, mirrors BOTH forbidden literals, and calls the pre-agent
+    # validator before the sole agent line.
+    assert 'wandb agent --count 1 "${VALIDATED_SWEEP_ID}"' in production_code
+    assert 'FORBIDDEN_DISPOSABLE_REHEARSAL_SWEEP_ID="oz5p4csb"' in production_code
+    assert 'validate-launch' in production_code
+    assert production_code.index('validate-launch') < production_code.index('wandb agent --count 1')
     assert '#SBATCH --partition=catfish' in production and '#SBATCH --gres=gpu:l4:1' in production
+
+
+def test_production_launcher_requires_and_exports_the_operational_manifest_seam():
+    production = (ROOT/'scripts/run_sweep_v2_six_axis_wandb_agent_moriah.sbatch').read_text()
+    code = '\n'.join(l for l in production.splitlines() if l.strip() and not l.lstrip().startswith('#'))
+    # Exactly one strict, immutable production manifest is selected through the
+    # explicit operational input, required and file-checked before launch, and
+    # exported so the W&B-created bridge subprocess inherits it.
+    assert ': "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST:?' in code
+    assert 'test -f "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}"' in code
+    assert 'export FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST' in code
+    # Static controller command: no swept CLI args, exactly one agent.
+    assert '${args}' not in code
+    assert code.count('wandb agent') == 1
+    # The agent target is the loader-validated manifest-derived sweep id, not
+    # an unjoined operator-supplied id.
+    assert 'wandb agent --count 1 "${VALIDATED_SWEEP_ID}"' in code
+    assert 'VALIDATED_SWEEP_ID="$(' in code and 'validate-launch' in code
+    # The pre-agent validator runs before the sole agent invocation.
+    assert code.index('validate-launch') < code.index('wandb agent --count 1')
+    # A non-empty inherited bridge self-test hook is refused nonzero, then unset.
+    assert 'if [ -n "${FLASHNH_SWEEP_V2_BRIDGE_SELFTEST:-}" ]; then' in code
+    assert 'unset FLASHNH_SWEEP_V2_BRIDGE_SELFTEST' in code
+    assert (code.index('FLASHNH_SWEEP_V2_BRIDGE_SELFTEST')
+            < code.index('validate-launch') < code.index('wandb agent --count 1'))
+    # Both forbidden production sweep ids are mirrored at shell level.
+    assert 'FORBIDDEN_PRODUCTION_SWEEP_ID="4x3btz2s"' in code
+    assert 'FORBIDDEN_DISPOSABLE_REHEARSAL_SWEEP_ID="oz5p4csb"' in code
+    # No credentials embedded; no environment dump.
+    lowered = production.lower()
+    for marker in ('api_key', 'wandb_api_key', 'password', 'secret', 'netrc'):
+        assert marker not in lowered
+    # The CLOSED rehearsal launcher must NOT gain the production env seam.
+    rehearsal = (ROOT/'scripts/run_sweep_v2_six_axis_wandb_bridge_rehearsal_moriah.sbatch').read_text()
+    assert 'FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST' not in rehearsal
+
+
+def test_production_launcher_forbidden_id_shell_mirror_matches_authoritative_set():
+    """The shell-level literals must not drift from FORBIDDEN_PRODUCTION_SWEEP_IDS."""
+    production = (ROOT/'scripts/run_sweep_v2_six_axis_wandb_agent_moriah.sbatch').read_text()
+    import re as _re
+    mirrored = set(_re.findall(r'FORBIDDEN_[A-Z_]*SWEEP_ID="([0-9a-z]+)"', production))
+    assert mirrored == set(FORBIDDEN_PRODUCTION_SWEEP_IDS)
 
 
 class _FakeRun:

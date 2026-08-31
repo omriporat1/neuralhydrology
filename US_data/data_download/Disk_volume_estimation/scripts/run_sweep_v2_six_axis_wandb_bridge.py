@@ -2,9 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+# Clearly named v2 PRODUCTION operational input: the reusable v2 production
+# W&B controller has a static command that embeds no proposal-specific
+# manifest, so each separately launched one-agent production job selects its
+# one immutable strict manifest through this environment variable, inherited
+# by the W&B-created bridge subprocess. The rehearsal path keeps its
+# existing positional-manifest invocation (the disposable sweep command
+# carries the manifest path). Resolution happens before wandb is imported or
+# initialized and before any proposal intake is written.
+ENV_V2_PRODUCTION_MANIFEST = "FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST"
+_SELFTEST_ENV = "FLASHNH_SWEEP_V2_BRIDGE_SELFTEST"
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -17,7 +29,8 @@ from src.baseline.pilot_lead06_config import load_screening_basin_ids
 from src.baseline import sweep_v1_campaign as sweep
 from src.baseline.sweep_v1_execution import enrich_layer_b_provenance
 from src.baseline.sweep_v2_six_axis_campaign import (
-    FORBIDDEN_V1_SWEEP_ID, SweepV2CampaignError, canonical_hyperparameters_v2, normalize_seq_length_axis,
+    FORBIDDEN_PRODUCTION_SWEEP_IDS, FORBIDDEN_V1_SWEEP_ID, SweepV2CampaignError,
+    canonical_hyperparameters_v2, normalize_seq_length_axis,
 )
 from src.baseline.sweep_v2_six_axis_config import V2_METRIC_NAME, V2_REHEARSAL_PLACEHOLDER_METRIC_NAME
 from src.baseline.sweep_v2_six_axis_execution import (
@@ -123,6 +136,12 @@ def _validate_screening_binding(manifest: Mapping[str, Any]) -> None:
 def _execute(manifest: Mapping[str, Any]) -> int:
     if manifest["wandb_sweep_id"] == FORBIDDEN_V1_SWEEP_ID:
         raise SweepV2BridgeRefusal("v1 sweep forbidden")
+    # Defense in depth: a mode=production manifest must never target the frozen
+    # v1 production sweep or the CLOSED disposable rehearsal sweep. The strict
+    # loader already rejects this, so this only fires for a manifest handed
+    # straight to ``_execute``; either way it is refused before ``wandb.init()``.
+    if manifest["mode"] == "production" and manifest["wandb_sweep_id"] in FORBIDDEN_PRODUCTION_SWEEP_IDS:
+        raise SweepV2BridgeRefusal("forbidden production sweep id")
     _validate_manifest_repository_root(manifest)
     contract = load_fixed_support_contract(manifest["fixed_support_contract_path"])
     if (contract["checksum_sha256"] != manifest["fixed_support_contract_sha256"]
@@ -197,6 +216,43 @@ def _execute(manifest: Mapping[str, Any]) -> int:
         run.finish()
 
 
+def resolve_bridge_manifest_source(argv: "list[str]", environ: Mapping[str, str]) -> str:
+    """Resolve exactly one strict launch-manifest path, before any W&B
+    import/init or proposal-intake write.
+
+    Accepts one source: the existing rehearsal positional argument, or the
+    v2 production environment variable :data:`ENV_V2_PRODUCTION_MANIFEST`.
+    If both are supplied they must agree exactly (same path); a contradiction
+    or the absence of both is a hard, clearly-reported error raised here --
+    before W&B or proposal contact.
+    """
+    positionals = [arg for arg in argv[1:] if not arg.startswith("-")]
+    if len(positionals) > 1:
+        raise SweepV2BridgeRefusal(
+            f"at most one positional manifest path is accepted, got {positionals!r}"
+        )
+    positional = positionals[0] if positionals else None
+
+    env_raw = environ.get(ENV_V2_PRODUCTION_MANIFEST)
+    env_value = env_raw.strip() if env_raw and env_raw.strip() else None
+
+    if positional is not None and env_value is not None:
+        if Path(positional) != Path(env_value):
+            raise SweepV2BridgeRefusal(
+                f"positional manifest {positional!r} contradicts "
+                f"{ENV_V2_PRODUCTION_MANIFEST}={env_value!r}; supply only one"
+            )
+        return positional
+    if positional is not None:
+        return positional
+    if env_value is not None:
+        return env_value
+    raise SweepV2BridgeRefusal(
+        "no launch manifest source: pass one positional manifest path (rehearsal) "
+        f"or set {ENV_V2_PRODUCTION_MANIFEST} (production)"
+    )
+
+
 def main_from_manifest(path: str | Path) -> int:
     from src.baseline.sweep_v1_runtime_contract import run_full_runtime_contract
     from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import load_v2_wandb_bridge_manifest
@@ -211,9 +267,17 @@ def main_from_manifest(path: str | Path) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("one manifest path required")
     try:
-        raise SystemExit(main_from_manifest(sys.argv[1]))
+        _manifest_source = resolve_bridge_manifest_source(sys.argv, os.environ)
+    except SweepV2BridgeRefusal as exc:
+        raise SystemExit(f"REFUSING: {exc}") from exc
+    if os.environ.get(_SELFTEST_ENV) == "resolve_only":
+        # Network-free hook: prove the manifest source resolves (and no
+        # swept --key=value CLI args reached this process) before any W&B
+        # import. Exits before main_from_manifest / wandb contact.
+        print(json.dumps({"resolved_manifest_path": str(_manifest_source), "argv_tail": sys.argv[1:]}))
+        raise SystemExit(0)
+    try:
+        raise SystemExit(main_from_manifest(_manifest_source))
     except SweepV2BridgeRefusal as exc:
         raise SystemExit(f"REFUSING: {exc}") from exc
