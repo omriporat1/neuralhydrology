@@ -54,9 +54,9 @@ def _row(*, search_arm, proposal_order, valid_result_order, workflow_status="pas
 
 
 def _small_trial_df() -> pd.DataFrame:
-    """5 valid Bayesian, 1 failed Bayesian (proposal_order=3); v2 has no
-    random_control arm (SEARCH_ARMS_V2 is Bayesian-only), so this fixture
-    intentionally omits it (unlike v1's fixture)."""
+    """5 valid Bayesian, 1 failed Bayesian (proposal_order=3); this fixture
+    intentionally carries only the Bayesian arm (unlike v1's fixture), so the
+    random-control selection path is exercised with zero available rows."""
     rows = [
         _row(search_arm="bayesian", proposal_order=1, valid_result_order=1, best_score=0.340,
              learning_rate=9.5e-4, hidden_size=64, seq_length=48),
@@ -208,7 +208,7 @@ def test_top_configurations_table_v2_ranked_and_capped_per_arm():
     df = _small_trial_df()
     table = analysis_v2.top_configurations_table_v2(df, n_bayesian=2, n_random=1)
     assert (table["search_arm"] == "bayesian").sum() <= 2
-    assert (table["search_arm"] == "random_control").sum() == 0  # v2 has no random-control arm
+    assert (table["search_arm"] == "random_control").sum() == 0  # this fixture carries only Bayesian rows
     assert list(table["rank"]) == list(range(1, len(table) + 1))
     assert list(table["best_score"]) == sorted(table["best_score"], reverse=True)
 

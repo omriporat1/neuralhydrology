@@ -82,7 +82,15 @@ CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID = "oz5p4csb"
 # at shell level for pre-contact refusal, guarded against drift by a test).
 FORBIDDEN_PRODUCTION_SWEEP_IDS = frozenset({FORBIDDEN_V1_SWEEP_ID, CLOSED_DISPOSABLE_REHEARSAL_SWEEP_ID})
 
-SEARCH_ARMS_V2 = frozenset({"bayesian"})
+# Mirrors v1's ``sweep_v1_campaign.SEARCH_ARMS`` exactly: the live W&B
+# Bayesian production controller is one arm; the frozen, pre-committed IID
+# ``random_control`` manifest (``sweep_v2_six_axis_random_control``) is a
+# scientifically independent second arm that shares this campaign's identity
+# grammar/execution/review spine but never contacts the Bayesian controller.
+# Broadening this set does not widen the Bayesian search: the production
+# prepare path is arm-parametrized (``prepare_bayesian_proposal_v2`` pins
+# ``expected_arm="bayesian"``) and the W&B sweep config is unchanged.
+SEARCH_ARMS_V2 = frozenset({"bayesian", "random_control"})
 
 _AXES_V2 = ("learning_rate", "hidden_size", "embedding_dropout", "output_dropout", "batch_size", "seq_length")
 # Guards against silent v1 axis-set drift: if v1's frozen five-axis field

@@ -17,12 +17,15 @@ identity (``sweep.CAMPAIGN_ID``/``sweep.DOMAIN_VERSION``/``sweep.configuration_i
 :func:`_review_records_v2`, :func:`execute_prepared_trial_v2`, and
 :func:`enrich_operations_slurm_accounting_v2`.
 
-Never starts NH/torch training itself -- exactly like ``sweep_v1_execution``,
-real training dispatch (the v1 equivalents of ``build_execution_context``/
-``run_prepared_trial_in_production``) is out of scope here: this module is
-exercised only via an injected ``execute_prepared_run_fn`` returning a
-synthetic ``pilot_orchestration.PreparedPilotExecutionResult``, never via a
-real NH/W&B call.
+The v2-identity-aware real training entry points --
+:func:`build_execution_context_v2` and
+:func:`run_prepared_trial_in_production_v2` -- are the v2 siblings of
+``sweep_v1_execution.build_execution_context`` /
+``run_prepared_trial_in_production``; like v1's, they are never called by
+local tests (they start real NH training/evaluation). Every other function
+here is exercised only via an injected ``execute_prepared_run_fn`` returning
+a synthetic ``pilot_orchestration.PreparedPilotExecutionResult`` and never
+contacts W&B.
 """
 from __future__ import annotations
 
@@ -62,6 +65,7 @@ from .sweep_v2_six_axis_config import V2_METRIC_NAME
 from .fixed_support_contract_v2 import (
     evaluate_fixed_support_raw_space_metrics,
     evaluate_natural_support_raw_space_metrics,
+    load_fixed_support_contract,
 )
 from .nh_config_generation import read_package_manifest, validate_full_population_basin_membership
 from .pilot_lead06_config import load_pilot_policy, load_screening_basin_ids
@@ -72,6 +76,7 @@ __all__ = [
     "write_proposal_intake_provenance_v2",
     "select_executor_mode_v2",
     "execute_prepared_trial_v2",
+    "run_prepared_trial_in_production_v2",
     "build_v2_epoch_evaluator",
     "build_execution_context_v2",
     "build_v2_objective_publication_payload",
@@ -310,6 +315,64 @@ def build_execution_context_v2(*, prepared_record: Mapping[str, Any], paths, bas
     return SweepV1ExecutionContext(execution_policy=policy, config_dir=Path(prepared_record["expected_output_dir"]),
         experiment_name=str(prepared_record["trial_id"]), target_variable=str(manifest["target_variable"]),
         lead_hours=int(manifest["lead_hours"]), screening_basin_ids=screening, package_root=Path(paths.package_root))
+
+
+def run_prepared_trial_in_production_v2(*, prepared_record: Mapping[str, Any], output_dir: Path,
+                                       paths, base_pilot_policy_path: "str | Path",
+                                       retry_of_trial_id: "str | None" = None,
+                                       slurm_job_id: "str | None" = None) -> dict[str, Any]:
+    """v2 sibling of :func:`sweep_v1_execution.run_prepared_trial_in_production`.
+
+    Builds the v2 execution context, loads and identity-checks the frozen
+    fixed-support (Common-120) contract from ``paths.fixed_support_contract_path``,
+    wires the per-epoch fixed/natural-support evaluator, then executes and
+    interprets exactly one prepared trial via the mature NH orchestration's
+    MONOLITHIC executor and :func:`execute_prepared_trial_v2` -- the identical
+    real, focused-tested v2 execution/interpretation layer the Bayesian bridge
+    uses (``scripts/run_sweep_v2_six_axis_wandb_bridge.py``'s ``_execute``).
+    Arm-agnostic: neither :func:`build_execution_context_v2` nor
+    :func:`execute_prepared_trial_v2` branches on ``search_arm`` -- only the
+    prepare-time front door differs (:func:`~sweep_v2_six_axis_production_adapter.prepare_bayesian_proposal_v2`
+    vs :func:`~sweep_v2_six_axis_production_adapter.prepare_random_control_proposal_v2`).
+    Never contacts W&B or the Bayesian controller.
+
+    Never called by local tests (it starts real NH training/evaluation).
+    """
+    mode = select_executor_mode_v2(prepared_record)
+    if mode != EXECUTOR_MODE_MONOLITHIC:
+        raise SweepV2ExecutionError(f"no production dispatch is wired for executor mode {mode!r}")
+
+    context = build_execution_context_v2(
+        prepared_record=prepared_record, paths=paths, base_pilot_policy_path=base_pilot_policy_path
+    )
+    contract = load_fixed_support_contract(paths.fixed_support_contract_path)
+    if (contract["checksum_sha256"] != prepared_record["support_contract_sha256"]
+            or contract["contract_id"] != prepared_record["support_contract_version"]
+            or len(contract["basin_ids"]) != 400):
+        raise SweepV2ExecutionError(
+            "fixed-support contract identity does not match the prepared v2 trial's bound contract"
+        )
+    evaluator = build_v2_epoch_evaluator(
+        support_contract=contract, package_root=context.package_root,
+        screening_basin_ids=context.screening_basin_ids,
+    )
+
+    def _execute() -> "pilot_orchestration.PreparedPilotExecutionResult":
+        return pilot_orchestration.execute_prepared_pilot_run_monolithic(
+            execution_policy=context.execution_policy, config_dir=context.config_dir,
+            experiment_name=context.experiment_name, package_root=context.package_root,
+            target_variable=context.target_variable, lead_hours=context.lead_hours,
+            screening_basin_ids=context.screening_basin_ids,
+            target_epoch=int(prepared_record["target_epoch"]),
+            supplemental_epoch_evaluator=evaluator,
+        )
+
+    return execute_prepared_trial_v2(
+        prepared_record=prepared_record, output_dir=output_dir,
+        expected_screening_population=len(context.screening_basin_ids),
+        execute_prepared_run_fn=_execute, retry_of_trial_id=retry_of_trial_id,
+        slurm_job_id=slurm_job_id, executor_mode=mode,
+    )
 
 
 def build_v2_objective_publication_payload(record: Mapping[str, Any]) -> dict[str, Any]:

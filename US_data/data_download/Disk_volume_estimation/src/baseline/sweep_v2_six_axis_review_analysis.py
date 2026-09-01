@@ -279,10 +279,11 @@ def top_configurations_table_v2(trial_df: pd.DataFrame, n_bayesian: int = 10, n_
     """v2 sibling of :func:`sweep_v1_review_analysis.top_configurations_table`.
 
     Identical ranking/short-id construction, with ``seq_length`` added to
-    the displayed hyperparameter columns. v2 never runs a ``random_control``
-    arm (:data:`sweep_v2_six_axis_campaign.SEARCH_ARMS_V2` is Bayesian-only),
-    so ``n_random`` defaults are retained only for interface parity with v1
-    and will simply select zero rows against real v2 evidence.
+    the displayed hyperparameter columns. v2 carries a scientifically
+    independent frozen ``random_control`` arm
+    (:mod:`sweep_v2_six_axis_random_control`); ``n_random`` selects its
+    top rows once random-control evidence exists, and simply selects zero
+    rows while only Bayesian evidence is present.
     """
     valid = valid_trials(trial_df)
     bayesian = valid[valid["search_arm"] == "bayesian"].sort_values("best_score", ascending=False).head(n_bayesian)

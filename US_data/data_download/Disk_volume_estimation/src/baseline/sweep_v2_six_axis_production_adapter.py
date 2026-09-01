@@ -34,7 +34,12 @@ from .pilot_lead06_config import (
     load_screening_basin_ids,
 )
 from .policy_v2_six_axis import load_stage1_baseline_policy_v2_six_axis
-from .sweep_v1_production_adapter import PreparationPaths as PreparationPathsV1, _verify_artifact_identities
+from . import sweep_v2_six_axis_random_control as rc
+from .sweep_v1_production_adapter import (
+    PreparationPaths as PreparationPathsV1,
+    _sha256,
+    _verify_artifact_identities,
+)
 from .sweep_v2_six_axis_campaign import (
     CAMPAIGN_ID_V2,
     CONFIGURATION_CANONICALIZATION_VERSION_V2,
@@ -55,6 +60,7 @@ __all__ = [
     "PreparationPathsV2",
     "PreparedSweepV2Proposal",
     "prepare_bayesian_proposal_v2",
+    "prepare_random_control_proposal_v2",
     "write_prepared_proposal_v2",
 ]
 
@@ -189,9 +195,40 @@ def prepare_bayesian_proposal_v2(*, proposal: Mapping[str, Any], paths: Preparat
     """Prepare one v2 six-axis Bayesian proposal; W&B values are
     telemetry-only provenance. Mirrors
     :func:`sweep_v1_production_adapter.prepare_bayesian_proposal` exactly in
-    shape; the only search arm currently legal for v2 is ``"bayesian"`` (see
+    shape; ``expected_arm`` is pinned to ``"bayesian"`` here, so the
+    scientifically independent ``random_control`` arm can never be prepared
+    through this Bayesian front door (see
     :data:`sweep_v2_six_axis_campaign.SEARCH_ARMS_V2`)."""
     return _prepare_proposal_v2(proposal=proposal, paths=paths, expected_arm="bayesian")
+
+
+def prepare_random_control_proposal_v2(*, row: Mapping[str, Any], manifest_path: Path,
+                                       paths: PreparationPathsV2,
+                                       execution_generation: int = 1) -> PreparedSweepV2Proposal:
+    """Prepare one immutable committed v2 six-axis random-control row without
+    regenerating it.
+
+    Mirrors :func:`sweep_v1_production_adapter.prepare_random_control_row`
+    exactly: verify the manifest's frozen SHA-256, confirm the requested row
+    is an exact committed manifest row (never recomputed), strip the
+    manifest-only identity/provenance fields, then run the identical
+    :func:`_prepare_proposal_v2` path the Bayesian arm uses with
+    ``expected_arm="random_control"``. No W&B, no Bayesian-controller
+    contact: random-control rows are a fixed committed manifest, not a live
+    search."""
+    manifest_path = Path(manifest_path)
+    if _sha256(manifest_path) != rc.RANDOM_CONTROL_MANIFEST_SHA256_V2:
+        raise SweepV2PreparationError("v2 random-control manifest SHA-256 does not match frozen bytes")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or dict(row) not in rows:
+        raise SweepV2PreparationError("requested random row is not an exact committed manifest row")
+    supplied = dict(row)
+    supplied["execution_generation"] = execution_generation
+    for manifest_only in ("configuration_id", "proposal_id", "trial_id_attempt001",
+                          "manifest_rng_seed", "manifest_index"):
+        supplied.pop(manifest_only, None)
+    return _prepare_proposal_v2(proposal=supplied, paths=paths, expected_arm="random_control")
 
 
 _LAYER_B_PROVENANCE_FILENAME = "execution_provenance.json"
