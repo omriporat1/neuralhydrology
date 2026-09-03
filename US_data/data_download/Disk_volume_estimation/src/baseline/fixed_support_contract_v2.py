@@ -67,6 +67,12 @@ __all__ = [
     "evaluate_fixed_support_raw_space_metrics",
     "evaluate_natural_support_raw_space_metrics",
     "extract_v2_objective_from_fixed_support_result",
+    # Neutral primitives shared additively with the devpop-audit contract family.
+    "serialize_support_date_array",
+    "deserialize_support_date_array",
+    "canonical_contract_checksum_payload",
+    "is_strict_int",
+    "strict_int",
 ]
 
 
@@ -127,6 +133,45 @@ def _deserialize_date_array(values: list, date_dtype: str) -> np.ndarray:
 def _canonical_payload_for_checksum(payload: Mapping) -> bytes:
     body = {k: v for k, v in payload.items() if k != "checksum_sha256"}
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Neutral primitives, exposed additively (same objects as the internal
+# underscore helpers).  The development-population Common-120 *audit* contract
+# family (:mod:`src.baseline.devpop_common120_audit_contract`) reuses these so
+# the two contract families stay byte-compatible in how they serialize
+# per-basin support and checksum, without any module importing an
+# underscore-prefixed name across a package boundary.  These are pure
+# encoding/accounting helpers -- no scientific math, no population semantics,
+# no optimizer identity.
+# --------------------------------------------------------------------------- #
+
+serialize_support_date_array = _serialize_date_array
+deserialize_support_date_array = _deserialize_date_array
+canonical_contract_checksum_payload = _canonical_payload_for_checksum
+
+
+def is_strict_int(value: object) -> bool:
+    """True only for a genuine Python ``int`` that is not a ``bool``.
+
+    ``True``/``False`` and floating-point values (even integral ones such as
+    ``2307.0``) are rejected -- an accounting field that compares "equal" to an
+    integer only after a bool/float coercion is treated as missing evidence.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def strict_int(value: object, *, name: str, minimum: Optional[int] = None) -> int:
+    """Return ``value`` if it is a strict non-bool ``int`` (optionally
+    ``>= minimum``); otherwise raise :class:`FixedSupportContractError`.
+    """
+    if not is_strict_int(value):
+        raise FixedSupportContractError(
+            f"{name} must be a strict integer (no bool, no float), got {value!r}"
+        )
+    if minimum is not None and value < minimum:
+        raise FixedSupportContractError(f"{name} must be >= {minimum}, got {value!r}")
+    return int(value)
 
 
 def build_fixed_support_contract(
