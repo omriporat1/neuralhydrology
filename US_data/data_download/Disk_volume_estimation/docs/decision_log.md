@@ -2,6 +2,29 @@
 
 # Decision Log
 
+## 2026-09-03 — `[SHARED-A1]` + `[SHARED-A2]`: LOCAL reusable development-population Common-120 audit foundation closed (contract + one-configuration consumer seam + explicit checkpoint/result provenance receipt); production audit orchestration, checkpoint selection, the real 2,307-basin audit, and acceptance criteria remain future gated work
+
+**[CLOSED — LOCAL FOUNDATION ONLY; NO PRODUCTION AUDIT, NO REMOTE/W&B/SEALED ACCESS]** The screening-400 vs full-population development-validation audit's implementation is no longer wholly undefined. This closure records the two local increments that establish its reusable foundation and commits the reviewed A2 patch plus this documentation. No remote compute, W&B, sealed-scope, or scientific next-step action occurred.
+
+**Decision / status now closed.**
+- The canonical development-population Common-120 audit contract and its strict fail-closed completeness boundary (`[SHARED-A1]`, already committed at HEAD `ffc798b`): explicit `ExpectedPopulationSpec`, diagnostic `common120_raw_space_nse_devpop_audit_v001` contract, frozen per-basin admitted-timestamp support, completeness gate that forbids any excluded basin.
+- The local one-configuration audit consumer/evaluator seam (`[SHARED-A2]`, `src/baseline/devpop_common120_audit_evaluator.py` + focused test), turning explicit caller-supplied trial/checkpoint identity + an already-produced NH period-results artifact + the A1 contract into one audit row via the qualified raw-space path (`derive_basin_area_km2_from_netcdf`, `evaluate_basin_raw_space`, `aggregate_raw_space_metrics`) reused verbatim and the A1 completeness gate; exact Common-120 support alignment with no silent realignment or truncation.
+- An explicit producer→consumer provenance-receipt contract binding trial id, configuration id, period, checkpoint epoch, checkpoint filename/SHA-256, and canonical period-results relative path/SHA-256; the consumer re-hashes and verifies the actual checkpoint and result-artifact bytes fail-closed before emitting a row.
+- Synthetic vertical integration through the real qualified raw-space helpers (not monkeypatched), preserving fixture-vs-canonical label separation; canonical completeness recognised only through A1's gate, with no forgeable row-level canonical assertion.
+- Interface / Consumer Contract Gate: CLOSED after independent review (two material interface defects found — result↔checkpoint/trial provenance gap; forgeable canonical-row assertion), one consolidated correction resolving both, and targeted re-review (no new material regressions). Focused A2 tests: 18 passed.
+
+**Explicitly not decided / not executed.**
+- No checkpoint-selection rule (which checkpoint(s) to audit).
+- No production evaluation/inference runner or orchestration; no real producer provenance-receipt emission run.
+- No actual seven-configuration 2,307-basin development-validation audit; no real evaluation result.
+- No compute/remote plan; no Moriah synchronization, Slurm execution, h2o work, or W&B contact.
+- No audit acceptance threshold or ranking-stability interpretation criterion.
+- No sealed temporal-test / spatial-holdout / California access.
+- No winner, promotion, or causal hyperparameter conclusion; no search-space, objective, fidelity, candidate-space, or sampling-policy change.
+- Proposal 4 and random-control Wave 2 remain unlaunched and separately gated. The seven-configuration screening ranking remains provisional and descriptive.
+
+**Scope of this closure.** Adds `src/baseline/devpop_common120_audit_evaluator.py` and `tests/test_devpop_common120_audit_evaluator.py` (the already-reviewed local A2 patch) plus this documentation update (`docs/FLASHNH_CURRENT_STATE.md`, `docs/decision_log.md`). Committed as `Close development-population Common-120 audit seam` and pushed to `origin/master`. No other files.
+
 ## 2026-09-02 — V2 Proposal 3 adjudicated VALID (Bayesian observation 3); random-control Wave 1 (frozen rows 0–3) independently adjudicated VALID; seven valid v2 configurations now exist; screening-400 vs full-population audit is the next gate; Proposal 4 and random Wave 2 remain unlaunched and separately gated
 
 **[CLOSED — DOCUMENTATION-ONLY CLOSURE; NO WINNER, NO PROMOTION, NO CAUSAL HYPERPARAMETER INFERENCE]** Two v2 Stage-1 validation-optimization executions that ran concurrently at exact commit `b4fe5eda96f15276354fa4de882c1291c93710a7` have completed and been independently adjudicated by read-only scientific + operational completion review. This entry records their results and supersedes the earlier dated "Proposal 3 is not launched" / "random Wave 1 remains unlaunched" statements below (which remain valid as historical, dated notes and are not rewritten). No code, test, config, manifest, launcher, evidence bundle, W&B state, or remote run output was changed in this closure.
