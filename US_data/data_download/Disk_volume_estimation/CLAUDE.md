@@ -10,7 +10,7 @@ This file contains **stable operating guidance only**. It must not become a copy
 
 Before substantial work:
 
-1. Read the top/current-milestone summary of `docs/FLASHNH_CURRENT_STATE.md` and only the task-relevant linked sections.
+1. Read the top/current-milestone summary of `docs/FLASHNH_CURRENT_STATE.md` and only the task-relevant sections/symbols.
 2. Read only the relevant parts of `docs/decision_log.md` when a past decision affects the task.
 3. Read only the specialist scientific/technical documents needed for the current task.
 4. Inspect the actual Git state before editing.
@@ -209,13 +209,9 @@ Avoid wasteful conversational polling. Use an efficient waiting/background mecha
 
 ## 11. Session/context discipline
 
-Do **not** mechanically split sessions by milestone or phase.
+Canonical context/resource policy is `docs/agent_handoff_rules.md` §11 — follow it rather than a restated copy here.
 
-Instead, start a fresh Claude session when context accumulation is becoming more expensive than continuity, especially when a clean handoff point already exists (for example after a design freeze, reviewed commit, remote launch, or evidence-collection boundary).
-
-A bounded overnight continuation may reasonably span launch -> wait -> evidence -> predefined evaluation.
-
-Avoid repeatedly loading whole historical documents when the needed state can be recovered from the current top summary, targeted sections, Git, or evidence.
+Claude-specific addition: do **not** mechanically split sessions by milestone or phase. Start a fresh Claude session when context accumulation is becoming more expensive than continuity, especially at a clean handoff point (design freeze, reviewed commit, remote launch, evidence-collection boundary). A bounded overnight continuation may reasonably span launch -> wait -> predefined evidence/evaluation when explicitly authorized — this is not a violation of one-role-per-session.
 
 ## 12. Reporting and handoff
 

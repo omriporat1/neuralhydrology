@@ -159,6 +159,10 @@ For substantial integration tasks (see §5), also explicitly surface:
 8. **Implicit/reconstructed facts** — any authoritative facts the consumer still has to infer rather than obtain from the interface.
 9. **Vertical synthetic/integration test result** — pass/fail and where to inspect it.
 
+For material sessions, optionally include:
+
+10. **Resource telemetry (ephemeral)** — directly observed values only, e.g. context used/remaining, compaction count/status, relevant usage-limit headroom, reset timing if visible. Report only what the environment directly exposes; otherwise say `not visible`/`unavailable`. Never infer or fabricate quota state, and do not spend material extra tool/context budget to discover it. This is handoff/report-only — never copy runtime percentages or reset timers into Git-tracked state docs or durable memory. Omit for tiny tasks.
+
 This is a default reporting contract, not a ceremonial requirement.
 
 For a tiny read-only review, report only what is relevant. For a complex failure, security issue, or formal scientific closure, expand the report as needed.
@@ -204,4 +208,54 @@ When done:
 - follow docs/agent_handoff_rules.md completion-report convention
 ```
 
+### Execution efficiency
+
+By default: inspect the relevant symbols/sections first, and widen only when the task or risk requires it. Avoid unnecessary rereads of unchanged material. Bound terminal/test output to what is decision-relevant. Stop at the bounded objective rather than continuing past it. Report only decision-relevant information.
+
+Prompts should identify the relevant producer/consumer/interfaces and the likely files involved, without mechanically requiring whole-file reads. This is not license to skip legitimate broad integration or debugging work — the rule is **default targeted; widen when task/risk requires**.
+
 Do not repeat stable project rules that already live in `CLAUDE.md`, `AGENTS.md`, `docs/repo_policy.md`, or `docs/remote_operations.md`.
+
+## 11. Context and resource discipline
+
+This is the canonical context/resource policy for ChatGPT, Claude Code, Codex, and later agents. Agent-native entrypoints (`CLAUDE.md`, `AGENTS.md`) should point here rather than restate it.
+
+### 11.1 Durable synchronization
+
+Repository state — exact Git state, current-state/scientific docs, tests, compact evidence, and defined interfaces/contracts — is the durable cross-session synchronization layer. Conversation history and agent memory are supporting context, not authority over newer repository evidence.
+
+### 11.2 One bounded role per session
+
+Prefer one coherent role and bounded objective per material session (implementation, correction, independent review, or remote execution/evidence collection). Do not carry a completed session into a substantially different role merely because nominal context remains. Milestone/role completion is a natural retirement point — but do not mechanically split work when continuity is genuinely cheaper and safer.
+
+### 11.3 Targeted repository inspection
+
+Default to targeted inspection (symbol search, grep/find, bounded line ranges, exact interfaces/diffs) and widen only as needed. Do not read entire large modules/test suites/historical documents merely because they are named in a prompt — but whole-file/broad inspection remains appropriate when the task genuinely requires it. Avoid unnecessary rereads of unchanged material; a targeted reread is appropriate after compaction, to reconfirm an authoritative fact, or when debugging/integration genuinely requires it.
+
+### 11.4 Tool/output discipline
+
+Keep terminal/tool output decision-relevant: prefer filtered test output, focused status, and summaries plus artifact paths over repeatedly re-ingesting full logs, huge diffs, large tables, or entire background output.
+
+### 11.5 Verification discipline
+
+Use focused tests while iterating, perform one relevant final verification pass, and expand to broader suites only when risk or a focused failure warrants it. Never weaken correctness merely to save context.
+
+### 11.6 Review/correction discipline
+
+Use independent cross-agent review when it materially reduces risk (scientific interfaces, provenance/artifact identity, W&B/production paths, HPC plumbing, sealed-set protection, risky integration). Review the exact patch/commit rather than asking the reviewer to recreate the implementation. Prefer one fresh narrow reviewer, and prefer consolidating material findings into one correction cycle where practical; the same reviewer session may do one narrow re-review of its own findings when that saves re-derivation. One cycle is a preferred efficiency pattern, not a hard maximum — if material findings remain unresolved, continue correction and re-review as needed rather than declaring closure because a cycle count was reached. Do not use cross-agent review mechanically for symmetry.
+
+### 11.7 Compaction/session lifecycle
+
+Compaction is not automatically a failure or stop condition. If it occurs mid-task and sufficient working context remains, finish the current bounded task when practical and do not start a materially new role/scope afterward. Repeated context pressure is a signal the task/session may be oversized, not an automatic prohibition. Context percentage is a warning signal, not a hard cutoff — do not encode a fixed retirement threshold (e.g. a specific 50%/55% figure).
+
+### 11.8 Shared resource-aware routing
+
+Agent routing must weigh both task fit/risk and current resource headroom when known. Some agent surfaces draw from shared constrained usage pools: when telemetry indicates Codex usage shares constrained OpenAI-side capacity with ChatGPT's strategic work, treat that capacity as shared, and preserve enough headroom for ChatGPT's high-value responsibilities (scientific interpretation, milestone planning, workflow control, report review, prompt design, resolving ambiguities, handoff/closure decisions).
+
+Therefore: do not spend Codex on routine confirmation or symmetrical duplication; prefer Claude for implementation/routine verification when independence adds little; use Codex selectively when independent review materially reduces risk. However, resource conservation must never be used to skip genuinely important independent review — when independence materially matters, do the review and economize elsewhere.
+
+Do not encode assumptions about a specific product plan (fixed hourly/weekly limits, quota percentages, reset schedules) as durable policy — those are runtime facts that may change. The durable rule is that directly-visible runtime telemetry informs routing.
+
+### 11.9 User burden
+
+Each agent should report the resource telemetry it can directly observe; ChatGPT should use the latest available agent/environment telemetry when routing subsequent work. Only ask the user for resource information when it materially affects a routing decision and no agent/environment can observe it directly. Never guess unavailable quota information.

@@ -192,3 +192,5 @@ Escalate rather than silently changing:
 Follow the completion-report convention in `docs/agent_handoff_rules.md`.
 
 Keep reports compact and decision-relevant unless the task/anomaly warrants more detail.
+
+Follow `docs/agent_handoff_rules.md` §11 for context/resource discipline, including that independent review (§7 above) is selective and resource-aware — not mandatory for every Claude patch.
