@@ -21,6 +21,7 @@ frozen support subset.
 """
 from __future__ import annotations
 
+import collections.abc
 import hashlib
 import pickle
 from pathlib import Path
@@ -30,6 +31,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+import src.baseline.devpop_common120_audit_contract as contract_module
 import src.baseline.devpop_common120_audit_evaluator as evaluator_module
 from src.baseline.devpop_common120_audit_contract import (
     CANONICAL_SOURCE_GAP_POLICY_IDENTITY,
@@ -37,7 +39,9 @@ from src.baseline.devpop_common120_audit_contract import (
     DevpopAuditCompletenessError,
     DevpopAuditContractError,
     ExpectedPopulationSpec,
+    _deserialize_contract_support_prevalidated,
     build_devpop_audit_contract,
+    deserialize_contract_support,
 )
 from src.baseline.devpop_common120_audit_evaluator import (
     PROVENANCE_RECEIPT_SCHEMA,
@@ -470,3 +474,212 @@ def test_fabricated_canonical_booleans_do_not_establish_canonical_authority(tmp_
         evaluate_devpop_common120_audit_row(require_canonical=True, **kwargs)
     # the forged row never became canonical evidence anywhere
     assert forged_row["canonical_completeness"] is True  # still just a dict the caller made
+
+
+# --------------------------------------------------------------------------- #
+# SHARED-A5 evaluator performance repair: the full contract validator must not
+# be re-run once per basin.  These tests prove the optimisation is semantically
+# identical, not merely faster (no wall-clock assertion anywhere).
+# --------------------------------------------------------------------------- #
+
+# The genuine, unpatched full contract validator, captured before any test can
+# monkeypatch the module attribute.
+_ORIG_VALIDATE_CONTRACT = contract_module.validate_devpop_audit_contract
+
+
+class _CallCounter:
+    """Transparent wrapper that forwards to the real callable and counts hits."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self._fn(*args, **kwargs)
+
+
+def _setup_n(tmp_path, n_basins, *, epoch: int = 1):
+    """A complete valid synthetic evaluator environment parameterised by basin
+    count, so a per-basin cost shows up as growth with ``n_basins``."""
+    ids = tuple(f"{i + 1:08d}" for i in range(n_basins))
+    population = _population(ids)
+    dates = _val_dates()
+    admitted = np.zeros(len(dates), dtype=bool)
+    admitted[SUPPORT_IDX] = True
+    contract = build_devpop_audit_contract(
+        population=population,
+        target_variable=CANONICAL_TARGET_VARIABLE,
+        source_gap_policy_identity=CANONICAL_SOURCE_GAP_POLICY_IDENTITY,
+        per_basin_date={b: dates for b in ids},
+        per_basin_admitted={b: admitted for b in ids},
+        **IDENT,
+    )
+    _write_package(tmp_path / "pkg", ids)
+    _write_run_pickle(tmp_path / "run", ids, epoch=epoch)
+    ckpt = _write_checkpoint(tmp_path, epoch=epoch)
+    receipt = build_devpop_audit_provenance_receipt(
+        trial_id="trial-A",
+        configuration_id="cfg-A",
+        run_dir=tmp_path / "run",
+        period="validation",
+        checkpoint_epoch=epoch,
+        checkpoint_path=ckpt,
+    )
+    return dict(
+        checkpoint_identity=_identity(checkpoint_epoch=epoch),
+        run_dir=tmp_path / "run",
+        package_root=tmp_path / "pkg",
+        population=population,
+        contract=contract,
+        provenance_receipt=receipt,
+        checkpoint_path=ckpt,
+    )
+
+
+def test_full_contract_validator_is_not_invoked_once_per_basin(monkeypatch, tmp_path):
+    counter = _CallCounter(_ORIG_VALIDATE_CONTRACT)
+    # patch every binding the evaluator path can reach
+    monkeypatch.setattr(contract_module, "validate_devpop_audit_contract", counter)
+    monkeypatch.setattr(evaluator_module, "validate_devpop_audit_contract", counter)
+
+    kwargs_small = _setup_n(tmp_path / "small", 3)
+    row_small = evaluate_devpop_common120_audit_row(**kwargs_small)
+    calls_small = counter.calls
+
+    counter.calls = 0
+    kwargs_large = _setup_n(tmp_path / "large", 15)
+    row_large = evaluate_devpop_common120_audit_row(**kwargs_large)
+    calls_large = counter.calls
+
+    # invariant to basin count -> not called per basin
+    assert calls_small == calls_large
+    # a small constant: once at the evaluator boundary + once in the synthetic
+    # completeness gate.  Definitely not O(N_basins).
+    assert calls_large <= 3
+    assert calls_large < 15
+
+    # and the rows are still correct / complete on both fixtures
+    assert row_small["fixture_completeness"] is True
+    assert row_large["fixture_completeness"] is True
+    assert row_large["result"]["n_basins_evaluated"] == 15
+    for r in row_large["result"]["per_basin"]:
+        assert r["nse"] == pytest.approx(1.0)
+
+
+def test_prevalidated_support_matches_fully_validated_support_exactly(tmp_path):
+    kwargs = _setup_n(tmp_path, 5)
+    contract = kwargs["contract"]
+    for basin_id in kwargs["population"].basin_ids:
+        fast = _deserialize_contract_support_prevalidated(contract, basin_id)
+        full = deserialize_contract_support(dict(contract), basin_id)
+        assert fast.dtype == full.dtype
+        assert np.array_equal(fast, full)
+
+
+def test_tampered_contract_still_fails_before_any_row_is_emitted(tmp_path):
+    kwargs = _setup(tmp_path)
+    tampered = dict(kwargs["contract"])
+    tampered["checksum_sha256"] = "0" * 64  # break the whole-payload checksum
+    kwargs["contract"] = tampered
+    with pytest.raises(DevpopAuditEvaluatorError, match="SHARED-A1 validation"):
+        evaluate_devpop_common120_audit_row(**kwargs)
+
+
+def test_prevalidated_accessor_is_private_and_not_an_unvalidated_entry_point():
+    # it is a private helper: absent from the contract module's public API and
+    # not reachable under the old public name
+    assert "deserialize_contract_support_prevalidated" not in contract_module.__all__
+    assert "_deserialize_contract_support_prevalidated" not in contract_module.__all__
+    assert not hasattr(contract_module, "deserialize_contract_support_prevalidated")
+    # misuse fails as a clean contract error, never a bare KeyError / TypeError
+    with pytest.raises(DevpopAuditContractError):
+        _deserialize_contract_support_prevalidated(None, "00000001")
+    with pytest.raises(DevpopAuditContractError):
+        _deserialize_contract_support_prevalidated({}, "00000001")
+    with pytest.raises(DevpopAuditContractError):
+        _deserialize_contract_support_prevalidated({"per_basin_support": {}}, "00000001")
+
+
+class _RecordingMapping(collections.abc.Mapping):
+    """A caller-supplied custom Mapping that records every key read, used to
+    prove the evaluator does not re-consult it once per basin after validation."""
+
+    def __init__(self, data):
+        self._data = dict(data)
+        self.reads: list = []
+
+    def __getitem__(self, key):
+        self.reads.append(key)
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+
+def test_evaluator_consumes_the_validated_local_snapshot_not_the_caller_mapping(tmp_path):
+    """The evaluator must build ONE local plain-dict snapshot, validate it, and
+    read every subsequent contract field from that snapshot -- never from the
+    caller-supplied Mapping again, and never once per basin."""
+    kwargs = _setup_n(tmp_path, 6)
+    recording = _RecordingMapping(kwargs["contract"])
+    kwargs["contract"] = recording
+
+    row = evaluate_devpop_common120_audit_row(**kwargs)
+    assert row["fixture_completeness"] is True
+    assert row["result"]["n_basins_evaluated"] == 6
+
+    # the caller mapping is touched only to build the single local snapshot
+    # (dict(contract) -> one read per key); keys consulted inside the per-basin
+    # loop and the result construction (per_basin_support, checksum_sha256,
+    # contract_id, ...) are never read a second time here.
+    assert recording.reads.count("per_basin_support") <= 1
+    assert recording.reads.count("checksum_sha256") <= 1
+    assert recording.reads.count("contract_id") <= 1
+    assert len(recording.reads) == len(set(recording.reads))  # no key read twice
+
+
+def test_completeness_and_provenance_behaviour_is_unchanged_by_the_optimization(tmp_path):
+    """Regression anchor: the fixture path still emits exactly the same
+    completeness / provenance receipt shape it did before the per-basin
+    validator was removed."""
+    row = evaluate_devpop_common120_audit_row(**_setup(tmp_path))
+    assert row["fixture_completeness"] is True
+    assert row["completeness"]["fixture_completeness"] is True
+    assert row["canonical_completeness"] is False
+    assert row["canonical_population_verified"] is False
+    assert "canonical_completeness" not in row["completeness"]
+    assert row["provenance_verified"] is True
+    assert row["provenance"]["provenance_verified"] is True
+    assert [r["n_admitted"] for r in row["result"]["per_basin"]] == [20, 20, 20]
+
+
+def test_p1_real_data_equivalence_anchor_is_documented():
+    """DOCUMENTATION ANCHOR -- performs no scoring in this session.
+
+    The SHARED-A5 evaluator performance repair (removing the per-basin
+    re-validation of the full immutable audit contract) must be confirmed
+    semantically identical *on real data* by a SEPARATELY AUTHORISED small CPU
+    re-score of P1, run after this patch is committed.  That first post-commit
+    qualification must reproduce the pre-patch P1 canonical audit row exactly:
+
+        * canonical contract checksum ==
+          "1100c736693f2db3dd15f34cfdd89da6c06f59320b9afd0d3a78cfc2427ed46b"
+        * nse_median                  == 0.36470379840322187   (exact)
+        * canonical_completeness       is True
+        * canonical_population_verified is True
+        * provenance_verified          is True
+        * n_basins_evaluated           == 2307
+        * n_basins_excluded            == 0
+
+    No new real P1 scoring job is launched here; this records the required
+    equivalence target.
+    """
+    p1_contract_checksum = "1100c736693f2db3dd15f34cfdd89da6c06f59320b9afd0d3a78cfc2427ed46b"
+    p1_nse_median = 0.36470379840322187
+    assert len(p1_contract_checksum) == 64
+    assert int(p1_contract_checksum, 16) >= 0
+    assert p1_nse_median == pytest.approx(0.36470379840322187)

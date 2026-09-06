@@ -1224,6 +1224,70 @@ def test_no_public_entrypoint_accepts_an_arbitrary_period_string():
     assert population.period == "validation"
 
 
+# --------------------------------------------------------------------------- #
+# SHARED-A5: the fast pre-validated support accessor is semantically identical
+# to the public one, minus the O(contract-size) re-validation the caller has
+# already done at its boundary.
+# --------------------------------------------------------------------------- #
+
+def test_prevalidated_support_accessor_returns_identical_arrays(monkeypatch):
+    population = _population()
+    contract = _contract(population, n_admitted=3, timeline=5)
+
+    validate_calls = {"n": 0}
+    real_validate = audit.validate_devpop_audit_contract
+
+    def _counting_validate(c):
+        validate_calls["n"] += 1
+        return real_validate(c)
+
+    monkeypatch.setattr(audit, "validate_devpop_audit_contract", _counting_validate)
+
+    for basin_id in population.basin_ids:
+        via_public = audit.deserialize_contract_support(dict(contract), basin_id)
+        via_fast = audit._deserialize_contract_support_prevalidated(contract, basin_id)
+        assert via_fast.dtype == via_public.dtype
+        assert np.array_equal(via_fast, via_public)
+
+    # the public accessor fully validated once per call; the fast accessor never
+    # invoked the full validator at all.
+    assert validate_calls["n"] == len(population.basin_ids)
+
+
+def test_prevalidated_accessor_rejects_misuse_as_a_clean_contract_error():
+    population = _population()
+    contract = _contract(population)
+    good_basin = population.basin_ids[0]
+
+    with pytest.raises(DevpopAuditContractError):
+        audit._deserialize_contract_support_prevalidated(None, good_basin)
+    with pytest.raises(DevpopAuditContractError):
+        audit._deserialize_contract_support_prevalidated({"date_dtype": "int64"}, good_basin)
+    with pytest.raises(DevpopAuditContractError):
+        audit._deserialize_contract_support_prevalidated(contract, "99999999")
+
+
+def test_public_support_accessor_still_fails_closed_on_a_tampered_contract():
+    population = _population()
+    contract = _contract(population)
+    tampered = dict(contract)
+    tampered["checksum_sha256"] = "0" * 64
+    with pytest.raises(DevpopAuditContractError):
+        audit.deserialize_contract_support(tampered, population.basin_ids[0])
+
+
+def test_prevalidated_accessor_is_internal_and_not_exported():
+    # the fast per-basin accessor is a private helper: it must exist as a module
+    # attribute (so the evaluator can import it) but must NOT be part of the
+    # public API surface, and the old public name must not exist at all.
+    assert "deserialize_contract_support_prevalidated" not in audit.__all__
+    assert "_deserialize_contract_support_prevalidated" not in audit.__all__
+    assert not hasattr(audit, "deserialize_contract_support_prevalidated")
+    assert hasattr(audit, "_deserialize_contract_support_prevalidated")
+    # the public safe accessor stays exported
+    assert "deserialize_contract_support" in audit.__all__
+
+
 def test_building_audit_contract_does_not_touch_the_frozen_identity_json():
     identity_path = Path(audit.__file__).parents[2] / "config" / "stage1_v2_common120_fixed_support_artifact_identity_v001.json"
     before = identity_path.read_bytes()

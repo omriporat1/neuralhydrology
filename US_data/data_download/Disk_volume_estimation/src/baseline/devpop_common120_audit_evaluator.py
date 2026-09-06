@@ -16,7 +16,13 @@ into **one audit row**, by:
    established result helper
    :func:`src.baseline.common_support_audit.basin_date_and_admitted`;
 3. obtaining each basin's frozen admitted-timestamp set through the SHARED-A1
-   helper :func:`src.baseline.devpop_common120_audit_contract.deserialize_contract_support`;
+   support decoder: this seam validates one local contract snapshot once at its
+   boundary and then feeds that same snapshot into its per-basin loop via the
+   contract module's private
+   :func:`~src.baseline.devpop_common120_audit_contract._deserialize_contract_support_prevalidated`
+   helper, so the whole immutable contract is not re-validated per basin
+   (the public :func:`~src.baseline.devpop_common120_audit_contract.deserialize_contract_support`
+   stays the validated entry point for every other caller);
 4. requiring *exact* timestamp membership -- no silent realignment, no
    truncation -- then masking observations outside Common-120 support to NaN so
    the qualified raw-space path's own ``admitted_mask = isfinite(obs)``
@@ -76,7 +82,7 @@ from .devpop_common120_audit_contract import (
     DEVPOP_AUDIT_CONTRACT_ID,
     DevpopAuditContractError,
     ExpectedPopulationSpec,
-    deserialize_contract_support,
+    _deserialize_contract_support_prevalidated,
     require_complete_devpop_audit_population,
     require_complete_synthetic_devpop_audit_population,
     validate_canonical_devpop_audit_contract,
@@ -471,7 +477,12 @@ def _basin_support_metrics(
         ) from exc
 
     run_date_values = np.asarray(date_values)
-    support_dates = deserialize_contract_support(contract, basin_id)
+    # ``contract`` has already been validated (canonically or generically) at the
+    # evaluate_devpop_common120_audit_row boundary before this loop began, and it
+    # is immutable; use the fast per-basin accessor so the full O(contract-size)
+    # validator is not re-run once per basin (a ~2 h pathology over the 2,307-
+    # basin canonical contract).
+    support_dates = _deserialize_contract_support_prevalidated(contract, basin_id)
     if len(np.unique(run_date_values)) != len(run_date_values):
         raise DevpopAuditEvaluatorError(f"basin {basin_id!r}: run date coordinate contains duplicates")
     if len(np.unique(support_dates)) != len(support_dates):
@@ -595,29 +606,37 @@ def evaluate_devpop_common120_audit_row(
         raise DevpopAuditEvaluatorError("contract must be a mapping")
 
     # -- contract identity, through the SHARED-A1 validator(s) ---------------- #
+    # Take one local, ordinary-dict snapshot of the caller-supplied mapping and
+    # validate *that* object.  Every subsequent contract read in this evaluator
+    # -- identity checks, target/lead/period resolution, the per-basin support
+    # accessor, the completeness gate, the returned identity/checksum fields --
+    # consumes this same validated snapshot, never the original caller mapping.
+    # The snapshot is a semantics-preserving copy (the audit contract is
+    # immutable), not a scientific transformation.
+    validated_contract = dict(contract)
     try:
         if require_canonical:
-            validate_canonical_devpop_audit_contract(dict(contract))
+            validate_canonical_devpop_audit_contract(validated_contract)
         else:
-            validate_devpop_audit_contract(dict(contract))
+            validate_devpop_audit_contract(validated_contract)
     except DevpopAuditContractError as exc:
         raise DevpopAuditEvaluatorError(f"audit contract failed SHARED-A1 validation: {exc}") from exc
 
-    if contract["contract_id"] != DEVPOP_AUDIT_CONTRACT_ID:
+    if validated_contract["contract_id"] != DEVPOP_AUDIT_CONTRACT_ID:
         raise DevpopAuditEvaluatorError("audit contract is not the diagnostic development-population audit contract")
-    if list(contract["basin_ids"]) != list(population.basin_ids):
+    if list(validated_contract["basin_ids"]) != list(population.basin_ids):
         raise DevpopAuditEvaluatorError(
             "audit contract basin_ids do not equal the expected population basin_ids "
             "(the consumer never reconciles a population/contract mismatch)"
         )
-    if contract["membership_ids_sha256"] != population.membership_ids_sha256:
+    if validated_contract["membership_ids_sha256"] != population.membership_ids_sha256:
         raise DevpopAuditEvaluatorError("audit contract membership hash does not equal the expected population hash")
-    if contract["period"] != population.period:
+    if validated_contract["period"] != population.period:
         raise DevpopAuditEvaluatorError("audit contract period does not equal the expected population period")
 
-    target_variable = contract["target_variable"]
-    lead_hours = contract["lead_hours"]
-    period = contract["period"]
+    target_variable = validated_contract["target_variable"]
+    lead_hours = validated_contract["lead_hours"]
+    period = validated_contract["period"]
 
     # -- authoritative producer -> consumer provenance receipt -------------- #
     # A declared checkpoint hash plus a result pickle selected only by
@@ -651,7 +670,7 @@ def evaluate_devpop_common120_audit_row(
             _basin_support_metrics(
                 basin_id=basin_id,
                 period_results=period_results,
-                contract=contract,
+                contract=validated_contract,
                 package_root=package_root,
                 target_variable=target_variable,
                 lead_hours=lead_hours,
@@ -665,9 +684,9 @@ def evaluate_devpop_common120_audit_row(
 
     result = {
         "objective_scope": AUDIT_OBJECTIVE_SCOPE,
-        "contract_id": contract["contract_id"],
-        "contract_checksum_sha256": contract["checksum_sha256"],
-        "seq_length_floor": contract["seq_length_floor"],
+        "contract_id": validated_contract["contract_id"],
+        "contract_checksum_sha256": validated_contract["checksum_sha256"],
+        "seq_length_floor": validated_contract["seq_length_floor"],
         "target_variable": target_variable,
         "lead_hours": lead_hours,
         "period": period,
@@ -685,11 +704,11 @@ def evaluate_devpop_common120_audit_row(
     # -- SHARED-A1 completeness gate (the only producer of the receipt) ------ #
     if require_canonical:
         receipt = require_complete_devpop_audit_population(
-            result, population=population, contract=contract
+            result, population=population, contract=validated_contract
         )
     else:
         receipt = require_complete_synthetic_devpop_audit_population(
-            result, population=population, contract=contract
+            result, population=population, contract=validated_contract
         )
 
     canonical_completeness = receipt.get("canonical_completeness") is True
@@ -698,8 +717,8 @@ def evaluate_devpop_common120_audit_row(
     return {
         "schema": "flashnh_stage1_devpop_common120_audit_row_v001",
         "objective_scope": AUDIT_OBJECTIVE_SCOPE,
-        "contract_id": contract["contract_id"],
-        "contract_checksum_sha256": contract["checksum_sha256"],
+        "contract_id": validated_contract["contract_id"],
+        "contract_checksum_sha256": validated_contract["checksum_sha256"],
         "population_role": population.role,
         "expected_population_size": population.expected_size,
         "membership_ids_sha256": population.membership_ids_sha256,

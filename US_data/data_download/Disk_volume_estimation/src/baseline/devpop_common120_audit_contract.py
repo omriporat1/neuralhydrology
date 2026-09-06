@@ -1106,8 +1106,56 @@ def load_synthetic_devpop_audit_contract(path) -> dict:
 
 def deserialize_contract_support(contract: dict, basin_id: str) -> np.ndarray:
     """Decode the frozen admitted-timestamp array for ``basin_id`` -- reuses
-    the shared fixed-support date deserializer (no parallel logic)."""
+    the shared fixed-support date deserializer (no parallel logic).
+
+    This is the **public, safe** accessor: it fully validates ``contract``
+    first (:func:`validate_devpop_audit_contract`) and then decodes.  Its public
+    scientific meaning is unchanged.
+
+    A component that owns a validation boundary immediately above a per-basin
+    loop -- i.e. it has *already* validated the exact (immutable) contract
+    snapshot it is iterating -- may use the private
+    :func:`_deserialize_contract_support_prevalidated` helper directly to avoid
+    re-running the full O(contract-size) validator once per basin.  That helper
+    is internal on purpose; it is not a public unvalidated entry point.
+    """
     validate_devpop_audit_contract(contract)
+    return _deserialize_contract_support_prevalidated(contract, basin_id)
+
+
+def _deserialize_contract_support_prevalidated(contract: Mapping, basin_id: str) -> np.ndarray:
+    """Internal per-basin support accessor -- **not** part of the public API and
+    deliberately absent from ``__all__``.
+
+    Precondition (the caller's responsibility): the *exact* ``contract`` object
+    passed here has already passed the appropriate validator
+    (:func:`validate_devpop_audit_contract` or
+    :func:`validate_canonical_devpop_audit_contract`) earlier in the same
+    operation and has not been mutated or swapped since -- the audit contract is
+    immutable.  The only supported caller is
+    :func:`src.baseline.devpop_common120_audit_evaluator.evaluate_devpop_common120_audit_row`,
+    which validates one local contract snapshot at its boundary and then passes
+    that same snapshot straight into its per-basin loop.
+
+    This performs **only** the O(1) work :func:`deserialize_contract_support`
+    adds on top of validation: the per-basin membership check and the shared
+    date-array decode.  It deliberately does **not** re-run the full validator
+    (schema checks + a full re-serialize and SHA-256 of the entire
+    ~contract-sized payload), which -- called once per basin over the
+    2,307-basin canonical contract -- is a pathological
+    O(N_basins x contract_size) cost with no added safety once the contract has
+    been validated at the boundary.
+
+    An unvalidated caller must use the public
+    :func:`deserialize_contract_support` (or a full validator) instead.  The two
+    keys it depends on are asserted present so accidental misuse fails as a
+    clean :class:`DevpopAuditContractError`, not a bare ``KeyError``.
+    """
+    if not isinstance(contract, Mapping) or "per_basin_support" not in contract or "date_dtype" not in contract:
+        raise DevpopAuditContractError(
+            "_deserialize_contract_support_prevalidated requires an already-validated audit contract "
+            "mapping carrying 'per_basin_support' and 'date_dtype'"
+        )
     if basin_id not in contract["per_basin_support"]:
         raise DevpopAuditContractError(f"basin {basin_id!r} is not in the audit contract")
     return deserialize_support_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
