@@ -43,7 +43,7 @@ from .package_audit import sha256_file
 from .pilot_full_validation import load_validated_full_population_basin_ids
 from .pilot_lead06_config import build_pilot_bundle_with_validation_scope
 from .policy_v2_six_axis import load_stage1_baseline_policy_v2_six_axis
-from .sweep_v2_six_axis_campaign import configuration_id_v2
+from .sweep_v2_six_axis_campaign import FROZEN_FIXED_CONFIGURATION_V2, configuration_id_v2
 
 __all__ = [
     "DevpopAuditEvalRunProducerError",
@@ -201,6 +201,17 @@ def prepare_devpop_audit_eval_run_dir(
     policy_v2 = load_stage1_baseline_policy_v2_six_axis(baseline_policy_path, policy_overlay_path)
     axes = entry["hyperparameters"]
 
+    # The v2 six-axis campaign sweeps only learning_rate/hidden_size/
+    # embedding_dropout/output_dropout/batch_size/seq_length; the
+    # dynamic-input family is a FROZEN fixed-campaign property (PT:
+    # mrms_qpe_1h_mm, rtma_2t_K), pinned identically for every screened
+    # configuration via FROZEN_FIXED_CONFIGURATION_V2. The base scientific
+    # baseline policy still carries the older, wider dynamic-input set, so
+    # this must be passed explicitly -- otherwise the regenerated audit
+    # config silently inherits the baseline default and the resulting LSTM
+    # input dimension no longer matches the frozen screening checkpoint.
+    frozen_dynamic_inputs = list(FROZEN_FIXED_CONFIGURATION_V2["dynamic_inputs"])
+
     bundle = build_pilot_bundle_with_validation_scope(
         baseline_policy_path=baseline_policy_path,
         package_root=package_root,
@@ -216,6 +227,7 @@ def prepare_devpop_audit_eval_run_dir(
         embedding_dropout=float(axes["embedding_dropout"]),
         output_dropout=float(axes["output_dropout"]),
         batch_size=axes["batch_size"],
+        dynamic_inputs=frozen_dynamic_inputs,
         policy_override=policy_v2,
     )
 
@@ -244,6 +256,24 @@ def prepare_devpop_audit_eval_run_dir(
         raise DevpopAuditEvalRunProducerError(
             f"generated bundle validation window {val_start!r}..{val_end!r} != the frozen audit window "
             f"{expected_start!r}..{expected_end!r}"
+        )
+    # Fail closed on dynamic-input-family drift: the regenerated audit config
+    # MUST carry exactly the frozen v2 six-axis campaign's dynamic inputs, in
+    # order -- if it silently inherited the wider base-baseline set the LSTM
+    # input dimension would no longer match the frozen screening checkpoint
+    # and NH would abort loading the state dict.
+    generated_dynamic_inputs = list(bundle.dynamic_inputs)
+    if generated_dynamic_inputs != frozen_dynamic_inputs:
+        raise DevpopAuditEvalRunProducerError(
+            f"generated bundle dynamic_inputs {generated_dynamic_inputs!r} != the frozen v2 six-axis "
+            f"campaign dynamic-input family {frozen_dynamic_inputs!r} -- refusing to stage an audit run "
+            "whose input dimension would not match the frozen screening checkpoint"
+        )
+    config_dynamic_inputs = list(bundle.config_mapping.get("dynamic_inputs", []))
+    if config_dynamic_inputs != frozen_dynamic_inputs:
+        raise DevpopAuditEvalRunProducerError(
+            f"generated config_mapping dynamic_inputs {config_dynamic_inputs!r} != the frozen v2 six-axis "
+            f"campaign dynamic-input family {frozen_dynamic_inputs!r}"
         )
 
     write_generated_config(bundle, out_generated_dir, force=force)

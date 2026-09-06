@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import yaml
 
 from src.baseline.devpop_audit_eval_run_producer import (
     AUDIT_EVAL_RUN_MANIFEST_FILENAME,
@@ -50,7 +51,8 @@ from src.baseline.devpop_common120_audit_evaluator import (
     evaluate_devpop_common120_audit_row,
 )
 from src.baseline.fixed_support_contract_v2 import build_fixed_support_contract, write_fixed_support_contract
-from src.baseline.sweep_v2_six_axis_campaign import OBJECTIVE_ID_V2
+from src.baseline.pilot_lead06_config import load_stage1_baseline_policy
+from src.baseline.sweep_v2_six_axis_campaign import FROZEN_FIXED_CONFIGURATION_V2, OBJECTIVE_ID_V2
 from tests._pilot_support import BASELINE_POLICY_PATH, REAL_DEVELOPMENT, SPLITS_DIR, build_full_union_package
 
 _OVERLAY_PATH = Path(__file__).parents[1] / "config" / "stage1_scientific_baseline_v2_six_axis_overlay_v001.yaml"
@@ -261,6 +263,14 @@ def test_manifest_entry_to_producer_to_a2_evaluator_vertical(tmp_path):
     assert producer_manifest["validation_basin_count"] == len(REAL_DEVELOPMENT)
     assert producer_manifest["checkpoint_sha256"] == hashlib.sha256(ckpt_bytes).hexdigest()
 
+    # (1b) the regenerated audit config pins the FROZEN v2 six-axis
+    # dynamic-input family (PT), NOT the wider base-baseline dynamic-input
+    # set -- otherwise the LSTM input dimension would not match the frozen
+    # screening checkpoint.
+    frozen_pt = list(FROZEN_FIXED_CONFIGURATION_V2["dynamic_inputs"])
+    gen_cfg = yaml.safe_load((tmp_path / "generated" / "config.yaml").read_text(encoding="utf-8"))
+    assert gen_cfg["dynamic_inputs"] == frozen_pt
+
     run_dir = tmp_path / "run"
     assert (run_dir / AUDIT_EVAL_RUN_MARKER_FILENAME).is_file()
     persisted = json.loads((run_dir / AUDIT_EVAL_RUN_MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -320,6 +330,84 @@ def test_manifest_entry_to_producer_to_a2_evaluator_vertical(tmp_path):
     # not a caller-asserted shortcut.
     for basin_row in result["per_basin"]:
         assert basin_row["nse"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------- #
+# regression: frozen v2 dynamic-input family must survive config regeneration
+# --------------------------------------------------------------------------- #
+
+def _stage_sources(tmp_path, ckpt_bytes: bytes):
+    manifest, entry, contract_path = _seven_entry_manifest(tmp_path, ckpt_bytes=ckpt_bytes)
+    ckpt_src = tmp_path / "source_ckpt" / entry["checkpoint_filename"]
+    ckpt_src.parent.mkdir(parents=True)
+    ckpt_src.write_bytes(ckpt_bytes)
+    scaler_src = tmp_path / "source_ckpt" / "train_data_scaler.yml"
+    scaler_src.write_bytes(b"scaler")
+    return manifest, entry, contract_path, ckpt_src, scaler_src
+
+
+def test_producer_pins_frozen_v2_dynamic_inputs_not_baseline_default(tmp_path):
+    # The defect that broke the P1 canary NH evaluation: the audit producer
+    # regenerates config.yml from CURRENT policy, and the base scientific
+    # baseline policy still carries the older 8-input dynamic family. The
+    # frozen v2 six-axis screening campaign was trained with only the PT
+    # pair, so the regenerated audit config MUST contain exactly PT -- not
+    # the 8-input baseline default it would silently inherit.
+    base_policy = load_stage1_baseline_policy(BASELINE_POLICY_PATH)
+    frozen_pt = list(FROZEN_FIXED_CONFIGURATION_V2["dynamic_inputs"])
+    assert frozen_pt == ["mrms_qpe_1h_mm", "rtma_2t_K"]
+    assert len(base_policy["dynamic_inputs"]) == 8
+    assert set(frozen_pt) < set(base_policy["dynamic_inputs"])
+
+    ckpt_bytes = b"synthetic-screened-checkpoint-weights"
+    manifest, entry, contract_path, ckpt_src, scaler_src = _stage_sources(tmp_path, ckpt_bytes)
+
+    prepare_devpop_audit_eval_run_dir(
+        selection_manifest=manifest,
+        entry_trial_id=entry["trial_id"],
+        fixed_support_contract_path=contract_path,
+        checkpoint_src_path=ckpt_src,
+        scaler_src_path=scaler_src,
+        out_generated_dir=tmp_path / "generated",
+        out_run_dir=tmp_path / "run",
+        **_producer_paths(tmp_path),
+    )
+
+    for rel in ("generated/config.yaml", "run/config.yml"):
+        cfg = yaml.safe_load((tmp_path / rel).read_text(encoding="utf-8"))
+        assert cfg["dynamic_inputs"] == frozen_pt
+        assert len(cfg["dynamic_inputs"]) != len(base_policy["dynamic_inputs"])
+
+
+def test_producer_guard_trips_on_dynamic_input_family_drift(tmp_path, monkeypatch):
+    # The new fail-closed guard: if the generated bundle's dynamic-input
+    # family ever drifted from the frozen v2 PT pair, the producer must
+    # raise before staging anything into out_run_dir.
+    import src.baseline.devpop_audit_eval_run_producer as producer_mod
+
+    real_builder = producer_mod.build_pilot_bundle_with_validation_scope
+
+    def _drifted_family(*args, **kwargs):
+        kwargs["dynamic_inputs"] = ["mrms_qpe_1h_mm", "rtma_2t_K", "rtma_2d_K"]
+        return real_builder(*args, **kwargs)
+
+    monkeypatch.setattr(producer_mod, "build_pilot_bundle_with_validation_scope", _drifted_family)
+
+    ckpt_bytes = b"synthetic-screened-checkpoint-weights"
+    manifest, entry, contract_path, ckpt_src, scaler_src = _stage_sources(tmp_path, ckpt_bytes)
+
+    with pytest.raises(DevpopAuditEvalRunProducerError, match="dynamic_inputs"):
+        prepare_devpop_audit_eval_run_dir(
+            selection_manifest=manifest,
+            entry_trial_id=entry["trial_id"],
+            fixed_support_contract_path=contract_path,
+            checkpoint_src_path=ckpt_src,
+            scaler_src_path=scaler_src,
+            out_generated_dir=tmp_path / "generated",
+            out_run_dir=tmp_path / "run",
+            **_producer_paths(tmp_path),
+        )
+    assert not (tmp_path / "run").exists()
 
 
 # --------------------------------------------------------------------------- #
