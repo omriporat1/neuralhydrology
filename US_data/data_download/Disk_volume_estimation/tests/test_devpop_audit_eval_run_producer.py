@@ -51,6 +51,7 @@ from src.baseline.devpop_common120_audit_evaluator import (
     evaluate_devpop_common120_audit_row,
 )
 from src.baseline.fixed_support_contract_v2 import build_fixed_support_contract, write_fixed_support_contract
+from src.baseline.nh_config_generation import EXPECTED_DEVELOPMENT_BASIN_COUNT, get_run_profile_mapping
 from src.baseline.pilot_lead06_config import load_stage1_baseline_policy
 from src.baseline.sweep_v2_six_axis_campaign import FROZEN_FIXED_CONFIGURATION_V2, OBJECTIVE_ID_V2
 from tests._pilot_support import BASELINE_POLICY_PATH, REAL_DEVELOPMENT, SPLITS_DIR, build_full_union_package
@@ -397,6 +398,79 @@ def test_producer_guard_trips_on_dynamic_input_family_drift(tmp_path, monkeypatc
     manifest, entry, contract_path, ckpt_src, scaler_src = _stage_sources(tmp_path, ckpt_bytes)
 
     with pytest.raises(DevpopAuditEvalRunProducerError, match="dynamic_inputs"):
+        prepare_devpop_audit_eval_run_dir(
+            selection_manifest=manifest,
+            entry_trial_id=entry["trial_id"],
+            fixed_support_contract_path=contract_path,
+            checkpoint_src_path=ckpt_src,
+            scaler_src_path=scaler_src,
+            out_generated_dir=tmp_path / "generated",
+            out_run_dir=tmp_path / "run",
+            **_producer_paths(tmp_path),
+        )
+    assert not (tmp_path / "run").exists()
+
+
+# --------------------------------------------------------------------------- #
+# regression: full-development-population evaluation count must survive the
+# reused screening pilot profile's validate_n_random_basins=1000 cap
+# --------------------------------------------------------------------------- #
+
+def test_producer_does_not_inherit_pilot_1000_basin_cap_for_devpop_audit(tmp_path):
+    # The defect that made P1 job 46098997 scientifically invalid for the
+    # audit population: the audit producer reuses a screening pilot run
+    # profile whose validate_n_random_basins is 1000 -- correct for the
+    # <=500-basin screening workflow, but for the full-development-population
+    # audit it silently makes NH BaseTester.evaluate() shuffle/truncate the
+    # 2,307-basin validation population down to 1,000.
+    profile = get_run_profile_mapping("pilot_lead06_emb128x32_seedA_v001")
+    assert profile["validate_n_random_basins"] == 1000
+    assert len(REAL_DEVELOPMENT) == EXPECTED_DEVELOPMENT_BASIN_COUNT == 2307
+
+    ckpt_bytes = b"synthetic-screened-checkpoint-weights"
+    manifest, entry, contract_path, ckpt_src, scaler_src = _stage_sources(tmp_path, ckpt_bytes)
+
+    producer_manifest = prepare_devpop_audit_eval_run_dir(
+        selection_manifest=manifest,
+        entry_trial_id=entry["trial_id"],
+        fixed_support_contract_path=contract_path,
+        checkpoint_src_path=ckpt_src,
+        scaler_src_path=scaler_src,
+        out_generated_dir=tmp_path / "generated",
+        out_run_dir=tmp_path / "run",
+        **_producer_paths(tmp_path),
+    )
+
+    # generated + staged configs both instruct NH to evaluate exactly the
+    # full canonical development population -- NOT the pilot profile's 1000.
+    for rel in ("generated/config.yaml", "run/config.yml"):
+        cfg = yaml.safe_load((tmp_path / rel).read_text(encoding="utf-8"))
+        assert cfg["validate_n_random_basins"] == 2307
+
+    # validation basin file carries all 2,307 canonical basin IDs
+    val_basins = [
+        ln.strip()
+        for ln in (tmp_path / "generated" / "validation_basins.txt").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(val_basins) == 2307
+    assert sorted(val_basins) == sorted(REAL_DEVELOPMENT)
+    assert producer_manifest["nh_evaluation_population_count"] == 2307
+    assert producer_manifest["validation_basin_count"] == 2307
+
+
+def test_producer_fails_closed_on_inconsistent_evaluation_count(tmp_path, monkeypatch):
+    # If the canonical development population ever resolved to something other
+    # than the frozen 2,307-basin count, the audit producer must refuse to
+    # stage a run rather than evaluate an inconsistent population.
+    import src.baseline.devpop_audit_eval_run_producer as producer_mod
+
+    monkeypatch.setattr(producer_mod, "EXPECTED_DEVELOPMENT_BASIN_COUNT", 2306)
+
+    ckpt_bytes = b"synthetic-screened-checkpoint-weights"
+    manifest, entry, contract_path, ckpt_src, scaler_src = _stage_sources(tmp_path, ckpt_bytes)
+
+    with pytest.raises(DevpopAuditEvalRunProducerError, match="expected exactly 2306"):
         prepare_devpop_audit_eval_run_dir(
             selection_manifest=manifest,
             entry_trial_id=entry["trial_id"],

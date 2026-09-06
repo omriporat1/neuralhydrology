@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -37,7 +38,11 @@ from .devpop_common120_audit_contract import (
     CANONICAL_TARGET_VARIABLE,
 )
 from .fixed_support_contract_v2 import load_fixed_support_contract
-from .nh_config_generation import raise_if_holdout_bundle, write_generated_config
+from .nh_config_generation import (
+    EXPECTED_DEVELOPMENT_BASIN_COUNT,
+    raise_if_holdout_bundle,
+    write_generated_config,
+)
 from .nh_seed_evaluation import weight_stem
 from .package_audit import sha256_file
 from .pilot_full_validation import load_validated_full_population_basin_ids
@@ -126,6 +131,12 @@ def prepare_devpop_audit_eval_run_dir(
     the frozen audit date window, and that the copied checkpoint's bytes
     match the manifest entry's frozen ``checkpoint_sha256`` before anything
     is written to ``out_run_dir``.
+
+    Also overrides the reused pilot profile's screening-era
+    ``validate_n_random_basins`` (1000) with the exact canonical
+    development-population count, so NH evaluates the FULL population rather
+    than a shuffled 1,000-basin subsample, and fails closed if that
+    evaluation count does not equal the canonical 2,307-basin population.
 
     Returns a manifest dict (also persisted as
     ``out_run_dir/DEVPOP_AUDIT_EVAL_RUN_MANIFEST.json``) carrying exactly the
@@ -276,6 +287,47 @@ def prepare_devpop_audit_eval_run_dir(
             f"campaign dynamic-input family {frozen_dynamic_inputs!r}"
         )
 
+    # ---- audit-specific evaluation-population carry-through ----------------
+    # The reused pilot run profile (_PILOT_LEAD06_BASE_PROFILE) carries
+    # ``validate_n_random_basins: 1000`` -- historically correct for the
+    # <=500-basin screening workflow (it covered all 400 screening basins),
+    # but for this FULL-development-population audit that same setting silently
+    # makes NH ``BaseTester.evaluate()`` shuffle/truncate the 2,307-basin
+    # validation population down to 1,000 (exactly the defect that made P1
+    # job 46098997 scientifically invalid for the audit population). This
+    # audit exists to re-evaluate the screened checkpoint against the ENTIRE
+    # canonical development population, so the generated audit config must
+    # instruct NH to score exactly that population -- never a subsample.
+    #
+    # This is an audit-local override of the produced config only: the shared
+    # ``_PILOT_LEAD06_BASE_PROFILE`` (and its ``validate_n_random_basins:
+    # 1000``) is deliberately left untouched, per the SHARED baseline policy.
+    audit_eval_population_count = len(development_basins)
+    audit_config_mapping = dict(bundle.config_mapping)
+    audit_config_mapping["validate_n_random_basins"] = audit_eval_population_count
+    bundle = replace(bundle, config_mapping=audit_config_mapping)
+
+    # Fail closed, before anything is staged: the NH evaluation count MUST be
+    # the exact canonical audit validation-population count, and that
+    # population MUST be the frozen canonical 2,307-basin development set.
+    if audit_eval_population_count != EXPECTED_DEVELOPMENT_BASIN_COUNT:
+        raise DevpopAuditEvalRunProducerError(
+            f"canonical development population resolved to {audit_eval_population_count} basins, "
+            f"expected exactly {EXPECTED_DEVELOPMENT_BASIN_COUNT} -- refusing to stage a devpop audit run"
+        )
+    if sorted(bundle.validation_basin_ids) != sorted(development_basins):
+        raise DevpopAuditEvalRunProducerError(
+            "generated bundle validation_basin_ids do not exactly match the canonical development "
+            "population -- refusing to stage a devpop audit run"
+        )
+    if bundle.config_mapping.get("validate_n_random_basins") != audit_eval_population_count:
+        raise DevpopAuditEvalRunProducerError(
+            f"generated audit config validate_n_random_basins "
+            f"{bundle.config_mapping.get('validate_n_random_basins')!r} != the canonical audit "
+            f"validation-population count {audit_eval_population_count} -- NH would not evaluate the "
+            "full development population"
+        )
+
     write_generated_config(bundle, out_generated_dir, force=force)
     raise_if_holdout_bundle(out_generated_dir)
 
@@ -342,6 +394,7 @@ def prepare_devpop_audit_eval_run_dir(
         "lead_hours": bundle.lead_hours,
         "population_role": bundle.population_role,
         "validation_basin_count": len(bundle.validation_basin_ids),
+        "nh_evaluation_population_count": bundle.config_mapping["validate_n_random_basins"],
         "date_window": [AUDIT_DATE_MIN, AUDIT_DATE_MAX],
         "support_contract_version": support_contract_version,
         "support_contract_sha256": support_contract_sha256,
