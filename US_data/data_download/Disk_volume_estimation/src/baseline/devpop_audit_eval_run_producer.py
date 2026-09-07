@@ -23,6 +23,7 @@ its own, differently-labelled marker and manifest.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import replace
 from datetime import date, datetime, timezone
@@ -78,6 +79,8 @@ AUDIT_EVAL_RUN_MANIFEST_FILENAME = "DEVPOP_AUDIT_EVAL_RUN_MANIFEST.json"
 #: label so a downstream reader could mistake one run for the other).
 AUDIT_EVAL_RUN_POPULATION_ROLE = "devpop_audit_full_population_v001"
 
+_SHA256_HEX_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
 
 def _copy_and_verify(src: Path, dst: Path, *, label: str) -> str:
     shutil.copy2(src, dst)
@@ -104,6 +107,7 @@ def prepare_devpop_audit_eval_run_dir(
     run_profile_name: str,
     out_generated_dir,
     out_run_dir,
+    expected_scaler_sha256: "str | None" = None,
     force: bool = False,
 ) -> dict:
     """Prepare one audit-specific, full-development-population NH validation
@@ -144,7 +148,25 @@ def prepare_devpop_audit_eval_run_dir(
     needs (``trial_id``, ``configuration_id``, ``run_dir``, ``period``,
     ``checkpoint_epoch``, ``checkpoint_path``) plus the identity/provenance
     fields this producer itself is responsible for.
+
+    Scaler provenance (SHARED-A5 Workstream B). The frozen seven-entry
+    selection manifest carries NO authoritative historical scaler
+    identity/hash -- the screening runs never recorded one -- so this producer
+    cannot and does not claim historical scaler identity. What it *can* do is
+    record, at audit-execution time, the exact bytes of the scaler it stages:
+    the source scaler's sha256 is always computed and both the source and the
+    byte-verified staged sha256 are written into a dedicated
+    ``audit_execution_time_scaler_provenance`` manifest block, clearly
+    labelled as execution-time (not screening-time) provenance. If the caller
+    already knows the scaler hash it expects (e.g. from an out-of-band
+    screening-run inventory), it may pass ``expected_scaler_sha256`` and the
+    producer fails closed on any mismatch. This is additive: the existing
+    ``scaler_sha256`` key and all checkpoint provenance are unchanged.
     """
+    if expected_scaler_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_scaler_sha256)):
+        raise DevpopAuditEvalRunProducerError(
+            f"expected_scaler_sha256 must be 64 lowercase hex chars or None, got {expected_scaler_sha256!r}"
+        )
     if not isinstance(selection_manifest, Mapping):
         raise DevpopAuditEvalRunProducerError(
             "selection_manifest must be the validated seven-entry selection-manifest mapping "
@@ -187,6 +209,17 @@ def prepare_devpop_audit_eval_run_dir(
         )
     if not scaler_src_path.is_file():
         raise DevpopAuditEvalRunProducerError(f"scaler source does not exist: {scaler_src_path}")
+    # SHARED-A5 Workstream B: execution-time scaler byte provenance. There is
+    # no authoritative historical scaler hash in the frozen selection manifest;
+    # this records the actual staged bytes, and fails closed only against a
+    # hash the caller explicitly supplies.
+    scaler_src_sha256 = sha256_file(scaler_src_path)
+    if expected_scaler_sha256 is not None and scaler_src_sha256 != expected_scaler_sha256:
+        raise DevpopAuditEvalRunProducerError(
+            f"scaler source sha256 {scaler_src_sha256} does not match the caller-supplied "
+            f"expected_scaler_sha256 {expected_scaler_sha256} -- refusing to stage an audit run from an "
+            "unexpected scaler"
+        )
 
     # Identity cross-check: the loaded fixed-support contract must be the
     # SAME one the manifest entry's configuration_id was computed under --
@@ -387,6 +420,25 @@ def prepare_devpop_audit_eval_run_dir(
         "checkpoint_sha256": checkpoint_dst_sha256,
         "checkpoint_path": str(checkpoint_dst),
         "scaler_sha256": scaler_dst_sha256,
+        "audit_execution_time_scaler_provenance": {
+            "provenance_kind": "audit_execution_time",
+            "note": (
+                "Execution-time scaler byte provenance ONLY. The frozen seven-entry devpop-audit "
+                "selection manifest records no historical screening-time scaler identity, so this "
+                "block does not and cannot attest that these bytes are the scaler the screening run "
+                "trained under -- it attests only that the bytes staged into this audit run's "
+                "train_data/train_data_scaler.yml are exactly the bytes read from scaler_src_path."
+            ),
+            "scaler_src_path": str(scaler_src_path),
+            "scaler_src_sha256": scaler_src_sha256,
+            "scaler_staged_relpath": "train_data/train_data_scaler.yml",
+            "scaler_staged_sha256": scaler_dst_sha256,
+            "scaler_bytes_verified_equal": scaler_src_sha256 == scaler_dst_sha256,
+            "expected_scaler_sha256": expected_scaler_sha256,
+            "expected_scaler_sha256_verified": (
+                None if expected_scaler_sha256 is None else scaler_src_sha256 == expected_scaler_sha256
+            ),
+        },
         "config_yaml_sha256": config_yaml_sha256,
         "run_dir": str(out_run_dir),
         "period": AUDIT_PERIOD_NAME,

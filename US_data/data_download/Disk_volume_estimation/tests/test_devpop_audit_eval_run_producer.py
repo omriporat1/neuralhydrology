@@ -602,3 +602,89 @@ def test_producer_rejects_tampered_selection_manifest_sha256(tmp_path):
             out_run_dir=tmp_path / "run",
             **_producer_paths(tmp_path),
         )
+
+
+# --------------------------------------------------------------------------- #
+# SHARED-A5 Workstream B: execution-time scaler byte provenance
+# --------------------------------------------------------------------------- #
+
+def _stage_with_scaler(tmp_path, scaler_bytes: bytes, *, expected_scaler_sha256=None):
+    ckpt_bytes = b"synthetic-screened-checkpoint-weights"
+    manifest, entry, contract_path, ckpt_src, _scaler_src = _stage_sources(tmp_path, ckpt_bytes)
+    scaler_src = tmp_path / "source_ckpt" / "train_data_scaler.yml"
+    scaler_src.write_bytes(scaler_bytes)
+    producer_manifest = prepare_devpop_audit_eval_run_dir(
+        selection_manifest=manifest,
+        entry_trial_id=entry["trial_id"],
+        fixed_support_contract_path=contract_path,
+        checkpoint_src_path=ckpt_src,
+        scaler_src_path=scaler_src,
+        out_generated_dir=tmp_path / "generated",
+        out_run_dir=tmp_path / "run",
+        expected_scaler_sha256=expected_scaler_sha256,
+        **_producer_paths(tmp_path),
+    )
+    return manifest, entry, producer_manifest
+
+
+def test_scaler_provenance_records_source_and_staged_hash_equality(tmp_path):
+    scaler_bytes = b"synthetic-scaler-yaml-bytes-v1"
+    expected = hashlib.sha256(scaler_bytes).hexdigest()
+    _manifest, _entry, producer_manifest = _stage_with_scaler(tmp_path, scaler_bytes)
+
+    prov = producer_manifest["audit_execution_time_scaler_provenance"]
+    assert prov["provenance_kind"] == "audit_execution_time"
+    assert prov["scaler_src_sha256"] == expected
+    assert prov["scaler_staged_sha256"] == expected
+    assert prov["scaler_bytes_verified_equal"] is True
+    assert prov["scaler_staged_relpath"] == "train_data/train_data_scaler.yml"
+    # caller supplied no expected hash -> nothing claimed on that axis
+    assert prov["expected_scaler_sha256"] is None
+    assert prov["expected_scaler_sha256_verified"] is None
+    # the pre-existing checkpoint provenance is untouched and still authoritative
+    assert producer_manifest["scaler_sha256"] == expected
+    assert producer_manifest["checkpoint_sha256"] == hashlib.sha256(
+        b"synthetic-screened-checkpoint-weights"
+    ).hexdigest()
+
+    # the staged bytes on disk really are those bytes
+    staged = (tmp_path / "run" / "train_data" / "train_data_scaler.yml").read_bytes()
+    assert hashlib.sha256(staged).hexdigest() == expected
+
+
+def test_scaler_provenance_note_disclaims_historical_identity(tmp_path):
+    _manifest, _entry, producer_manifest = _stage_with_scaler(tmp_path, b"scaler-bytes")
+    note = producer_manifest["audit_execution_time_scaler_provenance"]["note"].lower()
+    # it must NOT claim to prove the screening-time scaler identity
+    assert "execution-time" in note
+    assert "no historical" in note or "records no historical" in note
+    assert "cannot attest" in note or "does not and cannot attest" in note
+    # and there is no fabricated historical-hash field anywhere in the manifest
+    assert "historical_scaler_sha256" not in producer_manifest
+    assert "screening_scaler_sha256" not in producer_manifest
+
+
+def test_scaler_provenance_verifies_caller_supplied_expected_hash(tmp_path):
+    scaler_bytes = b"scaler-bytes-the-caller-knows"
+    expected = hashlib.sha256(scaler_bytes).hexdigest()
+    _manifest, _entry, producer_manifest = _stage_with_scaler(
+        tmp_path, scaler_bytes, expected_scaler_sha256=expected
+    )
+    prov = producer_manifest["audit_execution_time_scaler_provenance"]
+    assert prov["expected_scaler_sha256"] == expected
+    assert prov["expected_scaler_sha256_verified"] is True
+
+
+def test_scaler_provenance_fails_closed_on_expected_hash_mismatch(tmp_path):
+    with pytest.raises(DevpopAuditEvalRunProducerError, match="expected_scaler_sha256"):
+        _stage_with_scaler(
+            tmp_path, b"actual-scaler-bytes", expected_scaler_sha256="a" * 64
+        )
+    assert not (tmp_path / "run").exists()
+
+
+def test_scaler_provenance_rejects_non_hex_expected_hash(tmp_path):
+    with pytest.raises(DevpopAuditEvalRunProducerError, match="64 lowercase hex"):
+        _stage_with_scaler(
+            tmp_path, b"actual-scaler-bytes", expected_scaler_sha256="not-a-sha256"
+        )
