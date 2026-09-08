@@ -90,7 +90,6 @@ def test_sweep_config_and_launchers_have_exact_v2_metric_and_one_agent():
         assert code.count('wandb agent') == 1
         assert 'wandb agent --count 1 ' in code
         assert 'FORBIDDEN_PRODUCTION_SWEEP_ID="4x3btz2s"' in code
-        assert 'export WANDB_PROJECT WANDB_ENTITY' in code
         assert 'export PATH="$(dirname "${CANONICAL_PYTHON}"):${PATH}"' in code
         assert 'date -u' in code and 'hostname' in code and 'pwd' in code
         assert 'EXPECTED_COMMIT:' in code and 'V2_BRIDGE_MANIFEST:' in code
@@ -99,10 +98,22 @@ def test_sweep_config_and_launchers_have_exact_v2_metric_and_one_agent():
     production, production_code = _noncomment(production_path)
 
     # The CLOSED rehearsal launcher keeps its operator-supplied sweep id and
-    # its single frozen-v1 shell guard, unchanged.
+    # its single frozen-v1 shell guard, unchanged. It still takes W&B
+    # project/entity as explicit disposable inputs and exports them verbatim.
     assert 'wandb agent --count 1 "${WANDB_SWEEP_ID}"' in rehearsal_code
     assert 'if [ "${WANDB_SWEEP_ID}" = "${FORBIDDEN_PRODUCTION_SWEEP_ID}" ]' in rehearsal_code
+    assert 'export WANDB_PROJECT WANDB_ENTITY' in rehearsal_code
     assert '#SBATCH --partition=glacier' in rehearsal and '--gres=' not in rehearsal
+
+    # The PRODUCTION launcher does NOT take independent W&B project/entity
+    # inputs: the strict manifest is authoritative and the launcher resolves
+    # them from the loader-validated launch identity, refusing a contradicting
+    # inherited value before any W&B contact.
+    assert 'export WANDB_PROJECT WANDB_ENTITY' not in production_code
+    assert ': "${WANDB_PROJECT:?' not in production_code and ': "${WANDB_ENTITY:?' not in production_code
+    assert 'WANDB_PROJECT="${_MANIFEST_PROJECT}"' in production_code
+    assert "contradicts the validated manifest project" in production_code
+    assert production_code.index('validate-launch') < production_code.index('WANDB_PROJECT="${_MANIFEST_PROJECT}"') < production_code.index('wandb agent --count 1')
 
     # The production launcher targets the loader-validated manifest-derived
     # sweep id, mirrors BOTH forbidden literals, and calls the pre-agent
@@ -129,7 +140,12 @@ def test_production_launcher_requires_and_exports_the_operational_manifest_seam(
     # The agent target is the loader-validated manifest-derived sweep id, not
     # an unjoined operator-supplied id.
     assert 'wandb agent --count 1 "${VALIDATED_SWEEP_ID}"' in code
-    assert 'VALIDATED_SWEEP_ID="$(' in code and 'validate-launch' in code
+    # The sweep id is parsed from the validator's `--emit env` KEY=VALUE output,
+    # not reconstructed: the validator is called with `--emit env` and the
+    # authoritative id is read into VALIDATED_SWEEP_ID.
+    assert 'validate-launch' in code and '--emit env' in code
+    assert 'VALIDATED_SWEEP_ID="${_MANIFEST_SWEEP_ID}"' in code
+    assert '_LAUNCH_ENV="$(' in code and 'validate-launch' in code
     # The pre-agent validator runs before the sole agent invocation.
     assert code.index('validate-launch') < code.index('wandb agent --count 1')
     # A non-empty inherited bridge self-test hook is refused nonzero, then unset.
@@ -140,10 +156,19 @@ def test_production_launcher_requires_and_exports_the_operational_manifest_seam(
     # Both forbidden production sweep ids are mirrored at shell level.
     assert 'FORBIDDEN_PRODUCTION_SWEEP_ID="4x3btz2s"' in code
     assert 'FORBIDDEN_DISPOSABLE_REHEARSAL_SWEEP_ID="oz5p4csb"' in code
-    # No credentials embedded; no environment dump.
+    # No embedded credential literal and no command tracing. The launcher DOES
+    # resolve the already-configured user's W&B key at runtime (job env first,
+    # then $HOME/.netrc) so the `wandb agent` CLI can authenticate -- that is
+    # the approved observed-failure hardening, not an embedded secret.
     lowered = production.lower()
-    for marker in ('api_key', 'wandb_api_key', 'password', 'secret', 'netrc'):
+    for marker in ('password', 'secret', 'set -x', 'set -o xtrace'):
         assert marker not in lowered
+    for line in production.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(('WANDB_API_KEY=', 'export WANDB_API_KEY=')):
+            assert ('$(' in stripped or '${' in stripped), (
+                f'WANDB_API_KEY assignment must be a runtime resolution, not a literal: {stripped!r}'
+            )
     # The CLOSED rehearsal launcher must NOT gain the production env seam.
     rehearsal = (ROOT/'scripts/run_sweep_v2_six_axis_wandb_bridge_rehearsal_moriah.sbatch').read_text()
     assert 'FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST' not in rehearsal

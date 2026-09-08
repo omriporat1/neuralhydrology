@@ -22,11 +22,15 @@ set -euo pipefail
 # interpreter: it loader-validates the manifest (checksum, schema, full v2
 # identity), requires mode=production / stop_before_training=false /
 # max_agents=1, rejects the frozen v1 production sweep and the CLOSED
-# disposable rehearsal sweep, and prints the one authoritative sweep id the
-# agent may consume. WANDB_SWEEP_ID is optional and, if set, only a
-# redundant cross-check that must equal the validated manifest id exactly.
-: "${WANDB_PROJECT:?set the v2 production project}"
-: "${WANDB_ENTITY:?set the v2 production entity}"
+# disposable rehearsal sweep, and prints the one authoritative launch
+# identity (sweep id + W&B project/entity) the agent may consume.
+# WANDB_SWEEP_ID is optional and, if set, only a redundant cross-check that
+# must equal the validated manifest id exactly.
+#
+# WANDB_PROJECT / WANDB_ENTITY are NOT independent inputs here: the strict
+# mode=production manifest is authoritative for them. They are resolved from
+# the loader-validated manifest below; a non-empty inherited value that
+# disagrees with the manifest is refused before any W&B contact, never used.
 : "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST:?set the one immutable strict mode=production launch manifest path}"
 
 # A real production launch must never inherit an active bridge self-test
@@ -52,7 +56,6 @@ for _forbidden in "${FORBIDDEN_PRODUCTION_SWEEP_ID}" "${FORBIDDEN_DISPOSABLE_REH
 done
 
 test -f "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}" || { echo "MISSING v2 production launch manifest: ${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}" >&2; exit 1; }
-export WANDB_PROJECT WANDB_ENTITY
 export FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
@@ -67,13 +70,30 @@ export PATH="$(dirname "${CANONICAL_PYTHON}"):${PATH}"
 # the agent runs, before wandb.init(), before proposal intake, before any
 # W&B mutation -- on a checksum/schema error, a non-production manifest,
 # stop_before_training, max_agents!=1, a forbidden sweep id, or a
-# WANDB_SWEEP_ID that contradicts the manifest. Prints ONLY the one
-# authoritative sweep id. Imports and contacts no W&B.
-VALIDATE_ARGS=(--manifest-path "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}")
+# WANDB_SWEEP_ID that contradicts the manifest. With --emit env it prints
+# ONLY the manifest-authoritative launch identity (sweep id + W&B
+# project/entity) as KEY=VALUE lines. Imports and contacts no W&B.
+VALIDATE_ARGS=(--manifest-path "${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}" --emit env)
 if [ -n "${WANDB_SWEEP_ID:-}" ]; then
     VALIDATE_ARGS+=(--expect-sweep-id "${WANDB_SWEEP_ID}")
 fi
-VALIDATED_SWEEP_ID="$("${CANONICAL_PYTHON}" scripts/create_sweep_v2_six_axis_wandb_bridge_production_sweep.py validate-launch "${VALIDATE_ARGS[@]}")"
+# The validator emits the authoritative launch identity as KEY=VALUE lines;
+# parse them with a plain shell read loop (no eval, no sed/grep).
+_LAUNCH_ENV="$("${CANONICAL_PYTHON}" scripts/create_sweep_v2_six_axis_wandb_bridge_production_sweep.py validate-launch "${VALIDATE_ARGS[@]}")"
+_MANIFEST_SWEEP_ID=""
+_MANIFEST_PROJECT=""
+_MANIFEST_ENTITY=""
+while IFS='=' read -r _k _v; do
+    case "${_k}" in
+        WANDB_SWEEP_ID) _MANIFEST_SWEEP_ID="${_v}" ;;
+        WANDB_PROJECT) _MANIFEST_PROJECT="${_v}" ;;
+        WANDB_ENTITY) _MANIFEST_ENTITY="${_v}" ;;
+    esac
+done <<< "${_LAUNCH_ENV}"
+
+VALIDATED_SWEEP_ID="${_MANIFEST_SWEEP_ID}"
+test -n "${VALIDATED_SWEEP_ID}" || { echo "FATAL: pre-agent validator produced no sweep id" >&2; exit 1; }
+test -n "${_MANIFEST_PROJECT}" || { echo "FATAL: validated manifest carries no wandb_project" >&2; exit 1; }
 
 for _forbidden in "${FORBIDDEN_PRODUCTION_SWEEP_ID}" "${FORBIDDEN_DISPOSABLE_REHEARSAL_SWEEP_ID}"; do
     if [ "${VALIDATED_SWEEP_ID}" = "${_forbidden}" ]; then
@@ -81,6 +101,34 @@ for _forbidden in "${FORBIDDEN_PRODUCTION_SWEEP_ID}" "${FORBIDDEN_DISPOSABLE_REH
         exit 1
     fi
 done
+
+# >>> flashnh wandb project/entity manifest authority >>>
+# The strict mode=production manifest is authoritative for the W&B
+# project/entity. A non-empty inherited value that disagrees with the
+# loader-validated manifest is refused before any W&B contact; otherwise the
+# manifest's values are adopted and exported. This launcher never invents an
+# independent default.
+if [ -n "${WANDB_PROJECT:-}" ] && [ "${WANDB_PROJECT}" != "${_MANIFEST_PROJECT}" ]; then
+    echo "REFUSING: inherited WANDB_PROJECT='${WANDB_PROJECT}' contradicts the validated manifest project '${_MANIFEST_PROJECT}'" >&2
+    exit 1
+fi
+if [ -n "${WANDB_ENTITY:-}" ] && [ -n "${_MANIFEST_ENTITY}" ] && [ "${WANDB_ENTITY}" != "${_MANIFEST_ENTITY}" ]; then
+    echo "REFUSING: inherited WANDB_ENTITY='${WANDB_ENTITY}' contradicts the validated manifest entity '${_MANIFEST_ENTITY}'" >&2
+    exit 1
+fi
+if [ -n "${WANDB_ENTITY:-}" ] && [ -z "${_MANIFEST_ENTITY}" ]; then
+    echo "REFUSING: inherited WANDB_ENTITY='${WANDB_ENTITY}' but the validated manifest carries no entity" >&2
+    exit 1
+fi
+WANDB_PROJECT="${_MANIFEST_PROJECT}"
+export WANDB_PROJECT
+if [ -n "${_MANIFEST_ENTITY}" ]; then
+    WANDB_ENTITY="${_MANIFEST_ENTITY}"
+    export WANDB_ENTITY
+else
+    unset WANDB_ENTITY || true
+fi
+# <<< flashnh wandb project/entity manifest authority <<<
 
 echo "=== Flash-NH v2 bridge production agent (one proposal) ==="
 date -u
@@ -94,6 +142,32 @@ echo "CANONICAL_PYTHON: ${CANONICAL_PYTHON}"
 # command; do not expose credentials or dump the environment here.
 echo "V2_BRIDGE_MANIFEST: ${FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST}"
 echo "VALIDATED_SWEEP_ID: ${VALIDATED_SWEEP_ID}"
+
+# >>> flashnh wandb-agent credential availability (observed-failure hardening) >>>
+# The `wandb agent` CLI login path does NOT read $HOME/.netrc (only
+# wandb.Api() does). A submitted job whose environment lacks WANDB_API_KEY
+# previously failed here with "No API key configured" and created no W&B run.
+# Resolution order, without ever printing the value or enabling tracing:
+#   1. an existing non-empty WANDB_API_KEY in the job environment is used as-is;
+#   2. otherwise the already-configured user key is read from $HOME/.netrc
+#      (machine api.wandb.ai) via the Python standard-library parser;
+#   3. otherwise fail now, before any W&B contact.
+# We only assert that a non-empty configured credential was obtained; W&B
+# remains authoritative for whether it actually authenticates.
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    WANDB_API_KEY="$("${CANONICAL_PYTHON}" -c 'import netrc, sys
+try:
+    a = netrc.netrc().authenticators("api.wandb.ai")
+except Exception:
+    a = None
+sys.stdout.write(a[2] if a and a[2] else "")' 2>/dev/null)" || WANDB_API_KEY=""
+    export WANDB_API_KEY
+fi
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "FATAL: no W&B API key available for the sweep-agent login (need WANDB_API_KEY in the job environment or an api.wandb.ai entry in \$HOME/.netrc); refusing before any W&B contact" >&2
+    exit 1
+fi
+# <<< flashnh wandb-agent credential availability <<<
 
 # This launcher consumes exactly one controller proposal, targeting the
 # sweep id derived from the loader-validated mode=production manifest.

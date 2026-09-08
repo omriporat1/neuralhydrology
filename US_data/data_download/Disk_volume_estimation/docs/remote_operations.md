@@ -63,6 +63,43 @@ ssh moriah 'bash -lc "sbatch ..."'
 
 If a direct remote command cannot find `sbatch` or another expected environment tool, verify login-shell initialization before assuming paths/installations changed.
 
+A detached / non-login local parent (`setsid`, `nohup`) does not get Moriah's
+interactive-only Slurm `profile.d` hook either, so it loses `PATH` and
+`SLURM_CONF` before it can reach `sbatch`. The stable Moriah host locations for
+restoring that client state are:
+
+- Slurm client binaries: `/vol/slurm/moriah/bindir/bin` (contains `sbatch`,
+  `squeue`, `sacct`);
+- Slurm configuration: `/vol/slurm/moriah/slurm.conf` (`SLURM_CONF`).
+
+These are the standard HUJI Moriah `/vol/slurm/moriah/` install prefix; the
+`sacct` path is also recorded verbatim in the P7/P8 completion-poller logs. A
+guarded, idempotent restore of exactly these two locations is done by
+`scripts/submit_sweep_v2_six_axis_wandb_agent_moriah.sh` immediately before it
+submits the v2 six-axis W&B-agent job; a normal login shell where `sbatch`
+already resolves is left untouched. Invoke it as
+`bash scripts/submit_sweep_v2_six_axis_wandb_agent_moriah.sh <production-manifest-path>`
+(the tracked file is a normal non-executable `100644` file, like the other
+`scripts/*.sh` / `scripts/*.sbatch` in this repo).
+
+`submit_sweep_v2_six_axis_wandb_agent_moriah.sh` is only a **technical
+submission boundary** — it restores the Slurm client environment and runs one
+`sbatch`. It is **not** proposal authorization and does **no** W&B controller
+reconciliation. Before each user-authorized Bayesian proposal submission, the
+campaign workflow must separately verify the live controller state against the
+expected prior observations. The stable semantic checks are: the expected N−1
+prior runs are present and all finished and W&B-valid; the controller/sweep
+config still equals the committed authoritative configuration; each prior run's
+recorded objective agrees with the campaign's recorded observation; and no
+pre-existing or non-terminal Nth-proposal run exists. The mutable run IDs and
+objective values those checks compare against belong to the per-proposal
+evidence and workflow, not this document. The submitted job independently
+re-validates the strict manifest (checksum / schema / full v2 identity /
+`mode=production` / `stop_before_training=false` / `max_agents=1` / forbidden
+sweep ids) and derives the W&B project/entity from that manifest before any W&B
+contact, but that manifest/loader check is not a substitute for the
+controller-state reconciliation above.
+
 ### 2.4 File transfer
 
 Moriah SCP requires legacy mode because the default SFTP subsystem is unavailable in this environment.

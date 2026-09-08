@@ -480,12 +480,21 @@ def main(argv: "list[str] | None" = None) -> int:
 
     validate = sub.add_parser(
         "validate-launch",
-        help="Pre-agent validator: print ONLY the loader-validated mode=production sweep id (no W&B).",
+        help="Pre-agent validator: print the loader-validated mode=production launch identity (no W&B).",
     )
     validate.add_argument("--manifest-path", type=Path, required=True)
     validate.add_argument(
         "--expect-sweep-id", default=None,
         help="Optional redundant cross-check; if supplied it must equal the manifest's sweep id exactly.",
+    )
+    validate.add_argument(
+        "--emit", choices=("sweep-id", "env"), default="sweep-id",
+        help=(
+            "sweep-id (default): print ONLY the authoritative sweep id. "
+            "env: print WANDB_SWEEP_ID / WANDB_PROJECT / WANDB_ENTITY as KEY=VALUE "
+            "lines so a launcher takes the manifest-authoritative W&B project/entity "
+            "instead of reconstructing them."
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -504,12 +513,20 @@ def main(argv: "list[str] | None" = None) -> int:
             wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
         )
     elif args.command == "validate-launch":
-        # Narrow, launcher-safe success output: the bare authoritative sweep
-        # id and nothing else, on stdout. No W&B import or contact.
+        # Narrow, launcher-safe success output. No W&B import or contact.
         resolved = resolve_validated_production_launch(
             manifest_path=args.manifest_path, expected_sweep_id=args.expect_sweep_id,
         )
-        print(resolved["wandb_sweep_id"])
+        if args.emit == "env":
+            # The manifest is authoritative for the W&B project/entity too, so a
+            # launcher consumes these rather than defaulting or overriding them.
+            print(f"WANDB_SWEEP_ID={resolved['wandb_sweep_id']}")
+            print(f"WANDB_PROJECT={resolved['wandb_project']}")
+            if resolved.get("wandb_entity"):
+                print(f"WANDB_ENTITY={resolved['wandb_entity']}")
+        else:
+            # Default: the bare authoritative sweep id and nothing else.
+            print(resolved["wandb_sweep_id"])
         return 0
     else:
         receipt = build_one_agent_invocation(
