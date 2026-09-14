@@ -181,6 +181,45 @@ def test_raw_space_metrics_insufficient_samples_returns_nan_not_error():
     assert np.isnan(metrics["kge"])
 
 
+def test_raw_space_metrics_one_pair_returns_finite_rmse_mae_bias():
+    # RMSE/MAE/bias are mathematically defined for a single finite pair
+    # (RD1-C4 review Finding 5): |sim - obs| = 3.0 exactly.
+    metrics = raw_space_metrics(np.array([2.0]), np.array([5.0]))
+    assert metrics["n_samples"] == 1
+    assert metrics["rmse"] == pytest.approx(3.0)
+    assert metrics["mae"] == pytest.approx(3.0)
+    assert metrics["bias"] == pytest.approx(3.0)
+
+
+def test_raw_space_metrics_one_pair_pbias_correct_when_denominator_nonzero():
+    metrics = raw_space_metrics(np.array([2.0]), np.array([5.0]))
+    assert metrics["pbias"] == pytest.approx(100.0 * 3.0 / 2.0)
+
+
+def test_raw_space_metrics_one_pair_pbias_nan_when_obs_zero():
+    metrics = raw_space_metrics(np.array([0.0]), np.array([5.0]))
+    assert np.isnan(metrics["pbias"])
+
+
+def test_raw_space_metrics_one_pair_leaves_nse_kge_correlation_nan():
+    metrics = raw_space_metrics(np.array([2.0]), np.array([5.0]))
+    assert np.isnan(metrics["nse"])
+    assert np.isnan(metrics["kge"])
+    assert np.isnan(metrics["kge_r"])
+    assert np.isnan(metrics["kge_alpha"])
+    assert np.isnan(metrics["kge_beta"])
+    assert np.isnan(metrics["pearson_r"])
+
+
+def test_raw_space_metrics_zero_finite_pairs_fully_unavailable():
+    obs = np.array([np.nan, np.nan])
+    sim = np.array([1.0, 2.0])
+    metrics = raw_space_metrics(obs, sim)
+    assert metrics["n_samples"] == 0
+    for key in ("nse", "kge", "kge_r", "kge_alpha", "kge_beta", "rmse", "mae", "pearson_r", "bias", "pbias"):
+        assert np.isnan(metrics[key])
+
+
 def test_raw_space_metrics_zero_variance_obs_gives_nan_nse_and_correlation():
     obs = np.array([5.0, 5.0, 5.0, 5.0])
     sim = np.array([4.0, 5.0, 6.0, 5.0])

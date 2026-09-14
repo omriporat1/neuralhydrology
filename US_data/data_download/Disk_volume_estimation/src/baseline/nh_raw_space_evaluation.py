@@ -265,8 +265,13 @@ def raw_space_metrics(obs_m3s: np.ndarray, sim_m3s: np.ndarray) -> dict:
     """Raw-space (m^3/s) skill metrics on a single basin/period's admitted
     samples. Both inputs must already be NaN-free and equal-length (callers
     pass ``PeriodConversionResult.obs_m3s[mask]`` / ``sim_m3s[mask]``, or
-    equivalent). NSE/KGE/Pearson-r are NaN when fewer than 2 finite samples
-    or the observation series has zero variance (undefined, not zero)."""
+    equivalent). RMSE/MAE/bias are defined for a single finite pair; PBIAS
+    additionally requires a nonzero observed sum. NSE/KGE/Pearson-r are NaN
+    when fewer than 2 finite samples or the observation series has zero
+    variance (undefined, not zero) -- both conditions are already enforced
+    below by the ``denom > 0.0`` / ``obs_std > 0.0`` gates, which a
+    single-sample series can never satisfy (its own-mean variance is
+    identically zero), so no separate n>=2 branch is needed for those."""
     obs = np.asarray(obs_m3s, dtype=np.float64)
     sim = np.asarray(sim_m3s, dtype=np.float64)
     if obs.shape != sim.shape:
@@ -289,7 +294,7 @@ def raw_space_metrics(obs_m3s: np.ndarray, sim_m3s: np.ndarray) -> dict:
         "bias": float("nan"),
         "pbias": float("nan"),
     }
-    if n < 2:
+    if n < 1:
         return result
 
     obs_mean = float(np.mean(obs))

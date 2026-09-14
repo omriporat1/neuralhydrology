@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -60,6 +61,9 @@ __all__ = [
     "FixedSupportContractError",
     "CONTRACT_SCHEMA_NAME",
     "CONTRACT_SCHEMA_VERSION",
+    "AdmittedSeries",
+    "SupportContractProvenance",
+    "build_support_contract_provenance",
     "build_fixed_support_contract",
     "validate_fixed_support_contract",
     "write_fixed_support_contract",
@@ -128,6 +132,35 @@ def _deserialize_date_array(values: list, date_dtype: str) -> np.ndarray:
     if date_dtype == "int64":
         return np.array(values, dtype="int64")
     raise FixedSupportContractError(f"unsupported date_dtype {date_dtype!r}; expected 'datetime64' or 'int64'")
+
+
+def _canonicalize_timestamps_for_identity(values: np.ndarray, *, date_dtype: str, context: str) -> np.ndarray:
+    """Normalizes a timestamp array to the one canonical, validated
+    representation implied by the frozen contract's own ``date_dtype``,
+    before it is used to build an identity lookup (``np.unique``/
+    ``np.isin`` membership, or a Python ``dict`` keyed by timestamp
+    scalars). Equivalent timestamps represented in different
+    ``datetime64`` units (e.g. ``datetime64[D]`` vs ``datetime64[ns]``)
+    compare equal under ``==``/``np.isin`` but are distinct Python scalar
+    objects with unit-dependent hashes, so a dict keyed by one run's
+    ``datetime64[D]`` values will not resolve lookups by the contract's
+    always-``datetime64[ns]`` values (see :func:`_deserialize_date_array`)
+    even though the underlying instants agree -- RD1-C4 review Finding 4.
+    """
+    arr = np.asarray(values)
+    if date_dtype == "datetime64":
+        if not np.issubdtype(arr.dtype, np.datetime64):
+            raise FixedSupportContractError(
+                f"{context}: expected a datetime64 date coordinate for a 'datetime64' contract, got {arr.dtype!r}"
+            )
+        return arr.astype("datetime64[ns]")
+    if date_dtype == "int64":
+        if not np.issubdtype(arr.dtype, np.integer):
+            raise FixedSupportContractError(
+                f"{context}: expected an integer date coordinate for an 'int64' contract, got {arr.dtype!r}"
+            )
+        return arr.astype("int64")
+    raise FixedSupportContractError(f"{context}: unsupported date_dtype {date_dtype!r}; expected 'datetime64' or 'int64'")
 
 
 def _canonical_payload_for_checksum(payload: Mapping) -> bytes:
@@ -337,12 +370,113 @@ def write_fixed_support_contract(data: dict, path) -> Path:
     return path
 
 
+@dataclass(frozen=True)
+class SupportContractProvenance:
+    """Immutable snapshot of a fixed-support contract's own identity/
+    provenance facts, copied only from an already-
+    :func:`validate_fixed_support_contract`-validated payload (RD1-C4
+    review Finding 6) -- never inferred from a path name or reconstructed
+    downstream. C5/C6 can consume this directly instead of reopening the
+    contract file."""
+
+    schema_name: str
+    schema_version: int
+    contract_id: str
+    checksum_sha256: str
+    seq_length_floor: int
+    period: str
+    date_start: str
+    date_end: str
+    target_variable: str
+    lead_hours: int
+    screening_basin_ids_sha256: str
+    source_gap_policy_identity: str
+    package_manifest_sha256: str
+    package_file_checksums_sha256: str
+    package_run_provenance_sha256: str
+    development_split_sha256: str
+    spatial_holdout_split_sha256: str
+
+
+def build_support_contract_provenance(contract: Mapping) -> SupportContractProvenance:
+    """Builds an immutable :class:`SupportContractProvenance` from a
+    contract mapping. Re-validates ``contract`` against the current schema
+    first (:func:`validate_fixed_support_contract`) -- an unvalidated or
+    malformed contract must fail closed here rather than silently
+    propagate a partial/fabricated provenance record."""
+    validated = validate_fixed_support_contract(contract)
+    return SupportContractProvenance(
+        schema_name=validated["schema_name"],
+        schema_version=validated["schema_version"],
+        contract_id=validated["contract_id"],
+        checksum_sha256=validated["checksum_sha256"],
+        seq_length_floor=validated["seq_length_floor"],
+        period=validated["period"],
+        date_start=validated["date_start"],
+        date_end=validated["date_end"],
+        target_variable=validated["target_variable"],
+        lead_hours=validated["lead_hours"],
+        screening_basin_ids_sha256=validated["screening_basin_ids_sha256"],
+        source_gap_policy_identity=validated["source_gap_policy_identity"],
+        package_manifest_sha256=validated["package_manifest_sha256"],
+        package_file_checksums_sha256=validated["package_file_checksums_sha256"],
+        package_run_provenance_sha256=validated["package_run_provenance_sha256"],
+        development_split_sha256=validated["development_split_sha256"],
+        spatial_holdout_split_sha256=validated["spatial_holdout_split_sha256"],
+    )
+
+
 def load_fixed_support_contract(path, *, expected_contract_id: str = OBJECTIVE_ID_V2) -> dict:
     path = Path(path)
     if not path.is_file():
         raise FixedSupportContractError(f"fixed-support contract not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     return validate_fixed_support_contract(data, expected_contract_id=expected_contract_id)
+
+
+def _frozen_array_copy(value) -> np.ndarray:
+    """Return an independent, read-only copy of ``value``.
+
+    Never aliases (shares memory with) a caller-owned array, and never
+    mutates the writeability of the caller's own original array -- only the
+    returned copy is marked non-writeable (RD1-C4 review: defensive
+    immutability of public scientific results)."""
+    array = np.array(value, copy=True)
+    array.setflags(write=False)
+    return array
+
+
+@dataclass(frozen=True)
+class AdmittedSeries:
+    """One basin's frozen-support admitted raw-space series, in the fixed-
+    support contract's own ``per_basin_support[basin_id]`` timestamp order
+    (not run/positional order). ``date``, ``obs_m3s``, and ``sim_m3s`` are
+    one-dimensional and positionally aligned -- ``date[i]``/``obs_m3s[i]``/
+    ``sim_m3s[i]`` describe the same admitted timestamp. ``obs_m3s`` is
+    always finite (fail-closed elsewhere); ``sim_m3s`` may contain
+    non-finite values, which remain represented by the corresponding
+    metric row's ``n_sim_nonfinite_at_admitted`` -- never silently dropped.
+    This is the RD1-C4 producer-side result contract; RD1-C4-B (Q98
+    analysis/rendering) is the intended consumer.
+    """
+
+    basin_id: str
+    date: np.ndarray
+    obs_m3s: np.ndarray
+    sim_m3s: np.ndarray
+
+    def __post_init__(self) -> None:
+        # Defensively protect public scientific results: these arrays are
+        # returned to callers as part of an already-qualified, immutable
+        # record -- store an independent, read-only copy of each (never a
+        # view/alias of the caller-supplied array) so neither the caller's
+        # own original array nor its writeability is affected, while the
+        # stored copy itself can never be silently mutated after
+        # construction (RD1-C4 review follow-on: the prior `np.asarray` +
+        # `setflags` here aliased and froze the caller's own array whenever
+        # it was already an ndarray of the right dtype).
+        for name in ("date", "obs_m3s", "sim_m3s"):
+            object.__setattr__(self, name, _frozen_array_copy(getattr(self, name)))
 
 
 def evaluate_fixed_support_raw_space_metrics(
@@ -355,6 +489,7 @@ def evaluate_fixed_support_raw_space_metrics(
     require_full_screening_population: bool = False,
     min_area_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
+    return_admitted_series: bool = False,
 ) -> dict:
     """Evaluates raw-space metrics restricted to ``contract``'s frozen
     120h-floor common support. The returned dict is tagged
@@ -370,6 +505,13 @@ def evaluate_fixed_support_raw_space_metrics(
     does not contain every one of the contract's admitted timestamps for
     that basin -- both are basin/date identity contradictions, not normal
     per-basin exclusions.
+
+    ``return_admitted_series``, if set, additionally returns
+    ``result["admitted_series_by_basin"]``: a ``{basin_id: AdmittedSeries}``
+    mapping for exactly the successfully evaluated basins (same keys as the
+    ``per_basin`` metric rows), built from the same extraction/conversion
+    pass as those metric rows -- not a second independent reconstruction.
+    Defaults to ``False`` so the legacy result shape is unchanged.
     """
     validate_fixed_support_contract(contract)
     target_variable = contract["target_variable"]
@@ -388,6 +530,7 @@ def evaluate_fixed_support_raw_space_metrics(
 
     per_basin = []
     excluded = []
+    admitted_series_by_basin: dict = {}
     for basin_id in requested:
         if basin_id not in period_results:
             raise FixedSupportContractError(
@@ -407,6 +550,16 @@ def evaluate_fixed_support_raw_space_metrics(
 
         run_date_values = np.asarray(xr_ds.coords["date"].values)
         support_dates = _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+        run_date_values = _canonicalize_timestamps_for_identity(
+            run_date_values,
+            date_dtype=contract["date_dtype"],
+            context=f"basin {basin_id!r}: run date coordinate",
+        )
+        support_dates = _canonicalize_timestamps_for_identity(
+            support_dates,
+            date_dtype=contract["date_dtype"],
+            context=f"basin {basin_id!r}: frozen support timestamps",
+        )
         if len(np.unique(run_date_values)) != len(run_date_values):
             raise FixedSupportContractError(f"basin {basin_id!r}: run date coordinate contains duplicates")
         if len(np.unique(support_dates)) != len(support_dates):
@@ -455,7 +608,30 @@ def evaluate_fixed_support_raw_space_metrics(
             obs_mm_per_h=obs_support,
             sim_mm_per_h=sim_mm_per_h,
             area_km2=area_result.area_km2,
+            return_admitted_arrays=return_admitted_series,
         )
+        if return_admitted_series:
+            # ``evaluate_basin_raw_space``'s admitted arrays are ordered by
+            # this run's own date coordinate (positional), not the frozen
+            # contract's ``per_basin_support`` order -- reindex by exact
+            # timestamp identity to the contract's canonical order.
+            run_dates_admitted = run_date_values[support_mask]
+            position_by_date = {date: idx for idx, date in enumerate(run_dates_admitted)}
+            try:
+                reorder = np.array([position_by_date[date] for date in support_dates])
+            except KeyError as exc:
+                raise FixedSupportContractError(
+                    f"basin {basin_id!r}: admitted timestamp identity lookup failed for {exc} after "
+                    "unit canonicalization -- run/contract support timestamp identity contradiction"
+                ) from exc
+            admitted_obs_m3s = basin_metrics.pop("_admitted_obs_m3s")[reorder]
+            admitted_sim_m3s = basin_metrics.pop("_admitted_sim_m3s")[reorder]
+            admitted_series_by_basin[basin_id] = AdmittedSeries(
+                basin_id=basin_id,
+                date=support_dates,
+                obs_m3s=admitted_obs_m3s,
+                sim_m3s=admitted_sim_m3s,
+            )
         basin_metrics["freq"] = "1h"
         basin_metrics["n_fixed_support_eligible"] = len(support_dates)
         per_basin.append(basin_metrics)
@@ -474,6 +650,8 @@ def evaluate_fixed_support_raw_space_metrics(
         if per_basin
         else {"n_basins": 0, "n_admitted_total": 0, "n_sim_nonfinite_at_admitted_total": 0, "metrics": {}},
     }
+    if return_admitted_series:
+        result["admitted_series_by_basin"] = admitted_series_by_basin
     if require_full_screening_population:
         _require_complete_production_fixed_support_population(result, required_basin_ids=contract["basin_ids"])
     return result
