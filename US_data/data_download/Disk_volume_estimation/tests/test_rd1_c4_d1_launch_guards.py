@@ -388,3 +388,107 @@ def test_benchmark_still_refuses_without_an_explicit_trial_when_actually_execute
     assert result.returncode == 2
     assert "REFUSING: export D1_BENCHMARK_TRIAL_ID" in result.stderr
     assert not fresh.exists()
+
+
+# --- job 46175271: spool-copy self-location regression ---------------------
+#
+# On Moriah, `sbatch path/to/script.sbatch` executes a per-job spool copy
+# (/var/spool/slurmd/job<id>/slurm_script), not the checked-out file. Job
+# 46175271 failed in 2 seconds because each entry point located its sibling
+# rd1_c4_d1_common.sh via `dirname "${BASH_SOURCE[0]}"`, which pointed at the
+# empty spool directory rather than the isolated repo clone. The tests below
+# reproduce that exact shape -- a copy under a generic "slurm_script" name in
+# an unrelated temp directory that does NOT contain rd1_c4_d1_common.sh -- and
+# prove the corrected entry points resolve the common file from
+# REPO_CLONE_DIR instead, reaching each script's own pre-existing input guard
+# rather than a "No such file or directory" / "command not found" failure.
+
+REPO_ROOT_FOR_TESTS = Path(__file__).resolve().parents[1].parent.parent.parent
+assert (
+    REPO_ROOT_FOR_TESTS / "US_data" / "data_download" / "Disk_volume_estimation" / "scripts" / "rd1_c4_d1" / "rd1_c4_d1_common.sh"
+).is_file(), "REPO_ROOT_FOR_TESTS does not resolve to a checkout containing rd1_c4_d1_common.sh"
+
+
+def _spool_copy(tmp_path: Path, entry_point: Path) -> Path:
+    """Copy ``entry_point`` into an unrelated directory under a generic
+    Slurm-spool-style name, deliberately without its sibling common file --
+    the exact shape of /var/spool/slurmd/job<id>/slurm_script."""
+    spool_dir = tmp_path / "spool" / "jobXXXXX"
+    spool_dir.mkdir(parents=True)
+    spool_script = spool_dir / "slurm_script"
+    shutil.copy2(entry_point, spool_script)
+    assert not (spool_dir / "rd1_c4_d1_common.sh").exists()
+    return spool_script
+
+
+_SPOOL_REGRESSION_CASES = [
+    (BENCHMARK, {"D1_BENCHMARK_TRIAL_ID": "probe_trial", "D1_BENCHMARK_STORE_ROOT": None}),
+    (ARRAY, {"D1_ARRAY_CONFIRM": "run-all-24-trials", "SLURM_ARRAY_TASK_ID": "0"}),
+    (REDUCE, {}),
+]
+
+
+@pytestmark_bash
+@pytest.mark.parametrize("entry_point,extra_env", _SPOOL_REGRESSION_CASES, ids=lambda v: getattr(v, "name", None) or "env")
+def test_entry_point_locates_common_script_from_repo_clone_when_run_from_a_spool_copy(tmp_path, entry_point, extra_env):
+    spool_script = _spool_copy(tmp_path, entry_point)
+
+    flashnh_base = tmp_path / "flashnh_base"
+    env, _ = _guard_env(tmp_path)
+    env["SLURM_JOB_ID"] = "46175271"
+    env["REPO_CLONE_DIR"] = str(REPO_ROOT_FOR_TESTS)
+    if entry_point is BENCHMARK:
+        extra_env = dict(extra_env)
+        extra_env["D1_BENCHMARK_STORE_ROOT"] = str(
+            flashnh_base / "tmp" / "rd1_c4_d1" / "benchmarks" / "spool_regression_attempt"
+        )
+    env.update(extra_env)
+
+    result = subprocess.run(["bash", str(spool_script)], env=env, capture_output=True, text=True, timeout=30)
+
+    # The historical failure mode from job 46175271, must not recur.
+    assert "rd1_c4_d1_common.sh: No such file or directory" not in result.stderr
+    assert "command not found" not in result.stderr
+    assert "REFUSING: cannot locate rd1_c4_d1_common.sh" not in result.stderr
+
+    # It must instead reach the entry point's own pre-existing guard, proving
+    # rd1_c4_d1_common.sh (and rd1_c4_d1_require_inputs, which it defines)
+    # was actually sourced from the repo clone.
+    assert result.returncode == 2
+    assert "REFUSING" in result.stderr
+
+    # No benchmark store, log, scheduler action, Python process, or network
+    # contact: every one of these guards fires before mkdir/exec/python.
+    assert not (flashnh_base / "tmp" / "rd1_c4_d1").exists()
+
+
+@pytestmark_bash
+@pytest.mark.parametrize("entry_point", ENTRY_POINTS, ids=lambda path: path.name)
+def test_entry_point_fails_closed_when_slurm_mode_repo_clone_lacks_the_common_script(tmp_path, entry_point):
+    """A Slurm-mode REPO_CLONE_DIR that does not contain the common script
+    must refuse with the new explicit message -- it must never silently fall
+    back to a common.sh sitting next to the spool copy, which would recreate
+    the exact ambiguity job 46175271 exposed."""
+    spool_script = _spool_copy(tmp_path, entry_point)
+
+    # A decoy common.sh next to the spool copy: if the corrected bootstrap
+    # ever fell back to BASH_SOURCE-sibling resolution under Slurm, this is
+    # what it would source instead of failing closed.
+    decoy = spool_script.parent / "rd1_c4_d1_common.sh"
+    decoy.write_text('echo "DECOY_SOURCED_FROM_SPOOL_SIBLING"\nrd1_c4_d1_require_inputs() { return 0; }\n', encoding="utf-8")
+
+    empty_clone = tmp_path / "empty_repo_clone"
+    empty_clone.mkdir()
+
+    env, _ = _guard_env(tmp_path)
+    env["SLURM_JOB_ID"] = "46175271"
+    env["REPO_CLONE_DIR"] = str(empty_clone)
+
+    result = subprocess.run(["bash", str(spool_script)], env=env, capture_output=True, text=True, timeout=30)
+
+    assert "DECOY_SOURCED_FROM_SPOOL_SIBLING" not in result.stdout
+    assert result.returncode != 0
+    assert "REFUSING: cannot locate rd1_c4_d1_common.sh" in result.stderr
+    assert "resolution=slurm" in result.stderr
+    assert str(empty_clone) in result.stderr
+    assert "REPO_CLONE_DIR" in result.stderr

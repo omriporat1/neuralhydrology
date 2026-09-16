@@ -42,8 +42,26 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/rd1_c4_d1_common.sh"
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    # Under real Slurm, BASH_SOURCE[0] is the per-job spool copy
+    # (/var/spool/slurmd/job<id>/slurm_script), not the checked-out script,
+    # so the sibling common file must be located from the intended repo
+    # clone identity instead (job 46175271).
+    D1_RESOLUTION_MODE="slurm"
+    FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
+    REPO_CLONE_DIR="${REPO_CLONE_DIR:-${FLASHNH_BASE}/repos/flash-nh-rd1c4-d1}"
+    D1_COMMON_SCRIPT="${REPO_CLONE_DIR}/US_data/data_download/Disk_volume_estimation/scripts/rd1_c4_d1/rd1_c4_d1_common.sh"
+else
+    D1_RESOLUTION_MODE="local"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    D1_COMMON_SCRIPT="${SCRIPT_DIR}/rd1_c4_d1_common.sh"
+fi
+
+if [ ! -f "${D1_COMMON_SCRIPT}" ]; then
+    echo "REFUSING: cannot locate rd1_c4_d1_common.sh (resolution=${D1_RESOLUTION_MODE}, attempted=${D1_COMMON_SCRIPT}, REPO_CLONE_DIR=${REPO_CLONE_DIR:-unset})." >&2
+    return 2 2>/dev/null || exit 2
+fi
+source "${D1_COMMON_SCRIPT}"
 
 if [ "${D1_ARRAY_CONFIRM:-}" != "run-all-24-trials" ]; then
     echo "REFUSING: the full-array entry point requires an explicit confirmation." >&2
