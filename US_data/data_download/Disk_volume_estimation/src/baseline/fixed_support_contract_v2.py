@@ -543,6 +543,13 @@ class CanonicalPackageObservedSeries:
 #: which resolves it through the package's own declared, recognized schema.
 _RUN_RESULTS_DATE_COORDINATE = "date"
 
+#: NeuralHydrology's own run-results layout carries a size-1 ``time_step``
+#: axis alongside ``date`` (its per-step lookback bookkeeping dimension,
+#: degenerate for the single-lead-time case this evaluator handles).
+#: ``_require_exact_one_dimensional_variable`` accepts exactly this one
+#: named, singleton extra dimension -- see RD1-C4-D1 benchmark job 46175818.
+_RUN_RESULTS_SINGLETON_STEP_DIMENSION = "time_step"
+
 
 @dataclass(frozen=True)
 class _FixtureOnlyUnqualifiedPackage:
@@ -584,6 +591,7 @@ def _require_exact_one_dimensional_variable(
     *,
     coordinate_name: str,
     context: str,
+    allow_singleton_time_step: bool = False,
 ):
     """Return ``dataset[variable_name]``'s values, proven to be exactly a
     one-dimensional series along ``coordinate_name``.
@@ -602,10 +610,25 @@ def _require_exact_one_dimensional_variable(
       one-dimensional index coordinate (``dims == (coordinate_name,)``);
     * ``variable_name`` exists as a data variable;
     * its dims are EXACTLY ``(coordinate_name,)`` -- not a superset, not a
-      permutation, not a same-length sibling dimension.
+      permutation, not a same-length sibling dimension --
 
-    Nothing is flattened, squeezed, transposed or broadcast: a variable that
-    is not already the expected one-dimensional series is rejected.
+    with exactly one named exception, gated by ``allow_singleton_time_step``
+    (RD1-C4-D1 benchmark job 46175818): real NeuralHydrology validation-results
+    variables carry the variable as ``(coordinate_name, 'time_step')`` with
+    ``time_step`` of size exactly 1. That axis is NeuralHydrology's own
+    per-step bookkeeping dimension, degenerate here because this evaluator
+    only ever reads a single lead time; it is proven singleton, and proven to
+    have exactly one value per ``coordinate_name`` entry, before its sole
+    element is explicitly selected. This is not generic squeezing: no other
+    extra dimension name, no ``time_step`` of size other than 1, and no
+    temporal-length mismatch, is accepted -- and the exception is only ever
+    offered to callers that opt in, never to the frozen package's own
+    authoritative reader.
+
+    Nothing is flattened, reshaped, transposed or broadcast: a variable that
+    is not already the expected one-dimensional series, or (when
+    ``allow_singleton_time_step`` is set) exactly that one named
+    singleton-``time_step`` variant, is rejected.
     """
     coords = getattr(dataset, "coords", {})
     if coordinate_name not in coords:
@@ -626,17 +649,47 @@ def _require_exact_one_dimensional_variable(
         )
     variable = dataset[variable_name]
     dims = tuple(str(d) for d in variable.dims)
-    if dims != (coordinate_name,):
-        raise FixedSupportContractError(
-            f"{context}: data variable {variable_name!r} has dims {dims} but the only supported layout is "
-            f"({coordinate_name!r},) -- refusing to flatten an unexpected, transposed or multidimensional "
-            "variable into a positional series"
+    is_singleton_step_layout = allow_singleton_time_step and (
+        dims == (coordinate_name, _RUN_RESULTS_SINGLETON_STEP_DIMENSION)
+    )
+    if dims != (coordinate_name,) and not is_singleton_step_layout:
+        supported = (
+            f"({coordinate_name!r},) and ({coordinate_name!r}, {_RUN_RESULTS_SINGLETON_STEP_DIMENSION!r}) with "
+            f"a singleton {_RUN_RESULTS_SINGLETON_STEP_DIMENSION!r}"
+            if allow_singleton_time_step
+            else f"({coordinate_name!r},)"
         )
+        raise FixedSupportContractError(
+            f"{context}: data variable {variable_name!r} has dims {dims} but the only supported layout"
+            f"{'s are' if allow_singleton_time_step else ' is'} {supported} -- refusing to flatten an "
+            "unexpected, transposed or multidimensional variable into a positional series"
+        )
+    coordinate_length = np.asarray(coordinate.values).shape[0]
     values = np.asarray(variable.values)
+    if is_singleton_step_layout:
+        if values.ndim != 2 or values.shape[1] != 1:
+            raise FixedSupportContractError(
+                f"{context}: data variable {variable_name!r} declares dims {dims} but its values have shape "
+                f"{values.shape}, not a singleton {_RUN_RESULTS_SINGLETON_STEP_DIMENSION!r} axis -- refusing "
+                "to select an unproven element"
+            )
+        if values.shape[0] != coordinate_length:
+            raise FixedSupportContractError(
+                f"{context}: data variable {variable_name!r} has {values.shape[0]} {coordinate_name!r} rows "
+                f"but the {coordinate_name!r} coordinate has {coordinate_length} -- refusing to select an "
+                "unproven element against a mismatched temporal length"
+            )
+        values = values[:, 0]
     if values.ndim != 1:
         raise FixedSupportContractError(
             f"{context}: data variable {variable_name!r} declares dims {dims} but its values are "
             f"{values.ndim}-dimensional"
+        )
+    if values.shape[0] != coordinate_length:
+        raise FixedSupportContractError(
+            f"{context}: data variable {variable_name!r} has {values.shape[0]} values but the "
+            f"{coordinate_name!r} coordinate has {coordinate_length} -- refusing to pair a value "
+            "with an unproven date"
         )
     return values
 
@@ -938,12 +991,14 @@ def evaluate_fixed_support_raw_space_metrics(
             obs_key,
             coordinate_name=_RUN_RESULTS_DATE_COORDINATE,
             context=f"basin {basin_id!r}: run results ({authenticated_period_results.results_path})",
+            allow_singleton_time_step=True,
         )
         sim_mm_per_h = _require_exact_one_dimensional_variable(
             xr_ds,
             sim_key,
             coordinate_name=_RUN_RESULTS_DATE_COORDINATE,
             context=f"basin {basin_id!r}: run results ({authenticated_period_results.results_path})",
+            allow_singleton_time_step=True,
         )
         run_date_values = np.asarray(xr_ds.coords[_RUN_RESULTS_DATE_COORDINATE].values)
         if not (run_date_values.shape == obs_mm_per_h.shape == sim_mm_per_h.shape):

@@ -722,6 +722,14 @@ def test_integer_timestamp_canonicalization_remains_correct(monkeypatch):
         (("sample",), np.array([1.0, 2.0, 3.0])),
         (("date", "member"), np.ones((3, 1))),
         (("member", "date"), np.ones((1, 3))),
+        # RD1-C4-D1 benchmark job 46175818 fix: the one accepted extra
+        # dimension is a *singleton* ``time_step`` alongside ``date``, in
+        # that order -- a transposed ``(time_step, date)`` is still an
+        # unsupported layout and must be rejected, not silently squeezed.
+        # (A non-singleton ``('date', 'time_step')`` is rejected too, but
+        # with a different, more specific error -- see
+        # ``test_require_exact_one_dimensional_variable_rejects_non_singleton_time_step``.)
+        (("time_step", "date"), np.ones((1, 3))),
     ],
 )
 def test_run_observation_rejects_unrelated_multidimensional_or_transposed_layout(
@@ -736,6 +744,110 @@ def test_run_observation_rejects_unrelated_multidimensional_or_transposed_layout
     with pytest.raises(fixed.FixedSupportContractError, match="only supported layout"):
         fixed.evaluate_fixed_support_raw_space_metrics(
             run_dir="fixture", epoch=1, package_root="fixture", contract=contract
+        )
+
+
+def test_run_results_accept_singleton_time_step_layout_for_obs_and_sim(monkeypatch):
+    """RD1-C4-D1 benchmark job 46175818: real NeuralHydrology run results serialize
+    ``qobs_mm_per_h_lead06_obs``/``_sim`` with dims ``('date', 'time_step')`` where
+    ``time_step`` has size 1 (its degenerate per-step lookback axis for the
+    single-lead-time case). This must be accepted -- for both observation and
+    simulation variables -- with the sole ``time_step`` element explicitly
+    selected and dates preserved in exact order, not rejected as it was before
+    this fix (which only accepted the bare ``('date',)`` layout).
+    """
+    contract = _contract(1)
+    basin_id = contract["basin_ids"][0]
+    period = _wire_datetime_epoch(monkeypatch, basin_id=basin_id, run_dates=np.arange(3))
+    dataset = period[basin_id]["1h"]["xr"]
+    obs_singleton = np.array([[1.0], [2.0], [3.0]])
+    sim_singleton = np.array([[10.0], [20.0], [30.0]])
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(obs_singleton, dims=("date", "time_step"))
+    dataset._values["qobs_mm_per_h_lead06_sim"] = _Array(sim_singleton, dims=("date", "time_step"))
+
+    result = fixed.evaluate_fixed_support_raw_space_metrics(
+        run_dir="fixture", epoch=1, package_root="fixture", contract=contract,
+        return_admitted_series=True,
+    )
+
+    assert result["n_basins_evaluated"] == 1
+    series = result["admitted_series_by_basin"][basin_id]
+    np.testing.assert_array_equal(series.date, np.array([0, 1, 2], dtype="int64"))
+    # area_km2=100.0 from _wire_datetime_epoch's stubbed area derivation;
+    # metric() in _wire_datetime_epoch converts mm/h -> m3/s as value * area_km2 / 3.6.
+    np.testing.assert_allclose(series.obs_m3s, obs_singleton[:, 0] * 100.0 / 3.6)
+    np.testing.assert_allclose(series.sim_m3s, sim_singleton[:, 0] * 100.0 / 3.6)
+
+
+def test_require_exact_one_dimensional_variable_accepts_canonical_and_singleton_step(monkeypatch):
+    """Direct unit coverage of ``_require_exact_one_dimensional_variable`` itself,
+    proving both accepted layouts extract identical, correctly-ordered values.
+    """
+    dataset = _Dataset()
+    dataset.coords["date"] = _Array([0, 1, 2])
+
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array([1.0, 2.0, 3.0], dims=("date",))
+    canonical_values = fixed._require_exact_one_dimensional_variable(
+        dataset, "qobs_mm_per_h_lead06_obs", coordinate_name="date", context="test"
+    )
+    np.testing.assert_array_equal(canonical_values, np.array([1.0, 2.0, 3.0]))
+
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(
+        np.array([[1.0], [2.0], [3.0]]), dims=("date", "time_step")
+    )
+    singleton_values = fixed._require_exact_one_dimensional_variable(
+        dataset, "qobs_mm_per_h_lead06_obs", coordinate_name="date", context="test",
+        allow_singleton_time_step=True,
+    )
+    np.testing.assert_array_equal(singleton_values, np.array([1.0, 2.0, 3.0]))
+
+
+def test_require_exact_one_dimensional_variable_rejects_non_singleton_time_step(monkeypatch):
+    dataset = _Dataset()
+    dataset.coords["date"] = _Array([0, 1, 2])
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(
+        np.ones((3, 2)), dims=("date", "time_step")
+    )
+    with pytest.raises(fixed.FixedSupportContractError, match="refusing to select an unproven element"):
+        fixed._require_exact_one_dimensional_variable(
+            dataset, "qobs_mm_per_h_lead06_obs", coordinate_name="date", context="test",
+            allow_singleton_time_step=True,
+        )
+
+
+def test_require_exact_one_dimensional_variable_rejects_singleton_time_step_length_mismatch(monkeypatch):
+    """Review finding 1: a singleton ``time_step`` axis must also be proven to have
+    exactly one row per ``date`` coordinate entry before its sole element is
+    selected -- a malformed object whose first axis disagrees with the
+    coordinate length must fail inside the helper, not downstream.
+    """
+    dataset = _Dataset()
+    dataset.coords["date"] = _Array([0, 1, 2])
+    # 4 rows against a 3-entry 'date' coordinate, second axis genuinely singleton.
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(
+        np.array([[1.0], [2.0], [3.0], [4.0]]), dims=("date", "time_step")
+    )
+    with pytest.raises(fixed.FixedSupportContractError, match="mismatched temporal length"):
+        fixed._require_exact_one_dimensional_variable(
+            dataset, "qobs_mm_per_h_lead06_obs", coordinate_name="date", context="test",
+            allow_singleton_time_step=True,
+        )
+
+
+def test_require_exact_one_dimensional_variable_package_path_rejects_singleton_time_step(monkeypatch):
+    """Review finding 2: the frozen-package reader must remain strict.
+    Without ``allow_singleton_time_step=True`` (the package call site's actual
+    default), a singleton ``('date', 'time_step')`` layout -- even though it
+    would be accepted for validation results -- is still rejected.
+    """
+    dataset = _Dataset()
+    dataset.coords["date"] = _Array([0, 1, 2])
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(
+        np.array([[1.0], [2.0], [3.0]]), dims=("date", "time_step")
+    )
+    with pytest.raises(fixed.FixedSupportContractError, match="only supported layout"):
+        fixed._require_exact_one_dimensional_variable(
+            dataset, "qobs_mm_per_h_lead06_obs", coordinate_name="date", context="test"
         )
 
 
@@ -780,6 +892,29 @@ def test_package_series_rejects_same_length_unrelated_dimension_and_wrong_coordi
             package_identity=fixed.fixture_only_unqualified_package(
                 netcdf_time_coordinate="wrong_time"
             ),
+        )
+
+
+def test_package_series_rejects_singleton_time_step_even_though_validation_results_accept_it(tmp_path):
+    """Review finding 2: the frozen package's own reader (``allow_singleton_time_step``
+    defaults to ``False`` at that call site) must stay strict even for the exact
+    singleton ``time_step`` shape that validation-results call sites now accept.
+    """
+    basin_id = "00000009"
+    package_root = tmp_path / "package"
+    ts_dir = package_root / "time_series"
+    ts_dir.mkdir(parents=True)
+    xr.Dataset(
+        {"qobs_m3s": (("date", "time_step"), np.arange(12, dtype=float).reshape(12, 1))},
+        coords={"date": np.arange(12)},
+    ).to_netcdf(ts_dir / f"{basin_id}.nc")
+    contract = _contract_for_basin(basin_id, np.array([0, 1]), lead_hours=6)
+    with pytest.raises(fixed.FixedSupportContractError, match="only supported layout"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
         )
 
 
