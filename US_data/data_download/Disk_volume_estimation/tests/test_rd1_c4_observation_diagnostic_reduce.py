@@ -535,6 +535,58 @@ def test_nothing_at_all_is_written_when_a_gate_fails(world):
     assert sorted(path.name for path in world.out_dir.iterdir()) == ["pre_existing.txt"]
 
 
+def test_reduction_refuses_to_overwrite_an_existing_output_directory(world):
+    """Even when every gate would pass, an existing ``out_dir`` -- complete or
+    not -- is refused rather than silently overwritten. A reduction output
+    directory is published exactly once; a repeat run into the same path
+    means an operator must remove or rename it first."""
+    world.out_dir.mkdir(parents=True)
+    (world.out_dir / "prior_result.txt").write_text("do not touch", encoding="utf-8")
+
+    with pytest.raises(ReductionError, match="already exists"):
+        _reduce(world)
+
+    assert sorted(path.name for path in world.out_dir.iterdir()) == ["prior_result.txt"]
+    # No stray staging directory is left as a sibling of a refused out_dir --
+    # the refusal happens before any staging directory is even created.
+    attempt_dirs = [
+        path for path in world.out_dir.parent.iterdir() if path.name.startswith(f"{world.out_dir.name}.attempt.")
+    ]
+    assert attempt_dirs == []
+
+
+def test_a_crash_partway_through_writing_leaves_out_dir_absent_and_the_attempt_isolated(world, monkeypatch):
+    """If the process dies after gates pass but before every output is
+    written, ``out_dir`` must never appear at all -- not absent-but-about-to-
+    exist, not partially populated. Only a staging directory, left behind for
+    inspection like an abandoned shard attempt, should show the partial
+    work."""
+    import src.baseline.rd1_c4_observation_diagnostic_reduce as reduce_module
+
+    real_atomic_write_bytes = reduce_module.atomic_write_bytes
+    calls = {"n": 0}
+
+    def _flaky_atomic_write_bytes(path, payload):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("simulated crash mid-write")
+        return real_atomic_write_bytes(path, payload)
+
+    monkeypatch.setattr(reduce_module, "atomic_write_bytes", _flaky_atomic_write_bytes)
+
+    with pytest.raises(RuntimeError, match="simulated crash mid-write"):
+        _reduce(world)
+
+    assert not world.out_dir.exists()
+    attempt_dirs = [
+        path for path in world.out_dir.parent.iterdir() if path.name.startswith(f"{world.out_dir.name}.attempt.")
+    ]
+    assert len(attempt_dirs) == 1
+    partial_names = {path.name for path in attempt_dirs[0].iterdir()}
+    assert "cells.parquet" in partial_names
+    assert "manifest.csv" not in partial_names
+
+
 # --------------------------------------------------------------------- #
 # Typed error cells are evidence, not grounds for refusal
 # --------------------------------------------------------------------- #

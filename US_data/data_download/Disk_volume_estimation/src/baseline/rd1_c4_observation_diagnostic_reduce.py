@@ -29,7 +29,15 @@ selected, no pass/fail verdict is emitted, and no scientific conclusion
 about the package-versus-pickle relationship is published. That reading
 belongs to the user, from this evidence.
 
-Outputs (all written atomically into the output directory)::
+The whole output directory is published atomically, the same way a shard is:
+every file is built under a private staging directory and the directory is
+made visible with a single ``os.replace`` only after every output has been
+written and hashed. A crash or kill partway through leaves the staging
+directory behind for inspection and no trace at the public output path --
+``out_dir`` is never observed half-written, and an existing ``out_dir`` (a
+previous complete reduction) is refused rather than silently overwritten.
+
+Outputs::
 
     cells.parquet                        the 9,600-row typed cell table
     cell_status.csv                      status distribution by trial and overall
@@ -47,6 +55,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +67,8 @@ from .atomic_shard_store import (
     atomic_write_bytes,
     canonical_json_bytes,
     canonical_json_sha256,
+    fsync_dir,
+    replace_dir,
     sha256_path,
 )
 from .rd1_c4_observation_diagnostic import (
@@ -397,29 +408,45 @@ def reduce_observation_diagnostic(
         )
 
     # -- every gate passed: only now is anything written ------------------ #
+    #
+    # The whole output directory is published the same way a shard is: built
+    # in full under a staging directory the public ``out_dir`` path never
+    # points at, then made visible in one ``os.replace``. A crash or kill
+    # partway through writing leaves only the staging directory (inspectable,
+    # never cleaned up automatically -- same non-goal as abandoned shard
+    # attempts in :mod:`atomic_shard_store`); ``out_dir`` itself either does
+    # not exist yet or is a previous, complete reduction, never a partial one.
+    # An existing ``out_dir`` is refused rather than silently overwritten, so
+    # a complete prior reduction is never lost without an operator noticing.
     cells.sort(key=lambda row: (row["trial_id"], row["basin_id"]))
     extremes.sort(key=lambda row: (row["trial_id"], row["basin_id"], row["extreme_kind"]))
     q98_rows.sort(key=lambda row: (row["trial_id"], row["basin_id"]))
     receipt_rows.sort(key=lambda row: row["trial_id"])
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir.exists():
+        raise ReductionError(
+            f"refusing to reduce into {out_dir}: it already exists. A reduction output directory is "
+            "never overwritten, complete or partial -- remove or rename it explicitly first."
+        )
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f"{out_dir.name}.attempt.", dir=out_dir.parent))
     written: dict = {}
 
-    written["cells.parquet"] = _write_cells_parquet(out_dir / "cells.parquet", cells)
+    written["cells.parquet"] = _write_cells_parquet(staging_dir / "cells.parquet", cells)
     written["cell_status.csv"] = atomic_write_bytes(
-        out_dir / "cell_status.csv", _cell_status_bytes(cells, expected_trials)
+        staging_dir / "cell_status.csv", _cell_status_bytes(cells, expected_trials)
     )
     written["extreme_elements.csv"] = atomic_write_bytes(
-        out_dir / "extreme_elements.csv", _csv_bytes(_EXTREME_COLUMNS, extremes)
+        staging_dir / "extreme_elements.csv", _csv_bytes(_EXTREME_COLUMNS, extremes)
     )
     written["ulp_or_source_precision_histogram.csv"] = atomic_write_bytes(
-        out_dir / "ulp_or_source_precision_histogram.csv", _histogram_bytes(histogram_totals)
+        staging_dir / "ulp_or_source_precision_histogram.csv", _histogram_bytes(histogram_totals)
     )
     written["q98_consequences.csv"] = atomic_write_bytes(
-        out_dir / "q98_consequences.csv", _csv_bytes(_Q98_COLUMNS, q98_rows)
+        staging_dir / "q98_consequences.csv", _csv_bytes(_Q98_COLUMNS, q98_rows)
     )
     written["receipt_index.csv"] = atomic_write_bytes(
-        out_dir / "receipt_index.csv", _csv_bytes(list(receipt_rows[0].keys()), receipt_rows)
+        staging_dir / "receipt_index.csv", _csv_bytes(list(receipt_rows[0].keys()), receipt_rows)
     )
 
     status_counts = Counter(row["status"] for row in cells)
@@ -470,28 +497,36 @@ def reduce_observation_diagnostic(
         ),
     }
     written["summary.json"] = atomic_write_bytes(
-        out_dir / "summary.json", canonical_json_bytes(summary_payload)
+        staging_dir / "summary.json", canonical_json_bytes(summary_payload)
     )
     written["reduction.log"] = atomic_write_bytes(
-        out_dir / "reduction.log", _reduction_log_bytes(summary_payload).encode("utf-8")
+        staging_dir / "reduction.log", _reduction_log_bytes(summary_payload).encode("utf-8")
     )
 
     manifest_rows = [
         {
             "relative_path": name,
             "sha256": digest,
-            "size_bytes": (out_dir / name).stat().st_size,
+            "size_bytes": (staging_dir / name).stat().st_size,
         }
         for name, digest in sorted(written.items())
     ]
     atomic_write_bytes(
-        out_dir / "manifest.csv", _csv_bytes(("relative_path", "sha256", "size_bytes"), manifest_rows)
+        staging_dir / "manifest.csv", _csv_bytes(("relative_path", "sha256", "size_bytes"), manifest_rows)
     )
     atomic_write_bytes(
-        out_dir / "checksums.sha256",
+        staging_dir / "checksums.sha256",
         "".join(f"{row['sha256']}  {row['relative_path']}\n" for row in manifest_rows).encode("utf-8"),
     )
     summary_payload["outputs"] = manifest_rows
+
+    # Made visible in one step. If ``out_dir`` was created by a concurrent
+    # attempt since the check above, the replace still refuses to replace a
+    # non-empty directory (POSIX and Windows both raise), so two racing
+    # reductions can never silently merge or clobber one another; exactly one
+    # wins and the other's staging directory is left for inspection.
+    replace_dir(staging_dir, out_dir)
+    fsync_dir(out_dir.parent)
     return summary_payload
 
 

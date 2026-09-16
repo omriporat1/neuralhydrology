@@ -64,7 +64,12 @@ if [ "${N_RECEIPTS}" -ne 24 ]; then
     exit 2
 fi
 
-mkdir -p "${D1_OUT_DIR}" "${FLASHNH_BASE}/tmp/rd1_c4_d1"
+mkdir -p "${FLASHNH_BASE}/tmp/rd1_c4_d1"
+# D1_OUT_DIR itself is NOT pre-created here: the reducer now publishes its
+# whole output directory atomically (staging dir + single os.replace) and
+# refuses to run if D1_OUT_DIR already exists, so it must not exist yet at
+# launch. Only its parent (created by the reducer via out_dir.parent.mkdir)
+# needs to exist, which the reducer already guarantees itself.
 RESULT_LOG="${FLASHNH_BASE}/tmp/rd1_c4_d1/rd1_c4_d1_reduce_${SLURM_JOB_ID:-local}.log"
 exec > >(tee -a "${RESULT_LOG}") 2>&1
 

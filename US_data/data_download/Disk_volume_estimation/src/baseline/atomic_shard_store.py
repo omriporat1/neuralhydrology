@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +71,8 @@ __all__ = [
     "canonical_json_sha256",
     "atomic_write_bytes",
     "sha256_path",
+    "fsync_dir",
+    "replace_dir",
 ]
 
 
@@ -109,10 +112,14 @@ def sha256_path(path) -> str:
     return digest.hexdigest()
 
 
-def _fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path) -> None:
     """Flush a directory entry to stable storage where the platform supports
     it. Windows has no directory fd to fsync, so this is a documented no-op
-    there rather than a silent failure."""
+    there rather than a silent failure.
+
+    Public so other atomic-publication code (for example the D1 reducer's
+    whole-directory publish) can reuse the same durability step instead of
+    reimplementing it."""
     if os.name == "nt":
         return
     fd = os.open(str(path), os.O_RDONLY)
@@ -120,6 +127,31 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def replace_dir(source, destination, *, max_attempts: int = 10, initial_delay_s: float = 0.02) -> None:
+    """``os.replace`` a directory into place, retrying a transient Windows
+    rename race.
+
+    On Windows, a directory that was just written to (every file just
+    closed) can briefly raise ``PermissionError`` (WinError 5) or "file in
+    use" (WinError 32) on ``os.replace`` while the filesystem/antivirus
+    finishes releasing its handles -- not a real conflict, just a race this
+    project has hit before (see the attempt-directory republish helper in
+    ``tests/test_rd1_c4_observation_diagnostic_reduce.py``). POSIX platforms
+    do not exhibit this and the first attempt always succeeds there. Retries
+    only ``PermissionError``; any other error (for example the destination
+    genuinely already existing) is raised immediately, unretried."""
+    delay = initial_delay_s
+    for attempt in range(1, max_attempts + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == max_attempts:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def atomic_write_bytes(path, payload: bytes) -> str:
@@ -137,7 +169,7 @@ def atomic_write_bytes(path, payload: bytes) -> str:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
-    _fsync_dir(path.parent)
+    fsync_dir(path.parent)
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -365,8 +397,8 @@ class AtomicShardStore:
         )
 
         shard_dir.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(attempt_dir, shard_dir)
-        _fsync_dir(shard_dir.parent)
+        replace_dir(attempt_dir, shard_dir)
+        fsync_dir(shard_dir.parent)
         atomic_write_bytes(receipt_path, canonical_json_bytes(receipt.as_dict()))
         return receipt
 
