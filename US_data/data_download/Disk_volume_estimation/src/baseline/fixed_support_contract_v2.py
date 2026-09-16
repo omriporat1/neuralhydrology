@@ -54,7 +54,23 @@ from .nh_raw_space_evaluation import (
     derive_basin_area_km2_from_netcdf,
     evaluate_basin_raw_space,
 )
-from .nh_seed_evaluation import basin_netcdf_path, load_period_results, raw_space_metrics_for_run_period
+from .authenticated_period_results import (
+    AuthenticatedPeriodResults,
+    AuthenticatedPeriodResultsError,
+    load_authenticated_period_results,
+)
+from .nh_seed_evaluation import (
+    basin_netcdf_path,
+    load_period_results,
+    period_results_path,
+    raw_space_metrics_for_run_period,
+)
+from .package_identity_qualification import (
+    PackageIdentityError,
+    QualifiedPackageIdentity,
+    qualify_package_identity,
+    verify_basin_time_series_file,
+)
 from .sweep_v2_six_axis_campaign import OBJECTIVE_ID_V2, SEQ_LENGTH_MAX
 
 __all__ = [
@@ -62,6 +78,22 @@ __all__ = [
     "CONTRACT_SCHEMA_NAME",
     "CONTRACT_SCHEMA_VERSION",
     "AdmittedSeries",
+    "CanonicalPackageObservedSeries",
+    "derive_canonical_package_observed_series",
+    # Re-exported (RD1-C4-D1 finding A1) so a contract-bound consumer can
+    # obtain the package-identity proof from the same module it obtains the
+    # contract from, without a second import path to keep in sync.
+    "PackageIdentityError",
+    "QualifiedPackageIdentity",
+    "qualify_package_identity",
+    "verify_basin_time_series_file",
+    # Re-exported (RD1-C4-D1 Correction Pass A, finding A3) so a consumer
+    # obtains the authenticated evaluation-source object from the same
+    # module it obtains the contract and the evaluator from.
+    "AuthenticatedPeriodResults",
+    "AuthenticatedPeriodResultsError",
+    "load_authenticated_period_results",
+    "fixture_only_unqualified_package",
     "SupportContractProvenance",
     "build_support_contract_provenance",
     "build_fixed_support_contract",
@@ -479,6 +511,307 @@ class AdmittedSeries:
             object.__setattr__(self, name, _frozen_array_copy(getattr(self, name)))
 
 
+@dataclass(frozen=True)
+class CanonicalPackageObservedSeries:
+    """One basin's canonical raw-space observed series, read directly from
+    the frozen package NetCDF's own ``qobs_m3s`` and lead-shift-aligned to
+    the fixed-support contract's ``per_basin_support`` timestamps (RD1-C4
+    reproducibility correction, see ``docs/decision_log.md``). This is the
+    sole source of formal RD1-C4 Q98 evaluation targets/facts; per-run
+    ``validation_results.p`` observations remain provenance/consistency
+    audit inputs only and never determine this series or any Q98 fact.
+
+    ``date``/``obs_m3s`` are one-dimensional, positionally aligned, and in
+    the same order as the contract's own ``per_basin_support[basin_id]``.
+    ``obs_m3s`` is always fully finite (fail-closed at construction).
+    """
+
+    basin_id: str
+    date: np.ndarray
+    obs_m3s: np.ndarray
+
+    def __post_init__(self) -> None:
+        for name in ("date", "obs_m3s"):
+            object.__setattr__(self, name, _frozen_array_copy(getattr(self, name)))
+
+
+#: Temporal coordinate name of a NeuralHydrology ``*_results.p`` per-basin
+#: xarray dataset. This is NeuralHydrology's own convention for run results
+#: and is deliberately NOT the frozen package's coordinate name -- the
+#: package's authoritative coordinate comes from
+#: ``QualifiedPackageIdentity.netcdf_time_coordinate`` (RD1-C4-D1 finding A3),
+#: which resolves it through the package's own declared, recognized schema.
+_RUN_RESULTS_DATE_COORDINATE = "date"
+
+
+@dataclass(frozen=True)
+class _FixtureOnlyUnqualifiedPackage:
+    """Test-fixture-only stand-in for a :class:`QualifiedPackageIdentity`.
+
+    RD1-C4-D1 Correction Pass A, finding A2: package qualification is
+    mandatory on every production path, so ``package_identity`` is a
+    REQUIRED argument of :func:`derive_canonical_package_observed_series`
+    with no default. Many in-repo unit fixtures legitimately build a bare
+    two-file package directory with no manifests at all and only want to
+    exercise the alignment algebra; they pass
+    :func:`fixture_only_unqualified_package` instead.
+
+    This type provides exactly one thing -- the temporal coordinate name to
+    bind variable dimensions against -- and provides NO checksum, contract,
+    root or basin proof. It is module-private and no module under
+    ``src/baseline/`` other than this one may reference it; a guard test
+    enforces that, which is what makes the convenience path unreachable
+    from production.
+    """
+
+    netcdf_time_coordinate: str = _RUN_RESULTS_DATE_COORDINATE
+
+
+def fixture_only_unqualified_package(
+    *, netcdf_time_coordinate: str = _RUN_RESULTS_DATE_COORDINATE
+) -> "_FixtureOnlyUnqualifiedPackage":
+    """Build the test-fixture-only unqualified package marker.
+
+    Never call this from production code: it deliberately proves nothing.
+    See :class:`_FixtureOnlyUnqualifiedPackage`.
+    """
+    return _FixtureOnlyUnqualifiedPackage(netcdf_time_coordinate=netcdf_time_coordinate)
+
+
+def _require_exact_one_dimensional_variable(
+    dataset,
+    variable_name: str,
+    *,
+    coordinate_name: str,
+    context: str,
+):
+    """Return ``dataset[variable_name]``'s values, proven to be exactly a
+    one-dimensional series along ``coordinate_name``.
+
+    RD1-C4-D1 Correction Pass A, finding A3: the previous code flattened
+    every package/run variable with ``.reshape(-1)`` and then paired it
+    positionally with a coordinate vector. That silently accepted a variable
+    laid out along an unrelated dimension of the same length, a transposed
+    ``(time, x)`` variable, and any multidimensional variable whose element
+    count happened to match -- producing a confidently wrong alignment
+    rather than an error.
+
+    This helper instead proves the layout before any value is read:
+
+    * ``coordinate_name`` exists on the dataset and is itself a plain
+      one-dimensional index coordinate (``dims == (coordinate_name,)``);
+    * ``variable_name`` exists as a data variable;
+    * its dims are EXACTLY ``(coordinate_name,)`` -- not a superset, not a
+      permutation, not a same-length sibling dimension.
+
+    Nothing is flattened, squeezed, transposed or broadcast: a variable that
+    is not already the expected one-dimensional series is rejected.
+    """
+    coords = getattr(dataset, "coords", {})
+    if coordinate_name not in coords:
+        raise FixedSupportContractError(
+            f"{context}: dataset has no {coordinate_name!r} coordinate (available coordinates: "
+            f"{sorted(map(str, coords))}) -- refusing to align against an unproven temporal coordinate"
+        )
+    coordinate = coords[coordinate_name]
+    if tuple(coordinate.dims) != (coordinate_name,):
+        raise FixedSupportContractError(
+            f"{context}: coordinate {coordinate_name!r} has dims {tuple(map(str, coordinate.dims))}; expected "
+            f"the plain one-dimensional index ({coordinate_name!r},)"
+        )
+    if variable_name not in dataset.data_vars:
+        raise FixedSupportContractError(
+            f"{context}: missing data variable {variable_name!r} (available: "
+            f"{sorted(map(str, dataset.data_vars))})"
+        )
+    variable = dataset[variable_name]
+    dims = tuple(str(d) for d in variable.dims)
+    if dims != (coordinate_name,):
+        raise FixedSupportContractError(
+            f"{context}: data variable {variable_name!r} has dims {dims} but the only supported layout is "
+            f"({coordinate_name!r},) -- refusing to flatten an unexpected, transposed or multidimensional "
+            "variable into a positional series"
+        )
+    values = np.asarray(variable.values)
+    if values.ndim != 1:
+        raise FixedSupportContractError(
+            f"{context}: data variable {variable_name!r} declares dims {dims} but its values are "
+            f"{values.ndim}-dimensional"
+        )
+    return values
+
+
+def _require_qualified_package_identity(
+    package_identity: QualifiedPackageIdentity,
+    *,
+    package_root,
+    basin_id: str,
+    contract: Mapping,
+) -> None:
+    """Fail closed unless ``package_identity`` actually qualifies THIS read.
+
+    Three independent facts must hold, and each is proven, never assumed:
+    the identity was qualified against this same fixed-support contract
+    (checksum identity, so a stale identity from an older contract cannot
+    be reused); the root about to be opened is the root that was qualified;
+    and this basin's NetCDF still hashes to the package's own recorded
+    checksum for that file. Raises :class:`FixedSupportContractError` so
+    contract-bound callers see one exception family, chaining the
+    underlying :class:`~.package_identity_qualification.PackageIdentityError`
+    for the exact per-file evidence.
+    """
+    if not isinstance(package_identity, QualifiedPackageIdentity):
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: package_identity must be a QualifiedPackageIdentity, got "
+            f"{type(package_identity).__name__} -- refusing to accept an unqualified identity claim"
+        )
+    if package_identity.contract_checksum_sha256 != contract["checksum_sha256"]:
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: package identity was qualified against contract checksum "
+            f"{package_identity.contract_checksum_sha256} but this evaluation uses "
+            f"{contract['checksum_sha256']} -- package/contract identity contradiction"
+        )
+    if package_identity.contract_id != contract["contract_id"]:
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: package identity was qualified against contract "
+            f"{package_identity.contract_id!r} but this evaluation uses {contract['contract_id']!r}"
+        )
+    try:
+        verify_basin_time_series_file(package_identity, basin_id, package_root=package_root)
+    except PackageIdentityError as exc:
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: package identity verification failed before any value was read: {exc}"
+        ) from exc
+
+
+def derive_canonical_package_observed_series(
+    *,
+    package_root,
+    basin_id: str,
+    contract: dict,
+    package_identity: "QualifiedPackageIdentity",
+) -> CanonicalPackageObservedSeries:
+    """Derives basin ``basin_id``'s canonical raw-space observed series from
+    the frozen package NetCDF alone (no run/trial data), for the contract's
+    frozen ``per_basin_support`` timestamps.
+
+    Reuses the module's own already-qualified, documented algebraic lead-
+    shift identity (see ``nh_raw_space_evaluation.py``'s module docstring)::
+
+        qobs_mm_per_h_lead{L}[t] == discharge_m3s_to_runoff_mm_per_h(qobs_m3s[t + L], area_km2)
+
+    i.e. the package's raw ``qobs_m3s`` value corresponding to a contract
+    support timestamp ``t`` lives at the package's own date coordinate
+    ``t + lead_hours``, not at ``t`` itself. No new metric math or unit
+    conversion is introduced here: ``qobs_m3s`` is already raw m^3/s, so no
+    area is needed to read it.
+
+    Raises :class:`FixedSupportContractError` (never silently drops/
+    realigns) if: the contract's own support timestamps for this basin
+    contain a duplicate; the package NetCDF's own date coordinate contains
+    a duplicate; any lead-shifted lookup date is absent from the package's
+    date coordinate (lead-alignment failure); or any resulting aligned
+    ``qobs_m3s`` value is non-finite (finite-mask disagreement).
+
+    ``package_identity`` (RD1-C4-D1 findings A1/A2/A3) is REQUIRED and has
+    no default. It binds this read to a
+    :class:`~.package_identity_qualification.QualifiedPackageIdentity` that
+    was proven, once per task, to be the package ``contract`` was built
+    against. This function refuses to read values unless the identity was
+    qualified against this same contract checksum and this same package
+    root, and unless this basin's NetCDF still matches the package's own
+    recorded checksum for that file -- i.e. identity is proven BEFORE any
+    value is read. The identity is also the authority for the package's
+    temporal coordinate name: the coordinate is never assumed, it is taken
+    from the package's own declared, recognized NetCDF schema, and
+    ``qobs_m3s`` must be laid out along exactly that coordinate.
+
+    The only other accepted value is the module-private test-fixture marker
+    from :func:`fixture_only_unqualified_package`, which supplies the
+    coordinate name and nothing else. It exists for in-repo unit fixtures
+    that build a bare package directory with no manifests; it is
+    unreachable from production code and a guard test enforces that.
+    """
+    import xarray as xr
+
+    validate_fixed_support_contract(contract)
+    lead_hours = contract["lead_hours"]
+    if isinstance(package_identity, _FixtureOnlyUnqualifiedPackage):
+        coordinate_name = package_identity.netcdf_time_coordinate
+    else:
+        _require_qualified_package_identity(
+            package_identity, package_root=package_root, basin_id=basin_id, contract=contract
+        )
+        coordinate_name = package_identity.netcdf_time_coordinate
+
+    support_dates = _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+    support_dates = _canonicalize_timestamps_for_identity(
+        support_dates,
+        date_dtype=contract["date_dtype"],
+        context=f"basin {basin_id!r}: frozen support timestamps",
+    )
+    if len(np.unique(support_dates)) != len(support_dates):
+        raise FixedSupportContractError(f"basin {basin_id!r}: frozen support contains duplicate timestamps")
+
+    nc_path = basin_netcdf_path(package_root, basin_id)
+    with xr.open_dataset(nc_path) as ds:
+        # Exact dimension/coordinate identity BEFORE any value is read
+        # (RD1-C4-D1 finding A3): 'qobs_m3s' must be a plain series along
+        # the package's own authoritative temporal coordinate. Nothing is
+        # flattened, so an unrelated same-length dimension, a transposed
+        # layout, or an unexpected multidimensional variable is rejected
+        # rather than positionally mispaired.
+        package_qobs_m3s = _require_exact_one_dimensional_variable(
+            ds,
+            "qobs_m3s",
+            coordinate_name=coordinate_name,
+            context=f"{nc_path}",
+        )
+        package_date_values = np.asarray(ds.coords[coordinate_name].values)
+        if package_date_values.shape != package_qobs_m3s.shape:
+            raise FixedSupportContractError(
+                f"{nc_path}: coordinate {coordinate_name!r} has length {package_date_values.shape} but "
+                f"'qobs_m3s' has length {package_qobs_m3s.shape}"
+            )
+
+    package_date_values = _canonicalize_timestamps_for_identity(
+        package_date_values,
+        date_dtype=contract["date_dtype"],
+        context=f"basin {basin_id!r}: package {coordinate_name!r} coordinate",
+    )
+    if len(np.unique(package_date_values)) != len(package_date_values):
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: package {coordinate_name!r} coordinate contains duplicates"
+        )
+
+    if contract["date_dtype"] == "datetime64":
+        lookup_dates = support_dates + np.timedelta64(lead_hours, "h")
+    else:
+        # int64 contracts (fast synthetic fixtures only) represent the date
+        # coordinate as a plain hour-index, so the lead-shift is ordinary
+        # integer addition -- the same instant-shift semantics, expressed in
+        # the contract's own unit convention (see
+        # ``_canonicalize_timestamps_for_identity``).
+        lookup_dates = support_dates + lead_hours
+    position_by_date = {date: idx for idx, date in enumerate(package_date_values)}
+    try:
+        positions = np.array([position_by_date[date] for date in lookup_dates])
+    except KeyError as exc:
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: lead-shifted package lookup failed for {exc} (lead_hours={lead_hours}) -- "
+            "package/contract support timestamp identity contradiction"
+        ) from exc
+
+    canonical_obs_m3s = package_qobs_m3s[positions]
+    if not np.isfinite(canonical_obs_m3s).all():
+        raise FixedSupportContractError(
+            f"basin {basin_id!r}: lead-shifted package qobs_m3s contains non-finite values at admitted "
+            "support timestamps"
+        )
+
+    return CanonicalPackageObservedSeries(basin_id=basin_id, date=support_dates, obs_m3s=canonical_obs_m3s)
+
+
 def evaluate_fixed_support_raw_space_metrics(
     *,
     run_dir,
@@ -490,6 +823,8 @@ def evaluate_fixed_support_raw_space_metrics(
     min_area_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
     return_admitted_series: bool = False,
+    package_identity: Optional[QualifiedPackageIdentity] = None,
+    authenticated_period_results: Optional[AuthenticatedPeriodResults] = None,
 ) -> dict:
     """Evaluates raw-space metrics restricted to ``contract``'s frozen
     120h-floor common support. The returned dict is tagged
@@ -512,6 +847,30 @@ def evaluate_fixed_support_raw_space_metrics(
     ``per_basin`` metric rows), built from the same extraction/conversion
     pass as those metric rows -- not a second independent reconstruction.
     Defaults to ``False`` so the legacy result shape is unchanged.
+
+    ``package_identity`` (RD1-C4-D1 finding A1), when supplied, binds every
+    package NetCDF this evaluation opens to a
+    :class:`~.package_identity_qualification.QualifiedPackageIdentity`
+    proven once per task against ``contract`` -- see
+    :func:`_require_qualified_package_identity`. Omitted, the historical
+    unqualified behaviour is unchanged.
+
+    ``authenticated_period_results`` (RD1-C4-D1 finding A3), when supplied,
+    is used instead of loading the run's results pickle again. It must be an
+    :class:`~.authenticated_period_results.AuthenticatedPeriodResults` --
+    which can only be produced by an actual authenticated load of an actual
+    file -- and it must have been authenticated for exactly this
+    ``run_dir``/``contract["period"]``/``epoch``. It replaces the previous
+    plain-``Mapping`` seam, which any fabricated ``dict`` satisfied.
+
+    It exists so a caller that must evaluate one run's basins across several
+    passes (for example the D1 observation diagnostic, which needs per-basin
+    typed outcomes rather than one all-or-nothing call) loads and hashes
+    that run's ~84.5 MB ``validation_results.p`` once rather than once per
+    basin. When it is omitted this function performs that authenticated load
+    itself, so the simulations it evaluates are bound to a named pickle and
+    a recorded digest on every path. The observed source facts are returned
+    in ``result["evaluation_source"]``.
     """
     validate_fixed_support_contract(contract)
     target_variable = contract["target_variable"]
@@ -526,7 +885,28 @@ def evaluate_fixed_support_raw_space_metrics(
         if requested != contract["basin_ids"]:
             raise FixedSupportContractError("production fixed-support evaluation must use the complete frozen screening population")
 
-    period_results = load_period_results(run_dir, contract["period"], epoch)
+    if authenticated_period_results is None:
+        try:
+            authenticated_period_results = load_authenticated_period_results(
+                run_dir=run_dir, period=contract["period"], epoch=epoch
+            )
+        except AuthenticatedPeriodResultsError as exc:
+            raise FixedSupportContractError(str(exc)) from exc
+    else:
+        if not isinstance(authenticated_period_results, AuthenticatedPeriodResults):
+            raise FixedSupportContractError(
+                "authenticated_period_results must be an AuthenticatedPeriodResults produced by "
+                "load_authenticated_period_results(), got "
+                f"{type(authenticated_period_results).__name__} -- refusing to evaluate simulations whose "
+                "source pickle cannot be proven"
+            )
+        try:
+            authenticated_period_results.require_bound_to(
+                run_dir=run_dir, period=contract["period"], epoch=epoch
+            )
+        except AuthenticatedPeriodResultsError as exc:
+            raise FixedSupportContractError(str(exc)) from exc
+    period_results = authenticated_period_results
 
     per_basin = []
     excluded = []
@@ -548,7 +928,29 @@ def evaluate_fixed_support_raw_space_metrics(
         if xr_ds is None:
             raise FixedSupportContractError(f"basin {basin_id!r}: no freq result with both {obs_key!r} and {sim_key!r}")
 
-        run_date_values = np.asarray(xr_ds.coords["date"].values)
+        # Exact dimension/coordinate identity BEFORE any value is read
+        # (RD1-C4-D1 finding A3). The run-results coordinate is
+        # NeuralHydrology's own 'date', which is a different authority from
+        # the frozen package's declared coordinate -- both are bound, neither
+        # is assumed to be the other.
+        obs_mm_per_h = _require_exact_one_dimensional_variable(
+            xr_ds,
+            obs_key,
+            coordinate_name=_RUN_RESULTS_DATE_COORDINATE,
+            context=f"basin {basin_id!r}: run results ({authenticated_period_results.results_path})",
+        )
+        sim_mm_per_h = _require_exact_one_dimensional_variable(
+            xr_ds,
+            sim_key,
+            coordinate_name=_RUN_RESULTS_DATE_COORDINATE,
+            context=f"basin {basin_id!r}: run results ({authenticated_period_results.results_path})",
+        )
+        run_date_values = np.asarray(xr_ds.coords[_RUN_RESULTS_DATE_COORDINATE].values)
+        if not (run_date_values.shape == obs_mm_per_h.shape == sim_mm_per_h.shape):
+            raise FixedSupportContractError(
+                f"basin {basin_id!r}: run results coordinate/observation/simulation lengths disagree "
+                f"({run_date_values.shape}, {obs_mm_per_h.shape}, {sim_mm_per_h.shape})"
+            )
         support_dates = _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
         run_date_values = _canonicalize_timestamps_for_identity(
             run_date_values,
@@ -573,8 +975,6 @@ def evaluate_fixed_support_raw_space_metrics(
                 "(refusing to silently realign)"
             )
 
-        obs_mm_per_h = xr_ds[obs_key].values.reshape(-1)
-        sim_mm_per_h = xr_ds[sim_key].values.reshape(-1)
         obs_support = np.where(support_mask, obs_mm_per_h, np.nan)
         if not np.isfinite(obs_support[support_mask]).all():
             raise FixedSupportContractError(
@@ -582,6 +982,10 @@ def evaluate_fixed_support_raw_space_metrics(
             )
 
         nc_path = basin_netcdf_path(package_root, basin_id)
+        if package_identity is not None:
+            _require_qualified_package_identity(
+                package_identity, package_root=package_root, basin_id=basin_id, contract=contract
+            )
         try:
             area_result = derive_basin_area_km2_from_netcdf(
                 nc_path,
@@ -640,6 +1044,9 @@ def evaluate_fixed_support_raw_space_metrics(
         "objective_scope": "fixed_support",
         "contract_id": contract["contract_id"],
         "contract_checksum_sha256": contract["checksum_sha256"],
+        # The authenticated pickle these simulations actually came from
+        # (RD1-C4-D1 finding A3) -- path, digest, run, period and epoch.
+        "evaluation_source": authenticated_period_results.source_fields(),
         "seq_length_floor": contract["seq_length_floor"],
         "n_basins_requested": len(requested),
         "n_basins_evaluated": len(per_basin),

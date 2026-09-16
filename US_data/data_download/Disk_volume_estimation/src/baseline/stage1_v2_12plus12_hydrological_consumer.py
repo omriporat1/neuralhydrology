@@ -54,14 +54,21 @@ import numpy as np
 
 from .fixed_support_contract_v2 import (
     AdmittedSeries,
+    CanonicalPackageObservedSeries,
     FixedSupportContractError,
     SupportContractProvenance,
     build_support_contract_provenance,
+    derive_canonical_package_observed_series,
     evaluate_fixed_support_raw_space_metrics,
     extract_v2_objective_from_fixed_support_result,
     validate_fixed_support_contract,
 )
 from .nh_raw_space_evaluation import raw_space_metrics
+from .package_identity_qualification import (
+    PackageIdentityError,
+    QualifiedPackageIdentity,
+    qualify_package_identity,
+)
 from .stage1_v2_12plus12_basin_analysis import BasinDistributionResult, analyze_basin_distribution
 from .sweep_v1_campaign import MODEL_SEED_A, derive_trajectory_diagnostics
 from .sweep_v2_six_axis_campaign import (
@@ -120,6 +127,41 @@ HIGH_FLOW_QUANTILE = 0.98
 #: Frozen minimum high-flow sample count for high-flow NSE to be reported
 #: (secondary diagnostic; below this it is NaN/unavailable, never zero).
 MIN_HIGH_FLOW_NSE_SAMPLES = 50
+
+#: RD1-C4 reproducibility correction (docs/decision_log.md, this entry):
+#: per-trial admitted observed discharge (reconstructed from that trial's
+#: own ``validation_results.p``) is audited against the package-canonical
+#: series (:func:`~.fixed_support_contract_v2.derive_canonical_package_observed_series`)
+#: as PROVENANCE evidence only -- it never determines the formal metric
+#: target series or any Q98 fact.
+#:
+#: PROVISIONAL, UNRESOLVED (RD1-C4-D1 section A3). This envelope is a
+#: reference comparison scale only. It is NOT a qualified pass threshold,
+#: and the final RD1-C4 audit policy -- whether a numerical envelope gates
+#: anything at all, and if so at what scale and with what asymmetry -- is
+#: explicitly not decided here. It remains pending the RD1-C4-D1 24x400
+#: observation diagnostic's evidence and the user's decision on that
+#: evidence.
+#:
+#: What is known from inspected evidence (job 46169186, basin 06911000 /
+#: proposal 2, best epoch 9): all 8,436 aligned Common-120 elements differed
+#: bitwise; five exceeded this envelope; all five were one repeated
+#: low-flow value near 0.019 m^3/s whose actual difference (~1.26e-06 m^3/s)
+#: only slightly exceeded the combined tolerance there (~1.14e-06); the
+#: largest absolute difference in that cell (~7.58e-06 m^3/s) belonged to a
+#: different, high-flow element and passed comfortably. That is a
+#: scale-inappropriate tolerance at low flow on one basin/trial -- not a
+#: measured global reconstruction bound, and not evidence that this
+#: envelope is correct. Any statement of a "safety margin" for this
+#: envelope would be unsupported: do not reintroduce one.
+#:
+#: The discrepancy mechanism is also not simply "float32 storage noise":
+#: the two sides are independently quantized and transformed float32
+#: representations, so a single rounding operation is not assumed to
+#: explain every element. D1 measures this rather than asserting it.
+_FLOAT32_EPS = float(np.finfo(np.float32).eps)
+PROVENANCE_RTOL = 64.0 * _FLOAT32_EPS
+PROVENANCE_ATOL_M3S = 1e-6
 
 
 def _sha256_file(path: "str | Path") -> str:
@@ -641,12 +683,28 @@ def compute_q98_configuration_basin_diagnostics(
     sim_m3s: np.ndarray,
 ) -> Q98ConfigurationBasinDiagnostics:
     """Apply one basin's canonical Q98 threshold/mask/observed-peak facts to
-    one trial's admitted series. ``date``/``obs_m3s`` must equal
-    ``facts.canonical_date``/``facts.canonical_obs_m3s`` exactly (candidate-
-    independence enforcement at the point of use); ``sim_m3s`` must be fully
-    finite (the formal production fixed-support gate already requires zero
-    non-finite simulations at admitted timestamps -- this helper preserves
-    that gate rather than silently pairwise-dropping non-finite values).
+    one trial's admitted series.
+
+    ``date`` is THIS TRIAL's own admitted timestamps, positionally aligned
+    to ``sim_m3s`` -- i.e. ``date[i]`` is the instant simulated by
+    ``sim_m3s[i]``. It must equal ``facts.canonical_date`` exactly, which is
+    what proves that this trial's simulations and the canonical
+    candidate-independent observed series describe the same instants in the
+    same order. That check is the only thing standing between a correct
+    pairing and a silent positional pairing of two independently-ordered
+    series, so callers must pass the trial's own
+    :class:`~.fixed_support_contract_v2.AdmittedSeries.date` here and must
+    never pass ``facts.canonical_date`` back in (RD1-C4-D1 finding A2: both
+    call sites previously did exactly that, which made this check
+    tautological while ``sim_m3s`` remained bound only by position).
+
+    ``obs_m3s`` is the canonical candidate-independent observed series and
+    must equal ``facts.canonical_obs_m3s`` exactly -- a defensive check that
+    the caller has not paired one basin's facts with another basin's
+    observations. ``sim_m3s`` must be fully finite (the formal production
+    fixed-support gate already requires zero non-finite simulations at
+    admitted timestamps -- this helper preserves that gate rather than
+    silently pairwise-dropping non-finite values).
     """
     basin_id = facts.basin_id
     date_arr = np.asarray(date)
@@ -660,8 +718,9 @@ def compute_q98_configuration_basin_diagnostics(
         )
     if not np.array_equal(date_arr, facts.canonical_date):
         raise HydrologicalConsumerError(
-            f"basin {basin_id!r}/{trial_id!r}: admitted timestamps differ from the canonical "
-            "candidate-independent Q98 series -- Q98 threshold/mask requires identical observed-side support"
+            f"basin {basin_id!r}/{trial_id!r}: this trial's own admitted timestamps differ from the canonical "
+            "candidate-independent Q98 series -- the simulated series and the canonical observed series would "
+            "be paired by position only; Q98 threshold/mask requires identical observed-side support"
         )
     if not np.array_equal(obs_arr, facts.canonical_obs_m3s):
         raise HydrologicalConsumerError(
@@ -762,10 +821,55 @@ class V2HydrologicalConfigurationResult:
         object.__setattr__(self, "q98_diagnostics_by_basin", MappingProxyType(dict(self.q98_diagnostics_by_basin)))
 
 
+def _require_package_identity_for_root(
+    package_identity: QualifiedPackageIdentity,
+    *,
+    package_root: "str | Path",
+    contract: Mapping[str, Any],
+    context: str,
+) -> QualifiedPackageIdentity:
+    """Fail closed unless ``package_identity`` qualifies exactly this package
+    root against exactly this fixed-support contract (RD1-C4-D1 finding A2).
+
+    The formal consumer used to accept ``package_root`` alone and let the
+    lower reader fall back to an unqualified read, so a contract and a
+    qualification built from package A could silently consume package B's
+    basin files. Qualification is now produced once at the batch entry
+    point and threaded down; every real package-observation read is
+    preceded by this check plus the per-file checksum proof inside
+    :mod:`~.package_identity_qualification`.
+    """
+    if not isinstance(package_identity, QualifiedPackageIdentity):
+        raise HydrologicalConsumerError(
+            f"{context}: package_identity must be a QualifiedPackageIdentity produced by "
+            f"qualify_package_identity(), got {type(package_identity).__name__} -- the formal consumer "
+            "refuses to read an unqualified package"
+        )
+    resolved = Path(package_root).resolve().as_posix()
+    if resolved != package_identity.package_root:
+        raise HydrologicalConsumerError(
+            f"{context}: package_root {resolved!r} is not the qualified package root "
+            f"{package_identity.package_root!r} -- refusing to consume observations from a package that was "
+            "never qualified for this evaluation"
+        )
+    if package_identity.contract_id != contract["contract_id"]:
+        raise HydrologicalConsumerError(
+            f"{context}: package identity was qualified against contract {package_identity.contract_id!r} "
+            f"but this evaluation uses {contract['contract_id']!r}"
+        )
+    if package_identity.contract_checksum_sha256 != contract["checksum_sha256"]:
+        raise HydrologicalConsumerError(
+            f"{context}: package identity was qualified against a different fixed-support contract checksum "
+            "-- package/contract identity contradiction"
+        )
+    return package_identity
+
+
 def evaluate_v2_configuration_hydrological_result(
     *,
     best_epoch_source: V2BestEpochSource,
     package_root: "str | Path",
+    package_identity: QualifiedPackageIdentity,
     contract: Mapping[str, Any],
     basin_ids: Optional[Sequence[str]] = None,
     require_full_screening_population: bool = False,
@@ -778,14 +882,19 @@ def evaluate_v2_configuration_hydrological_result(
     bound directly from the source receipt's own authoritative
     ``result.nh_run_dir`` (RD1-C4 review Finding 1).
 
+    The source is re-opened and re-derived from its authoritative receipt on
+    this standalone path, exactly as it is on the batch path.  A dataclass
+    instance that is internally self-consistent but no longer matches its
+    receipt is not sufficient.
+
     ``canonical_q98_facts_by_basin``, if supplied, must already be
     cross-configuration-validated (see
     :func:`assemble_rd1_hydrological_review`) and is applied as-is so every
     trial shares one candidate-independent Q98 threshold/mask/observed-peak
     per basin. If omitted (the lower single-trial path), Q98 facts are
-    derived from this trial's own admitted series -- valid for standalone/
-    synthetic use, but candidate-independence across trials is only
-    established by the batch entry point.
+    derived from the qualified package's own lead-aligned ``qobs_m3s``.
+    Candidate-independence across trials is additionally established by the
+    batch entry point.
 
     Raises :class:`HydrologicalConsumerError` if
     ``best_epoch_source.support_contract_version``/``support_contract_sha256``
@@ -794,7 +903,19 @@ def evaluate_v2_configuration_hydrological_result(
     equal ``best_epoch_source.official_objective`` exactly.
     """
     contract = validate_fixed_support_contract(dict(contract))
+    try:
+        best_epoch_source = _revalidate_source_against_authoritative_receipt(best_epoch_source)
+    except HydrologicalConsumerError as exc:
+        raise HydrologicalConsumerError(
+            f"trial {best_epoch_source.trial_id!r}: standalone source authentication failed: {exc}"
+        ) from exc
     support_contract_provenance = build_support_contract_provenance(contract)
+    package_identity = _require_package_identity_for_root(
+        package_identity,
+        package_root=package_root,
+        contract=contract,
+        context=f"trial {best_epoch_source.trial_id!r}",
+    )
 
     if best_epoch_source.support_contract_version != contract["contract_id"]:
         raise HydrologicalConsumerError(
@@ -821,6 +942,7 @@ def evaluate_v2_configuration_hydrological_result(
             basin_ids=requested_basin_ids,
             require_full_screening_population=require_full_screening_population,
             return_admitted_series=True,
+            package_identity=package_identity,
         )
     except FixedSupportContractError as exc:
         raise HydrologicalConsumerError(
@@ -856,12 +978,32 @@ def evaluate_v2_configuration_hydrological_result(
     for basin_id, series in admitted_series_by_basin.items():
         facts = (canonical_q98_facts_by_basin or {}).get(basin_id)
         if facts is None:
-            facts = derive_canonical_basin_q98_facts(basin_id=basin_id, date=series.date, obs_m3s=series.obs_m3s)
+            # RD1-C4 reproducibility correction: the package's own qobs_m3s
+            # is the sole canonical observed series for formal Q98
+            # evaluation, never this trial's own reconstructed series (see
+            # docs/decision_log.md). This is the lower single-trial/
+            # standalone path -- the batch entry point
+            # (:func:`assemble_rd1_hydrological_review`) additionally
+            # audits this trial's own ``series.obs_m3s`` as provenance
+            # evidence, which is not repeated here.
+            canonical_series = derive_canonical_package_observed_series(
+                package_root=package_root,
+                basin_id=basin_id,
+                contract=contract,
+                package_identity=package_identity,
+            )
+            facts = derive_canonical_basin_q98_facts(
+                basin_id=basin_id, date=canonical_series.date, obs_m3s=canonical_series.obs_m3s
+            )
         q98_diagnostics_by_basin[basin_id] = compute_q98_configuration_basin_diagnostics(
             trial_id=best_epoch_source.trial_id,
             facts=facts,
+            # This trial's OWN admitted timestamps (RD1-C4-D1 finding A2):
+            # passing ``facts.canonical_date`` here would make the callee's
+            # timestamp-identity check tautological and leave ``sim_m3s``
+            # paired to the canonical observed series by position alone.
             date=series.date,
-            obs_m3s=series.obs_m3s,
+            obs_m3s=facts.canonical_obs_m3s,
             sim_m3s=series.sim_m3s,
         )
 
@@ -1035,17 +1177,104 @@ def _revalidate_source_against_authoritative_receipt(source: V2BestEpochSource) 
         ) from exc
     rebuilt = build_v2_best_epoch_source(execution_provenance=receipt_record, source_receipt_path=receipt_path)
     if rebuilt != source:
+        differing = [
+            name
+            for name in source.__dataclass_fields__
+            if getattr(rebuilt, name) != getattr(source, name)
+        ]
         raise HydrologicalConsumerError(
             f"trial {source.trial_id!r}: the supplied V2BestEpochSource does not match the source freshly "
-            "rebuilt from its own authoritative receipt -- refusing to trust dataclass self-consistency as "
-            "receipt qualification"
+            f"rebuilt from its own authoritative receipt (differing fields: {differing}) -- refusing to "
+            "trust dataclass self-consistency as receipt qualification"
         )
     return rebuilt
 
 
-def _derive_and_validate_canonical_q98_facts(
+def _audit_admitted_observation_provenance(
+    *,
+    trial_id: str,
+    basin_id: str,
+    admitted_date: np.ndarray,
+    admitted_obs_m3s: np.ndarray,
+    canonical: CanonicalPackageObservedSeries,
+) -> None:
+    """RD1-C4 reproducibility correction: audits one trial's own admitted
+    observed discharge (reconstructed from its ``validation_results.p``)
+    against the package-canonical series, as PROVENANCE/consistency
+    evidence only -- this never determines the formal metric target series
+    or any Q98 fact (those come solely from ``canonical``).
+
+    Timestamps must match exactly (cheap defensive check: both this
+    trial's ``AdmittedSeries.date`` and ``canonical.date`` are constructed,
+    independently, from the same frozen contract support timestamps for
+    this basin -- see :func:`fixed_support_contract_v2.evaluate_fixed_support_raw_space_metrics`
+    and :func:`fixed_support_contract_v2.derive_canonical_package_observed_series`,
+    so any disagreement here is a genuine identity contradiction, not
+    float noise). Observed VALUES are compared with
+    :func:`numpy.allclose` at :data:`PROVENANCE_RTOL`/:data:`PROVENANCE_ATOL_M3S`,
+    a PROVISIONAL reference envelope (see the module-level constant
+    docstring) whose final role in RD1-C4 is unresolved.
+
+    This function's behaviour is deliberately UNCHANGED by RD1-C4-D1: it
+    still raises :class:`HydrologicalConsumerError` on an exceedance, so the
+    formal consumer keeps failing closed until the user decides the audit
+    policy on D1 evidence. Only the claim the error makes has been corrected
+    -- it reports an exceedance of a provisional envelope, not a proven
+    observed-value disagreement. Redesigning this audit into a non-fatal,
+    measured one is explicitly out of scope for D1, which is a separate
+    read-only diagnostic layer
+    (:mod:`src.baseline.rd1_c4_observation_diagnostic`) and never routes
+    through here.
+    """
+    if admitted_date.shape != canonical.date.shape or not np.array_equal(admitted_date, canonical.date):
+        raise HydrologicalConsumerError(
+            f"basin {basin_id!r}: trial {trial_id!r} admitted timestamps differ from the package-canonical "
+            "observed series -- support/date identity contradiction"
+        )
+    if admitted_obs_m3s.shape != canonical.obs_m3s.shape:
+        raise HydrologicalConsumerError(
+            f"basin {basin_id!r}: trial {trial_id!r} admitted observed discharge shape "
+            f"{admitted_obs_m3s.shape} != package-canonical shape {canonical.obs_m3s.shape}"
+        )
+    if not np.allclose(admitted_obs_m3s, canonical.obs_m3s, rtol=PROVENANCE_RTOL, atol=PROVENANCE_ATOL_M3S):
+        abs_diff = np.abs(admitted_obs_m3s - canonical.obs_m3s)
+        max_abs_diff = float(np.max(abs_diff)) if abs_diff.size else float("nan")
+        exceeding = abs_diff > (PROVENANCE_ATOL_M3S + PROVENANCE_RTOL * np.abs(canonical.obs_m3s))
+        n_exceeding = int(exceeding.sum())
+        worst = int(np.argmax(abs_diff)) if abs_diff.size else -1
+        raise HydrologicalConsumerError(
+            f"basin {basin_id!r}: trial {trial_id!r} admitted observed discharge lies outside the PROVISIONAL "
+            f"package-canonical provenance envelope (rtol={PROVENANCE_RTOL:.3g}/atol={PROVENANCE_ATOL_M3S:.3g}): "
+            f"{n_exceeding} of {abs_diff.size} aligned elements exceed it; the largest absolute difference is "
+            f"{max_abs_diff:.6g} m^3/s at position {worst} (package value "
+            f"{float(canonical.obs_m3s[worst]) if abs_diff.size else float('nan'):.6g} m^3/s), which is not "
+            "necessarily one of the exceeding elements. This envelope is a provisional reference scale, NOT a "
+            "qualified pass threshold: an exceedance here means 'outside the provisional envelope', not "
+            "'a genuine observed-value disagreement'. The final RD1-C4 audit policy is unresolved pending the "
+            "RD1-C4-D1 24x400 observation diagnostic -- see this module's PROVENANCE_RTOL docstring and "
+            "src/baseline/rd1_c4_observation_diagnostic.py"
+        )
+
+
+def _derive_canonical_q98_facts_from_package(
     results_by_trial_id: Mapping[str, V2HydrologicalConfigurationResult],
+    *,
+    package_root: "str | Path",
+    package_identity: QualifiedPackageIdentity,
+    contract: Mapping[str, Any],
 ) -> dict[str, CanonicalBasinQ98Facts]:
+    """RD1-C4 reproducibility correction (docs/decision_log.md, this entry):
+    the frozen package NetCDF's own ``qobs_m3s``, lead-shift-aligned to the
+    fixed-support contract, is the SOLE canonical raw-space observed series
+    for formal Q98 evaluation -- never any trial's own
+    ``validation_results.p``-derived series. Each trial's own admitted
+    observed discharge is retained only as provenance/consistency evidence,
+    audited against the canonical package series via
+    :func:`_audit_admitted_observation_provenance`.
+
+    Basin-population cross-trial agreement is still enforced first (a
+    partial/mismatched basin population across trials remains a contract
+    failure, independent of the observed-series source)."""
     trial_ids = sorted(results_by_trial_id)
     if not trial_ids:
         raise HydrologicalConsumerError("no trial results supplied for cross-trial Q98 derivation")
@@ -1061,26 +1290,32 @@ def _derive_and_validate_canonical_q98_facts(
                 "partial/mismatched basin coverage across trials is a contract failure"
             )
 
+    package_identity = _require_package_identity_for_root(
+        package_identity,
+        package_root=package_root,
+        contract=contract,
+        context="canonical Q98 observation derivation",
+    )
+
     canonical: dict[str, CanonicalBasinQ98Facts] = {}
     for basin_id in sorted(reference_basins):
-        reference_series = results_by_trial_id[reference_id].admitted_series_by_basin[basin_id]
-        for trial_id in trial_ids[1:]:
+        canonical_series = derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=package_identity,
+        )
+        for trial_id in trial_ids:
             series = results_by_trial_id[trial_id].admitted_series_by_basin[basin_id]
-            if series.date.shape != reference_series.date.shape or not np.array_equal(series.date, reference_series.date):
-                raise HydrologicalConsumerError(
-                    f"basin {basin_id!r}: trial {trial_id!r} admitted timestamps differ from "
-                    f"{reference_id!r} -- the Q98 threshold/mask requires an identical observed-side support "
-                    "across every trial"
-                )
-            if series.obs_m3s.shape != reference_series.obs_m3s.shape or not np.array_equal(
-                series.obs_m3s, reference_series.obs_m3s
-            ):
-                raise HydrologicalConsumerError(
-                    f"basin {basin_id!r}: trial {trial_id!r} admitted observed discharge differs "
-                    f"from {reference_id!r} -- Q98 must be derived from one candidate-independent observed series"
-                )
+            _audit_admitted_observation_provenance(
+                trial_id=trial_id,
+                basin_id=basin_id,
+                admitted_date=series.date,
+                admitted_obs_m3s=series.obs_m3s,
+                canonical=canonical_series,
+            )
         canonical[basin_id] = derive_canonical_basin_q98_facts(
-            basin_id=basin_id, date=reference_series.date, obs_m3s=reference_series.obs_m3s
+            basin_id=basin_id, date=canonical_series.date, obs_m3s=canonical_series.obs_m3s
         )
     return canonical
 
@@ -1177,6 +1412,21 @@ def assemble_rd1_hydrological_review(
     contract = validate_fixed_support_contract(dict(contract))
     _validate_production_batch_shape(best_epoch_sources, contract)
 
+    # RD1-C4-D1 finding A2: the formal consumer qualifies the package root
+    # it is actually about to open, ONCE, and threads that single immutable
+    # qualification result through every package-observation read below.
+    # There is no parameter by which a caller can skip, weaken or substitute
+    # it, and no production path reaches a package read without it.
+    try:
+        package_identity = qualify_package_identity(
+            package_root=package_root, contract=contract, basin_ids=contract["basin_ids"]
+        )
+    except PackageIdentityError as exc:
+        raise HydrologicalConsumerError(
+            f"the frozen observation package at {package_root} is not qualified for contract "
+            f"{contract['contract_id']!r}: {exc}"
+        ) from exc
+
     # RD1-C4 review follow-on (Finding: formal assembly must revalidate
     # receipt qualification): a directly-constructed, internally
     # self-consistent V2BestEpochSource is not sufficient to enter the
@@ -1195,11 +1445,17 @@ def assemble_rd1_hydrological_review(
         interim_results[source.trial_id] = evaluate_v2_configuration_hydrological_result(
             best_epoch_source=source,
             package_root=package_root,
+            package_identity=package_identity,
             contract=contract,
             require_full_screening_population=True,
         )
 
-    canonical_facts = _derive_and_validate_canonical_q98_facts(interim_results)
+    canonical_facts = _derive_canonical_q98_facts_from_package(
+        interim_results,
+        package_root=package_root,
+        package_identity=package_identity,
+        contract=contract,
+    )
 
     final_results: dict[str, V2HydrologicalConfigurationResult] = {}
     for trial_id, result in interim_results.items():
@@ -1207,8 +1463,10 @@ def assemble_rd1_hydrological_review(
             basin_id: compute_q98_configuration_basin_diagnostics(
                 trial_id=trial_id,
                 facts=canonical_facts[basin_id],
+                # This trial's OWN admitted timestamps, not the canonical
+                # ones (RD1-C4-D1 finding A2) -- see the standalone path.
                 date=series.date,
-                obs_m3s=series.obs_m3s,
+                obs_m3s=canonical_facts[basin_id].canonical_obs_m3s,
                 sim_m3s=series.sim_m3s,
             )
             for basin_id, series in result.admitted_series_by_basin.items()

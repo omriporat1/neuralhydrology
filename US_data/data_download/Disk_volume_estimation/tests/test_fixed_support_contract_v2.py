@@ -14,14 +14,28 @@ import pytest
 import xarray as xr
 
 from src.baseline import fixed_support_contract_v2 as fixed
+from src.baseline.authenticated_period_results import (
+    fixture_only_period_results,
+    load_authenticated_period_results,
+)
 from src.baseline.nh_raw_space_evaluation import RawSpaceEvaluationError
 from src.baseline.nh_seed_evaluation import weight_stem
 from src.baseline.sweep_v2_six_axis_campaign import OBJECTIVE_ID_V2
 
 
 class _Array:
-    def __init__(self, values):
+    """Minimal xarray-DataArray stand-in.
+
+    ``dims`` is part of the surface because the evaluator proves a
+    variable's dimension identity before reading its values (RD1-C4-D1
+    finding A3) instead of flattening whatever it finds. A stub without
+    ``dims`` would let these fast tests pass against an implementation that
+    had silently lost that proof.
+    """
+
+    def __init__(self, values, dims=("date",)):
         self.values = np.asarray(values)
+        self.dims = tuple(dims)
 
 
 class _Dataset:
@@ -50,10 +64,32 @@ def _contract(n_basins: int) -> dict:
     )
 
 
+def _wire_authenticated_loader(monkeypatch, results):
+    """Substitute the evaluator's authenticated loader with a fixture object.
+
+    RD1-C4-D1 finding A3: the evaluator no longer loads a bare mapping that a
+    test can hand it; it loads a typed
+    :class:`~.authenticated_period_results.AuthenticatedPeriodResults` whose
+    bytes it hashed itself. These fast seams never write a real
+    ``validation_results.p``, so they substitute the loader and use the
+    explicit fixture-only constructor -- whose ``results_path``/
+    ``results_sha256`` are non-path, non-digest sentinels, so nothing here
+    can be mistaken for, or reported as, a real authenticated source. The
+    vertical tests below use real pickles and the real loader.
+    """
+
+    def _load(*, run_dir, period, epoch, expected_sha256=None):
+        return fixture_only_period_results(
+            run_dir=run_dir, period=period, epoch=epoch, results=results
+        )
+
+    monkeypatch.setattr(fixed, "load_authenticated_period_results", _load)
+
+
 def _wire_synthetic_epoch(monkeypatch, contract, *, area_failure=None, metric_id=None, metric_nse=0.5):
     dataset = _Dataset()
     period = {basin_id: {"1h": {"xr": dataset}} for basin_id in contract["basin_ids"]}
-    monkeypatch.setattr(fixed, "load_period_results", lambda *_: period)
+    _wire_authenticated_loader(monkeypatch, period)
     monkeypatch.setattr(fixed, "basin_netcdf_path", lambda *_: "fixture.nc")
 
     def area(*_, basin_id, **__):
@@ -158,11 +194,16 @@ def test_return_admitted_series_disabled_leaves_legacy_shape_unchanged(monkeypat
         run_dir="fixture", epoch=1, package_root="fixture", contract=contract,
     )
     assert "admitted_series_by_basin" not in result
+    # ``evaluation_source`` is additive (RD1-C4-D1 finding A3): the result
+    # now names the authenticated product the simulations were read from,
+    # so a consumer can prove which pickle a score came from rather than
+    # inferring it from the run_dir/epoch arguments it happened to pass.
     assert set(result) == {
         "objective_scope", "contract_id", "contract_checksum_sha256", "seq_length_floor",
         "n_basins_requested", "n_basins_evaluated", "n_basins_excluded", "basins_excluded",
-        "per_basin", "aggregate",
+        "per_basin", "aggregate", "evaluation_source",
     }
+    assert set(result["evaluation_source"]) >= {"run_dir", "period", "epoch", "results_path", "results_sha256"}
 
 
 def test_admitted_series_arrays_are_read_only():
@@ -217,6 +258,7 @@ def _write_package_basin_netcdf(package_root, basin_id, *, area_km2, lead_hours,
         },
         coords={"date": np.arange(n)},
     ).to_netcdf(ts_dir / f"{basin_id}.nc")
+    return qobs_m3s
 
 
 def _write_validation_pickle(run_dir, epoch, basin_results):
@@ -307,6 +349,218 @@ def test_return_admitted_series_vertical_real_load_support_alignment_and_convers
 
 
 # --------------------------------------------------------------------------- #
+# RD1-C4 reproducibility correction: ``derive_canonical_package_observed_series``
+# reads the frozen package NetCDF's own ``qobs_m3s`` directly (no run/trial
+# data involved) and is the sole source of formal Q98 evaluation targets.
+# These tests exercise its own fail-closed behavior in isolation, independent
+# of the higher-level provenance-audit tests in
+# ``test_stage1_v2_12plus12_hydrological_consumer.py``.
+# --------------------------------------------------------------------------- #
+
+def test_derive_canonical_package_series_matches_lead_shift_identity(tmp_path):
+    basin_id = "00000002"
+    area_km2 = 50.0
+    lead_hours = 6
+    n = 40
+
+    package_root = tmp_path / "package"
+    qobs_m3s = _write_package_basin_netcdf(package_root, basin_id, area_km2=area_km2, lead_hours=lead_hours, n=n)
+
+    support_dates = np.array([0, 3, 10, n - lead_hours - 1], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, support_dates, lead_hours=lead_hours)
+
+    series = fixed.derive_canonical_package_observed_series(
+        package_root=package_root,
+        basin_id=basin_id,
+        contract=contract,
+        package_identity=fixed.fixture_only_unqualified_package(),
+    )
+    assert isinstance(series, fixed.CanonicalPackageObservedSeries)
+    assert series.basin_id == basin_id
+    np.testing.assert_array_equal(series.date, support_dates)
+    np.testing.assert_allclose(series.obs_m3s, qobs_m3s[support_dates + lead_hours])
+
+
+def test_derive_canonical_package_series_rejects_defensive_mutation(tmp_path):
+    basin_id = "00000002"
+    lead_hours = 6
+    package_root = tmp_path / "package"
+    _write_package_basin_netcdf(package_root, basin_id, area_km2=50.0, lead_hours=lead_hours, n=40)
+    support_dates = np.array([0, 3, 10], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, support_dates, lead_hours=lead_hours)
+
+    series = fixed.derive_canonical_package_observed_series(
+        package_root=package_root,
+        basin_id=basin_id,
+        contract=contract,
+        package_identity=fixed.fixture_only_unqualified_package(),
+    )
+    with pytest.raises(ValueError):
+        series.obs_m3s[0] = 999.0
+    with pytest.raises(ValueError):
+        series.date[0] = 999
+
+
+def test_derive_canonical_package_series_duplicate_contract_support_timestamps_fails_closed(tmp_path):
+    basin_id = "00000002"
+    lead_hours = 6
+    package_root = tmp_path / "package"
+    _write_package_basin_netcdf(package_root, basin_id, area_km2=50.0, lead_hours=lead_hours, n=40)
+
+    # Duplicate an admitted date so the contract's own support timestamps
+    # for this basin contain a repeat.
+    date_values = np.array([0, 3, 3, 10], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, date_values, lead_hours=lead_hours)
+
+    with pytest.raises(fixed.FixedSupportContractError, match="duplicate timestamps"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
+        )
+
+
+def test_derive_canonical_package_series_duplicate_package_date_coordinate_fails_closed(tmp_path):
+    basin_id = "00000002"
+    area_km2 = 50.0
+    lead_hours = 6
+    n = 20
+
+    package_root = tmp_path / "package"
+    rng = np.random.default_rng(3)
+    qobs_m3s = rng.uniform(1.0, 200.0, size=n)
+    # Package date coordinate has a genuine duplicate (corrupt/malformed package).
+    dup_dates = np.arange(n)
+    dup_dates[-1] = dup_dates[-2]
+    ts_dir = package_root / "time_series"
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        {"qobs_m3s": ("date", qobs_m3s)},
+        coords={"date": dup_dates},
+    ).to_netcdf(ts_dir / f"{basin_id}.nc")
+
+    support_dates = np.array([0, 3], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, support_dates, lead_hours=lead_hours)
+
+    with pytest.raises(fixed.FixedSupportContractError, match="coordinate contains duplicates"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
+        )
+
+
+def test_derive_canonical_package_series_lead_alignment_failure_fails_closed(tmp_path):
+    basin_id = "00000002"
+    area_km2 = 50.0
+    lead_hours = 6
+    n = 20
+
+    package_root = tmp_path / "package"
+    _write_package_basin_netcdf(package_root, basin_id, area_km2=area_km2, lead_hours=lead_hours, n=n)
+
+    # A support timestamp whose lead-shifted lookup falls outside the
+    # package's own date coordinate range entirely.
+    support_dates = np.array([0, n - 1], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, support_dates, lead_hours=lead_hours)
+
+    with pytest.raises(fixed.FixedSupportContractError, match="lead-shifted package lookup failed"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
+        )
+
+
+def test_derive_canonical_package_series_nonfinite_package_value_fails_closed(tmp_path):
+    basin_id = "00000002"
+    area_km2 = 50.0
+    lead_hours = 6
+    n = 20
+
+    package_root = tmp_path / "package"
+    rng = np.random.default_rng(4)
+    qobs_m3s = rng.uniform(1.0, 200.0, size=n)
+    qobs_m3s[10] = np.nan  # non-finite raw value at what will be a lead-shifted lookup target
+    ts_dir = package_root / "time_series"
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        {"qobs_m3s": ("date", qobs_m3s)},
+        coords={"date": np.arange(n)},
+    ).to_netcdf(ts_dir / f"{basin_id}.nc")
+
+    support_dates = np.array([10 - lead_hours], dtype=np.int64)
+    contract = _contract_for_basin(basin_id, support_dates, lead_hours=lead_hours)
+
+    with pytest.raises(fixed.FixedSupportContractError, match="non-finite values at admitted"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
+        )
+
+
+def test_derive_canonical_package_series_datetime64_dtype_succeeds(tmp_path):
+    # Production contracts use datetime64 support timestamps (the int64
+    # cases above cover only the fast-synthetic-fixture path); this proves
+    # the datetime64 + np.timedelta64 lead-shift branch independently.
+    basin_id = "00000003"
+    area_km2 = 75.0
+    lead_hours = 6
+    n = 30
+
+    package_dates = np.array("2024-01-01", dtype="datetime64[h]") + np.arange(n)
+    rng = np.random.default_rng(5)
+    qobs_m3s = rng.uniform(1.0, 200.0, size=n)
+    package_root = tmp_path / "package"
+    ts_dir = package_root / "time_series"
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        {"qobs_m3s": ("date", qobs_m3s)},
+        coords={"date": package_dates.astype("datetime64[ns]")},
+    ).to_netcdf(ts_dir / f"{basin_id}.nc")
+
+    support_dates = package_dates[[0, 5, 10]].astype("datetime64[ns]")
+    contract = fixed.build_fixed_support_contract(
+        contract_id=OBJECTIVE_ID_V2, lead_hours=lead_hours, target_variable="qobs_mm_per_h_lead06",
+        period="fixture", date_start="2024-01-01", date_end="2024-01-01",
+        source_gap_policy_identity="fixture_gap_v001", screening_basin_ids_sha256="0" * 64,
+        package_manifest_sha256="a" * 64, package_file_checksums_sha256="b" * 64,
+        package_run_provenance_sha256="c" * 64, development_split_sha256="d" * 64,
+        spatial_holdout_split_sha256="e" * 64,
+        per_basin_date={basin_id: support_dates},
+        per_basin_admitted={basin_id: np.ones(len(support_dates), dtype=bool)},
+    )
+
+    series = fixed.derive_canonical_package_observed_series(
+        package_root=package_root,
+        basin_id=basin_id,
+        contract=contract,
+        package_identity=fixed.fixture_only_unqualified_package(),
+    )
+    np.testing.assert_array_equal(series.date, support_dates)
+    expected = qobs_m3s[np.array([0, 5, 10]) + lead_hours]
+    np.testing.assert_allclose(series.obs_m3s, expected)
+
+
+def _contract_for_basin(basin_id: str, support_dates: np.ndarray, *, lead_hours: int) -> dict:
+    return fixed.build_fixed_support_contract(
+        contract_id=OBJECTIVE_ID_V2, lead_hours=lead_hours, target_variable="qobs_mm_per_h_lead06",
+        period="fixture", date_start="2024-01-01", date_end="2024-01-01",
+        source_gap_policy_identity="fixture_gap_v001", screening_basin_ids_sha256="0" * 64,
+        package_manifest_sha256="a" * 64, package_file_checksums_sha256="b" * 64,
+        package_run_provenance_sha256="c" * 64, development_split_sha256="d" * 64,
+        spatial_holdout_split_sha256="e" * 64,
+        per_basin_date={basin_id: support_dates},
+        per_basin_admitted={basin_id: np.ones(len(support_dates), dtype=bool)},
+    )
+
+
+# --------------------------------------------------------------------------- #
 # RD1-C4 review Finding 4: canonicalize datetime units before admitted-series
 # identity indexing (frozen contract dates always deserialize to
 # ``datetime64[ns]``; a run's own date coordinate may be a different,
@@ -334,7 +588,7 @@ def _wire_datetime_epoch(monkeypatch, *, basin_id, run_dates):
         "qobs_mm_per_h_lead06_sim": _Array(np.arange(len(run_dates), dtype=np.float64) + 1.0),
     }
     period = {basin_id: {"1h": {"xr": dataset}}}
-    monkeypatch.setattr(fixed, "load_period_results", lambda *_: period)
+    _wire_authenticated_loader(monkeypatch, period)
     monkeypatch.setattr(fixed, "basin_netcdf_path", lambda *_: "fixture.nc")
     monkeypatch.setattr(
         fixed, "derive_basin_area_km2_from_netcdf",
@@ -460,6 +714,135 @@ def test_integer_timestamp_canonicalization_remains_correct(monkeypatch):
     series = result["admitted_series_by_basin"][basin_id]
     assert series.date.dtype == np.dtype("int64")
     np.testing.assert_array_equal(series.date, np.array([0, 1, 2], dtype="int64"))
+
+
+@pytest.mark.parametrize(
+    ("obs_dims", "obs_values"),
+    [
+        (("sample",), np.array([1.0, 2.0, 3.0])),
+        (("date", "member"), np.ones((3, 1))),
+        (("member", "date"), np.ones((1, 3))),
+    ],
+)
+def test_run_observation_rejects_unrelated_multidimensional_or_transposed_layout(
+    monkeypatch, obs_dims, obs_values
+):
+    contract = _contract(1)
+    basin_id = contract["basin_ids"][0]
+    period = _wire_datetime_epoch(monkeypatch, basin_id=basin_id, run_dates=np.arange(3))
+    dataset = period[basin_id]["1h"]["xr"]
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(obs_values, dims=obs_dims)
+
+    with pytest.raises(fixed.FixedSupportContractError, match="only supported layout"):
+        fixed.evaluate_fixed_support_raw_space_metrics(
+            run_dir="fixture", epoch=1, package_root="fixture", contract=contract
+        )
+
+
+def test_run_results_reject_wrong_or_missing_temporal_coordinate(monkeypatch):
+    contract = _contract(1)
+    basin_id = contract["basin_ids"][0]
+    period = _wire_datetime_epoch(monkeypatch, basin_id=basin_id, run_dates=np.arange(3))
+    dataset = period[basin_id]["1h"]["xr"]
+    dataset.coords = {"time": _Array(np.arange(3), dims=("time",))}
+    dataset._values["qobs_mm_per_h_lead06_obs"] = _Array(np.ones(3), dims=("time",))
+    dataset._values["qobs_mm_per_h_lead06_sim"] = _Array(np.ones(3), dims=("time",))
+
+    with pytest.raises(fixed.FixedSupportContractError, match="no 'date' coordinate"):
+        fixed.evaluate_fixed_support_raw_space_metrics(
+            run_dir="fixture", epoch=1, package_root="fixture", contract=contract
+        )
+
+
+def test_package_series_rejects_same_length_unrelated_dimension_and_wrong_coordinate(tmp_path):
+    basin_id = "00000009"
+    package_root = tmp_path / "package"
+    ts_dir = package_root / "time_series"
+    ts_dir.mkdir(parents=True)
+    xr.Dataset(
+        {"qobs_m3s": ("sample", np.arange(12, dtype=float))},
+        coords={"date": np.arange(12), "sample": np.arange(12)},
+    ).to_netcdf(ts_dir / f"{basin_id}.nc")
+    contract = _contract_for_basin(basin_id, np.array([0, 1]), lead_hours=6)
+    with pytest.raises(fixed.FixedSupportContractError, match="only supported layout"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(),
+        )
+
+    with pytest.raises(fixed.FixedSupportContractError, match="no 'wrong_time' coordinate"):
+        fixed.derive_canonical_package_observed_series(
+            package_root=package_root,
+            basin_id=basin_id,
+            contract=contract,
+            package_identity=fixed.fixture_only_unqualified_package(
+                netcdf_time_coordinate="wrong_time"
+            ),
+        )
+
+
+def test_plain_period_results_mapping_cannot_enter_authenticated_seam(monkeypatch):
+    contract = _contract(1)
+    basin_id = contract["basin_ids"][0]
+    period = _wire_datetime_epoch(monkeypatch, basin_id=basin_id, run_dates=np.arange(3))
+    with pytest.raises(fixed.FixedSupportContractError, match="must be an AuthenticatedPeriodResults"):
+        fixed.evaluate_fixed_support_raw_space_metrics(
+            run_dir="fixture",
+            epoch=1,
+            package_root="fixture",
+            contract=contract,
+            authenticated_period_results=period,
+        )
+
+
+def test_authenticated_period_results_reject_wrong_run_period_and_epoch(tmp_path):
+    run_dir = tmp_path / "run_a"
+    _write_validation_pickle(run_dir, 1, {})
+    authenticated = load_authenticated_period_results(run_dir=run_dir, period="validation", epoch=1)
+    contract = _contract(1)
+
+    for kwargs, match in (
+        ({"run_dir": tmp_path / "run_b", "epoch": 1, "contract": contract}, "run-identity"),
+        ({"run_dir": run_dir, "epoch": 1, "contract": contract}, "evaluation-period"),
+    ):
+        with pytest.raises(fixed.FixedSupportContractError, match=match):
+            fixed.evaluate_fixed_support_raw_space_metrics(
+                package_root="fixture",
+                authenticated_period_results=authenticated,
+                **kwargs,
+            )
+
+    validation_contract = dict(contract)
+    validation_contract["period"] = "validation"
+    # Recompute the contract checksum after changing the period through the
+    # public builder rather than presenting a malformed dict.
+    validation_contract = fixed.build_fixed_support_contract(
+        contract_id=OBJECTIVE_ID_V2,
+        lead_hours=6,
+        target_variable="qobs_mm_per_h_lead06",
+        period="validation",
+        date_start="2024-01-01",
+        date_end="2024-01-01",
+        source_gap_policy_identity="fixture_gap_v001",
+        screening_basin_ids_sha256="0" * 64,
+        package_manifest_sha256="a" * 64,
+        package_file_checksums_sha256="b" * 64,
+        package_run_provenance_sha256="c" * 64,
+        development_split_sha256="d" * 64,
+        spatial_holdout_split_sha256="e" * 64,
+        per_basin_date={contract["basin_ids"][0]: np.array([0, 1, 2])},
+        per_basin_admitted={contract["basin_ids"][0]: np.ones(3, dtype=bool)},
+    )
+    with pytest.raises(fixed.FixedSupportContractError, match="epoch contradiction"):
+        fixed.evaluate_fixed_support_raw_space_metrics(
+            run_dir=run_dir,
+            epoch=2,
+            package_root="fixture",
+            contract=validation_contract,
+            authenticated_period_results=authenticated,
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -16,11 +16,12 @@ Test layout:
    ``aggregate_raw_space_metrics`` seam already used by
    ``tests/test_fixed_support_contract_v2.py``'s own production-completeness
    tests) for the re-scored-objective sub-cases.
- - Section E: cross-configuration observed-side identity enforcement
-   (scenarios 3, 14 basin-population half, 15, 16) against
-   ``_derive_and_validate_canonical_q98_facts`` directly, using lightweight
-   stand-ins that expose only the ``admitted_series_by_basin`` attribute it
-   reads.
+ - Section E: package-canonical Q98 derivation and cross-trial provenance-
+   audit enforcement (scenarios 3, 14 basin-population half, 15, 16) against
+   ``_derive_canonical_q98_facts_from_package``/``_audit_admitted_observation_provenance``
+   directly, using lightweight stand-ins that expose only the
+   ``admitted_series_by_basin`` attribute they read and a monkeypatched
+   ``derive_canonical_package_observed_series`` seam.
  - Section F: production batch-shape gating, including the RD1-C4 review
    Finding 3 fix (legal duplicate ``configuration_id`` across trials that
    agree on canonical hyperparameters) against ``_validate_production_batch_shape``
@@ -40,6 +41,7 @@ Test layout:
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import pickle
 import shutil
@@ -55,6 +57,8 @@ import xarray as xr
 from src.baseline import fixed_support_contract_v2 as fixed
 from src.baseline import pilot_orchestration as orchestration
 from src.baseline import stage1_v2_12plus12_hydrological_consumer as hyd
+from src.baseline.authenticated_period_results import fixture_only_period_results
+from src.baseline.package_identity_qualification import QualifiedPackageIdentity
 from src.baseline import sweep_v2_six_axis_production_adapter as v2_adapter
 from src.baseline.nh_seed_evaluation import period_results_path
 from src.baseline.sweep_v1_campaign import derive_trajectory_diagnostics
@@ -89,8 +93,16 @@ def _contract(n_basins: int, *, support_len: int = 3) -> dict:
 
 
 class _Array:
-    def __init__(self, values):
+    """Minimal xarray-DataArray stand-in.
+
+    ``dims`` is part of the surface because the evaluator proves a
+    variable's dimension identity before reading its values (RD1-C4-D1
+    finding A3) instead of flattening whatever it finds.
+    """
+
+    def __init__(self, values, dims=("date",)):
         self.values = np.asarray(values)
+        self.dims = tuple(dims)
 
 
 class _Dataset:
@@ -106,6 +118,100 @@ class _Dataset:
         return self._values[key]
 
 
+def _fixture_package_identity(package_root, contract) -> QualifiedPackageIdentity:
+    """A ``QualifiedPackageIdentity`` built directly rather than through
+    ``qualify_package_identity()``'s real proof chain (RD1-C4-D1 finding A2:
+    the formal consumer now refuses any package_identity that is not an
+    actual ``QualifiedPackageIdentity`` instance qualified against exactly
+    this package_root/contract). The full manifest/schema/provenance proof
+    chain is exhaustively exercised by
+    ``tests/test_package_identity_qualification.py``; this helper only needs
+    to satisfy the formal consumer's own checks -- type, resolved
+    package_root, contract_id, contract checksum (``_require_package_identity_for_root``)
+    -- for tests in this module that mock or do not otherwise depend on real
+    package I/O. This mirrors the same direct-construction pattern already
+    used for ``AuthenticatedTrialTarget`` fixtures in
+    ``tests/_rd1_c4_d1_support.py``.
+
+    Where the real per-basin byte proof (RD1-C4-D1 finding A5,
+    ``verify_basin_time_series_file``) is still unconditionally exercised
+    downstream -- inside ``evaluate_fixed_support_raw_space_metrics``'s
+    per-basin loop, regardless of how the higher-level metric/area functions
+    are mocked -- this writes one tiny real placeholder file per
+    ``contract["basin_ids"]`` basin under ``package_root/time_series/`` and
+    records its real sha256/size, so that proof genuinely passes rather than
+    being bypassed. Skipped (no filesystem writes) when the contract carries
+    no ``basin_ids`` (Section E's shallow-only contracts), so this helper
+    stays side-effect-free for callers that never reach the per-basin check.
+    """
+    from pathlib import Path as _Path
+    import hashlib as _hashlib
+
+    root = _Path(package_root)
+    basin_ids = list(contract.get("basin_ids", []))
+    relative_path: dict = {}
+    sha256_by_basin: dict = {}
+    size_by_basin: dict = {}
+    if basin_ids:
+        time_series_dir = root / "time_series"
+        time_series_dir.mkdir(parents=True, exist_ok=True)
+        for basin_id in basin_ids:
+            rel = f"time_series/{basin_id}.nc"
+            file_path = root / rel
+            if not file_path.is_file():
+                # No real package file at this path yet (the common case for
+                # this module's fast seams) -- a tiny placeholder is enough
+                # to satisfy the real per-basin byte proof honestly. Where a
+                # real basin NetCDF already exists (Section H's vertical
+                # test, which writes real package files before qualifying),
+                # this never touches it -- it only records that file's own
+                # real bytes below, exactly as the real qualifier would.
+                file_path.write_bytes(f"fixture-basin-{basin_id}".encode("utf-8"))
+            payload_bytes = file_path.read_bytes()
+            relative_path[basin_id] = rel
+            sha256_by_basin[basin_id] = _hashlib.sha256(payload_bytes).hexdigest()
+            size_by_basin[basin_id] = len(payload_bytes)
+
+    return QualifiedPackageIdentity(
+        package_root=root.resolve().as_posix(),
+        contract_id=contract["contract_id"],
+        contract_checksum_sha256=contract["checksum_sha256"],
+        contract_schema_name="fixture_schema",
+        contract_schema_version=1,
+        package_manifest_sha256="0" * 64,
+        package_file_checksums_sha256="0" * 64,
+        package_run_provenance_sha256="0" * 64,
+        manifest_schema_name="fixture_manifest_schema",
+        manifest_schema_version=1,
+        package_role="fixture_role",
+        netcdf_package_schema_name="fixture_netcdf_schema",
+        netcdf_package_schema_version=1,
+        netcdf_time_coordinate="date",
+        netcdf_schema_historical_lineage_applied=False,
+        run_provenance_builder_module="fixture_module",
+        run_provenance_created_at_utc="2026-01-01T00:00:00Z",
+        run_provenance_dry_run=False,
+        raw_target_variable="qobs_m3s",
+        target_variable="qobs_mm_per_h_lead06",
+        lead_hours=6,
+        period="fixture",
+        contract_date_start="2024-01-01",
+        contract_date_end="2024-01-01",
+        timeline_start="2024-01-01T00:00:00",
+        timeline_end="2024-01-01T00:00:00",
+        timeline_rows=1,
+        timeline_frequency="1h",
+        timeline_window_verified=True,
+        n_package_basins=len(basin_ids) or 1,
+        n_qualified_basins=len(basin_ids) or 1,
+        n_checksum_entries=len(basin_ids) or 1,
+        basin_time_series_relative_path=relative_path,
+        basin_time_series_sha256=sha256_by_basin,
+        basin_time_series_size_bytes=size_by_basin,
+        qualified_at_utc="2026-01-01T00:00:00Z",
+    )
+
+
 def _wire_synthetic_epoch_v2(monkeypatch, contract, *, per_basin_overrides=None, aggregate_median=0.5, n=10):
     """Fast monkeypatch seam (extends ``tests/test_fixed_support_contract_v2.py``'s
     own ``_wire_synthetic_epoch`` pattern) that additionally carries kge/
@@ -114,10 +220,23 @@ def _wire_synthetic_epoch_v2(monkeypatch, contract, *, per_basin_overrides=None,
     exercised through the real ``evaluate_fixed_support_raw_space_metrics``
     control flow without real NetCDF/pickle I/O. Never used for the
     designated vertical integration test (Section H), which uses real I/O
-    and mocks nothing."""
+    and mocks nothing.
+
+    Also monkeypatches ``hyd.derive_canonical_package_observed_series`` (the
+    package-canonical Q98 source, RD1-C4 reproducibility correction) to
+    return, per basin, exactly the same admitted obs values this seam
+    fabricates by default (or ``per_basin_overrides[basin_id]["obs_m3s"]``
+    when supplied) -- so the fast seam's fixtures remain self-consistent
+    with the package-canonical provenance audit without requiring real
+    NetCDF I/O for every batch-shape/coverage-focused test.
+    """
     dataset = _Dataset(n=n)
-    period = {basin_id: {"1h": {"xr": dataset}} for basin_id in contract["basin_ids"]}
-    monkeypatch.setattr(fixed, "load_period_results", lambda *_: period)
+    period_results = {basin_id: {"1h": {"xr": dataset}} for basin_id in contract["basin_ids"]}
+
+    def _load(*, run_dir, period, epoch, expected_sha256=None):
+        return fixture_only_period_results(run_dir=run_dir, period=period, epoch=epoch, results=period_results)
+
+    monkeypatch.setattr(fixed, "load_authenticated_period_results", _load)
     monkeypatch.setattr(fixed, "basin_netcdf_path", lambda *_: "fixture.nc")
     monkeypatch.setattr(
         fixed, "derive_basin_area_km2_from_netcdf",
@@ -146,7 +265,46 @@ def _wire_synthetic_epoch_v2(monkeypatch, contract, *, per_basin_overrides=None,
 
     monkeypatch.setattr(fixed, "evaluate_basin_raw_space", metric)
     monkeypatch.setattr(fixed, "aggregate_raw_space_metrics", aggregate)
-    return period
+
+    support_dates_by_basin = {
+        basin_id: fixed._deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+        for basin_id in contract["basin_ids"]
+    }
+
+    def fake_canonical_package_series(*, package_root, basin_id, contract, package_identity=None):
+        row_overrides = overrides.get(basin_id, {})
+        support_dates = support_dates_by_basin[basin_id]
+        # This seam's own ``metric()`` fabricates a default admitted
+        # obs_m3s of ``run_date_values[i] + 1.0`` at each run position i
+        # (``np.arange(1.0, n + 1.0)`` against ``run_date_values ==
+        # np.arange(n)``), and the real ``evaluate_fixed_support_raw_space_metrics``
+        # reindexes strictly by date identity -- so for any admitted
+        # support timestamp ``d`` the resulting default admitted obs_m3s
+        # value is always exactly ``d + 1.0``, independent of contract
+        # support length/ordering. Mirror that identity here so the fast
+        # seam's fixtures stay self-consistent with the package-canonical
+        # provenance audit by default.
+        default_obs = np.asarray(support_dates, dtype=np.float64) + 1.0
+        obs_m3s = np.asarray(row_overrides.get("obs_m3s", default_obs))
+        return fixed.CanonicalPackageObservedSeries(basin_id=basin_id, date=support_dates, obs_m3s=obs_m3s)
+
+    monkeypatch.setattr(hyd, "derive_canonical_package_observed_series", fake_canonical_package_series)
+
+    # ``assemble_rd1_hydrological_review`` calls the real, full manifest/
+    # schema/provenance proof chain unconditionally and with no parameter to
+    # substitute it (RD1-C4-D1 finding A2: no production path can skip
+    # qualification) -- building that full proof for a synthetic fixture
+    # package would mean fabricating a complete matching manifest set for no
+    # additional test value, since the proof chain itself is already
+    # exhaustively exercised in tests/test_package_identity_qualification.py.
+    # This fast seam substitutes only the call as bound in ``hyd``'s module
+    # globals, exactly like every other package-touching function this seam
+    # already substitutes above.
+    monkeypatch.setattr(
+        hyd, "qualify_package_identity",
+        lambda *, package_root, contract, basin_ids=None: _fixture_package_identity(package_root, contract),
+    )
+    return period_results
 
 
 def _write_receipt(tmp_path, name, payload):
@@ -542,6 +700,17 @@ def test_q98_diagnostics_reject_observed_side_mismatch_against_canonical_facts()
         )
 
 
+def test_q98_point_of_use_requires_simulation_timestamps_to_equal_canonical_package_timestamps():
+    dates = np.array([0, 1, 2])
+    obs = np.array([1.0, 2.0, 3.0])
+    facts = hyd.derive_canonical_basin_q98_facts(basin_id="b1", date=dates, obs_m3s=obs)
+    with pytest.raises(hyd.HydrologicalConsumerError, match="paired by position only"):
+        hyd.compute_q98_configuration_basin_diagnostics(
+            trial_id="trial", facts=facts, date=np.array([1, 0, 2]),
+            obs_m3s=obs, sim_m3s=np.array([2.0, 1.0, 3.0]),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Section D: official best-epoch/objective identity & receipt content
 # binding (RD1-C4 review Findings 1, 2; scenarios 11-13).
@@ -835,16 +1004,21 @@ def test_configuration_result_fails_closed_on_support_contract_checksum_mismatch
     )
     source = hyd.build_v2_best_epoch_source(execution_provenance=receipt_record, source_receipt_path=receipt_path)
 
+    package_root = short_tmp_path / "fixture_pkg"
+    package_identity = _fixture_package_identity(package_root, contract)
+
     bad_sha_source = replace(source, support_contract_sha256="0" * 64)
     with pytest.raises(hyd.HydrologicalConsumerError, match="support_contract_sha256"):
         hyd.evaluate_v2_configuration_hydrological_result(
-            best_epoch_source=bad_sha_source, package_root="fixture_pkg", contract=contract,
+            best_epoch_source=bad_sha_source, package_root=package_root, package_identity=package_identity,
+            contract=contract,
         )
 
     bad_version_source = replace(source, support_contract_version="wrong_contract_id")
     with pytest.raises(hyd.HydrologicalConsumerError, match="support_contract_version"):
         hyd.evaluate_v2_configuration_hydrological_result(
-            best_epoch_source=bad_version_source, package_root="fixture_pkg", contract=contract,
+            best_epoch_source=bad_version_source, package_root=package_root, package_identity=package_identity,
+            contract=contract,
         )
 
 
@@ -857,9 +1031,11 @@ def test_configuration_result_fails_closed_on_rescored_objective_mismatch(short_
     # Self-consistent record (objective_score == trajectory[best_epoch] ==
     # 0.7) but not equal to what the real evaluator will compute (0.5).
     _wire_synthetic_epoch_v2(monkeypatch, contract, aggregate_median=0.5)
+    package_root = short_tmp_path / "fixture_pkg"
     with pytest.raises(hyd.HydrologicalConsumerError, match="re-scored"):
         hyd.evaluate_v2_configuration_hydrological_result(
-            best_epoch_source=source, package_root="fixture_pkg", contract=contract,
+            best_epoch_source=source, package_root=package_root,
+            package_identity=_fixture_package_identity(package_root, contract), contract=contract,
         )
 
 
@@ -870,12 +1046,54 @@ def test_configuration_result_succeeds_when_rescored_objective_matches(short_tmp
     )
     source = hyd.build_v2_best_epoch_source(execution_provenance=receipt_record, source_receipt_path=receipt_path)
     _wire_synthetic_epoch_v2(monkeypatch, contract, aggregate_median=0.5)
+    package_root = short_tmp_path / "fixture_pkg"
     result = hyd.evaluate_v2_configuration_hydrological_result(
-        best_epoch_source=source, package_root="fixture_pkg", contract=contract,
+        best_epoch_source=source, package_root=package_root,
+        package_identity=_fixture_package_identity(package_root, contract), contract=contract,
     )
     assert result.rescored_objective == pytest.approx(0.5)
     assert result.official_objective == pytest.approx(0.5)
     assert set(result.admitted_series_by_basin) == set(contract["basin_ids"])
+
+
+def test_standalone_consumer_requires_package_qualification_argument():
+    parameter = inspect.signature(hyd.evaluate_v2_configuration_hydrological_result).parameters[
+        "package_identity"
+    ]
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_standalone_consumer_rejects_package_b_with_package_a_identity(short_tmp_path, monkeypatch):
+    receipt_path, receipt_record, contract = _real_receipt(
+        short_tmp_path, monkeypatch, fixed_scores_by_epoch=_linear_trajectory(3, 0.5)
+    )
+    source = hyd.build_v2_best_epoch_source(
+        execution_provenance=receipt_record, source_receipt_path=receipt_path
+    )
+    package_a = short_tmp_path / "package_a"
+    package_b = short_tmp_path / "package_b"
+    identity_a = _fixture_package_identity(package_a, contract)
+    with pytest.raises(hyd.HydrologicalConsumerError, match="not the qualified package root"):
+        hyd.evaluate_v2_configuration_hydrological_result(
+            best_epoch_source=source, package_root=package_b,
+            package_identity=identity_a, contract=contract,
+        )
+
+
+def test_standalone_consumer_revalidates_receipt_at_point_of_use(short_tmp_path, monkeypatch):
+    receipt_path, receipt_record, contract = _real_receipt(
+        short_tmp_path, monkeypatch, fixed_scores_by_epoch=_linear_trajectory(3, 0.5)
+    )
+    source = hyd.build_v2_best_epoch_source(
+        execution_provenance=receipt_record, source_receipt_path=receipt_path
+    )
+    receipt_path.write_bytes(receipt_path.read_bytes() + b" ")
+    package_root = short_tmp_path / "package"
+    with pytest.raises(hyd.HydrologicalConsumerError, match="standalone source authentication"):
+        hyd.evaluate_v2_configuration_hydrological_result(
+            best_epoch_source=source, package_root=package_root,
+            package_identity=_fixture_package_identity(package_root, contract), contract=contract,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -887,16 +1105,85 @@ def _admitted(basin_id, date, obs, sim):
     return fixed.AdmittedSeries(basin_id=basin_id, date=np.asarray(date), obs_m3s=np.asarray(obs), sim_m3s=np.asarray(sim))
 
 
-def test_cross_configuration_canonical_facts_derived_when_series_agree():
+def _patch_canonical_package_series(monkeypatch, series_by_basin):
+    """Monkeypatches the package-canonical-series loader as it is bound in
+    ``hyd`` (a direct-imported name, so ``fixed.derive_canonical_package_observed_series``
+    is not sufficient -- ``hyd``'s own two call sites resolve the name
+    against ``hyd``'s module globals)."""
+
+    def fake(*, package_root, basin_id, contract, package_identity=None):
+        return series_by_basin[basin_id]
+
+    monkeypatch.setattr(hyd, "derive_canonical_package_observed_series", fake)
+
+
+_SECTION_E_CONTRACT = {"contract_id": "fixture_contract", "checksum_sha256": "f" * 64}
+_SECTION_E_PACKAGE_IDENTITY = _fixture_package_identity("fixture_pkg", _SECTION_E_CONTRACT)
+
+
+def test_cross_configuration_canonical_facts_derived_from_package_not_trials(monkeypatch):
+    # RD1-C4 reproducibility correction: canonical Q98 facts must come from
+    # the package-canonical series, never from either trial's own admitted
+    # series -- even when both trials happen to agree with each other but
+    # NOT with the package (a scenario the old cross-trial-only check could
+    # never detect).
+    date = np.array([1, 2, 3])
+    package_obs = np.array([10.0, 20.0, 30.0])
+    trial_obs = np.array([1.0, 2.0, 3.0])  # agrees cross-trial, disagrees with package
+    canonical_series = fixed.CanonicalPackageObservedSeries(basin_id="b1", date=date, obs_m3s=package_obs)
+    results = {
+        "cfgA": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_obs, trial_obs * 1.1)}),
+        "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_obs, trial_obs * 0.9)}),
+    }
+    _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
+    with pytest.raises(hyd.HydrologicalConsumerError, match="provenance envelope"):
+        hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
+
+
+def test_cross_configuration_canonical_facts_derived_when_package_and_trials_agree(monkeypatch):
     date = np.array([1, 2, 3])
     obs = np.array([1.0, 2.0, 3.0])
+    canonical_series = fixed.CanonicalPackageObservedSeries(basin_id="b1", date=date, obs_m3s=obs)
     results = {
         "cfgA": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs, obs * 1.1)}),
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs, obs * 0.9)}),
     }
-    canonical = hyd._derive_and_validate_canonical_q98_facts(results)
+    _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
+    canonical = hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
     assert set(canonical) == {"b1"}
     np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, obs)
+
+
+def test_cross_configuration_float32_reconstruction_scale_admitted(monkeypatch):
+    # requirement 5 bullet 1: two pickle observation arrays differing only
+    # at demonstrated float32 reconstruction scale must be admitted by the
+    # provenance audit (not rejected).
+    date = np.array([1, 2, 3])
+    package_obs = np.array([12.345, 23.456, 100.0], dtype=np.float64)
+    # Simulate float32 round-trip reconstruction noise (the diagnostic's
+    # actual observed failure mode), well within PROVENANCE_RTOL/ATOL.
+    trial_a_obs = package_obs.astype(np.float32).astype(np.float64)
+    trial_b_obs = (package_obs.astype(np.float32) * np.float32(1.0)).astype(np.float64)
+    canonical_series = fixed.CanonicalPackageObservedSeries(basin_id="b1", date=date, obs_m3s=package_obs)
+    results = {
+        "cfgA": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_a_obs, trial_a_obs)}),
+        "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_b_obs, trial_b_obs)}),
+    }
+    _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
+    canonical = hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
+    # Formal metric evaluation receives the exact same package-derived
+    # observations for both trials (requirement 5 bullet 2), and Q98 facts
+    # are package-canonical (requirement 5 bullet 4).
+    np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, package_obs)
 
 
 def test_cross_configuration_missing_basin_fails_closed():
@@ -910,31 +1197,45 @@ def test_cross_configuration_missing_basin_fails_closed():
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs, obs)}),
     }
     with pytest.raises(hyd.HydrologicalConsumerError, match="basin population"):
-        hyd._derive_and_validate_canonical_q98_facts(results)
+        hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
 
 
-def test_cross_configuration_timestamp_disagreement_fails_closed():
+def test_cross_configuration_timestamp_disagreement_fails_closed(monkeypatch):
     # scenario 15
     obs = np.array([1.0, 2.0, 3.0])
+    canonical_series = fixed.CanonicalPackageObservedSeries(basin_id="b1", date=np.array([1, 2, 3]), obs_m3s=obs)
     results = {
         "cfgA": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", [1, 2, 3], obs, obs)}),
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", [1, 2, 4], obs, obs)}),
     }
+    _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
     with pytest.raises(hyd.HydrologicalConsumerError, match="timestamps differ"):
-        hyd._derive_and_validate_canonical_q98_facts(results)
+        hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
 
 
-def test_cross_configuration_observed_value_disagreement_fails_closed():
-    # scenario 16
+def test_cross_configuration_observed_value_disagreement_fails_closed(monkeypatch):
+    # scenario 16: a materially different observed value (not float32-scale
+    # noise) must still fail closed against the package-canonical series.
     date = [1, 2, 3]
     obs_a = np.array([1.0, 2.0, 3.0])
     obs_b = np.array([1.0, 2.0, 3.5])
+    canonical_series = fixed.CanonicalPackageObservedSeries(basin_id="b1", date=np.array(date), obs_m3s=obs_a)
     results = {
         "cfgA": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs_a, obs_a)}),
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs_b, obs_b)}),
     }
-    with pytest.raises(hyd.HydrologicalConsumerError, match="observed discharge differs"):
-        hyd._derive_and_validate_canonical_q98_facts(results)
+    _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
+    with pytest.raises(hyd.HydrologicalConsumerError, match="provenance envelope"):
+        hyd._derive_canonical_q98_facts_from_package(
+            results, package_root="fixture_pkg",
+            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1495,6 +1796,7 @@ def _write_package_basin_netcdf(package_root, basin_id, *, area_km2, lead_hours,
         {"qobs_m3s": ("date", qobs_m3s), "qobs_mm_per_h_lead06": ("date", target_mm_per_h)},
         coords={"date": np.arange(n)},
     ).to_netcdf(ts_dir / f"{basin_id}.nc")
+    return qobs_m3s
 
 
 def _write_validation_pickle(run_dir, period, epoch, basin_results):
@@ -1517,10 +1819,21 @@ def test_vertical_synthetic_integration_full_chain(short_tmp_path, monkeypatch):
     contract = fixed.load_fixed_support_contract(paths.fixed_support_contract_path)
 
     package_root = short_tmp_path / "package"
-    _write_package_basin_netcdf(package_root, basin_id, area_km2=area_km2, lead_hours=lead_hours, n=package_n)
+    package_qobs_m3s = _write_package_basin_netcdf(
+        package_root, basin_id, area_km2=area_km2, lead_hours=lead_hours, n=package_n
+    )
 
-    rng = np.random.default_rng(11)
-    obs_mm_per_h = rng.uniform(0.01, 5.0, size=n)
+    # RD1-C4 reproducibility correction: a genuine run's own admitted
+    # obs_mm_per_h satisfies the package's own qobs_m3s<->target_mm_per_h
+    # algebraic identity (lead-shift-aligned) up to float32 reconstruction
+    # precision -- it is never independent of the package (see
+    # docs/decision_log.md, this entry; RD1-C4 Q98 mismatch diagnostic
+    # classification A). Derive it that way here, with a genuine float32
+    # round-trip cast standing in for the diagnostic's own demonstrated
+    # reconstruction-scale drift, so the provenance audit is exercised
+    # honestly rather than trivially.
+    obs_m3s_from_package = package_qobs_m3s[lead_hours:lead_hours + n]
+    obs_mm_per_h = (3.6 * obs_m3s_from_package / area_km2).astype(np.float32).astype(np.float64)
     sim_mm_per_h = obs_mm_per_h * 1.1  # fully finite, deliberately biased high
 
     period_dataset = xr.Dataset(
@@ -1547,8 +1860,9 @@ def test_vertical_synthetic_integration_full_chain(short_tmp_path, monkeypatch):
     assert source.official_objective == pytest.approx(official_value)
     assert Path(source.run_dir) == nh_run_dir
 
+    package_identity = _fixture_package_identity(package_root, contract)
     result = hyd.evaluate_v2_configuration_hydrological_result(
-        best_epoch_source=source, package_root=package_root, contract=contract,
+        best_epoch_source=source, package_root=package_root, package_identity=package_identity, contract=contract,
     )
 
     # scenario 11(a): valid selected epoch is proven end to end.
@@ -1584,5 +1898,6 @@ def test_vertical_synthetic_integration_full_chain(short_tmp_path, monkeypatch):
     wrong_source = hyd.build_v2_best_epoch_source(execution_provenance=wrong_receipt_record, source_receipt_path=wrong_receipt_path)
     with pytest.raises(hyd.HydrologicalConsumerError, match="re-scored"):
         hyd.evaluate_v2_configuration_hydrological_result(
-            best_epoch_source=wrong_source, package_root=package_root, contract=contract,
+            best_epoch_source=wrong_source, package_root=package_root, package_identity=package_identity,
+            contract=contract,
         )
