@@ -1127,6 +1127,11 @@ def test_cross_configuration_canonical_facts_derived_from_package_not_trials(mon
     # series -- even when both trials happen to agree with each other but
     # NOT with the package (a scenario the old cross-trial-only check could
     # never detect).
+    #
+    # RD1-C4 formal-results reconciliation: a provisional-envelope
+    # exceedance is report-only and no longer aborts assembly -- the
+    # canonical facts must still come from the package alone, and the
+    # exceedance must be captured, not raised.
     date = np.array([1, 2, 3])
     package_obs = np.array([10.0, 20.0, 30.0])
     trial_obs = np.array([1.0, 2.0, 3.0])  # agrees cross-trial, disagrees with package
@@ -1136,11 +1141,20 @@ def test_cross_configuration_canonical_facts_derived_from_package_not_trials(mon
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_obs, trial_obs * 0.9)}),
     }
     _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
-    with pytest.raises(hyd.HydrologicalConsumerError, match="provenance envelope"):
-        hyd._derive_canonical_q98_facts_from_package(
-            results, package_root="fixture_pkg",
-            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
-        )
+    canonical, provenance = hyd._derive_canonical_q98_facts_from_package(
+        results, package_root="fixture_pkg",
+        package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+    )
+    # Canonical facts are package-derived regardless of the exceedance.
+    np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, package_obs)
+    for trial_id in ("cfgA", "cfgB"):
+        record = provenance[trial_id]["b1"]
+        assert record.envelope_exceeded is True
+        assert record.n_compared == 3
+        assert record.n_exceeding == 3
+        assert record.max_abs_diff_m3s == pytest.approx(27.0)  # |1.0 - 30.0| (index 2, largest abs diff)
+        assert record.worst_position == 2
+        assert record.worst_package_value_m3s == pytest.approx(30.0)
 
 
 def test_cross_configuration_canonical_facts_derived_when_package_and_trials_agree(monkeypatch):
@@ -1152,12 +1166,14 @@ def test_cross_configuration_canonical_facts_derived_when_package_and_trials_agr
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs, obs * 0.9)}),
     }
     _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
-    canonical = hyd._derive_canonical_q98_facts_from_package(
+    canonical, provenance = hyd._derive_canonical_q98_facts_from_package(
             results, package_root="fixture_pkg",
             package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
         )
     assert set(canonical) == {"b1"}
     np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, obs)
+    assert provenance["cfgA"]["b1"].envelope_exceeded is False
+    assert provenance["cfgB"]["b1"].envelope_exceeded is False
 
 
 def test_cross_configuration_float32_reconstruction_scale_admitted(monkeypatch):
@@ -1176,7 +1192,7 @@ def test_cross_configuration_float32_reconstruction_scale_admitted(monkeypatch):
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, trial_b_obs, trial_b_obs)}),
     }
     _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
-    canonical = hyd._derive_canonical_q98_facts_from_package(
+    canonical, provenance = hyd._derive_canonical_q98_facts_from_package(
             results, package_root="fixture_pkg",
             package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
         )
@@ -1184,6 +1200,8 @@ def test_cross_configuration_float32_reconstruction_scale_admitted(monkeypatch):
     # observations for both trials (requirement 5 bullet 2), and Q98 facts
     # are package-canonical (requirement 5 bullet 4).
     np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, package_obs)
+    assert provenance["cfgA"]["b1"].envelope_exceeded is False
+    assert provenance["cfgB"]["b1"].envelope_exceeded is False
 
 
 def test_cross_configuration_missing_basin_fails_closed():
@@ -1219,9 +1237,12 @@ def test_cross_configuration_timestamp_disagreement_fails_closed(monkeypatch):
         )
 
 
-def test_cross_configuration_observed_value_disagreement_fails_closed(monkeypatch):
+def test_cross_configuration_observed_value_disagreement_is_report_only_diagnostic(monkeypatch):
     # scenario 16: a materially different observed value (not float32-scale
-    # noise) must still fail closed against the package-canonical series.
+    # noise) is captured as a report-only provenance-envelope exceedance,
+    # not a hard failure -- RD1-C4 formal-results reconciliation
+    # (docs/decision_log.md, this entry). cfgA agrees with the package
+    # exactly (no exceedance); cfgB disagrees at one element (exceedance).
     date = [1, 2, 3]
     obs_a = np.array([1.0, 2.0, 3.0])
     obs_b = np.array([1.0, 2.0, 3.5])
@@ -1231,11 +1252,22 @@ def test_cross_configuration_observed_value_disagreement_fails_closed(monkeypatc
         "cfgB": SimpleNamespace(admitted_series_by_basin={"b1": _admitted("b1", date, obs_b, obs_b)}),
     }
     _patch_canonical_package_series(monkeypatch, {"b1": canonical_series})
-    with pytest.raises(hyd.HydrologicalConsumerError, match="provenance envelope"):
-        hyd._derive_canonical_q98_facts_from_package(
-            results, package_root="fixture_pkg",
-            package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
-        )
+    canonical, provenance = hyd._derive_canonical_q98_facts_from_package(
+        results, package_root="fixture_pkg",
+        package_identity=_SECTION_E_PACKAGE_IDENTITY, contract=_SECTION_E_CONTRACT,
+    )
+    # Canonical Q98 facts remain package-derived, unaffected by the exceedance.
+    np.testing.assert_array_equal(canonical["b1"].canonical_obs_m3s, obs_a)
+    assert provenance["cfgA"]["b1"].envelope_exceeded is False
+    assert provenance["cfgA"]["b1"].n_exceeding == 0
+    record_b = provenance["cfgB"]["b1"]
+    assert record_b.envelope_exceeded is True
+    assert record_b.n_compared == 3
+    assert record_b.n_exceeding == 1
+    assert record_b.worst_position == 2
+    assert record_b.max_abs_diff_m3s == pytest.approx(0.5)
+    assert record_b.worst_package_value_m3s == pytest.approx(3.0)
+    assert record_b.worst_admitted_value_m3s == pytest.approx(3.5)
 
 
 # --------------------------------------------------------------------------- #
@@ -1548,6 +1580,57 @@ def test_formal_assembly_full_batch_coverage_is_exactly_24x400_with_duplicates_c
     for coverage in review.coverage.values():
         assert coverage.n_total == 24 * 400 == 9600
         assert coverage.n_finite + coverage.n_unavailable == coverage.n_total
+
+
+def test_formal_assembly_retains_report_only_envelope_exceedance_without_aborting(formal_batch, monkeypatch):
+    # RD1-C4 formal-results reconciliation (docs/decision_log.md, this
+    # entry): a provisional-envelope exceedance must be retained as
+    # structured, report-only diagnostic metadata and must NOT abort the
+    # formal 24x400 batch assembly (job 46178103's observed failure mode).
+    sources, contract, package_root = formal_batch
+    _wire_synthetic_epoch_v2(monkeypatch, contract)
+    baseline_canonical = hyd.derive_canonical_package_observed_series
+    exceedance_basin_id = contract["basin_ids"][0]
+    other_basin_id = contract["basin_ids"][1]
+
+    def shifted_canonical(*, package_root, basin_id, contract, package_identity=None):
+        series = baseline_canonical(
+            package_root=package_root, basin_id=basin_id, contract=contract, package_identity=package_identity
+        )
+        if basin_id != exceedance_basin_id:
+            return series
+        shifted_obs = series.obs_m3s.copy()
+        shifted_obs[0] += 10.0  # far beyond PROVENANCE_RTOL/PROVENANCE_ATOL_M3S
+        return fixed.CanonicalPackageObservedSeries(basin_id=basin_id, date=series.date, obs_m3s=shifted_obs)
+
+    monkeypatch.setattr(hyd, "derive_canonical_package_observed_series", shifted_canonical)
+
+    review = hyd.assemble_rd1_hydrological_review(
+        best_epoch_sources=sources, package_root=package_root, contract=contract
+    )
+    assert review.n_configurations == 24  # formal assembly did NOT abort
+
+    exceeding_trials = [
+        trial_id
+        for trial_id, by_basin in review.provenance_audit_by_trial_id.items()
+        if by_basin[exceedance_basin_id].envelope_exceeded
+    ]
+    assert len(exceeding_trials) == 24  # every trial audited against the same shifted canonical series
+    record = review.provenance_audit_by_trial_id[exceeding_trials[0]][exceedance_basin_id]
+    assert record.n_exceeding == 1
+    assert record.worst_position == 0
+    assert record.max_abs_diff_m3s == pytest.approx(10.0)
+
+    # Canonical Q98 facts remain package-derived and unaffected by the
+    # exceedance (official/canonical authority never changes).
+    facts = review.canonical_q98_facts_by_basin[exceedance_basin_id]
+    assert facts.basin_id == exceedance_basin_id
+
+    # An unshifted basin shows no exceedance for any trial.
+    assert all(
+        not by_basin[other_basin_id].envelope_exceeded
+        for by_basin in review.provenance_audit_by_trial_id.values()
+    )
 
 
 def test_formal_assembly_rejects_self_consistent_hand_built_source_not_bound_to_a_receipt(formal_batch, monkeypatch):

@@ -35,6 +35,7 @@ from .rd1_c4_trial_authentication import TrialAuthenticationError, authenticate_
 from .stage1_v2_12plus12_hydrological_consumer import (
     HydrologicalConsumerError,
     HydrologicalReviewResult,
+    ProvenanceAuditRecord,
     Q98ConfigurationBasinDiagnostics,
     assemble_rd1_hydrological_review,
 )
@@ -168,6 +169,56 @@ def canonical_q98_facts_rows(review: HydrologicalReviewResult) -> list:
     return rows
 
 
+def provenance_audit_rows(review: HydrologicalReviewResult) -> list:
+    """Flatten every trial/basin cell's already-qualified, report-only
+    :class:`~src.baseline.stage1_v2_12plus12_hydrological_consumer.ProvenanceAuditRecord`
+    (RD1-C4 formal-results reconciliation, docs/decision_log.md, this entry)
+    into one flat table, covering every compared cell -- never only
+    exceedances. This is provenance/diagnostic metadata only; it is never a
+    Q98/metric authority and never a pass/fail classifier."""
+    rows = []
+    for trial_id in sorted(review.provenance_audit_by_trial_id):
+        by_basin = review.provenance_audit_by_trial_id[trial_id]
+        search_arm = review.results_by_trial_id[trial_id].best_epoch_source.search_arm
+        for basin_id in sorted(by_basin):
+            row = {"trial_id": trial_id, "search_arm": search_arm}
+            row.update(asdict(by_basin[basin_id]))
+            rows.append(row)
+    return rows
+
+
+def provenance_audit_aggregate_summary(review: HydrologicalReviewResult) -> dict:
+    """Aggregate, report-only totals/extrema over every trial/basin cell's
+    :class:`~src.baseline.stage1_v2_12plus12_hydrological_consumer.ProvenanceAuditRecord`.
+    Pure arithmetic over the already-qualified per-cell records -- no metric
+    or Q98 fact is recomputed here. ``provisional_envelope_is_report_only``
+    is always ``True``: this envelope is not a qualified pass threshold (see
+    ``PROVENANCE_RTOL``'s module-level docstring)."""
+    n_cells = 0
+    n_cells_with_exceedance = 0
+    n_elements_compared = 0
+    n_elements_exceeding = 0
+    max_abs_diff_m3s = float("-inf")
+    worst_cell = None
+    for trial_id, by_basin in review.provenance_audit_by_trial_id.items():
+        for basin_id, record in by_basin.items():
+            n_cells += 1
+            n_cells_with_exceedance += int(record.envelope_exceeded)
+            n_elements_compared += record.n_compared
+            n_elements_exceeding += record.n_exceeding
+            if record.max_abs_diff_m3s > max_abs_diff_m3s:
+                max_abs_diff_m3s = record.max_abs_diff_m3s
+                worst_cell = {"trial_id": trial_id, "basin_id": basin_id, "max_abs_diff_m3s": record.max_abs_diff_m3s}
+    return {
+        "provisional_envelope_is_report_only": True,
+        "n_cells": n_cells,
+        "n_cells_with_exceedance": n_cells_with_exceedance,
+        "n_elements_compared": n_elements_compared,
+        "n_elements_exceeding": n_elements_exceeding,
+        "worst_cell": worst_cell,
+    }
+
+
 def coverage_summary(review: HydrologicalReviewResult) -> dict:
     return {
         name: {
@@ -212,6 +263,11 @@ def write_rd1_c4_results(review: HydrologicalReviewResult, out_dir: "str | Path"
     facts_fields = list(facts_rows[0].keys()) if facts_rows else []
     _write_csv(out_dir / "canonical_q98_facts.csv", facts_rows, facts_fields)
 
+    provenance_rows = provenance_audit_rows(review)
+    provenance_fields = ["trial_id", "search_arm"] + [f.name for f in fields(ProvenanceAuditRecord)]
+    _write_csv(out_dir / "provenance_audit.csv", provenance_rows, provenance_fields)
+    provenance_summary = provenance_audit_aggregate_summary(review)
+
     identity = {
         "n_configurations": review.n_configurations,
         "n_bayesian": review.n_bayesian,
@@ -220,6 +276,7 @@ def write_rd1_c4_results(review: HydrologicalReviewResult, out_dir: "str | Path"
         "contract_id": review.contract_id,
         "trial_ids": sorted(review.results_by_trial_id),
         "coverage": coverage_summary(review),
+        "provenance_audit_summary": provenance_summary,
     }
     with open(out_dir / "review_identity.json", "w", encoding="utf-8") as handle:
         json.dump(identity, handle, indent=2, sort_keys=True)

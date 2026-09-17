@@ -1066,6 +1066,12 @@ class HydrologicalReviewResult:
     coverage: Mapping[str, MetricCoverage]
     contract_id: str
     contract_checksum_sha256: str
+    #: RD1-C4 formal-results reconciliation (docs/decision_log.md, this
+    #: entry): one report-only :class:`ProvenanceAuditRecord` per trial/basin
+    #: cell (keyed ``[trial_id][basin_id]``), covering every compared cell --
+    #: never only exceedances. Diagnostic/provenance metadata only; never a
+    #: Q98/metric authority and never a pass/fail classifier.
+    provenance_audit_by_trial_id: Mapping[str, Mapping[str, "ProvenanceAuditRecord"]]
 
     def __post_init__(self) -> None:
         # Defensively protect public scientific results: results_by_trial_id
@@ -1078,6 +1084,16 @@ class HydrologicalReviewResult:
             self, "canonical_q98_facts_by_basin", MappingProxyType(dict(self.canonical_q98_facts_by_basin))
         )
         object.__setattr__(self, "coverage", MappingProxyType(dict(self.coverage)))
+        object.__setattr__(
+            self,
+            "provenance_audit_by_trial_id",
+            MappingProxyType(
+                {
+                    trial_id: MappingProxyType(dict(by_basin))
+                    for trial_id, by_basin in self.provenance_audit_by_trial_id.items()
+                }
+            ),
+        )
 
 
 def _validate_production_batch_shape(
@@ -1190,6 +1206,34 @@ def _revalidate_source_against_authoritative_receipt(source: V2BestEpochSource) 
     return rebuilt
 
 
+@dataclass(frozen=True)
+class ProvenanceAuditRecord:
+    """RD1-C4 formal-results reconciliation (docs/decision_log.md, this
+    entry): the structured, report-only outcome of comparing one trial's
+    own admitted observed discharge against the package-canonical series
+    for one basin, within the PROVISIONAL reference envelope
+    (:data:`PROVENANCE_RTOL`/:data:`PROVENANCE_ATOL_M3S`).
+
+    This is diagnostic/provenance metadata ONLY. It never determines the
+    formal metric target series, any Q98 fact, or any pass/fail outcome --
+    those come solely from the package-canonical series (see
+    :func:`_derive_canonical_q98_facts_from_package`). ``envelope_exceeded``
+    records whether at least one aligned element exceeded the provisional
+    envelope; it is not a qualified classifier and must not be interpreted
+    as skill failure or observed-value disagreement (see the module-level
+    ``PROVENANCE_RTOL`` docstring)."""
+
+    trial_id: str
+    basin_id: str
+    n_compared: int
+    n_exceeding: int
+    envelope_exceeded: bool
+    max_abs_diff_m3s: float
+    worst_position: int
+    worst_package_value_m3s: float
+    worst_admitted_value_m3s: float
+
+
 def _audit_admitted_observation_provenance(
     *,
     trial_id: str,
@@ -1197,7 +1241,7 @@ def _audit_admitted_observation_provenance(
     admitted_date: np.ndarray,
     admitted_obs_m3s: np.ndarray,
     canonical: CanonicalPackageObservedSeries,
-) -> None:
+) -> ProvenanceAuditRecord:
     """RD1-C4 reproducibility correction: audits one trial's own admitted
     observed discharge (reconstructed from its ``validation_results.p``)
     against the package-canonical series, as PROVENANCE/consistency
@@ -1210,21 +1254,22 @@ def _audit_admitted_observation_provenance(
     this basin -- see :func:`fixed_support_contract_v2.evaluate_fixed_support_raw_space_metrics`
     and :func:`fixed_support_contract_v2.derive_canonical_package_observed_series`,
     so any disagreement here is a genuine identity contradiction, not
-    float noise). Observed VALUES are compared with
-    :func:`numpy.allclose` at :data:`PROVENANCE_RTOL`/:data:`PROVENANCE_ATOL_M3S`,
-    a PROVISIONAL reference envelope (see the module-level constant
-    docstring) whose final role in RD1-C4 is unresolved.
+    float noise) and a mismatch here still raises
+    :class:`HydrologicalConsumerError` -- a hard identity failure. Observed
+    array SHAPE mismatch likewise still raises.
 
-    This function's behaviour is deliberately UNCHANGED by RD1-C4-D1: it
-    still raises :class:`HydrologicalConsumerError` on an exceedance, so the
-    formal consumer keeps failing closed until the user decides the audit
-    policy on D1 evidence. Only the claim the error makes has been corrected
-    -- it reports an exceedance of a provisional envelope, not a proven
-    observed-value disagreement. Redesigning this audit into a non-fatal,
-    measured one is explicitly out of scope for D1, which is a separate
-    read-only diagnostic layer
-    (:mod:`src.baseline.rd1_c4_observation_diagnostic`) and never routes
-    through here.
+    RD1-C4 formal-results reconciliation (docs/decision_log.md, this
+    entry): observed VALUES are compared at :data:`PROVENANCE_RTOL`/
+    :data:`PROVENANCE_ATOL_M3S`, a PROVISIONAL reference envelope (see the
+    module-level constant docstring) whose final scientific role in RD1-C4
+    remains unresolved. An exceedance of this envelope is no longer fatal:
+    it is captured as a structured, report-only :class:`ProvenanceAuditRecord`
+    -- covering every compared cell, not only exceedances -- and returned
+    to the caller so it can be surfaced in the formal results bundle. This
+    does not widen, recalibrate, or otherwise reinterpret the envelope, and
+    it does not change the canonical package-derived Q98 facts or the
+    official objective/NSE/KGE computation, which never depend on this
+    audit's outcome.
     """
     if admitted_date.shape != canonical.date.shape or not np.array_equal(admitted_date, canonical.date):
         raise HydrologicalConsumerError(
@@ -1236,24 +1281,33 @@ def _audit_admitted_observation_provenance(
             f"basin {basin_id!r}: trial {trial_id!r} admitted observed discharge shape "
             f"{admitted_obs_m3s.shape} != package-canonical shape {canonical.obs_m3s.shape}"
         )
-    if not np.allclose(admitted_obs_m3s, canonical.obs_m3s, rtol=PROVENANCE_RTOL, atol=PROVENANCE_ATOL_M3S):
-        abs_diff = np.abs(admitted_obs_m3s - canonical.obs_m3s)
-        max_abs_diff = float(np.max(abs_diff)) if abs_diff.size else float("nan")
-        exceeding = abs_diff > (PROVENANCE_ATOL_M3S + PROVENANCE_RTOL * np.abs(canonical.obs_m3s))
-        n_exceeding = int(exceeding.sum())
-        worst = int(np.argmax(abs_diff)) if abs_diff.size else -1
-        raise HydrologicalConsumerError(
-            f"basin {basin_id!r}: trial {trial_id!r} admitted observed discharge lies outside the PROVISIONAL "
-            f"package-canonical provenance envelope (rtol={PROVENANCE_RTOL:.3g}/atol={PROVENANCE_ATOL_M3S:.3g}): "
-            f"{n_exceeding} of {abs_diff.size} aligned elements exceed it; the largest absolute difference is "
-            f"{max_abs_diff:.6g} m^3/s at position {worst} (package value "
-            f"{float(canonical.obs_m3s[worst]) if abs_diff.size else float('nan'):.6g} m^3/s), which is not "
-            "necessarily one of the exceeding elements. This envelope is a provisional reference scale, NOT a "
-            "qualified pass threshold: an exceedance here means 'outside the provisional envelope', not "
-            "'a genuine observed-value disagreement'. The final RD1-C4 audit policy is unresolved pending the "
-            "RD1-C4-D1 24x400 observation diagnostic -- see this module's PROVENANCE_RTOL docstring and "
-            "src/baseline/rd1_c4_observation_diagnostic.py"
-        )
+
+    abs_diff = np.abs(admitted_obs_m3s - canonical.obs_m3s)
+    n_compared = int(abs_diff.size)
+    exceeding = abs_diff > (PROVENANCE_ATOL_M3S + PROVENANCE_RTOL * np.abs(canonical.obs_m3s))
+    n_exceeding = int(exceeding.sum())
+    if abs_diff.size:
+        worst = int(np.argmax(abs_diff))
+        max_abs_diff = float(abs_diff[worst])
+        worst_package_value = float(canonical.obs_m3s[worst])
+        worst_admitted_value = float(admitted_obs_m3s[worst])
+    else:
+        worst = -1
+        max_abs_diff = float("nan")
+        worst_package_value = float("nan")
+        worst_admitted_value = float("nan")
+
+    return ProvenanceAuditRecord(
+        trial_id=trial_id,
+        basin_id=basin_id,
+        n_compared=n_compared,
+        n_exceeding=n_exceeding,
+        envelope_exceeded=n_exceeding > 0,
+        max_abs_diff_m3s=max_abs_diff,
+        worst_position=worst,
+        worst_package_value_m3s=worst_package_value,
+        worst_admitted_value_m3s=worst_admitted_value,
+    )
 
 
 def _derive_canonical_q98_facts_from_package(
@@ -1274,7 +1328,12 @@ def _derive_canonical_q98_facts_from_package(
 
     Basin-population cross-trial agreement is still enforced first (a
     partial/mismatched basin population across trials remains a contract
-    failure, independent of the observed-series source)."""
+    failure, independent of the observed-series source).
+
+    Returns ``(canonical_facts_by_basin, provenance_audit_by_trial_id)``,
+    where the second element carries one :class:`ProvenanceAuditRecord` per
+    trial/basin cell from :func:`_audit_admitted_observation_provenance`
+    (report-only provenance diagnostics; never a Q98 or metric authority)."""
     trial_ids = sorted(results_by_trial_id)
     if not trial_ids:
         raise HydrologicalConsumerError("no trial results supplied for cross-trial Q98 derivation")
@@ -1298,6 +1357,9 @@ def _derive_canonical_q98_facts_from_package(
     )
 
     canonical: dict[str, CanonicalBasinQ98Facts] = {}
+    provenance_audit_by_trial_id: dict[str, dict[str, ProvenanceAuditRecord]] = {
+        trial_id: {} for trial_id in trial_ids
+    }
     for basin_id in sorted(reference_basins):
         canonical_series = derive_canonical_package_observed_series(
             package_root=package_root,
@@ -1307,7 +1369,7 @@ def _derive_canonical_q98_facts_from_package(
         )
         for trial_id in trial_ids:
             series = results_by_trial_id[trial_id].admitted_series_by_basin[basin_id]
-            _audit_admitted_observation_provenance(
+            provenance_audit_by_trial_id[trial_id][basin_id] = _audit_admitted_observation_provenance(
                 trial_id=trial_id,
                 basin_id=basin_id,
                 admitted_date=series.date,
@@ -1317,7 +1379,7 @@ def _derive_canonical_q98_facts_from_package(
         canonical[basin_id] = derive_canonical_basin_q98_facts(
             basin_id=basin_id, date=canonical_series.date, obs_m3s=canonical_series.obs_m3s
         )
-    return canonical
+    return canonical, provenance_audit_by_trial_id
 
 
 #: Metric fields every ``per_basin`` row of a qualified fixed-support result
@@ -1450,7 +1512,7 @@ def assemble_rd1_hydrological_review(
             require_full_screening_population=True,
         )
 
-    canonical_facts = _derive_canonical_q98_facts_from_package(
+    canonical_facts, provenance_audit_by_trial_id = _derive_canonical_q98_facts_from_package(
         interim_results,
         package_root=package_root,
         package_identity=package_identity,
@@ -1488,4 +1550,5 @@ def assemble_rd1_hydrological_review(
         coverage=coverage,
         contract_id=contract["contract_id"],
         contract_checksum_sha256=contract["checksum_sha256"],
+        provenance_audit_by_trial_id=provenance_audit_by_trial_id,
     )
