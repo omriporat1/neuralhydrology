@@ -35,7 +35,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -47,11 +47,15 @@ from .fixed_support_contract_v2 import (
 )
 from .hydrograph_atlas_events import EventWindow
 from .hydrograph_rendering import (
+    MRMS_QPE_VARIABLE,
     BasinSeries,
+    _current_git_commit,
     basin_netcdf_path,
+    build_arm_aware_candidate_colors,
     compute_target_valid_dates,
     derive_basin_area_km2_from_netcdf,
     derive_comparison_scale,
+    load_mrms_series,
     render_multi_candidate_basin_panel,
 )
 from .package_identity_qualification import qualify_package_identity
@@ -61,6 +65,11 @@ from .stage1_rd1_c4_f_hydrograph_supplement import (
     build_incumbent_order_mapping,
     select_observed_peak_window,
     validate_selected_basins_canonical,
+)
+from .stage1_rd1_c4_f_synthesis import (
+    basin_arm_medians,
+    merge_hydrograph_selection_families,
+    select_performance_stratified_basins,
 )
 
 __all__ = [
@@ -223,13 +232,24 @@ def render_basin_incumbent_panel(
     package_root,
     contract: dict,
     out_path,
+    search_arm_by_trial_id: Optional[Mapping[str, str]] = None,
+    load_precip: bool = False,
 ) -> PeakWindow:
     """Extracts, computes the canonical peak window for, and renders one
     same-panel N-candidate overlay figure for ``basin_id`` -- one predicted
     line per deduplicated incumbent trial in ``manifest``, plus the single
     shared candidate-independent observed line. Returns the
     :class:`~.stage1_rd1_c4_f_hydrograph_supplement.PeakWindow` used, so the
-    caller can record it in a receipt/manifest."""
+    caller can record it in a receipt/manifest.
+
+    ``search_arm_by_trial_id``, if supplied, assigns stable arm-aware
+    colors (see :func:`~.hydrograph_rendering.build_arm_aware_candidate_colors`)
+    instead of the plain index-based palette. ``load_precip=True`` loads the
+    qualified MRMS QPE forcing series for ``basin_id``
+    (:func:`~.hydrograph_rendering.load_mrms_series`) and renders it as a
+    separate, aligned precipitation panel above the discharge panel; the
+    canonical ``qobs_m3s`` observed-discharge authority is unaffected -- the
+    rainfall display is explanatory forcing context only."""
     trial_ids = manifest["unique_incumbent_trial_ids"]
     series_by_trial = extract_basin_candidate_series(
         basin_id=basin_id,
@@ -243,8 +263,15 @@ def render_basin_incumbent_panel(
         reference.dates, reference.obs_m3s, reference.admitted_mask, basin_id=basin_id
     )
     window = peak_window_to_event_window(peak_window)
-    scale = derive_comparison_scale(list(series_by_trial.values()), window=window)
+
+    precip_series = load_mrms_series(package_root, basin_id) if load_precip else None
+    precip_series_list = [precip_series] if precip_series is not None else ()
+    scale = derive_comparison_scale(list(series_by_trial.values()), window=window, precip_series_list=precip_series_list)
+
     labels = candidate_labels_from_manifest(manifest)
+    candidate_colors = None
+    if search_arm_by_trial_id is not None:
+        candidate_colors = build_arm_aware_candidate_colors(trial_ids, search_arm_by_trial_id)
     render_multi_candidate_basin_panel(
         series_by_trial,
         window=window,
@@ -253,6 +280,8 @@ def render_basin_incumbent_panel(
         candidate_order=trial_ids,
         scale=scale,
         title_prefix="RD1-C4-F descriptive run-progress example (NOT winner/promotion evidence)",
+        candidate_colors=candidate_colors,
+        precip_series=precip_series,
     )
     return peak_window
 
@@ -281,13 +310,24 @@ def produce_rd1_c4_f_hydrograph_supplement(
     out_dir,
     search_arms: Sequence[str] = DEFAULT_SEARCH_ARMS,
     proposal_orders: Sequence[int] = DEFAULT_PROPOSAL_ORDERS,
+    performance_metrics_path=None,
+    repo_root=None,
 ) -> dict:
     """Produces the complete RD1-C4-F hydrograph supplement: one same-panel
-    incumbent-overlay figure per selected basin, plus a hash-verified
-    manifest recording the incumbent-order mapping, the peak window used per
-    basin, and every produced figure's SHA-256. This is a descriptive
-    evidence-rendering product only -- it makes no classifier, winner,
-    promotion, or tolerance decision, and does not close RD1-C4.
+    incumbent-overlay figure per selected basin (arm-difference examples,
+    plus -- when ``performance_metrics_path`` is supplied -- the additive
+    low-/typical-/high-performance examples selected by
+    :func:`~.stage1_rd1_c4_f_synthesis.select_performance_stratified_basins`,
+    deduplicated against the arm-difference family via
+    :func:`~.stage1_rd1_c4_f_synthesis.merge_hydrograph_selection_families`
+    so an overlapping basin is rendered once with both rationales recorded).
+    Every figure includes a separate, aligned MRMS QPE precipitation panel
+    and arm-aware candidate colors. Produces a hash-verified manifest
+    recording the incumbent-order mapping, the peak window used per basin,
+    the selection rationale(s) per basin, and every produced figure's
+    SHA-256. This is a descriptive evidence-rendering product only -- it
+    makes no classifier, winner, promotion, or tolerance decision, and does
+    not close RD1-C4.
 
     Raises :class:`HydrographRunnerError` if ``out_dir`` already exists and
     is non-empty (never silently overwrites prior evidence)."""
@@ -304,11 +344,13 @@ def produce_rd1_c4_f_hydrograph_supplement(
 
     selection_path = Path(selection_manifest_path)
     selection_payload = json.loads(selection_path.read_text(encoding="utf-8"))
-    selected_basins = selection_payload["selected_basins"]
-    validate_selected_basins_canonical(selected_basins)
+    arm_diff_selected_basins = selection_payload["selected_basins"]
+    validate_selected_basins_canonical(arm_diff_selected_basins)
+    arm_diff_selected = {float(k): v for k, v in arm_diff_selected_basins.items()}
 
     config_table = pd.read_csv(configuration_table_path, dtype={"trial_id": str})
     incumbent_manifest = build_incumbent_order_mapping(config_table, search_arms, proposal_orders)
+    search_arm_by_trial_id = dict(zip(config_table["trial_id"], config_table["search_arm"]))
 
     unknown_trials = sorted(set(incumbent_manifest["unique_incumbent_trial_ids"]) - set(targets_by_trial_id))
     if unknown_trials:
@@ -317,10 +359,36 @@ def produce_rd1_c4_f_hydrograph_supplement(
             f"{roster.trial_ids()}"
         )
 
+    performance_selected: dict = {}
+    performance_metrics_sha256 = None
+    performance_values: dict = {}
+    arm_diff_values: dict = {}
+    if performance_metrics_path is not None:
+        performance_metrics_path = Path(performance_metrics_path)
+        performance_metrics_sha256 = _sha256_path(performance_metrics_path)
+        per_basin_metrics = pd.read_csv(performance_metrics_path, dtype={"basin_id": str})
+        performance_selected = {
+            float(k): v for k, v in select_performance_stratified_basins(per_basin_metrics).items()
+        }
+        overall_median_nse = per_basin_metrics.groupby("basin_id")["nse"].median()
+        performance_values = {p: float(overall_median_nse.loc[b]) for p, b in performance_selected.items()}
+        arm_medians = basin_arm_medians(per_basin_metrics, "nse")
+        for p, b in arm_diff_selected.items():
+            if b in arm_medians.index:
+                arm_diff_values[p] = float(arm_medians.loc[b, "diff_bayesian_minus_random"])
+
+    selection_by_basin = merge_hydrograph_selection_families(
+        arm_diff_selected, performance_selected,
+        arm_diff_values=arm_diff_values or None, performance_values=performance_values or None,
+    )
+    validate_selected_basins_canonical({b: b for b in selection_by_basin})
+
     figures: dict = {}
     peak_windows: dict = {}
-    for percentile_key, basin_id in selected_basins.items():
-        out_path = figures_dir / f"hydrograph_p{percentile_key}_{basin_id}.png"
+    for basin_id in sorted(selection_by_basin):
+        rationales = selection_by_basin[basin_id]
+        rationale_tag = "_".join(sorted(r["label"] for r in rationales))
+        out_path = figures_dir / f"hydrograph_{rationale_tag}_{basin_id}.png"
         peak_window = render_basin_incumbent_panel(
             basin_id=basin_id,
             manifest=incumbent_manifest,
@@ -328,17 +396,20 @@ def produce_rd1_c4_f_hydrograph_supplement(
             package_root=package_root,
             contract=contract,
             out_path=out_path,
+            search_arm_by_trial_id=search_arm_by_trial_id,
+            load_precip=True,
         )
-        figures[percentile_key] = {
+        figures[basin_id] = {
             "basin_id": basin_id,
+            "rationales": rationales,
             "path": str(out_path),
             "sha256": _sha256_path(out_path),
         }
-        peak_windows[percentile_key] = _peak_window_to_receipt_dict(peak_window)
+        peak_windows[basin_id] = _peak_window_to_receipt_dict(peak_window)
 
     manifest_payload = {
         "schema_name": "rd1_c4_f_hydrograph_supplement_manifest",
-        "schema_version": 1,
+        "schema_version": 2,
         "label": "RD1-C4-F descriptive hydrograph supplement -- run-progress examples only, "
         "NOT winner/promotion/classifier/tolerance evidence, and does not close RD1-C4",
         "trial_list_path": str(trial_list_path),
@@ -347,12 +418,18 @@ def produce_rd1_c4_f_hydrograph_supplement(
         "support_contract_sha256": roster.support_contract_sha256,
         "selection_manifest_path": str(selection_path),
         "configuration_table_path": str(configuration_table_path),
-        "selected_basins": selected_basins,
+        "performance_metrics_path": str(performance_metrics_path) if performance_metrics_path is not None else None,
+        "performance_metrics_sha256": performance_metrics_sha256,
+        "arm_difference_selected_basins": arm_diff_selected_basins,
+        "performance_stratified_selected_basins": {str(int(k)): v for k, v in performance_selected.items()},
+        "selection_by_basin": selection_by_basin,
+        "mrms_qpe_variable": MRMS_QPE_VARIABLE,
         "search_arms": list(search_arms),
         "proposal_orders": list(proposal_orders),
         "incumbent_order_manifest": incumbent_manifest,
-        "peak_windows_by_percentile": peak_windows,
-        "figures_by_percentile": figures,
+        "peak_windows_by_basin": peak_windows,
+        "figures_by_basin": figures,
+        "git_commit": _current_git_commit(Path(repo_root)) if repo_root is not None else None,
     }
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest_payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -370,6 +447,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--search-arms", nargs="+", default=list(DEFAULT_SEARCH_ARMS))
     parser.add_argument("--proposal-orders", nargs="+", type=int, default=list(DEFAULT_PROPOSAL_ORDERS))
+    parser.add_argument(
+        "--performance-metrics-path", default=None,
+        help="per_basin_metrics.csv (24-config-per-basin NSE evidence) enabling the additive "
+        "low-/typical-/high-performance selection family; omit to render the arm-difference "
+        "family only",
+    )
+    parser.add_argument(
+        "--repo-root", default=None,
+        help="repo root to record the exact git commit SHA in the manifest",
+    )
     return parser
 
 
@@ -384,8 +471,10 @@ def main(argv=None) -> int:
         out_dir=args.out_dir,
         search_arms=tuple(args.search_arms),
         proposal_orders=tuple(args.proposal_orders),
+        performance_metrics_path=args.performance_metrics_path,
+        repo_root=args.repo_root,
     )
-    print(json.dumps({"out_dir": args.out_dir, "n_figures": len(manifest["figures_by_percentile"])}, indent=2))
+    print(json.dumps({"out_dir": args.out_dir, "n_figures": len(manifest["figures_by_basin"])}, indent=2))
     return 0
 
 

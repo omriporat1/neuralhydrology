@@ -104,6 +104,8 @@ __all__ = [
     "render_basin_panel",
     "render_compact_panel",
     "render_multi_candidate_basin_panel",
+    "ARM_COLOR_PALETTES",
+    "build_arm_aware_candidate_colors",
     "render_stage1_hydrographs",
     "render_stage1_compact_comparison_package",
 ]
@@ -821,6 +823,40 @@ _OVERLAY_CANDIDATE_COLORS = (
 )
 _OVERLAY_CANDIDATE_LINESTYLES = ("-", "--", "-.", ":")
 
+# Stable, arm-distinguishable ordered palettes for the RD1-C4-F multi-
+# candidate overlay: one sequential hue family per search arm, ordered from
+# darkest (earliest proposal order) to lightest (latest), so the two search
+# arms are visually distinguishable by hue family and never share a color.
+ARM_COLOR_PALETTES = {
+    "bayesian": ("#08519c", "#3182bd", "#6baed6", "#9ecae1", "#c6dbef"),
+    "random_control": ("#a63603", "#e6550d", "#fd8d3c", "#fdae6b", "#fdd0a2"),
+}
+
+
+def build_arm_aware_candidate_colors(
+    candidate_order: Sequence[str], search_arm_by_candidate: Mapping[str, str],
+) -> dict:
+    """Deterministically assign one color per candidate_id from
+    :data:`ARM_COLOR_PALETTES`, keyed by each candidate's search arm and
+    cycling in ``candidate_order`` (i.e. earliest-listed candidate of an arm
+    gets the darkest shade of that arm's palette). Raises
+    :class:`HydrographRenderingError` for an unrecognized search arm rather
+    than silently falling back to the index-based palette."""
+    counters: dict = {}
+    colors: dict = {}
+    for cand_id in candidate_order:
+        arm = search_arm_by_candidate.get(cand_id)
+        palette = ARM_COLOR_PALETTES.get(arm)
+        if palette is None:
+            raise HydrographRenderingError(
+                f"candidate {cand_id!r}: unrecognized search_arm {arm!r}; "
+                f"expected one of {sorted(ARM_COLOR_PALETTES)}"
+            )
+        i = counters.get(arm, 0)
+        colors[cand_id] = palette[i % len(palette)]
+        counters[arm] = i + 1
+    return colors
+
 _OBS_MATCH_ATOL = 1e-6
 _OBS_MATCH_RTOL = 1e-3
 
@@ -835,6 +871,7 @@ def render_multi_candidate_basin_panel(
     precip_series: Optional[pd.Series] = None,
     scale: Optional[ScaleSpec] = None,
     title_prefix: Optional[str] = None,
+    candidate_colors: Optional[Mapping[str, str]] = None,
 ) -> Path:
     """Render ONE panel containing a single shared observed-discharge line
     plus one predicted-discharge line per candidate, all overlaid on the
@@ -914,7 +951,15 @@ def render_multi_candidate_basin_panel(
     out_path = Path(out_path)
     area_title = format_basin_area_title(basin_id, reference_bs.area_km2)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    has_precip = precip_series is not None and len(precip_series) > 0
+    if has_precip:
+        fig, (ax_precip, ax) = plt.subplots(
+            2, 1, figsize=(10, 6.5), sharex=True, gridspec_kw={"height_ratios": [1, 3]},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax_precip = None
+
     ax.plot(
         ref_obs_by_date.index, ref_obs_by_date.to_numpy(),
         label="observed", color="black", linewidth=1.4, zorder=10,
@@ -923,8 +968,12 @@ def render_multi_candidate_basin_panel(
         bs = basin_series_by_candidate[cand_id]
         mask = (bs.dates >= window.window_start) & (bs.dates <= window.window_end)
         label = candidate_labels.get(cand_id, cand_id)
-        color = _OVERLAY_CANDIDATE_COLORS[i % len(_OVERLAY_CANDIDATE_COLORS)]
-        linestyle = _OVERLAY_CANDIDATE_LINESTYLES[(i // len(_OVERLAY_CANDIDATE_COLORS)) % len(_OVERLAY_CANDIDATE_LINESTYLES)]
+        if candidate_colors is not None and cand_id in candidate_colors:
+            color = candidate_colors[cand_id]
+            linestyle = "-"
+        else:
+            color = _OVERLAY_CANDIDATE_COLORS[i % len(_OVERLAY_CANDIDATE_COLORS)]
+            linestyle = _OVERLAY_CANDIDATE_LINESTYLES[(i // len(_OVERLAY_CANDIDATE_COLORS)) % len(_OVERLAY_CANDIDATE_LINESTYLES)]
         ax.plot(bs.dates[mask], bs.sim_m3s[mask], label=label, color=color, linestyle=linestyle, linewidth=1.15)
 
     ax.set_ylabel("discharge [m^3/s]")
@@ -933,13 +982,43 @@ def render_multi_candidate_basin_panel(
         ax.set_ylim(scale.discharge_min, scale.discharge_max)
     else:
         ax.set_xlim(window.window_start, window.window_end)
-    _add_precip_axis(ax, precip_series, scale)
-    ax.legend(loc="upper right", fontsize=8)
-    title = area_title if not title_prefix else f"{title_prefix}  {area_title}"
-    ax.set_title(title, fontsize=10)
     ax.tick_params(axis="x", labelrotation=30, labelsize=8)
 
-    fig.tight_layout()
+    handles, labels = ax.get_legend_handles_labels()
+
+    if has_precip:
+        window_precip = precip_series[
+            (precip_series.index >= window.window_start) & (precip_series.index <= window.window_end)
+        ]
+        ax_precip.bar(
+            window_precip.index, window_precip.values,
+            width=pd.Timedelta(hours=1), color="tab:blue", alpha=0.7, label=MRMS_QPE_VARIABLE,
+        )
+        if scale is not None and scale.precip_max is not None:
+            precip_top = scale.precip_max
+        else:
+            finite_vals = np.asarray(window_precip.values, dtype=np.float64)
+            finite_vals = finite_vals[np.isfinite(finite_vals)]
+            precip_top = float(finite_vals.max()) * 1.05 if finite_vals.size and finite_vals.max() > 0 else 1.0
+        ax_precip.set_ylim(precip_top, 0)  # zero at the top, increasing downward -- clear separation from discharge panel below
+        ax_precip.set_ylabel("MRMS QPE\n(mm h^-1)", fontsize=8)
+        ax_precip.tick_params(axis="x", labelbottom=False)
+        p_handles, p_labels = ax_precip.get_legend_handles_labels()
+        handles, labels = p_handles + handles, p_labels + labels
+
+    title = area_title if not title_prefix else f"{title_prefix}  {area_title}"
+    fig.suptitle(title, fontsize=10)
+
+    # Separate legend band below the plotting axes (never inside them, so it
+    # can never overlap plotted data), compact multi-column layout.
+    n_cols = min(max(len(labels), 1), 4)
+    fig.legend(
+        handles, labels, loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=n_cols, fontsize=7, frameon=True,
+    )
+    legend_rows = -(-len(labels) // n_cols)  # ceil division
+    bottom_margin = min(0.10 + 0.055 * legend_rows, 0.4)
+    fig.tight_layout(rect=(0, bottom_margin, 1, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)

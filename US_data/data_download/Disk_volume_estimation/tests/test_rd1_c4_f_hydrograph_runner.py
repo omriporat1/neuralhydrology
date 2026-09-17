@@ -131,6 +131,35 @@ def test_candidate_labels_from_manifest_lists_every_order_per_trial():
     assert "bayesian@9" in labels["trial_b"]
 
 
+def test_render_basin_incumbent_panel_uses_arm_aware_colors(wired_batch, tmp_path):
+    sources, contract, package_root, targets_by_trial_id = wired_batch
+    basin_id = contract["basin_ids"][0]
+    bayesian_trial = next(s.trial_id for s in sources if s.search_arm == "bayesian")
+    random_trial = next(s.trial_id for s in sources if s.search_arm == "random_control")
+    search_arm_by_trial_id = {s.trial_id: s.search_arm for s in sources}
+    manifest = {
+        "order_to_incumbent_trial_id": {
+            "bayesian__proposal_order_01": bayesian_trial,
+            "random_control__proposal_order_01": random_trial,
+        },
+        "unique_incumbent_trial_ids": [bayesian_trial, random_trial],
+    }
+    out_path = tmp_path / "panel_arm_colors.png"
+
+    peak_window = runner.render_basin_incumbent_panel(
+        basin_id=basin_id,
+        manifest=manifest,
+        targets_by_trial_id=targets_by_trial_id,
+        package_root=package_root,
+        contract=contract,
+        out_path=out_path,
+        search_arm_by_trial_id=search_arm_by_trial_id,
+    )
+
+    assert isinstance(peak_window, PeakWindow)
+    assert out_path.exists() and out_path.stat().st_size > 0
+
+
 def test_peak_window_to_event_window_carries_fields_through():
     import pandas as pd
 

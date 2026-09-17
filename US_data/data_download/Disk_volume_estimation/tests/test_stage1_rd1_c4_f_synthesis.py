@@ -10,8 +10,11 @@ from src.baseline.stage1_rd1_c4_f_synthesis import (
     RosterMismatchError,
     add_raw_axis_columns,
     basin_arm_medians,
+    basin_overall_median_nse,
     build_configuration_table,
+    merge_hydrograph_selection_families,
     select_percentile_basins,
+    select_performance_stratified_basins,
     sign_counts,
     validate_canonical_basin_ids,
     validate_roster_against_trial_ids,
@@ -222,3 +225,72 @@ def test_select_percentile_basins_preserves_canonical_ids_of_real_selection():
     assert selected[10] == "06600100"
     assert selected[50] == "01464000"
     assert selected[90] == "02303205"
+
+
+# ---------------------------------------------------------------------------
+# Performance-stratified selection family (RD1-C4-F hydrograph repair)
+# ---------------------------------------------------------------------------
+
+def _per_basin_metrics_24_configs(basin_median_nse: dict) -> pd.DataFrame:
+    """24-row-per-basin synthetic per_basin_metrics: 12 bayesian + 12
+    random_control trials per basin, median NSE across all 24 pinned to the
+    given value for each basin_id (via a symmetric spread around it)."""
+    rows = []
+    for basin_id, target_median in basin_median_nse.items():
+        trial_i = 0
+        for arm in ("bayesian", "random_control"):
+            for order in range(1, 13):
+                trial_i += 1
+                # symmetric spread of 24 values around target_median with that exact median
+                offset = (trial_i - 12.5) * 0.001
+                rows.append(
+                    {
+                        "trial_id": f"trial_{arm}_{order}",
+                        "search_arm": arm,
+                        "basin_id": basin_id,
+                        "nse": target_median + offset,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_basin_overall_median_nse_combines_both_arms():
+    pbm = _per_basin_metrics_24_configs({"06600100": 0.2, "01464000": 0.5, "02303205": 0.8})
+    medians = basin_overall_median_nse(pbm)
+    assert medians.loc["06600100"] == pytest.approx(0.2, abs=1e-6)
+    assert medians.loc["01464000"] == pytest.approx(0.5, abs=1e-6)
+    assert medians.loc["02303205"] == pytest.approx(0.8, abs=1e-6)
+
+
+def test_select_performance_stratified_basins_reuses_percentile_rule():
+    pbm = _per_basin_metrics_24_configs({"06600100": 0.2, "01464000": 0.5, "02303205": 0.8})
+    selected = select_performance_stratified_basins(pbm, percentiles=(10, 50, 90))
+    assert selected[10] == "06600100"
+    assert selected[50] == "01464000"
+    assert selected[90] == "02303205"
+
+
+def test_merge_hydrograph_selection_families_dedups_overlap_preserving_both_rationales():
+    arm_diff = {10: "A", 50: "SHARED", 90: "C"}
+    performance = {10: "D", 50: "SHARED", 90: "E"}
+    merged = merge_hydrograph_selection_families(arm_diff, performance)
+
+    assert set(merged) == {"A", "SHARED", "C", "D", "E"}
+    assert len(merged["SHARED"]) == 2
+    families = {entry["family"] for entry in merged["SHARED"]}
+    assert families == {"arm_difference", "performance_stratified"}
+    assert len(merged["A"]) == 1
+    assert merged["A"][0]["family"] == "arm_difference"
+    assert merged["D"][0]["family"] == "performance_stratified"
+
+
+def test_merge_hydrograph_selection_families_carries_values_when_supplied():
+    arm_diff = {50: "X"}
+    performance = {50: "X"}
+    merged = merge_hydrograph_selection_families(
+        arm_diff, performance,
+        arm_diff_values={50: 0.03}, performance_values={50: 0.61},
+    )
+    values_by_family = {e["family"]: e["value"] for e in merged["X"]}
+    assert values_by_family["arm_difference"] == pytest.approx(0.03)
+    assert values_by_family["performance_stratified"] == pytest.approx(0.61)

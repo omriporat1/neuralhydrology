@@ -13,7 +13,7 @@ No classifier, winner, promotion, or tolerance decision is made here.
 from __future__ import annotations
 
 import json
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -214,3 +214,69 @@ def select_percentile_basins(
         candidate_ids = sorted(str(idx) for idx in diff.index[abs_dist == min_dist])
         selected[p] = candidate_ids[0]
     return selected
+
+
+def basin_overall_median_nse(per_basin_metrics: pd.DataFrame) -> pd.Series:
+    """Per-basin median NSE across *all* authenticated configurations (both
+    search arms combined) -- the absolute-performance quantity used by the
+    RD1-C4-F performance-stratified example family, as distinct from
+    :func:`basin_arm_medians`'s per-arm medians/difference (used by the
+    arm-difference example family). One value per ``basin_id``, indexed by
+    ``basin_id``."""
+    return per_basin_metrics.groupby("basin_id")["nse"].median()
+
+
+def select_performance_stratified_basins(
+    per_basin_metrics: pd.DataFrame, percentiles: Sequence[float] = (10, 50, 90)
+) -> Mapping[float, str]:
+    """Deterministically select the low-/typical-/high-performance example
+    basins: for each of the 400 basins, the median NSE across all
+    authenticated configurations (both arms), then the basin closest to
+    each empirical percentile of that per-basin quantity -- reusing
+    :func:`select_percentile_basins`'s exact percentile-plus-lexicographic-
+    tie-break rule (never a parallel selection implementation)."""
+    overall_median_nse = basin_overall_median_nse(per_basin_metrics)
+    return select_percentile_basins(overall_median_nse, percentiles=percentiles)
+
+
+_PERFORMANCE_LABELS = {10: "low_performance", 50: "typical_performance", 90: "high_performance"}
+_ARM_DIFF_LABELS = {10: "arm_diff_p10", 50: "arm_diff_p50", 90: "arm_diff_p90"}
+
+
+def merge_hydrograph_selection_families(
+    arm_diff_selected: Mapping[float, str],
+    performance_selected: Mapping[float, str],
+    *,
+    arm_diff_values: Optional[Mapping[float, float]] = None,
+    performance_values: Optional[Mapping[float, float]] = None,
+) -> dict:
+    """Merge the arm-difference and performance-stratified selection
+    families into one basin_id -> [rationale, ...] structure, deduplicating
+    any basin selected by both families while preserving every applicable
+    selection rationale for it (never silently dropping/re-rendering a
+    duplicate basin as if it had only one rationale).
+
+    Each rationale entry is
+    ``{"family": ..., "percentile": ..., "label": ..., "value": ...}``.
+    ``value`` is populated from ``arm_diff_values``/``performance_values``
+    when supplied (both keyed the same way as the corresponding *_selected
+    mapping), else omitted (``None``).
+    """
+    by_basin: dict = {}
+    for p, basin_id in arm_diff_selected.items():
+        entry = {
+            "family": "arm_difference",
+            "percentile": p,
+            "label": _ARM_DIFF_LABELS.get(p, f"arm_diff_p{p}"),
+            "value": None if arm_diff_values is None else arm_diff_values.get(p),
+        }
+        by_basin.setdefault(basin_id, []).append(entry)
+    for p, basin_id in performance_selected.items():
+        entry = {
+            "family": "performance_stratified",
+            "percentile": p,
+            "label": _PERFORMANCE_LABELS.get(p, f"performance_p{p}"),
+            "value": None if performance_values is None else performance_values.get(p),
+        }
+        by_basin.setdefault(basin_id, []).append(entry)
+    return by_basin

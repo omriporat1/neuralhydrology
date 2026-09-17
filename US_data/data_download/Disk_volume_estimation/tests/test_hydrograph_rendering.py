@@ -1222,3 +1222,75 @@ def test_render_multi_candidate_basin_panel_legend_has_observed_plus_all_candida
         rendering_mod.plt.subplots = orig
     labels = [line.get_label() for line in captured["ax"].get_lines()]
     assert labels == ["observed", "P (ep5)", "PT (ep3)", "PTM (ep5)"]
+
+
+def test_render_multi_candidate_basin_panel_with_precip_writes_two_axes_no_error(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={"P": np.linspace(5, 15, 10), "PT": np.linspace(8, 18, 10)},
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    precip = pd.Series(np.linspace(0, 5, 10), index=dates, name="mrms_qpe_1h_mm")
+    out_path = tmp_path / "overlay_precip.png"
+    result = render_multi_candidate_basin_panel(
+        series_by_cand, window=window,
+        candidate_labels={"P": "P (ep5)", "PT": "PT (ep3)"},
+        candidate_order=["P", "PT"], out_path=out_path, precip_series=precip,
+    )
+    assert result == out_path
+    assert out_path.is_file() and out_path.stat().st_size > 0
+    assert plt.get_fignums() == []
+
+
+def test_render_multi_candidate_basin_panel_arm_aware_colors_are_distinct_and_stable(tmp_path):
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={"B1": np.linspace(5, 15, 10), "R1": np.linspace(8, 18, 10)},
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    colors = rendering_mod.build_arm_aware_candidate_colors(
+        ["B1", "R1"], {"B1": "bayesian", "R1": "random_control"},
+    )
+    assert colors["B1"] != colors["R1"]
+    assert colors["B1"] == rendering_mod.ARM_COLOR_PALETTES["bayesian"][0]
+    assert colors["R1"] == rendering_mod.ARM_COLOR_PALETTES["random_control"][0]
+
+    captured = {}
+    real_subplots = plt.subplots
+
+    def _spy_subplots(*args, **kwargs):
+        fig, ax = real_subplots(*args, **kwargs)
+        captured["ax"] = ax
+        return fig, ax
+
+    orig = rendering_mod.plt.subplots
+    rendering_mod.plt.subplots = _spy_subplots
+    try:
+        render_multi_candidate_basin_panel(
+            series_by_cand, window=window,
+            candidate_labels={"B1": "B1", "R1": "R1"},
+            candidate_order=["B1", "R1"], out_path=tmp_path / "overlay_colors.png",
+            candidate_colors=colors,
+        )
+    finally:
+        rendering_mod.plt.subplots = orig
+    line_colors = {
+        line.get_label(): line.get_color() for line in captured["ax"].get_lines() if line.get_label() != "observed"
+    }
+    assert line_colors["B1"] == colors["B1"]
+    assert line_colors["R1"] == colors["R1"]
+
+
+def test_build_arm_aware_candidate_colors_rejects_unknown_arm():
+    with pytest.raises(HydrographRenderingError):
+        rendering_mod.build_arm_aware_candidate_colors(["X"], {"X": "not_a_real_arm"})
