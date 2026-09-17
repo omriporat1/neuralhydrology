@@ -1010,8 +1010,13 @@ def render_multi_candidate_basin_panel(
     fig.suptitle(title, fontsize=10)
 
     # Separate legend band below the plotting axes (never inside them, so it
-    # can never overlap plotted data), compact multi-column layout.
-    n_cols = min(max(len(labels), 1), 4)
+    # can never overlap plotted data), compact multi-column layout. ncol is
+    # capped lower than the previous fixed 4 because these labels list every
+    # (arm, proposal_order) mapped to a shared incumbent trial and can run
+    # long (e.g. "random_control_proposal009 (random_control@9,
+    # random_control@12)"); 4 side-by-side columns of such labels does not
+    # fit a 10in canvas width even at fontsize=7.
+    n_cols = min(max(len(labels), 1), 3)
     fig.legend(
         handles, labels, loc="lower center", bbox_to_anchor=(0.5, 0.0),
         ncol=n_cols, fontsize=7, frameon=True,
@@ -1020,7 +1025,11 @@ def render_multi_candidate_basin_panel(
     bottom_margin = min(0.10 + 0.055 * legend_rows, 0.4)
     fig.tight_layout(rect=(0, bottom_margin, 1, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=130)
+    # bbox_inches="tight" is essential, not cosmetic: fig.tight_layout()
+    # only reserves space for the Axes, not a fig-level legend artist, so
+    # without it a wide legend (long labels x n_cols) is silently clipped at
+    # the figure's fixed canvas edges at save time rather than included.
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     return out_path
 

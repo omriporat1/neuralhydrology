@@ -1294,3 +1294,55 @@ def test_render_multi_candidate_basin_panel_arm_aware_colors_are_distinct_and_st
 def test_build_arm_aware_candidate_colors_rejects_unknown_arm():
     with pytest.raises(HydrographRenderingError):
         rendering_mod.build_arm_aware_candidate_colors(["X"], {"X": "not_a_real_arm"})
+
+
+def test_render_multi_candidate_basin_panel_saves_with_tight_bbox_so_wide_legend_is_not_clipped(tmp_path):
+    # Regression test for a real defect found by visual inspection of Moriah
+    # job 46185815's evidence: with long, realistic RD1-C4-F legend labels
+    # (every (arm, proposal_order) mapped to a shared incumbent trial) and
+    # six candidates, the fig-level legend band is wider than the fixed
+    # figsize -- fig.tight_layout() only reserves space for the Axes, not a
+    # fig.legend() artist, so without bbox_inches="tight" at save time the
+    # legend's leftmost/rightmost entries were silently clipped at the
+    # canvas edge rather than included in the saved PNG.
+    dates = pd.date_range("2023-01-01", periods=10, freq="h")
+    long_labels = {
+        "bayesian_proposal001": "bayesian_proposal001 (bayesian@1)",
+        "bayesian_proposal002": "bayesian_proposal002 (bayesian@3, bayesian@6)",
+        "bayesian_proposal009": "bayesian_proposal009 (bayesian@9, bayesian@12)",
+        "random_control_proposal001": "random_control_proposal001 (random_control@1)",
+        "random_control_proposal002": "random_control_proposal002 (random_control@3, random_control@6)",
+        "random_control_proposal009": "random_control_proposal009 (random_control@9, random_control@12)",
+    }
+    series_by_cand = _overlay_candidates(
+        obs=np.linspace(10, 20, 10),
+        sim_by_candidate={cand_id: np.linspace(5, 15, 10) for cand_id in long_labels},
+        dates=dates,
+    )
+    window = EventWindow(
+        magnitude_class="largest", peak_time=dates[5], peak_value=20.0,
+        window_start=dates[0], window_end=dates[-1], window_clipped=False, n_missing_in_window=0,
+    )
+    precip = pd.Series(np.linspace(0, 5, 10), index=dates, name="mrms_qpe_1h_mm")
+
+    savefig_calls = []
+    real_savefig = plt.Figure.savefig
+
+    def _spy_savefig(self, *args, **kwargs):
+        savefig_calls.append(kwargs)
+        return real_savefig(self, *args, **kwargs)
+
+    orig = rendering_mod.plt.Figure.savefig
+    rendering_mod.plt.Figure.savefig = _spy_savefig
+    try:
+        out_path = render_multi_candidate_basin_panel(
+            series_by_cand, window=window, candidate_labels=long_labels,
+            candidate_order=list(long_labels), out_path=tmp_path / "overlay_wide_legend.png",
+            precip_series=precip,
+        )
+    finally:
+        rendering_mod.plt.Figure.savefig = orig
+
+    assert len(savefig_calls) == 1
+    assert savefig_calls[0].get("bbox_inches") == "tight"
+    assert out_path.is_file() and out_path.stat().st_size > 0
