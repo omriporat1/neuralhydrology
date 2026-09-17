@@ -1,5 +1,17 @@
 # Flash-NH Current State
 
+## RD1-C4-F hydrograph legend-clipping repair + performance-stratified selection family PRODUCED (Moriah job `46185914`) — descriptive rendering repair/expansion only; not a classifier, winner, promotion, or tolerance decision; does not close RD1-C4 (2026-09-17)
+
+**[RENDERING REPAIR + REPRESENTATIVE-EXAMPLE EXPANSION — C4-F EVIDENCE-RENDERING ONLY; NOT TRAINING/INFERENCE/RESCORING; NOT A NEW EVALUATION PRODUCT; NOT A SCIENTIFIC CLASSIFIER, WINNER, PROMOTION, OR TOLERANCE DECISION; NOT A C4/C5/C6 CLOSURE]** Mandatory visual review of job `46185815`'s figures found the fig-level legend clipped at both canvas edges (`fig.tight_layout()` does not reserve space for a `fig.legend()` artist, and `savefig()` was missing `bbox_inches="tight"`). Fixed in `src/baseline/hydrograph_rendering.py` (legend `ncol` cap 4→3, `bbox_inches="tight"` added to `savefig`), with a new regression test in `tests/test_hydrograph_rendering.py` (76/76 passing). Committed at `4431027c2ac77cd1e97454bfd235a96e06f5cdbc`, pushed, synced into the isolated Moriah clone.
+
+**New performance-stratified selection family (additive to the existing arm-difference family).** Percentile of per-basin median NSE across all 24 authenticated configurations combined (both arms): low/p10=`12086500` (−0.1551), typical/p50=`14199704` (0.4057), high/p90=`03151400` (0.6495) — zero overlap with the arm-difference family (`06600100`, `01464000`, `02303205`). Both families reuse the same 72-hour observed-peak-centered window, incumbent-trial resolution, shared axis scale, and MRMS QPE (`mrms_qpe_1h_mm`) precipitation panel.
+
+**Rerun.** Moriah job `46185914`: `COMPLETED`, `ExitCode=0:0`, `Elapsed=00:00:57`; commit gate and all 5 input hashes confirmed matching; 6 figures produced.
+
+**Evidence.** Retrieved and hash-verified (0 mismatches) into `.scratch_local/rd1_c4_f_hydrograph_legendfix_46185914_evidence/`: `manifest.json`, 6 figures, job log, `sacct`. All 6 figures visually re-inspected and confirmed clean (no legend clipping, arm-aware colors consistent, observed series dominant, precipitation panel present). Compact `selection_table.csv` and `selection_families_overview.md` built from the verified manifest.
+
+**Scope.** This is a rendering-defect repair and additive representative-example expansion, descriptive run-progress evidence only. No training, inference, rescoring, W&B/controller contact, or sealed-scope access occurred. No classifier, winner, promotion, or tolerance decision was made. RD1-C4 is not closed by this entry. Full detail: `docs/decision_log.md` (2026-09-17 entry, "hydrograph legend-clipping repair + performance-stratified selection family").
+
 ## RD1-C4-F descriptive hydrograph supplement PRODUCED (Moriah job `46185509`) — descriptive run-progress evidence only; not a classifier, winner, promotion, or tolerance decision; does not close RD1-C4 (2026-09-17)
 
 **[DESCRIPTIVE HYDROGRAPH SUPPLEMENT PRODUCED — C4-F EVIDENCE-RENDERING ONLY; NOT TRAINING/INFERENCE/RESCORING; NOT A NEW EVALUATION PRODUCT; NOT A SCIENTIFIC CLASSIFIER, WINNER, PROMOTION, OR TOLERANCE DECISION; NOT A C4/C5/C6 CLOSURE]** A basin-ID identifier-representation defect (leading zeros silently stripped by pandas default dtype inference on an untyped basin-ID column) was corrected first, as a local identifier-representation/provenance repair only — no change to selected records, percentiles, metrics, or the selection rule. This gate was verified before any hydrograph work proceeded.
