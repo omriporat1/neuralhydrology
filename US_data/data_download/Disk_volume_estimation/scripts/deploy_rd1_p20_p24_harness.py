@@ -202,14 +202,25 @@ def _approved_operational_base_paths(
 
 
 def _git_show_bytes(repo_root: Path, commit: str, rel_path: str) -> bytes:
+    """``rel_path`` is project-relative (as DEPLOY_MANIFEST entries are
+    written). A bare ``git show <commit>:<path>`` resolves ``<path>`` against
+    the git top-level, not against ``cwd`` -- so in the real Flash-NH
+    monorepo (non-empty ``_project_prefix``) a project-relative path must
+    first be re-expressed relative to the monorepo top level, the same way
+    ``_diff_project_relative`` already does for ``git diff`` output, or git
+    looks for it at the wrong location and fails to find it. Unchanged when
+    the project root IS the git top level (empty prefix)."""
+    prefix = _project_prefix(repo_root)
+    monorepo_relative_path = f"{prefix}{rel_path}"
     proc = subprocess.run(
-        ["git", "show", f"{commit}:{rel_path}"],
+        ["git", "show", f"{commit}:{monorepo_relative_path}"],
         cwd=str(repo_root),
         capture_output=True,
     )
     if proc.returncode != 0:
         raise DeploymentRefused(
-            f"git show {commit}:{rel_path} failed: {proc.stderr.decode('utf-8', 'replace').strip()}"
+            f"git show {commit}:{monorepo_relative_path} failed: "
+            f"{proc.stderr.decode('utf-8', 'replace').strip()}"
         )
     return proc.stdout
 

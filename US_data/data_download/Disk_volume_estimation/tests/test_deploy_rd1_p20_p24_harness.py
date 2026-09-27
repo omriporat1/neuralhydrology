@@ -512,3 +512,99 @@ def test_actual_flashnh_repository_history_audit_interface():
         # raising; whether it passes now legitimately depends on what
         # actually changed, which this test does not assume.
         pass
+
+
+# --- _git_show_bytes monorepo-prefix regression (corrective patch) ---------
+#
+# scripts/deploy_rd1_p20_p24_harness.py's _git_show_bytes() used to pass a
+# bare project-relative path straight to ``git show <commit>:<path>``. A
+# bare (non "./"-prefixed) <path> in that form resolves against the git
+# TOP LEVEL, not against ``cwd`` -- so in the real Flash-NH monorepo (a
+# non-empty _project_prefix) it silently looked in the wrong place and
+# failed to find e.g. "scripts/submit_rd1_p20_p24_chain.sh". These tests
+# cover both the non-empty-prefix real-repository case and the disposable
+# empty-prefix case, without relying only on mocks.
+
+
+def test_git_show_bytes_empty_prefix_disposable_repo(tmp_path):
+    """When the project root IS the git top level (empty _project_prefix,
+    the layout every disposable repo above uses), _git_show_bytes must still
+    return the exact tracked content for a project-relative path."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write(repo, "scripts/rd1_p20_p24_job.py", "# harness driver v1\n")
+    commit = _commit(repo, "add harness driver")
+
+    assert deploy_mod._project_prefix(repo) == ""
+    blob = deploy_mod._git_show_bytes(repo, commit, "scripts/rd1_p20_p24_job.py")
+    assert blob == b"# harness driver v1\n"
+
+
+def test_git_show_bytes_matches_real_repo_tracked_content_at_d5de66e():
+    """Regression for the monorepo path bug: against the ACTUAL Flash-NH
+    repository (non-empty _project_prefix, e.g.
+    "US_data/data_download/Disk_volume_estimation/"), _git_show_bytes for a
+    project-relative DEPLOY_MANIFEST path at the real, already-existing
+    harness commit ``d5de66e`` must return exactly that file's tracked
+    content. Uses ``src/baseline/rd1_p20_p24_env.py`` (untouched by this
+    corrective patch) so the expected bytes can be read straight off the
+    working tree, which is checked out at that same commit."""
+    repo_root = deploy_mod.REPO_ROOT
+    harness_commit = "d5de66eb97defad2f454a8b5dc6152b2ad807473"
+    prefix = deploy_mod._project_prefix(repo_root)
+    assert prefix, (
+        "expected a non-empty monorepo prefix here -- otherwise this test "
+        "would not actually exercise the bug this patch fixes"
+    )
+
+    rel_path = "src/baseline/rd1_p20_p24_env.py"
+    blob = deploy_mod._git_show_bytes(repo_root, harness_commit, rel_path)
+    on_disk = (repo_root / rel_path).read_bytes()
+    assert blob == on_disk
+    assert len(blob) > 0
+
+
+# --- Real local monorepo end-to-end deployment (corrective patch) ----------
+
+
+def test_real_monorepo_end_to_end_deployment_at_d5de66e():
+    """A local, non-mocked end-to-end deployment against the actual
+    Flash-NH monorepo using the real, already-existing harness commit
+    ``d5de66e``. Writes only under a fresh, uniquely-named directory inside
+    this project's own gitignored ``.scratch_local/`` (never outside the
+    project root -- see CLAUDE.md's project-local artifact boundary), and
+    removes it afterwards. No W&B, Slurm, registry, or manifest action."""
+    repo_root = deploy_mod.REPO_ROOT
+    harness_commit = "d5de66eb97defad2f454a8b5dc6152b2ad807473"
+
+    chain_dir = repo_root / ".scratch_local" / f"test_deploy_real_monorepo_{harness_commit[:12]}"
+    if chain_dir.exists():
+        shutil.rmtree(chain_dir)
+    try:
+        receipt = deploy_mod.deploy(
+            repo_root=repo_root,
+            chain_dir=chain_dir,
+            harness_commit=harness_commit,
+        )
+
+        assert receipt["frozen_scientific_commit"] == deploy_mod.FROZEN_SCIENTIFIC_COMMIT
+        assert receipt["harness_commit"] == harness_commit
+        assert receipt["provenance_audit"]["passed"] is True
+        assert receipt["provenance_audit"]["decomposition_matches"] is True
+        assert len(receipt["files"]) == len(deploy_mod.DEPLOY_MANIFEST) == 8
+
+        chain_dir_real = chain_dir.resolve()
+        for rec in receipt["files"]:
+            deployed_path = Path(rec["deployed_path"]).resolve()
+            assert deployed_path.exists()
+            assert deployed_path.is_file()
+            assert hashlib.sha256(deployed_path.read_bytes()).hexdigest() == rec["sha256"]
+            # Raises ValueError (failing the test) if deployed_path is not
+            # beneath chain_dir_real.
+            deployed_path.relative_to(chain_dir_real)
+
+        receipt_path = chain_dir / "deploy_receipt.json"
+        assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
+    finally:
+        if chain_dir.exists():
+            shutil.rmtree(chain_dir)
