@@ -69,6 +69,9 @@ from src.baseline.rd1_p20_p24_retry import (  # noqa: E402
     is_socket_failure_retry_eligible,
     no_new_run_appeared,
 )
+from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import (  # noqa: E402
+    load_v2_wandb_bridge_manifest,
+)
 
 __all__ = [
     "FIRST_PROPOSAL_ORDER",
@@ -233,28 +236,60 @@ def _subprocess_attempt_fn(agent_launcher_path: Path, env: dict) -> AgentAttempt
     )
 
 
-def _wandb_sweep_run_ids(sweep_id: str) -> list[str]:
+def _resolve_canonical_sweep_path(manifest_path: "str | Path", expected_sweep_id: str) -> str:
+    """Build the ``entity/project/sweep_id`` path ``wandb.Api().sweep``
+    actually requires. A bare sweep id resolves against whatever
+    entity/project happen to be ambient defaults for the calling account,
+    which this chain must never rely on -- this is exactly how a prior
+    production attempt failed with ``Invalid path: 'wta85z3b' (missing
+    project)``. Reuses the same loader-validated manifest that is already
+    the sole launch identity everywhere else in this chain (never a second,
+    parallel source for entity/project). Fails closed -- raises instead of
+    ever returning a bare or partial path -- if the manifest's own sweep id
+    disagrees with ``expected_sweep_id``, or if it carries no non-empty
+    project/entity."""
+    manifest = load_v2_wandb_bridge_manifest(manifest_path)
+    manifest_sweep_id = manifest["wandb_sweep_id"]
+    if manifest_sweep_id != expected_sweep_id:
+        raise RuntimeError(
+            f"manifest wandb_sweep_id {manifest_sweep_id!r} disagrees with expected "
+            f"{expected_sweep_id!r}; refusing to guess a sweep path"
+        )
+    project = manifest.get("wandb_project")
+    entity = manifest.get("wandb_entity")
+    if not isinstance(project, str) or not project or not isinstance(entity, str) or not entity:
+        raise RuntimeError(
+            f"manifest carries no usable non-empty wandb_project/wandb_entity "
+            f"(project={project!r} entity={entity!r}); refusing to contact W&B with "
+            "an ambiguous sweep path"
+        )
+    return f"{entity}/{project}/{expected_sweep_id}"
+
+
+def _wandb_sweep_run_ids(manifest_path: "str | Path", sweep_id: str) -> list[str]:
     """Read-only listing of every run id currently in ``sweep_id``. Imports
     ``wandb`` lazily so importing this module for the pure-function unit
     tests never requires the ``wandb`` package to be installed."""
+    sweep_path = _resolve_canonical_sweep_path(manifest_path, sweep_id)
     import wandb  # noqa: PLC0415
 
     api = wandb.Api()
-    sweep = api.sweep(sweep_id)
+    sweep = api.sweep(sweep_path)
     return sorted(run.id for run in sweep.runs)
 
 
-def _wandb_resolve_latest_run_id(sweep_id: str) -> str:
+def _wandb_resolve_latest_run_id(manifest_path: "str | Path", sweep_id: str) -> str:
     """Read-only resolution of the most-recently-created run in
     ``sweep_id``, called exactly once after ``run_agent_with_retry`` reports
     overall success. Raises ``RuntimeError`` if the sweep has no runs at
     all (a successful agent exit with no resolvable run is itself a fatal,
     non-retryable condition -- the caller must not append a registry row
     without a real run id)."""
+    sweep_path = _resolve_canonical_sweep_path(manifest_path, sweep_id)
     import wandb  # noqa: PLC0415
 
     api = wandb.Api()
-    sweep = api.sweep(sweep_id)
+    sweep = api.sweep(sweep_path)
     runs = sorted(sweep.runs, key=lambda run: run.created_at)
     if not runs:
         raise RuntimeError("no runs found in sweep after a successful agent exit")
@@ -341,7 +376,7 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
         return _subprocess_attempt_fn(agent_launcher_path, dict(attempt_env))
 
     def audit_run_ids_fn() -> list[str]:
-        return _wandb_sweep_run_ids(args.wandb_sweep_id)
+        return _wandb_sweep_run_ids(args.manifest_path, args.wandb_sweep_id)
 
     try:
         result = run_agent_with_retry(
@@ -361,7 +396,7 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        run_id = _wandb_resolve_latest_run_id(args.wandb_sweep_id)
+        run_id = _wandb_resolve_latest_run_id(args.manifest_path, args.wandb_sweep_id)
     except Exception as exc:  # noqa: BLE001 -- any resolution failure is fatal, never silently skipped
         print(f"AGENT_FAILED reason=run_id_resolution_failed detail={exc}", file=sys.stderr)
         return 1

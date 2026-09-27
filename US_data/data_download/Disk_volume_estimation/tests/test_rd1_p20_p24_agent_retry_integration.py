@@ -25,6 +25,21 @@ prove about the one live retry path):
      that function is exercised unmodified, not mocked.
   4. No second retry once the attempt budget is exhausted, even when the
      second failure also matches the marker with an empty diff.
+
+Regression coverage (review fix, 2026-09-27): a real production P20 attempt
+failed with ``Invalid path: 'wta85z3b' (missing project)`` because the
+audit's ``wandb.Api().sweep(...)`` call was passing the bare sweep id
+instead of the ``entity/project/sweep_id`` path the real W&B API requires.
+The stub ``_Api.sweep`` below now records every path it is called with so
+these additional scenarios can assert on it directly:
+  5. The audit always calls ``sweep()`` with the full canonical
+     ``entity/project/sweep_id`` path built from the launch manifest, never
+     the bare sweep id.
+  6. A manifest with no usable ``wandb_project``/``wandb_entity`` fails
+     closed before the agent launcher (and W&B) are ever contacted.
+  7. A manifest whose own ``wandb_sweep_id`` disagrees with the CLI's
+     ``--wandb-sweep-id`` fails closed before the agent launcher (and W&B)
+     are ever contacted.
 """
 from __future__ import annotations
 
@@ -33,6 +48,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+from src.baseline.sweep_v2_six_axis_campaign import (
+    CAMPAIGN_ID_V2,
+    CONFIGURATION_CANONICALIZATION_VERSION_V2,
+    DOMAIN_VERSION_V2,
+    OBJECTIVE_ID_V2,
+)
+from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import write_v2_wandb_bridge_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JOB_PY = REPO_ROOT / "scripts" / "rd1_p20_p24_job.py"
@@ -66,8 +89,9 @@ class _Sweep:
 
 
 class _Api:
-    def sweep(self, sweep_id):
+    def sweep(self, sweep_path):
         state = _load()
+        state.setdefault("sweep_paths_seen", []).append(sweep_path)
         idx = state["call_index"]
         snapshots = state["snapshots"]
         entry = snapshots[min(idx, len(snapshots) - 1)]
@@ -119,12 +143,73 @@ def _write_stub_launcher(tmp_path: Path, counter_file: Path, outcomes: list[tupl
     return launcher_path
 
 
-def _run_cli(tmp_path: Path, site_dir: Path, state_path: Path, launcher_path: Path, extra_args: list[str]) -> subprocess.CompletedProcess:
+_DEFAULT_MANIFEST_SWEEP_ID = "stub-sweep-id"
+_DEFAULT_MANIFEST_PROJECT = "rd1-test-project"
+_DEFAULT_MANIFEST_ENTITY = "rd1-test-entity"
+
+
+def _write_manifest(
+    path: Path,
+    *,
+    wandb_sweep_id: str = _DEFAULT_MANIFEST_SWEEP_ID,
+    wandb_project: "str | None" = _DEFAULT_MANIFEST_PROJECT,
+    wandb_entity: "str | None" = _DEFAULT_MANIFEST_ENTITY,
+) -> None:
+    """The one launch-identity manifest the CLI's audit calls must resolve
+    entity/project from -- built with the same real, loader-validated
+    manifest writer used everywhere else in this codebase (never a
+    hand-rolled JSON fixture), so these tests exercise the exact schema the
+    production driver actually reads. ``wandb_project``/``wandb_entity`` of
+    ``None`` is how a test simulates a manifest that carries no usable
+    identity for that field (empty string for project, since it is a
+    required-but-unchecked-for-emptiness field; omitted entirely for
+    entity, an optional field)."""
+    fields = dict(
+        manifest_label="rd1-p20p24-retry-integration-test",
+        created_at_utc="2026-09-27T00:00:00Z",
+        mode="rehearsal",
+        expected_commit="a" * 40,
+        repository_root=str(REPO_ROOT),
+        expected_runtime_python="/canonical/python",
+        wandb_project="" if wandb_project is None else wandb_project,
+        wandb_sweep_id=wandb_sweep_id,
+        output_root=str(REPO_ROOT / "tmp/out"),
+        package_root=str(REPO_ROOT / "tmp/pkg"),
+        screening_basin_ids_path=str(REPO_ROOT / "tmp/screening.txt"),
+        screening_basin_ids_sha256="b" * 64,
+        fixed_support_contract_path=str(REPO_ROOT / "tmp/support.json"),
+        fixed_support_contract_version=OBJECTIVE_ID_V2,
+        fixed_support_contract_sha256="c" * 64,
+        baseline_policy_path=str(REPO_ROOT / "config/stage1_scientific_baseline_v001.yaml"),
+        policy_overlay_path=str(REPO_ROOT / "config/stage1_scientific_baseline_v2_six_axis_overlay_v001.yaml"),
+        base_pilot_policy_path=str(REPO_ROOT / "config/stage1_lead06_pilot_v001.yaml"),
+        proposal_order=1,
+        execution_generation=1,
+        stop_before_training=True,
+        max_agents=1,
+        campaign_id=CAMPAIGN_ID_V2,
+        domain_version=DOMAIN_VERSION_V2,
+        canonicalization_version=CONFIGURATION_CANONICALIZATION_VERSION_V2,
+        objective_id=OBJECTIVE_ID_V2,
+    )
+    if wandb_entity is not None:
+        fields["wandb_entity"] = wandb_entity
+    write_v2_wandb_bridge_manifest(path, **fields)
+
+
+def _run_cli(
+    tmp_path: Path,
+    site_dir: Path,
+    state_path: Path,
+    launcher_path: Path,
+    extra_args: list[str],
+    manifest_kwargs: "dict | None" = None,
+) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(site_dir) + os.pathsep + env.get("PYTHONPATH", "")
     env["RD1_TEST_WANDB_STATE_PATH"] = str(state_path)
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text("{}", encoding="utf-8")
+    _write_manifest(manifest_path, **(manifest_kwargs or {}))
     cmd = [
         sys.executable,
         str(JOB_PY),
@@ -134,7 +219,7 @@ def _run_cli(tmp_path: Path, site_dir: Path, state_path: Path, launcher_path: Pa
         "--manifest-path",
         str(manifest_path),
         "--wandb-sweep-id",
-        "stub-sweep-id",
+        _DEFAULT_MANIFEST_SWEEP_ID,
         "--path",
         env.get("PATH", ""),
         "--home",
@@ -205,3 +290,68 @@ def test_no_second_retry_after_budget_exhausted(tmp_path):
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "AGENT_FAILED" in (proc.stdout + proc.stderr)
     assert counter_file.read_text().strip() == "2"
+
+
+def test_audit_uses_full_canonical_sweep_path_never_bare_id(tmp_path):
+    """Regression test for the real production failure: the stub records
+    every path it was called with, and every one of them must be the full
+    ``entity/project/sweep_id`` path -- never the bare sweep id alone."""
+    site_dir = _write_stub_wandb(tmp_path)
+    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"], ["r0", "r1"]])
+    counter_file = tmp_path / "attempt_counter.txt"
+    launcher_path = _write_stub_launcher(tmp_path, counter_file, outcomes=[(0, "ok")])
+
+    proc = _run_cli(tmp_path, site_dir, state_path, launcher_path, extra_args=["--max-attempts", "2"])
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "AGENT_OK run_id=r1" in proc.stdout
+    final_state = json.loads(state_path.read_text())
+    expected_path = f"{_DEFAULT_MANIFEST_ENTITY}/{_DEFAULT_MANIFEST_PROJECT}/{_DEFAULT_MANIFEST_SWEEP_ID}"
+    assert final_state["sweep_paths_seen"], "the audit must call sweep() at least once"
+    for seen in final_state["sweep_paths_seen"]:
+        assert seen == expected_path, f"expected full canonical path, got bare/partial path {seen!r}"
+        assert seen != _DEFAULT_MANIFEST_SWEEP_ID
+
+
+def test_missing_manifest_project_or_entity_fails_closed_before_agent_launch(tmp_path):
+    site_dir = _write_stub_wandb(tmp_path)
+    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"]])
+    counter_file = tmp_path / "attempt_counter.txt"
+    launcher_path = _write_stub_launcher(tmp_path, counter_file, outcomes=[(0, "ok")])
+
+    proc = _run_cli(
+        tmp_path,
+        site_dir,
+        state_path,
+        launcher_path,
+        extra_args=["--max-attempts", "2"],
+        manifest_kwargs={"wandb_project": None, "wandb_entity": None},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "retry_audit_unavailable" in (proc.stdout + proc.stderr)
+    assert not counter_file.exists(), "the agent launcher must never run when identity resolution fails closed"
+    final_state = json.loads(state_path.read_text())
+    assert final_state.get("sweep_paths_seen", []) == [], "wandb must never be contacted when identity is unresolved"
+
+
+def test_manifest_sweep_id_mismatch_fails_closed_before_agent_launch(tmp_path):
+    site_dir = _write_stub_wandb(tmp_path)
+    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"]])
+    counter_file = tmp_path / "attempt_counter.txt"
+    launcher_path = _write_stub_launcher(tmp_path, counter_file, outcomes=[(0, "ok")])
+
+    proc = _run_cli(
+        tmp_path,
+        site_dir,
+        state_path,
+        launcher_path,
+        extra_args=["--max-attempts", "2"],
+        manifest_kwargs={"wandb_sweep_id": "a-different-sweep-id"},
+    )
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "retry_audit_unavailable" in (proc.stdout + proc.stderr)
+    assert not counter_file.exists(), "the agent launcher must never run when identity resolution fails closed"
+    final_state = json.loads(state_path.read_text())
+    assert final_state.get("sweep_paths_seen", []) == [], "wandb must never be contacted when identity is unresolved"
