@@ -119,7 +119,8 @@ test -f "${JOB_DRIVER[0]}" || {
 # Invocation-time deployed-harness integrity verification (review fix,
 # 2026-09-27). scripts/deploy_rd1_p20_p24_harness.py already checksums every
 # deployed file against its tracked git source AT DEPLOY TIME and writes
-# ${RD1_HARNESS_DIR}/deploy_receipt.json -- but nothing previously re-checked
+# ${RD1_CHAIN_DIR}/deploy_receipt.json (the chain-dir root, not inside
+# harness/) -- but nothing previously re-checked
 # that the deployed bundle on disk still matches that receipt AT JOB-RUN
 # TIME, before this script hands control to it. A deployed file could have
 # been overwritten (accidentally or otherwise) any time between deployment
@@ -139,7 +140,7 @@ test -f "${JOB_DRIVER[0]}" || {
 # submitter, deployed sbatch script, deployed Python driver, and every
 # src/baseline module + package marker the driver imports).
 echo "--- verifying deployed harness bundle against deploy_receipt.json ---"
-"${CANONICAL_PYTHON}" - "${RD1_HARNESS_DIR}/deploy_receipt.json" "${RD1_CHAIN_DIR_REAL}" "${RD1_HARNESS_DIR}" <<'PYEOF'
+"${CANONICAL_PYTHON}" - "${RD1_CHAIN_DIR}/deploy_receipt.json" "${RD1_CHAIN_DIR_REAL}" "${RD1_HARNESS_DIR}" <<'PYEOF'
 import hashlib
 import json
 import sys

@@ -330,8 +330,10 @@ def _deploy_valid_harness(chain_dir: Path) -> dict:
     """Deploys a minimal-but-real harness bundle (the driver is a no-op
     stub, real enough for a real Python interpreter to execute without
     error; the other 7 required files are inert placeholder content) plus a
-    matching, fully valid ``deploy_receipt.json`` under
-    ``${chain_dir}/harness/``. Returns the receipt dict actually written."""
+    matching, fully valid ``deploy_receipt.json`` at ``${chain_dir}/``
+    (chain-dir root -- matches scripts/deploy_rd1_p20_p24_harness.py's real
+    ``build_receipt``/``deploy`` behavior, not the harness subdirectory).
+    Returns the receipt dict actually written."""
     harness_dir = chain_dir / "harness"
     file_records = []
     for rel_path in REQUIRED_HARNESS_PATHS:
@@ -353,7 +355,7 @@ def _deploy_valid_harness(chain_dir: Path) -> dict:
         "provenance_audit": {},
         "files": file_records,
     }
-    (harness_dir / "deploy_receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    (chain_dir / "deploy_receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     return receipt
 
 
@@ -446,21 +448,21 @@ def test_tampered_deployed_sbatch_script_refused_before_preflight(tmp_path):
 
 def test_missing_receipt_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        (chain_dir / "harness" / "deploy_receipt.json").unlink()
+        (chain_dir / "deploy_receipt.json").unlink()
 
     _assert_refused_before_preflight(_run_verification_case(tmp_path, mutate))
 
 
 def test_malformed_receipt_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        (chain_dir / "harness" / "deploy_receipt.json").write_text("{not valid json", encoding="utf-8")
+        (chain_dir / "deploy_receipt.json").write_text("{not valid json", encoding="utf-8")
 
     _assert_refused_before_preflight(_run_verification_case(tmp_path, mutate))
 
 
 def test_incomplete_receipt_missing_required_file_entry_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        receipt_path = chain_dir / "harness" / "deploy_receipt.json"
+        receipt_path = chain_dir / "deploy_receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["files"] = [f for f in receipt["files"] if f["path"] != "src/baseline/rd1_p20_p24_retry.py"]
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -470,7 +472,7 @@ def test_incomplete_receipt_missing_required_file_entry_refused_before_preflight
 
 def test_mismatched_frozen_scientific_commit_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        receipt_path = chain_dir / "harness" / "deploy_receipt.json"
+        receipt_path = chain_dir / "deploy_receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["frozen_scientific_commit"] = "0" * 40
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -480,7 +482,7 @@ def test_mismatched_frozen_scientific_commit_refused_before_preflight(tmp_path):
 
 def test_mismatched_chain_dir_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        receipt_path = chain_dir / "harness" / "deploy_receipt.json"
+        receipt_path = chain_dir / "deploy_receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["chain_dir"] = receipt["chain_dir"] + "_not_the_real_one"
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -490,7 +492,7 @@ def test_mismatched_chain_dir_refused_before_preflight(tmp_path):
 
 def test_checksum_mismatch_refused_before_preflight(tmp_path):
     def mutate(chain_dir: Path) -> None:
-        receipt_path = chain_dir / "harness" / "deploy_receipt.json"
+        receipt_path = chain_dir / "deploy_receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         for entry in receipt["files"]:
             if entry["path"] == "src/baseline/rd1_p20_p24_registry.py":
@@ -498,3 +500,80 @@ def test_checksum_mismatch_refused_before_preflight(tmp_path):
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
     _assert_refused_before_preflight(_run_verification_case(tmp_path, mutate))
+
+
+# --- Regression test for the 2026-09-27 P20 production failure ------------
+# (Slurm job 46226038): scripts/deploy_rd1_p20_p24_harness.py's real
+# ``deploy()`` writes deploy_receipt.json at the chain-dir root, but this
+# sbatch script previously read it from one level too deep, inside
+# harness/, so a real deployment's receipt was never found and the job
+# refused with HARNESS_VERIFY_FAILED before ever reaching preflight -- and
+# P21-P24 were then auto-cancelled by Slurm's own afterok enforcement.
+# Unlike the fixture-based cases above (which hand-build a receipt to probe
+# specific tamper/mismatch scenarios), this test invokes the actual deploy
+# script as a subprocess against this real repository's own git history,
+# into a disposable but genuinely project-local chain directory, so the
+# receipt path this test observes is whatever the real deploy tool actually
+# produces, not a recreation of it that could silently drift out of sync
+# with production again.
+def test_real_deploy_receipt_path_matches_what_sbatch_verifies_before_preflight(tmp_path):
+    import uuid
+
+    deploy_script = REPO_ROOT / "scripts" / "deploy_rd1_p20_p24_harness.py"
+    chain_dir = REPO_ROOT / ".scratch_local" / f"pytest_rd1_receipt_regression_{uuid.uuid4().hex}"
+    try:
+        harness_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), capture_output=True, text=True, check=True
+        ).stdout.strip()
+        deploy_proc = subprocess.run(
+            [
+                sys.executable,
+                str(deploy_script),
+                "--chain-dir",
+                str(chain_dir),
+                "--harness-commit",
+                harness_commit,
+                "--operational-base-commit",
+                "04a487e0c2daddf0ae5c700402b6b976fb2b076b",
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        assert deploy_proc.returncode == 0, deploy_proc.stdout + deploy_proc.stderr
+
+        real_receipt_path = chain_dir / "deploy_receipt.json"
+        assert real_receipt_path.is_file(), "real deploy script must write the receipt at the chain-dir root"
+        assert not (chain_dir / "harness" / "deploy_receipt.json").exists()
+
+        # The exact string this sbatch script's own invocation-time verifier
+        # reads must be the chain-dir-root receipt path the real deploy tool
+        # actually wrote, never the harness-subdirectory path.
+        text = _sbatch_text()
+        assert '"${RD1_CHAIN_DIR}/deploy_receipt.json"' in text
+        assert '"${RD1_HARNESS_DIR}/deploy_receipt.json"' not in text
+
+        # Windows-dev-only normalization (matches _git_bash_realpath's own
+        # documented rationale above): the real deploy script's Python
+        # ``str(chain_dir_real)`` uses native backslash separators, while
+        # this sbatch script's own ``realpath -m`` (Git Bash) always emits
+        # forward slashes for the same location. On production Moriah
+        # (Linux) both sides are already POSIX paths and agree natively;
+        # this rewrite only neutralizes a dev-machine string-format
+        # difference unrelated to the receipt-location bug under test.
+        receipt = json.loads(real_receipt_path.read_text(encoding="utf-8"))
+        receipt["chain_dir"] = _git_bash_realpath(chain_dir)
+        real_receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+        (tmp_path / "p20_manifest.json").write_text("placeholder manifest, never opened for real", encoding="utf-8")
+        env = _base_env_for_verification(tmp_path, repo_workdir=REPO_ROOT, chain_dir=chain_dir)
+        env["CANONICAL_PYTHON"] = sys.executable
+
+        proc = _run(env)
+
+        assert "HARNESS_VERIFY_OK" in proc.stdout, proc.stdout + proc.stderr
+        verify_idx = proc.stdout.index("HARNESS_VERIFY_OK")
+        preflight_idx = proc.stdout.index("--- preflight ---")
+        assert verify_idx < preflight_idx
+    finally:
+        shutil.rmtree(chain_dir, ignore_errors=True)
