@@ -6,6 +6,26 @@ The user is the scientific decision-maker. Claude Code is a high-value implement
 
 This file contains **stable operating guidance only**. It must not become a copy of current project state, current hyperparameters, current campaign results, or temporary workarounds.
 
+## Project-local artifact boundary (non-negotiable)
+
+For Flash-NH, every newly created project artifact must remain below the project root:
+
+- Local: `C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation`
+- Moriah: `/sci/labs/efratmorin/omripo/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation`
+
+This covers source prototypes, scratch files, transferred evidence, temporary scripts, manifests, logs, test output, caches, virtual environments, package-install targets, copied repositories, worktrees, and temporary directories.
+
+- Use only tracked project paths or the existing gitignored `.scratch_local/` beneath the project root (see `docs/repo_policy.md` for the full scratch/evidence location taxonomy).
+- Never create a Git worktree or clone for Flash-NH anywhere without explicit user approval.
+- Never create a virtual environment, package-install target, cache, temporary directory, or test-output directory outside the project root.
+- This boundary does not prohibit invoking an approved, pre-existing shared environment outside the project root, such as the canonical Moriah interpreter at `/sci/labs/efratmorin/omripo/Flash-NH/envs/flashnh-moriah`. It does prohibit creating, modifying, installing packages into, caching into, or otherwise writing to such an external environment without explicit user approval. If that environment cannot provide a needed dependency, stop and ask; do not create a replacement elsewhere.
+- Never rely on a default machine-global temporary directory. Configure test/package/runtime temporary paths explicitly under `.scratch_local/`.
+- Before any write, resolve the intended target path and stop if it is outside the project root.
+- Do not delete an out-of-root path, even one created by mistake, without first reporting it and receiving explicit user approval.
+- Ordinary ephemeral OS-level process plumbing should be minimized and, where configurable, redirected under `.scratch_local/`; it must not be used for persistent project artifacts.
+
+This rule is independent of, and stricter than, the scratch/output taxonomy in `docs/repo_policy.md` §2: that policy governs *which* project-local location to use; this rule governs the outer boundary that all of them must stay inside. This is the canonical wording; `AGENTS.md` mirrors it verbatim and `docs/repo_policy.md` cross-references it rather than restating it.
+
 ## 1. Enter the project through the canonical sources
 
 Before substantial work:

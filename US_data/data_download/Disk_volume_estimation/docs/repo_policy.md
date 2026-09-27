@@ -20,6 +20,13 @@ Large raw GRIB, NC4, Parquet, checkpoints, and similar generated/raw products mu
 
 Flash-NH uses three distinct project-local patterns. They are **not interchangeable**.
 
+All three must additionally stay inside the Flash-NH project-local artifact boundary, whose canonical non-negotiable wording lives in `CLAUDE.md` ("Project-local artifact boundary", mirrored verbatim in `AGENTS.md`) rather than being restated here:
+
+- Local: `C:\PhD\Python\neuralhydrology\US_data\data_download\Disk_volume_estimation`
+- Moriah: `/sci/labs/efratmorin/omripo/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation`
+
+That boundary is the outer limit for every generated artifact, environment, and scratch/cache/temp path (including package-install targets, virtual environments, and OS-level temp redirection). Git worktrees/clones for Flash-NH require explicit user approval regardless of location, and an approved pre-existing shared environment outside the boundary (e.g. the canonical Moriah interpreter) may be invoked but never modified/installed into without approval — see `CLAUDE.md` for the exact wording. This section governs which project-local location to use *within* that boundary, not whether the boundary applies.
+
 ### `reports/<run_name>/` — organized generated review/report outputs
 
 Use `reports/<run_name>/` for generated report-style outputs that benefit from a stable, named directory structure, for example:
