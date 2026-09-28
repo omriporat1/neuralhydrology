@@ -271,6 +271,13 @@ echo "--- running the agent attempt(s): retry decision is entirely inside the te
 # default temp location.
 RD1_TMP_DIR="${RD1_CHAIN_DIR}/tmp"
 mkdir -p "${RD1_TMP_DIR}"
+# Persistent (never trap-cleaned, unlike RD1_TMP_DIR) per-attempt evidence:
+# this is the root-cause-#1 fix -- every agent-launcher attempt's redacted
+# stdout/stderr and outcome metadata is written here regardless of exit
+# code, so a launcher that exits 0 while the W&B run it dispatched had
+# already crashed still leaves inspectable evidence behind.
+RD1_ATTEMPTS_DIR="${RD1_CHAIN_DIR}/agent_attempts"
+mkdir -p "${RD1_ATTEMPTS_DIR}"
 RESULT_FILE="$(mktemp "${RD1_TMP_DIR}/rd1_p${RD1_PROPOSAL_ORDER}_agent_result.XXXXXX")"
 trap 'rm -f "${RESULT_FILE}"' EXIT
 set +e
@@ -281,6 +288,7 @@ set +e
     --path "${PATH}" \
     --home "${HOME}" \
     --max-attempts 2 \
+    --attempts-dir "${RD1_ATTEMPTS_DIR}" \
     > "${RESULT_FILE}" 2>&1
 AGENT_RC=$?
 cat "${RESULT_FILE}"
@@ -299,6 +307,8 @@ echo "--- verified registry append ---"
     --recorded-at-utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --registry-path "${RD1_REGISTRY_PATH}" \
     --lock-path "${RD1_LOCK_PATH}" \
-    --backup-dir "${BACKUP_DIR}"
+    --backup-dir "${BACKUP_DIR}" \
+    --manifest-path "${MANIFEST_PATH}" \
+    --wandb-sweep-id "${RD1_WANDB_SWEEP_ID}"
 
 echo "=== P${RD1_PROPOSAL_ORDER} complete: run_id=${RUN_ID} ==="

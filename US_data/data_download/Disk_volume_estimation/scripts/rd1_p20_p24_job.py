@@ -47,11 +47,15 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import hashlib
+import json
+import math
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -69,6 +73,15 @@ from src.baseline.rd1_p20_p24_retry import (  # noqa: E402
     is_socket_failure_retry_eligible,
     no_new_run_appeared,
 )
+from src.baseline.sweep_v2_six_axis_campaign import (  # noqa: E402
+    CAMPAIGN_ID_V2,
+    DOMAIN_VERSION_V2,
+    OBJECTIVE_ID_V2,
+    SweepV2CampaignError,
+    configuration_id_v2,
+    proposal_id_v2,
+    trial_id_v2,
+)
 from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import (  # noqa: E402
     load_v2_wandb_bridge_manifest,
 )
@@ -76,18 +89,34 @@ from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import (  # noqa: E402
 __all__ = [
     "FIRST_PROPOSAL_ORDER",
     "HARD_STOP_ORDER",
+    "V2_METRIC_NAME",
     "PreflightError",
     "ManifestIdentityError",
+    "RunAcceptanceError",
     "AgentAttemptResult",
     "compute_expected_prior_orders",
     "check_preflight",
     "verify_pinned_manifest_checksum",
     "run_agent_with_retry",
+    "redact_secrets",
+    "find_local_execution_provenance",
+    "validate_local_provenance_record",
+    "validate_terminal_wandb_run",
+    "validate_run_for_registry_acceptance",
     "main",
 ]
 
 FIRST_PROPOSAL_ORDER = 1
 HARD_STOP_ORDER = 24
+
+# Derived locally, never imported from sweep_v2_six_axis_config: that module
+# pulls in sweep_v2_six_axis_execution's full NH/torch training dependency
+# chain (pilot_orchestration, nh_config_generation, fixed_support_contract_v2,
+# ...), which this deliberately narrow, orchestration-only deployed harness
+# bundle must not need. The formula is identical to
+# sweep_v2_six_axis_config.V2_METRIC_NAME (f"flashnh/{OBJECTIVE_ID_V2}"),
+# and OBJECTIVE_ID_V2 itself is already an existing deployed dependency.
+V2_METRIC_NAME = f"flashnh/{OBJECTIVE_ID_V2}"
 
 
 class PreflightError(Exception):
@@ -102,6 +131,46 @@ class PreflightError(Exception):
 
 class ManifestIdentityError(Exception):
     """P20's manifest failed the byte-for-byte checksum-pinned reuse check."""
+
+
+class RunAcceptanceError(Exception):
+    """Any reason a completed W&B run must be refused RD1 P20-P24 registry
+    acceptance. Mirrors :class:`PreflightError`'s reason/detail pattern.
+    This is the sole gate ``_cmd_append_registry_row`` trusts -- a run may
+    be appended to the registry only after every check this exception type
+    can raise has passed."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+        self.detail = detail
+
+
+_SECRET_KEYVALUE_PATTERN = re.compile(
+    r"(?i)\b(wandb_api_key|api[_-]?key|password|token|secret)\b(\s*[:=]\s*)(\S+)"
+)
+_SECRET_BEARER_PATTERN = re.compile(r"(?i)(authorization:\s*bearer\s+)(\S+)")
+_SECRET_NETRC_PATTERN = re.compile(
+    r"(?i)(machine\s+\S+\s+login\s+\S+\s+password\s+)(\S+)"
+)
+_SECRET_BARE_TOKEN_PATTERN = re.compile(r"\b[0-9a-fA-F]{32,64}\b")
+
+
+def redact_secrets(text: str) -> str:
+    """Redact every credential-shaped substring from ``text`` before it is
+    ever persisted as attempt evidence. Deliberately fails toward
+    over-redaction, never under-redaction: covers ``key=value``/``key:
+    value`` forms for common credential-bearing names (api key, password,
+    token, secret), ``Authorization: Bearer`` headers, ``.netrc``-style
+    ``machine ... login ... password ...`` lines, and -- independent of any
+    surrounding keyword -- any bare 32-64 hex-character run (the shape of a
+    W&B API key), so a credential is still caught even if it appears next
+    to an unanticipated label."""
+    redacted = _SECRET_KEYVALUE_PATTERN.sub(r"\1\2***REDACTED***", text)
+    redacted = _SECRET_BEARER_PATTERN.sub(r"\1***REDACTED***", redacted)
+    redacted = _SECRET_NETRC_PATTERN.sub(r"\1***REDACTED***", redacted)
+    redacted = _SECRET_BARE_TOKEN_PATTERN.sub("***REDACTED***", redacted)
+    return redacted
 
 
 def compute_expected_prior_orders(order: int) -> list[int]:
@@ -171,6 +240,7 @@ def run_agent_with_retry(
     attempt_fn: "Callable[[], AgentAttemptResult]",
     audit_run_ids_fn: "Callable[[], Iterable[str]]",
     max_attempts: int = 2,
+    on_attempt: "Callable[[int, AgentAttemptResult], None] | None" = None,
 ) -> AgentAttemptResult:
     """Run ``attempt_fn`` (one ``wandb agent --count 1`` invocation) and, on
     failure, retry at most once -- and only for the exact pre-run W&B
@@ -185,6 +255,15 @@ def run_agent_with_retry(
     RetryAuditError` propagates to the caller uncaught: an unavailable or
     ambiguous audit must fail closed (no retry decision made at all), never
     be silently treated as "no new run".
+
+    ``on_attempt``, when given, is called with ``(attempt_index, result)``
+    immediately after every single ``attempt_fn()`` call -- success or
+    failure, retried or not, and before any subsequent audit call that
+    could itself raise. This is purely additive evidence persistence (the
+    root-cause fix for silently discarding launcher output on an exit-0
+    subprocess whose dispatched W&B run had already crashed): it never
+    influences the retry decision itself, which remains exactly as before
+    when ``on_attempt`` is ``None``.
     """
     run_ids_before = list(fetch_with_backoff(audit_run_ids_fn))
     attempt_index = 0
@@ -192,6 +271,8 @@ def run_agent_with_retry(
     while True:
         attempt_index += 1
         result = attempt_fn()
+        if on_attempt is not None:
+            on_attempt(attempt_index, result)
         if result.success or attempt_index >= max_attempts:
             return result
 
@@ -266,6 +347,24 @@ def _resolve_canonical_sweep_path(manifest_path: "str | Path", expected_sweep_id
     return f"{entity}/{project}/{expected_sweep_id}"
 
 
+def _resolve_canonical_run_path(manifest_path: "str | Path", run_id: str) -> str:
+    """Build the ``entity/project/run_id`` path ``wandb.Api().run`` actually
+    requires -- the run-path sibling of ``_resolve_canonical_sweep_path``
+    (a W&B run path never includes the sweep id, unlike a sweep path).
+    Reuses the same loader-validated manifest as the sole source of
+    entity/project everywhere else in this chain."""
+    manifest = load_v2_wandb_bridge_manifest(manifest_path)
+    project = manifest.get("wandb_project")
+    entity = manifest.get("wandb_entity")
+    if not isinstance(project, str) or not project or not isinstance(entity, str) or not entity:
+        raise RuntimeError(
+            f"manifest carries no usable non-empty wandb_project/wandb_entity "
+            f"(project={project!r} entity={entity!r}); refusing to contact W&B with "
+            "an ambiguous run path"
+        )
+    return f"{entity}/{project}/{run_id}"
+
+
 def _wandb_sweep_run_ids(manifest_path: "str | Path", sweep_id: str) -> list[str]:
     """Read-only listing of every run id currently in ``sweep_id``. Imports
     ``wandb`` lazily so importing this module for the pure-function unit
@@ -296,6 +395,311 @@ def _wandb_resolve_latest_run_id(manifest_path: "str | Path", sweep_id: str) -> 
     return runs[-1].id
 
 
+def find_local_execution_provenance(
+    output_root: "str | Path",
+    *,
+    expected_order: int,
+    expected_run_id: str,
+) -> Path:
+    """Locate this proposal's ``execution_provenance.json`` beneath
+    ``output_root`` (the manifest's own ``output_root``, the documented
+    one-directory-per-trial layout: ``<output_root>/<trial_id>/
+    execution_provenance.json``) without assuming or reconstructing any
+    particular trial-id naming scheme: search the immediate subdirectories
+    once, and require exactly one candidate whose own ``proposal_order``/
+    ``wandb_run_id`` fields match what the caller independently expects.
+
+    Fails closed -- raises :class:`RunAcceptanceError` -- on a missing
+    output root, zero matches, more than one match, or a candidate that is
+    unreadable/not valid JSON; never silently guesses "the newest one"."""
+    root = Path(output_root)
+    if not root.is_dir():
+        raise RunAcceptanceError("output_root_missing", str(root))
+
+    matches: list[Path] = []
+    for candidate in sorted(root.glob("*/execution_provenance.json")):
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            payload.get("proposal_order") == expected_order
+            and payload.get("wandb_run_id") == expected_run_id
+        ):
+            matches.append(candidate)
+
+    if not matches:
+        raise RunAcceptanceError(
+            "local_execution_provenance_not_found",
+            f"no execution_provenance.json beneath {root} matches "
+            f"order={expected_order} run_id={expected_run_id}",
+        )
+    if len(matches) > 1:
+        raise RunAcceptanceError(
+            "local_execution_provenance_ambiguous",
+            f"{len(matches)} candidates matched order={expected_order} "
+            f"run_id={expected_run_id}: {[str(m) for m in matches]}",
+        )
+    return matches[0]
+
+
+_LOCAL_PROVENANCE_REQUIRED_FIELDS = (
+    "hyperparameters",
+    "search_arm",
+    "proposal_order",
+    "execution_generation",
+    "configuration_id",
+    "proposal_id",
+    "trial_id",
+    "campaign_id",
+    "domain_version",
+    "wandb_sweep_id",
+    "wandb_run_id",
+    "support_contract_version",
+    "support_contract_sha256",
+    "execution_status",
+    "objective_eligible",
+    "fixed_support_metric_name",
+    "objective_score",
+)
+
+
+def validate_local_provenance_record(
+    provenance_path: "str | Path",
+    *,
+    expected_order: int,
+    expected_sweep_id: str,
+    expected_run_id: str,
+) -> float:
+    """Load and validate one local ``execution_provenance.json`` record.
+
+    Mirrors -- rather than imports -- the identity re-derivation contract of
+    ``src.baseline.sweep_v2_six_axis_retry.load_frozen_proposal_record_v2``/
+    ``assert_matches_pinned_identity_v2``. Deliberately not imported:
+    ``sweep_v2_six_axis_retry.py`` and its dependency ``sweep_v1_retry.py``
+    were both added to this repository by commits landing AFTER
+    ``FROZEN_SCIENTIFIC_COMMIT`` (verified: neither file exists in that
+    commit's tree) that are not on the reviewed
+    ``APPROVED_OPERATIONAL_BASE_COMMITS`` allowlist in
+    ``scripts/deploy_rd1_p20_p24_harness.py`` -- deploying either module
+    into this harness would silently require widening that provenance
+    allowlist, which this recovery task's scope does not authorize (CLAUDE.md
+    S9: a provenance-safeguard change is an escalation, not an autonomous
+    repair). Every identity value re-derived below instead uses only
+    ``src.baseline.sweep_v2_six_axis_campaign`` (and its own dependency
+    ``sweep_v1_campaign``), both confirmed byte-for-byte unchanged since
+    ``FROZEN_SCIENTIFIC_COMMIT`` and already part of this harness's deployed
+    bundle -- so this validation needs no new deployment surface at all.
+
+    Never trusts any persisted identity field at face value: every
+    identity-bearing field is either independently re-derived from the
+    record's own raw persisted fields via the canonical v2 helpers
+    (``configuration_id_v2``/``proposal_id_v2``/``trial_id_v2``), or
+    cross-checked against what this CLI invocation independently already
+    knows (the proposal order it was launched for, and the W&B sweep/run id
+    the agent actually resolved).
+
+    Returns the locally recorded objective value, for the caller to
+    cross-check against W&B's own published summary. Fails closed -- raises
+    :class:`RunAcceptanceError` -- on any read, schema, re-derivation,
+    identity, terminal-state, or finiteness problem."""
+    path = Path(provenance_path)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunAcceptanceError("local_provenance_record_unreadable", f"{path}: {exc}") from exc
+    if not isinstance(record, dict):
+        raise RunAcceptanceError(
+            "local_provenance_record_malformed", f"{path}: top level is not a JSON object"
+        )
+
+    missing = [field for field in _LOCAL_PROVENANCE_REQUIRED_FIELDS if field not in record]
+    if missing:
+        raise RunAcceptanceError("local_provenance_record_missing_fields", f"{path}: missing {missing}")
+
+    if record["campaign_id"] != CAMPAIGN_ID_V2 or record["domain_version"] != DOMAIN_VERSION_V2:
+        raise RunAcceptanceError(
+            "local_provenance_campaign_identity_mismatch",
+            f"campaign_id={record['campaign_id']!r} domain_version={record['domain_version']!r} "
+            f"expected campaign_id={CAMPAIGN_ID_V2!r} domain_version={DOMAIN_VERSION_V2!r}",
+        )
+
+    try:
+        re_derived_configuration_id = configuration_id_v2(
+            record["hyperparameters"],
+            support_contract_version=record["support_contract_version"],
+            support_contract_sha256=record["support_contract_sha256"],
+        )
+        re_derived_proposal_id = proposal_id_v2(record["search_arm"], record["proposal_order"])
+        re_derived_trial_id = trial_id_v2(
+            re_derived_configuration_id,
+            re_derived_proposal_id,
+            execution_generation=record["execution_generation"],
+        )
+    except SweepV2CampaignError as exc:
+        raise RunAcceptanceError("local_provenance_re_derivation_failed", str(exc)) from exc
+
+    mismatches: dict[str, tuple[object, object]] = {}
+    if re_derived_configuration_id != record["configuration_id"]:
+        mismatches["configuration_id"] = (re_derived_configuration_id, record["configuration_id"])
+    if re_derived_proposal_id != record["proposal_id"]:
+        mismatches["proposal_id"] = (re_derived_proposal_id, record["proposal_id"])
+    if re_derived_trial_id != record["trial_id"]:
+        mismatches["trial_id"] = (re_derived_trial_id, record["trial_id"])
+    if record["proposal_order"] != expected_order:
+        mismatches["proposal_order"] = (expected_order, record["proposal_order"])
+    if record["wandb_sweep_id"] != expected_sweep_id:
+        mismatches["wandb_sweep_id"] = (expected_sweep_id, record["wandb_sweep_id"])
+    if record["wandb_run_id"] != expected_run_id:
+        mismatches["wandb_run_id"] = (expected_run_id, record["wandb_run_id"])
+    if mismatches:
+        raise RunAcceptanceError("local_provenance_identity_mismatch", f"{path}: {mismatches}")
+
+    if record["execution_status"] != "VALID":
+        raise RunAcceptanceError(
+            "local_provenance_not_valid", f"execution_status={record['execution_status']!r}"
+        )
+    if record["objective_eligible"] is not True:
+        raise RunAcceptanceError(
+            "local_provenance_objective_ineligible",
+            f"objective_eligible={record['objective_eligible']!r}",
+        )
+    if record["fixed_support_metric_name"] != V2_METRIC_NAME:
+        raise RunAcceptanceError(
+            "local_provenance_metric_name_mismatch",
+            f"fixed_support_metric_name={record['fixed_support_metric_name']!r} "
+            f"expected={V2_METRIC_NAME!r}",
+        )
+
+    objective = record["objective_score"]
+    try:
+        objective_value = float(objective)
+    except (TypeError, ValueError):
+        raise RunAcceptanceError(
+            "local_provenance_objective_not_numeric", f"objective_score={objective!r}"
+        )
+    if not math.isfinite(objective_value):
+        raise RunAcceptanceError(
+            "local_provenance_objective_not_finite", f"objective_score={objective_value!r}"
+        )
+    return objective_value
+
+
+def validate_terminal_wandb_run(manifest_path: "str | Path", run_id: str) -> float:
+    """Independently confirm, via a fresh read-only W&B API call, that
+    ``run_id`` reached a genuinely terminal, scientifically valid state --
+    never trusted from local files or subprocess exit codes alone (the
+    root-cause-#2 defect this validation gate exists to close). Returns the
+    published objective value for the caller to cross-check against the
+    local ``execution_provenance.json`` record. Fails closed -- raises
+    :class:`RunAcceptanceError` -- on any non-``finished`` state, a
+    missing/false ``flashnh/valid`` flag, a missing or non-finite objective
+    metric, or any W&B API error. Imports ``wandb`` lazily so importing this
+    module for the pure-function unit tests never requires the ``wandb``
+    package to be installed."""
+    run_path = _resolve_canonical_run_path(manifest_path, run_id)
+    import wandb  # noqa: PLC0415
+
+    api = wandb.Api()
+    try:
+        run = api.run(run_path)
+    except Exception as exc:  # noqa: BLE001 -- any lookup failure is fatal, never silently skipped
+        raise RunAcceptanceError("wandb_run_lookup_failed", f"{run_path}: {exc}") from exc
+
+    if run.state != "finished":
+        raise RunAcceptanceError("wandb_run_not_finished", f"{run_path} state={run.state!r}")
+
+    summary = dict(run.summary)
+    if summary.get("flashnh/valid") is not True:
+        raise RunAcceptanceError(
+            "wandb_run_not_flagged_valid",
+            f"{run_path} flashnh/valid={summary.get('flashnh/valid')!r}",
+        )
+
+    objective = summary.get(V2_METRIC_NAME)
+    try:
+        objective_value = float(objective)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise RunAcceptanceError(
+            "wandb_objective_missing_or_not_numeric",
+            f"{run_path} {V2_METRIC_NAME}={objective!r}",
+        )
+    if not math.isfinite(objective_value):
+        raise RunAcceptanceError(
+            "wandb_objective_not_finite", f"{run_path} {V2_METRIC_NAME}={objective_value!r}"
+        )
+    return objective_value
+
+
+_OBJECTIVE_CROSS_CHECK_ABS_TOL = 1e-9
+
+
+def validate_run_for_registry_acceptance(
+    *,
+    manifest_path: "str | Path",
+    wandb_sweep_id: str,
+    run_id: str,
+    order: int,
+) -> dict[str, Any]:
+    """The full RD1 P20-P24 registry-acceptance gate. A production run may
+    be accepted into the registry only if ALL of the following
+    independently hold:
+
+    * the manifest's own pinned sweep id agrees with ``wandb_sweep_id``;
+    * exactly one local ``execution_provenance.json`` exists beneath the
+      manifest's ``output_root`` for this exact order/run_id, and it
+      independently re-derives to a matching, ``VALID``,
+      objective-eligible, finite-objective identity
+      (:func:`validate_local_provenance_record`);
+    * a fresh W&B API lookup of the same run id independently confirms
+      ``state == "finished"``, ``flashnh/valid is True``, and a finite
+      published objective (:func:`validate_terminal_wandb_run`);
+    * the two independently-obtained objective values agree.
+
+    Returns ``{"objective": <float>, "manifest_sha256": <hex str>}`` for
+    the caller to persist into the registry row. Raises
+    :class:`RunAcceptanceError` (fail-closed) on any disagreement --
+    ``_cmd_append_registry_row`` must never append a registry row on
+    partial, ambiguous, or single-source evidence.
+    """
+    manifest_path = Path(manifest_path)
+    manifest = load_v2_wandb_bridge_manifest(manifest_path)
+    manifest_sweep_id = manifest["wandb_sweep_id"]
+    if manifest_sweep_id != wandb_sweep_id:
+        raise RunAcceptanceError(
+            "manifest_sweep_id_mismatch",
+            f"manifest wandb_sweep_id {manifest_sweep_id!r} disagrees with "
+            f"expected {wandb_sweep_id!r}",
+        )
+    output_root = manifest.get("output_root")
+    if not isinstance(output_root, str) or not output_root:
+        raise RunAcceptanceError("manifest_output_root_missing", repr(output_root))
+
+    provenance_path = find_local_execution_provenance(
+        output_root, expected_order=order, expected_run_id=run_id
+    )
+    local_objective = validate_local_provenance_record(
+        provenance_path,
+        expected_order=order,
+        expected_sweep_id=wandb_sweep_id,
+        expected_run_id=run_id,
+    )
+
+    wandb_objective = validate_terminal_wandb_run(manifest_path, run_id)
+
+    if not math.isclose(
+        local_objective, wandb_objective, rel_tol=0.0, abs_tol=_OBJECTIVE_CROSS_CHECK_ABS_TOL
+    ):
+        raise RunAcceptanceError(
+            "objective_cross_check_mismatch",
+            f"local execution_provenance.json objective={local_objective!r} disagrees "
+            f"with W&B summary objective={wandb_objective!r}",
+        )
+
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return {"objective": local_objective, "manifest_sha256": manifest_sha256}
+
+
 def _cmd_preflight(args: argparse.Namespace) -> int:
     with RegistryLock(args.lock_path, exclusive=False):
         registry = read_registry(args.registry_path)
@@ -310,10 +714,23 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def _cmd_append_registry_row(args: argparse.Namespace) -> int:
+    try:
+        acceptance = validate_run_for_registry_acceptance(
+            manifest_path=args.manifest_path,
+            wandb_sweep_id=args.wandb_sweep_id,
+            run_id=args.run_id,
+            order=args.order,
+        )
+    except RunAcceptanceError as exc:
+        print(f"APPEND_REFUSED reason={exc.reason} detail={exc.detail}", file=sys.stderr)
+        return 1
+
     row = {
         "order": args.order,
         "wandb_run_id": args.run_id,
         "recorded_at_utc": args.recorded_at_utc,
+        "objective": acceptance["objective"],
+        "manifest_sha256": acceptance["manifest_sha256"],
     }
     with RegistryLock(args.lock_path, exclusive=True):
         try:
@@ -352,12 +769,37 @@ def _cmd_sanitize_env_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _persist_attempt_evidence(attempts_dir: Path, attempt_index: int, result: AgentAttemptResult) -> None:
+    """Persist one agent-launcher attempt's redacted evidence beneath
+    ``attempts_dir``, unconditionally -- this is the root-cause-#1 fix:
+    called for every attempt regardless of exit code, so evidence survives
+    even when the launcher subprocess exited 0 but the W&B run it dispatched
+    had already crashed. Never writes raw, unredacted output -- ``run_id``
+    is always ``None`` at this point (see ``_subprocess_attempt_fn``), so
+    only ``output_text`` needs redaction."""
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "attempt_index": attempt_index,
+        "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "success": result.success,
+        "returncode": result.returncode,
+        "run_id": result.run_id,
+        "output_text_redacted": redact_secrets(result.output_text),
+    }
+    evidence_path = attempts_dir / f"attempt_{attempt_index:02d}.json"
+    evidence_path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
     """The one live retry-eligibility execution path. Builds the exact
     narrow env allowlist the agent launcher runs under, then delegates the
     entire attempt/retry decision to the tested ``run_agent_with_retry`` /
     ``is_socket_failure_retry_eligible`` functions above -- this function
     adds no additional retry logic of its own.
+
+    When ``--attempts-dir`` is given, every attempt's redacted evidence is
+    persisted beneath it via ``on_attempt``, regardless of outcome -- purely
+    additive; the ``AGENT_OK``/``AGENT_FAILED`` contract below is unchanged.
 
     On overall success, resolves the created run id via one more read-only
     W&B call and prints it for the sbatch wrapper to pass to
@@ -378,11 +820,19 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
     def audit_run_ids_fn() -> list[str]:
         return _wandb_sweep_run_ids(args.manifest_path, args.wandb_sweep_id)
 
+    on_attempt = None
+    if args.attempts_dir:
+        attempts_dir = Path(args.attempts_dir)
+
+        def on_attempt(attempt_index: int, result: AgentAttemptResult) -> None:
+            _persist_attempt_evidence(attempts_dir, attempt_index, result)
+
     try:
         result = run_agent_with_retry(
             attempt_fn=attempt_fn,
             audit_run_ids_fn=audit_run_ids_fn,
             max_attempts=args.max_attempts,
+            on_attempt=on_attempt,
         )
     except RetryAuditError as exc:
         print(f"AGENT_FAILED reason=retry_audit_unavailable detail={exc}", file=sys.stderr)
@@ -423,6 +873,12 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     p_append.add_argument("--registry-path", required=True)
     p_append.add_argument("--lock-path", required=True)
     p_append.add_argument("--backup-dir", required=True)
+    p_append.add_argument(
+        "--manifest-path", required=True, help="Manifest whose pinned sweep id/output_root gate acceptance."
+    )
+    p_append.add_argument(
+        "--wandb-sweep-id", required=True, help="Expected sweep id, cross-checked against the manifest."
+    )
     p_append.set_defaults(func=_cmd_append_registry_row)
 
     p_manifest = sub.add_parser("verify-pinned-manifest", help="P20-only: checksum-pin the reused manifest.")
@@ -444,6 +900,11 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     p_run_agent.add_argument("--path", required=True, help="PATH value for the narrow attempt-env allowlist.")
     p_run_agent.add_argument("--home", required=True, help="HOME value for the narrow attempt-env allowlist.")
     p_run_agent.add_argument("--max-attempts", type=int, default=2)
+    p_run_agent.add_argument(
+        "--attempts-dir",
+        default=None,
+        help="Project-local dir to persist redacted per-attempt evidence into (optional).",
+    )
     p_run_agent.set_defaults(func=_cmd_run_agent_with_retry)
 
     args = parser.parse_args(argv)
