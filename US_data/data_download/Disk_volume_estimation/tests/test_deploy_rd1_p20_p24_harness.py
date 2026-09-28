@@ -94,6 +94,25 @@ def _make_base_commit(repo: Path) -> str:
     _write(repo, "src/__init__.py", "# pre-existing package marker\n")
     _write(repo, "src/baseline/__init__.py", "# pre-existing baseline package marker\n")
     _write(repo, "scripts/unrelated_science.py", "# unrelated pre-existing scientific script\n")
+    # Pre-existing, frozen-scientific-era dependency modules the harness
+    # driver imports transitively via
+    # src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py (job-46226308
+    # forensic repair) -- written into the BASE commit, never the harness
+    # commit, exactly mirroring the real repository: these four modules are
+    # unchanged between FROZEN_SCIENTIFIC_COMMIT and the real harness
+    # commits, never new operational-harness surface.
+    _write(repo, "src/baseline/sweep_v1_campaign.py", "# pre-existing sweep v1 campaign module\n")
+    _write(
+        repo,
+        "src/baseline/sweep_v2_six_axis_campaign.py",
+        "# pre-existing sweep v2 six-axis campaign module\n",
+    )
+    _write(repo, "src/baseline/sweep_v1_launch_manifest.py", "# pre-existing sweep v1 launch manifest module\n")
+    _write(
+        repo,
+        "src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py",
+        "# pre-existing sweep v2 six-axis W&B bridge manifest module\n",
+    )
     return _commit(repo, "base scientific commit")
 
 
@@ -591,7 +610,7 @@ def test_real_monorepo_end_to_end_deployment_at_d5de66e():
         assert receipt["harness_commit"] == harness_commit
         assert receipt["provenance_audit"]["passed"] is True
         assert receipt["provenance_audit"]["decomposition_matches"] is True
-        assert len(receipt["files"]) == len(deploy_mod.DEPLOY_MANIFEST) == 8
+        assert len(receipt["files"]) == len(deploy_mod.DEPLOY_MANIFEST) == 12
 
         chain_dir_real = chain_dir.resolve()
         for rec in receipt["files"]:
@@ -605,6 +624,113 @@ def test_real_monorepo_end_to_end_deployment_at_d5de66e():
 
         receipt_path = chain_dir / "deploy_receipt.json"
         assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
+    finally:
+        if chain_dir.exists():
+            shutil.rmtree(chain_dir)
+
+
+# --- Isolated deployed-bundle import preflight (job-46226308 forensic repair) ---
+#
+# Direct regression coverage for the defect that failed Slurm job 46226308 in
+# ~3 seconds: ``scripts/rd1_p20_p24_job.py`` imports
+# ``src.baseline.sweep_v2_six_axis_wandb_bridge_manifest``, but that module
+# (and its own transitive ``src.baseline.sweep_v1_launch_manifest`` /
+# ``sweep_v2_six_axis_campaign`` / ``sweep_v1_campaign`` dependency closure)
+# was missing from DEPLOY_MANIFEST -- so the deployed bundle's checksum
+# verification (which only proves deployed bytes match tracked bytes for
+# whatever IS in the manifest) passed, but the job died on
+# ``ModuleNotFoundError`` the moment it actually tried to run. These tests
+# use the REAL, current Flash-NH repository HEAD and the REAL driver file --
+# never a disposable stub -- so they actually exercise the real local
+# monorepo deployment path this bug lived in.
+
+
+def test_real_monorepo_end_to_end_deployment_at_current_head_import_preflight_passes():
+    """A local, non-mocked end-to-end deployment against the actual, current
+    Flash-NH monorepo HEAD, whose real ``scripts/rd1_p20_p24_job.py`` really
+    does import ``src.baseline.sweep_v2_six_axis_wandb_bridge_manifest`` (not
+    a stub). Proves the isolated deployed-bundle import preflight actually
+    passes end to end against the real driver and its real transitive
+    dependency closure now that DEPLOY_MANIFEST includes all four of them."""
+    repo_root = deploy_mod.REPO_ROOT
+    head = _git(repo_root, "rev-parse", "HEAD")
+
+    chain_dir = repo_root / ".scratch_local" / f"test_deploy_import_preflight_{head[:12]}"
+    if chain_dir.exists():
+        shutil.rmtree(chain_dir)
+    try:
+        receipt = deploy_mod.deploy(
+            repo_root=repo_root,
+            chain_dir=chain_dir,
+            harness_commit=head,
+            # Current HEAD normally sits many ordinary harness-iteration
+            # commits ahead of any single approved base -- so, exactly like
+            # test_real_monorepo_end_to_end_deployment_at_d5de66e's sibling
+            # test in tests/test_rd1_p20_p24_job_sbatch.py already does, the
+            # provenance audit's base must be pinned explicitly to the one
+            # already-approved operational-base commit rather than left to
+            # default to ``head^`` (which is just the previous ordinary
+            # iteration commit, not an approved base, and would make the
+            # audit refuse for reasons unrelated to this regression).
+            operational_base_commit="04a487e0c2daddf0ae5c700402b6b976fb2b076b",
+        )
+
+        assert receipt["import_preflight"]["returncode"] == 0
+        output_path = Path(receipt["import_preflight"]["output_path"])
+        assert output_path.is_file()
+        assert "returncode=0" in output_path.read_text(encoding="utf-8")
+
+        # Prove the deployed driver on disk really is the real one (contains
+        # the actual import this whole regression is about), not a no-op
+        # stand-in that would make a passing preflight meaningless.
+        deployed_driver = Path(receipt["files"][2]["deployed_path"])
+        assert deployed_driver.name == "rd1_p20_p24_job.py"
+        assert "sweep_v2_six_axis_wandb_bridge_manifest" in deployed_driver.read_text(encoding="utf-8")
+
+        assert (chain_dir / "deploy_receipt.json").exists()
+    finally:
+        if chain_dir.exists():
+            shutil.rmtree(chain_dir)
+
+
+def test_import_preflight_fails_closed_when_manifest_omits_a_required_transitive_dependency():
+    """Directly reproduces the job-46226308 defect class: deploy the real,
+    current HEAD harness commit but with a DEPLOY_MANIFEST that omits
+    ``src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py`` -- exactly
+    what the pre-repair DEPLOY_MANIFEST actually omitted. The isolated import
+    preflight must fail closed (``ModuleNotFoundError``, non-zero return
+    code) and ``deploy_receipt.json`` must NOT be written, so nothing
+    downstream -- the sbatch script's own invocation-time receipt check, or a
+    human operator -- can mistake this deployment for valid."""
+    repo_root = deploy_mod.REPO_ROOT
+    head = _git(repo_root, "rev-parse", "HEAD")
+
+    omitted = "src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py"
+    broken_manifest = tuple(p for p in deploy_mod.DEPLOY_MANIFEST if p != omitted)
+    assert len(broken_manifest) == len(deploy_mod.DEPLOY_MANIFEST) - 1
+
+    chain_dir = repo_root / ".scratch_local" / f"test_deploy_broken_manifest_{head[:12]}"
+    if chain_dir.exists():
+        shutil.rmtree(chain_dir)
+    try:
+        with pytest.raises(
+            deploy_mod.DeploymentRefused,
+            match="isolated deployed-bundle import preflight failed",
+        ):
+            deploy_mod.deploy(
+                repo_root=repo_root,
+                chain_dir=chain_dir,
+                harness_commit=head,
+                operational_base_commit="04a487e0c2daddf0ae5c700402b6b976fb2b076b",
+                manifest=broken_manifest,
+            )
+
+        assert not (chain_dir / "deploy_receipt.json").exists()
+        assert not (chain_dir / "harness" / omitted).exists()
+
+        output_path = chain_dir / "import_preflight" / "import_preflight_output.txt"
+        assert output_path.is_file()
+        assert "ModuleNotFoundError" in output_path.read_text(encoding="utf-8")
     finally:
         if chain_dir.exists():
             shutil.rmtree(chain_dir)

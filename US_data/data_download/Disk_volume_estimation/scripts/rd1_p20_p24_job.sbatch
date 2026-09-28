@@ -155,6 +155,10 @@ REQUIRED_PATHS = (
     "src/baseline/rd1_p20_p24_env.py",
     "src/baseline/rd1_p20_p24_registry.py",
     "src/baseline/rd1_p20_p24_retry.py",
+    "src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py",
+    "src/baseline/sweep_v1_launch_manifest.py",
+    "src/baseline/sweep_v2_six_axis_campaign.py",
+    "src/baseline/sweep_v1_campaign.py",
 )
 FROZEN_SCIENTIFIC_COMMIT = "dabd2ca851bd2b3a03035886cfa50015f2c864b4"
 

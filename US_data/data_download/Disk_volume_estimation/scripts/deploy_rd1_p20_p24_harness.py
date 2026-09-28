@@ -43,12 +43,25 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Default canonical interpreter for the isolated deployed-bundle import
+# preflight (see run_isolated_import_preflight below), mirroring the exact
+# same env-var-overridable default scripts/rd1_p20_p24_job.sbatch already
+# uses for CANONICAL_PYTHON/FLASHNH_BASE. Only main()'s CLI default uses
+# this -- deploy()'s own function-level default is sys.executable, so tests
+# and disposable local use always get a real, working interpreter without
+# needing Moriah paths to exist.
+_FLASHNH_BASE_DEFAULT = os.environ.get("FLASHNH_BASE", "/sci/labs/efratmorin/omripo/Flash-NH")
+CANONICAL_PYTHON_DEFAULT = os.environ.get(
+    "CANONICAL_PYTHON", f"{_FLASHNH_BASE_DEFAULT}/envs/flashnh-moriah/bin/python"
+)
 
 # The scientific execution identity this chain's manifests are pinned to.
 # Frozen: not a CLI flag, so nothing at deployment time can silently swap it
@@ -82,6 +95,20 @@ DEPLOY_MANIFEST: tuple[str, ...] = (
     "src/baseline/rd1_p20_p24_env.py",
     "src/baseline/rd1_p20_p24_registry.py",
     "src/baseline/rd1_p20_p24_retry.py",
+    # Added (P20 job-46226308 forensic repair): rd1_p20_p24_job.py's own
+    # "from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import
+    # load_v2_wandb_bridge_manifest" plus that module's full transitive
+    # internal src.* dependency closure (verified by static import
+    # inspection -- none of these four import anything under src.* beyond
+    # each other). All four are pre-existing, frozen-scientific-era modules
+    # unchanged since FROZEN_SCIENTIFIC_COMMIT (see the operational-base/
+    # harness provenance audit below, which never needed to allowlist them
+    # because they never appear in that diff), never new operational-harness
+    # surface.
+    "src/baseline/sweep_v2_six_axis_wandb_bridge_manifest.py",
+    "src/baseline/sweep_v1_launch_manifest.py",
+    "src/baseline/sweep_v2_six_axis_campaign.py",
+    "src/baseline/sweep_v1_campaign.py",
 )
 
 # Manifest paths that must be deployed executable (the two shell/sbatch
@@ -363,12 +390,87 @@ def deploy_harness_files(
     return records
 
 
+def run_isolated_import_preflight(chain_dir_real: Path, canonical_python: str) -> dict:
+    """Proves, using ``canonical_python`` alone, that the just-deployed
+    ``${chain_dir_real}/harness/scripts/rd1_p20_p24_job.py`` actually imports
+    cleanly from the deployed bundle -- the exact class of defect that let
+    Slurm job 46226308 reach ``sbatch`` and fail in ~3 seconds with
+    ``ModuleNotFoundError`` for a driver import ``DEPLOY_MANIFEST`` had
+    omitted, which the deploy-time checksum verification and the sbatch
+    script's own invocation-time receipt/checksum re-check never caught
+    (both only prove deployed bytes match tracked bytes; neither ever tries
+    to actually import anything).
+
+    Runs ``canonical_python -I <deployed_driver> --help``:
+
+    - ``-I`` (isolated mode) ignores ``PYTHONPATH``/``PYTHONHOME`` and
+      disables the user site-packages directory, so nothing from the
+      caller's own environment can accidentally satisfy an import the
+      deployed bundle is missing.
+    - ``cwd`` is a dedicated ``${chain_dir_real}/import_preflight``
+      directory -- beneath this chain's own project-local ``.scratch_local``
+      subtree, and never ``REPO_WORKDIR`` or any other directory containing
+      a real ``src`` package -- so the full repository checkout cannot
+      satisfy an import either. (The deployed driver's own
+      ``sys.path.insert(0, parents[1])`` resolves relative to the deployed
+      script's own on-disk location, not ``cwd``, so this in no way changes
+      which ``src.baseline`` package the driver actually imports from.)
+    - ``--help`` is the one CLI form guaranteed to run to completion
+      successfully without ever touching W&B or the registry: argparse's
+      ``-h``/``--help`` handling fires during parsing, before the
+      ``required=True`` subparsers check, but only after every top-level
+      import in the driver module (and everything it imports) has already
+      executed -- so a missing deployed dependency surfaces here, as a
+      ``ModuleNotFoundError`` on stderr and a non-zero return code, before
+      this chain is ever submitted to Slurm.
+
+    Raises :class:`DeploymentRefused` (never writing ``deploy_receipt.json``)
+    on any non-zero return code. Always records the full command, cwd, return
+    code, stdout, and stderr under ``${chain_dir_real}/import_preflight/``
+    first, whether or not it then raises.
+    """
+    harness_dir = chain_dir_real / "harness"
+    driver_path = harness_dir / "scripts" / "rd1_p20_p24_job.py"
+    preflight_dir = chain_dir_real / "import_preflight"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    output_path = preflight_dir / "import_preflight_output.txt"
+
+    if not driver_path.is_file():
+        raise DeploymentRefused(
+            f"isolated import preflight cannot run: deployed driver missing at {driver_path}"
+        )
+
+    cmd = [canonical_python, "-I", str(driver_path), "--help"]
+    proc = subprocess.run(cmd, cwd=str(preflight_dir), capture_output=True, text=True)
+    output_path.write_text(
+        f"cmd={json.dumps(cmd)}\n"
+        f"cwd={preflight_dir}\n"
+        f"returncode={proc.returncode}\n"
+        f"--- stdout ---\n{proc.stdout}\n"
+        f"--- stderr ---\n{proc.stderr}\n",
+        encoding="utf-8",
+    )
+    if proc.returncode != 0:
+        raise DeploymentRefused(
+            "isolated deployed-bundle import preflight failed "
+            f"(rc={proc.returncode}); full output recorded at {output_path}; "
+            f"stderr tail: {proc.stderr[-2000:]}"
+        )
+    return {
+        "canonical_python": canonical_python,
+        "cwd": str(preflight_dir),
+        "returncode": proc.returncode,
+        "output_path": str(output_path),
+    }
+
+
 def build_receipt(
     *,
     chain_dir_real: Path,
     audit: dict,
     file_records: list[dict],
     deployed_at_utc: str,
+    import_preflight: dict,
 ) -> dict:
     return {
         "frozen_scientific_commit": audit["frozen_scientific_commit"],
@@ -377,6 +479,7 @@ def build_receipt(
         "chain_dir": str(chain_dir_real),
         "deployed_at_utc": deployed_at_utc,
         "provenance_audit": audit,
+        "import_preflight": import_preflight,
         "files": file_records,
     }
 
@@ -393,10 +496,25 @@ def deploy(
     executable_paths: frozenset[str] = EXECUTABLE_MANIFEST_PATHS,
     allowed_harness_paths: frozenset[str] = ALLOWED_HARNESS_CHANGED_PATHS,
     approved_doc_paths: frozenset[str] = APPROVED_OPERATIONAL_DOC_PATHS,
+    canonical_python: str = sys.executable,
 ) -> dict:
     """End-to-end: boundary check -> provenance audit (gates deployment) ->
-    file deployment+verification -> receipt. Raises ``DeploymentRefused``
-    (writing no files and no receipt) on any refusal."""
+    file deployment+verification -> isolated deployed-bundle import
+    preflight (gates the receipt) -> receipt. Raises ``DeploymentRefused`` on
+    any refusal. The boundary check and provenance audit write no files and
+    no receipt on refusal; the import preflight runs necessarily after
+    ``harness/`` files are already on disk (it has to import them), but it
+    still gates ``deploy_receipt.json`` itself -- a failed import preflight
+    leaves no receipt, so nothing downstream (the sbatch script's own
+    invocation-time ``deploy_receipt.json`` check, or a human operator) can
+    mistake this attempt for a valid deployment.
+
+    ``canonical_python`` defaults to ``sys.executable`` here purely for
+    disposable-repo test/dev ergonomics (always a real, working
+    interpreter); a production Moriah deployment invoked via ``main()``
+    below always passes the actual canonical Moriah interpreter explicitly
+    instead of relying on this default.
+    """
     chain_dir_real = assert_chain_dir_within_project_scratch_local(repo_root, chain_dir)
 
     audit = provenance_audit(
@@ -421,12 +539,15 @@ def deploy(
 
     file_records = deploy_harness_files(repo_root, chain_dir_real, harness_commit, manifest, executable_paths)
 
+    import_preflight = run_isolated_import_preflight(chain_dir_real, canonical_python)
+
     deployed_at_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     receipt = build_receipt(
         chain_dir_real=chain_dir_real,
         audit=audit,
         file_records=file_records,
         deployed_at_utc=deployed_at_utc,
+        import_preflight=import_preflight,
     )
     receipt_path = chain_dir_real / "deploy_receipt.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -443,6 +564,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="commit the harness commit is built on top of (defaults to <harness-commit>^)",
     )
     parser.add_argument("--repo-root", default=str(REPO_ROOT), help="repo root (defaults to this script's own checkout)")
+    parser.add_argument(
+        "--canonical-python",
+        default=CANONICAL_PYTHON_DEFAULT,
+        help=(
+            "canonical interpreter for the isolated deployed-bundle import "
+            "preflight (defaults to $CANONICAL_PYTHON, else the Moriah "
+            "canonical env path under $FLASHNH_BASE)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -451,6 +581,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             chain_dir=Path(args.chain_dir),
             harness_commit=args.harness_commit,
             operational_base_commit=args.operational_base_commit,
+            canonical_python=args.canonical_python,
         )
     except DeploymentRefused as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
