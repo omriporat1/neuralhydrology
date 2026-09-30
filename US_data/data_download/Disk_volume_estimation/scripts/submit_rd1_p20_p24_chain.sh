@@ -34,7 +34,15 @@
 #       --output-root-base <path> \
 #       --p20-pinned-manifest-path <path> \
 #       --p20-pinned-manifest-sha256 <sha256> \
+#       --payload-repository-path <path> \
 #       [--dry-run]
+#
+# --payload-repository-path is required and points at a detached checkout
+# whose HEAD must exactly equal --expected-commit and whose working tree
+# must be clean; it is what every job's REPO_WORKDIR resolves to (exported
+# below), so the bridge process that actually runs training always executes
+# out of this exact checkout, never out of whatever the tracked harness repo
+# happens to have checked out at submission time.
 #
 # (For local development/testing of this script's own logic -- never for a
 # production launch -- the tracked repo copy at scripts/
@@ -57,6 +65,7 @@ EXECUTION_GENERATION=""
 OUTPUT_ROOT_BASE=""
 P20_PINNED_MANIFEST_PATH=""
 P20_PINNED_MANIFEST_SHA256=""
+PAYLOAD_REPOSITORY_PATH=""
 DRY_RUN=""
 
 while [ "$#" -gt 0 ]; do
@@ -69,12 +78,13 @@ while [ "$#" -gt 0 ]; do
         --output-root-base) OUTPUT_ROOT_BASE="$2"; shift 2 ;;
         --p20-pinned-manifest-path) P20_PINNED_MANIFEST_PATH="$2"; shift 2 ;;
         --p20-pinned-manifest-sha256) P20_PINNED_MANIFEST_SHA256="$2"; shift 2 ;;
+        --payload-repository-path) PAYLOAD_REPOSITORY_PATH="$2"; shift 2 ;;
         --dry-run) DRY_RUN="--dry-run"; shift ;;
         *) echo "FATAL: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-for _required_name in REGISTRY_PATH CHAIN_DIR WANDB_SWEEP_ID EXPECTED_COMMIT EXECUTION_GENERATION OUTPUT_ROOT_BASE P20_PINNED_MANIFEST_PATH P20_PINNED_MANIFEST_SHA256; do
+for _required_name in REGISTRY_PATH CHAIN_DIR WANDB_SWEEP_ID EXPECTED_COMMIT EXECUTION_GENERATION OUTPUT_ROOT_BASE P20_PINNED_MANIFEST_PATH P20_PINNED_MANIFEST_SHA256 PAYLOAD_REPOSITORY_PATH; do
     if [ -z "${!_required_name}" ]; then
         echo "FATAL: --$(echo "${_required_name}" | tr '[:upper:]_' '[:lower:]-') is required" >&2
         exit 2
@@ -129,6 +139,31 @@ case "${CHAIN_DIR_REAL}/" in
         ;;
 esac
 
+# --payload-repository-path must be a clean checkout pinned exactly at
+# --expected-commit. This is exported below as the job's REPO_WORKDIR (with
+# RD1_PROJECT_ROOT separately pinned to REPO_WORKDIR_REAL above, the real
+# tracked-repo project root) so every job's bridge process runs out of this
+# checkout instead of silently defaulting to the tracked harness repo.
+PAYLOAD_REPOSITORY_PATH_REAL="$(realpath -m "${PAYLOAD_REPOSITORY_PATH}")"
+if [ ! -e "${PAYLOAD_REPOSITORY_PATH_REAL}/.git" ]; then
+    echo "FATAL: --payload-repository-path ${PAYLOAD_REPOSITORY_PATH_REAL} is not a git checkout" >&2
+    exit 2
+fi
+_payload_head="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" rev-parse HEAD)"
+if [ "${_payload_head}" != "${EXPECTED_COMMIT}" ]; then
+    echo "FATAL: --payload-repository-path HEAD ${_payload_head} does not match --expected-commit ${EXPECTED_COMMIT}" >&2
+    exit 2
+fi
+# Only tracked-content modifications make the checkout scientifically dirty;
+# untracked runtime artifacts (e.g. a wandb/ run-log directory left behind by
+# an earlier attempt) do not change what code executes and are intentionally
+# not flagged here so this check never forces deleting evidence.
+_payload_dirty="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" status --porcelain --untracked-files=no)"
+if [ -n "${_payload_dirty}" ]; then
+    echo "FATAL: --payload-repository-path ${PAYLOAD_REPOSITORY_PATH_REAL} has uncommitted tracked-file changes; refusing to submit against a non-pristine payload checkout" >&2
+    exit 2
+fi
+
 LOCK_PATH="${CHAIN_DIR}/rd1_p20_p24_registry.lock"
 LOG_DIR="${CHAIN_DIR}/logs"
 mkdir -p "${CHAIN_DIR}" "${LOG_DIR}"
@@ -148,6 +183,8 @@ for ORDER in "${PROPOSAL_ORDERS[@]}"; do
     EXPORT_LIST="${EXPORT_LIST},RD1_EXPECTED_COMMIT=${EXPECTED_COMMIT}"
     EXPORT_LIST="${EXPORT_LIST},RD1_EXECUTION_GENERATION=${EXECUTION_GENERATION}"
     EXPORT_LIST="${EXPORT_LIST},RD1_OUTPUT_ROOT_BASE=${OUTPUT_ROOT_BASE}"
+    EXPORT_LIST="${EXPORT_LIST},REPO_WORKDIR=${PAYLOAD_REPOSITORY_PATH_REAL}"
+    EXPORT_LIST="${EXPORT_LIST},RD1_PROJECT_ROOT=${REPO_WORKDIR_REAL}"
     if [ "${ORDER}" = "20" ]; then
         EXPORT_LIST="${EXPORT_LIST},RD1_P20_PINNED_MANIFEST_PATH=${P20_PINNED_MANIFEST_PATH}"
         EXPORT_LIST="${EXPORT_LIST},RD1_P20_PINNED_MANIFEST_SHA256=${P20_PINNED_MANIFEST_SHA256}"

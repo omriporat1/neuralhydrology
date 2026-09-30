@@ -32,6 +32,18 @@ Covers, in order:
      same boundary check ``rd1_p20_p24_job.sbatch`` already enforces) is
      refused by the submitter itself, before any ``sbatch`` call and before
      the logs directory is created.
+ 10. ``--payload-repository-path`` is required, is exported into every one
+     of the five ``sbatch`` calls as bare ``REPO_WORKDIR=<payload path>``
+     (proving the payload path actually reaches the job/agent/bridge
+     process, which all resolve ``REPO_WORKDIR`` the same bare-name way),
+     the real tracked-repo root is separately exported as
+     ``RD1_PROJECT_ROOT=<tracked repo>`` (so the project-local boundary
+     check in ``rd1_p20_p24_job.sbatch`` keeps anchoring to the real
+     project, not the payload checkout), a HEAD mismatch against
+     ``--expected-commit`` is refused before any ``sbatch`` call, a dirty
+     payload working tree is refused before any ``sbatch`` call, the
+     ``--export=`` value still carries no ``ALL`` token, and the fixed
+     P20->P24 ``afterok`` topology from points 1-4 above is unaffected.
 """
 from __future__ import annotations
 
@@ -48,6 +60,22 @@ SUBMIT_SCRIPT = REPO_ROOT / "scripts" / "submit_rd1_p20_p24_chain.sh"
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="requires a bash interpreter on PATH")
 
 
+def _bash_command_dir(name: str) -> str:
+    """Directory containing ``name`` as bash's own login-shell PATH resolves
+    it (not the outer Python process's PATH, which may use Windows-style
+    entries bash's PATH variable cannot consume)."""
+    try:
+        result = subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True, text=True)
+    except OSError:
+        return ""
+    resolved = result.stdout.strip()
+    return resolved.rsplit("/", 1)[0] if "/" in resolved else ""
+
+
+_GIT_DIR = _bash_command_dir("git")
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None or not _GIT_DIR, reason="requires bash and git interpreters on PATH")
+
+
 def _write_stub_sbatch(bin_dir: Path, log_path: Path) -> None:
     stub = bin_dir / "sbatch"
     stub.write_text(
@@ -59,16 +87,41 @@ def _write_stub_sbatch(bin_dir: Path, log_path: Path) -> None:
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
 
-def _base_args(chain_dir: Path) -> list[str]:
+def _make_payload_repo(base: Path, *, dirty: bool = False, untracked: bool = False) -> tuple[Path, str]:
+    """A real tiny git checkout standing in for the detached frozen-payload
+    checkout. Its actual HEAD (content-addressed, cannot be forced to an
+    arbitrary SHA) is returned alongside the path so callers pass it as
+    ``--expected-commit`` for the pass case, or a different literal for the
+    HEAD-mismatch case."""
+    repo = base / "payload_repo"
+    repo.mkdir()
+    run = lambda *cmd: subprocess.run(cmd, cwd=repo, check=True, capture_output=True, text=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "test@example.com")
+    run("git", "config", "user.name", "test")
+    (repo / "README.md").write_text("payload\n", encoding="utf-8")
+    run("git", "add", ".")
+    run("git", "commit", "-q", "-m", "payload")
+    head = run("git", "rev-parse", "HEAD").stdout.strip()
+    if dirty:
+        (repo / "README.md").write_text("payload modified\n", encoding="utf-8")
+    if untracked:
+        (repo / "wandb").mkdir()
+        (repo / "wandb" / "debug.log").write_text("stray run artifact\n", encoding="utf-8")
+    return repo, head
+
+
+def _base_args(chain_dir: Path, payload_repo: Path, expected_commit: str) -> list[str]:
     return [
         "--registry-path", str(chain_dir / "registry.json"),
         "--chain-dir", str(chain_dir),
         "--wandb-sweep-id", "disposable-test-sweep",
-        "--expected-commit", "dabd2ca851bd2b3a03035886cfa50015f2c864b4",
+        "--expected-commit", expected_commit,
         "--execution-generation", "1",
         "--output-root-base", str(chain_dir / "outputs"),
         "--p20-pinned-manifest-path", str(chain_dir / "p20_manifest.json"),
         "--p20-pinned-manifest-sha256", "0" * 64,
+        "--payload-repository-path", str(payload_repo),
     ]
 
 
@@ -76,8 +129,19 @@ def _chain_dir_under_project_local_scratch(tmp_path: Path) -> Path:
     """A ``--chain-dir`` value that satisfies the submitter's project-local
     artifact-boundary check when paired with ``REPO_WORKDIR=<tmp_path>`` in
     ``env`` below -- mirrors the identical convention
-    ``rd1_p20_p24_job.sbatch`` uses (``${REPO_WORKDIR}/.scratch_local/...``)."""
+    ``rd1_p20_p24_job.sbatch`` uses (``${REPO_WORKDIR}/.scratch_local/...``).
+    This ``env`` ``REPO_WORKDIR`` is consumed only by the submitter's own
+    tracked-repo/boundary-check logic (becoming ``RD1_PROJECT_ROOT`` in the
+    export list); it is unrelated to ``--payload-repository-path``, which is
+    exported into the job as the bare ``REPO_WORKDIR`` the job itself sees."""
     return tmp_path / ".scratch_local" / "chain"
+
+
+def _env(bin_dir: Path, tmp_path: Path) -> dict:
+    path_value = f"{bin_dir}:/usr/bin:/bin"
+    if _GIT_DIR:
+        path_value = f"{path_value}:{_GIT_DIR}"
+    return {"PATH": path_value, "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
 
 
 def _run(tmp_path: Path, extra_args: "list[str] | None" = None):
@@ -87,14 +151,14 @@ def _run(tmp_path: Path, extra_args: "list[str] | None" = None):
     _write_stub_sbatch(bin_dir, log_path)
 
     chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
-    args = _base_args(chain_dir) + (extra_args or [])
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+    args = _base_args(chain_dir, payload_repo, payload_head) + (extra_args or [])
 
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(bin_dir, tmp_path),
         cwd=str(REPO_ROOT),
     )
     invocations = log_path.read_text(encoding="utf-8").splitlines() if log_path.exists() else []
@@ -138,16 +202,16 @@ def test_refuses_forbidden_sweep_id_before_any_sbatch_call(tmp_path):
     log_path = tmp_path / "sbatch_invocations.log"
     _write_stub_sbatch(bin_dir, log_path)
     chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
 
-    args = _base_args(chain_dir)
+    args = _base_args(chain_dir, payload_repo, payload_head)
     args[args.index("--wandb-sweep-id") + 1] = "4x3btz2s"
 
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(bin_dir, tmp_path),
         cwd=str(REPO_ROOT),
     )
     assert proc.returncode != 0
@@ -196,16 +260,16 @@ def test_log_containment_unaffected_by_caller_cwd(tmp_path):
     log_path = tmp_path / "sbatch_invocations.log"
     _write_stub_sbatch(bin_dir, log_path)
     chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
-    args = _base_args(chain_dir)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+    args = _base_args(chain_dir, payload_repo, payload_head)
 
     unrelated_cwd = tmp_path / "unrelated_cwd"
     unrelated_cwd.mkdir()
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(bin_dir, tmp_path),
         cwd=str(unrelated_cwd),
     )
     assert proc.returncode == 0, proc.stderr
@@ -219,14 +283,14 @@ def test_refuses_chain_dir_outside_project_scratch_local_before_any_sbatch_call(
     log_path = tmp_path / "sbatch_invocations.log"
     _write_stub_sbatch(bin_dir, log_path)
     chain_dir = tmp_path / "not_under_scratch_local" / "chain"
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
 
-    args = _base_args(chain_dir)
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
+    args = _base_args(chain_dir, payload_repo, payload_head)
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(bin_dir, tmp_path),
         cwd=str(REPO_ROOT),
     )
     assert proc.returncode != 0
@@ -241,18 +305,131 @@ def test_refuses_missing_required_argument_before_any_sbatch_call(tmp_path):
     log_path = tmp_path / "sbatch_invocations.log"
     _write_stub_sbatch(bin_dir, log_path)
     chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
 
-    args = _base_args(chain_dir)
+    args = _base_args(chain_dir, payload_repo, payload_head)
     idx = args.index("--registry-path")
     del args[idx:idx + 2]
 
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(tmp_path)}
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=_env(bin_dir, tmp_path),
         cwd=str(REPO_ROOT),
     )
     assert proc.returncode != 0
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+def test_refuses_missing_payload_repository_path_before_any_sbatch_call(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+
+    args = _base_args(chain_dir, payload_repo, payload_head)
+    idx = args.index("--payload-repository-path")
+    del args[idx:idx + 2]
+
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "payload-repository-path" in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+# --- Dual-provenance REPO_WORKDIR export (2026-09-30 recovery correction) ----
+
+
+def test_payload_repository_path_exported_as_repo_workdir_every_order(tmp_path):
+    proc, invocations = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(invocations) == 5
+
+    expected_repo_workdir_prefix = "REPO_WORKDIR="
+    for line in invocations:
+        export_field = next(tok for tok in line.split() if tok.startswith("--export="))
+        tokens = export_field[len("--export="):].split(",")
+        repo_workdir_tokens = [t for t in tokens if t.startswith(expected_repo_workdir_prefix)]
+        assert len(repo_workdir_tokens) == 1
+        assert repo_workdir_tokens[0].endswith("payload_repo")
+        project_root_tokens = [t for t in tokens if t.startswith("RD1_PROJECT_ROOT=")]
+        assert len(project_root_tokens) == 1
+        # The payload checkout and the real tracked-repo project root must be
+        # two distinct paths -- this is the whole point of the correction.
+        assert repo_workdir_tokens[0][len(expected_repo_workdir_prefix):] != project_root_tokens[0][len("RD1_PROJECT_ROOT="):]
+
+
+def test_refuses_payload_repository_head_mismatch_before_any_sbatch_call(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+
+    args = _base_args(chain_dir, payload_repo, "0" * 40)  # expected-commit != actual HEAD
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "does not match --expected-commit" in proc.stderr
+    assert payload_head in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+def test_untracked_files_in_payload_repository_do_not_block_submission(tmp_path):
+    """Stray untracked runtime artifacts (e.g. a leftover wandb/ run-log
+    directory from an earlier attempt) must not be treated as a dirty
+    checkout -- only actual tracked-content modifications should refuse
+    submission, so this check never forces deleting evidence to proceed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path, untracked=True)
+
+    args = _base_args(chain_dir, payload_repo, payload_head)
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(log_path.read_text(encoding="utf-8").strip().splitlines()) == 5
+
+
+def test_refuses_dirty_payload_repository_worktree_before_any_sbatch_call(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path, dirty=True)
+
+    args = _base_args(chain_dir, payload_repo, payload_head)
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "uncommitted tracked-file changes" in proc.stderr
     assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
