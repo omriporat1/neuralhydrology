@@ -55,6 +55,12 @@ Covers, in order:
      beneath its ``.scratch_local/`` and refusing one beneath
      ``REPO_WORKDIR``'s instead); when unset, behavior is unchanged
      (``RD1_PROJECT_ROOT`` defaults to ``REPO_WORKDIR``, per tests 2-3 above).
+  9. (Dual-provenance diagnostic fix, 2026-09-30) ``RD1_WANDB_PROJECT`` /
+     ``RD1_WANDB_ENTITY``, when unset, add no ``--wandb-project`` /
+     ``--wandb-entity`` flag to the non-P20 build-manifest invocation
+     (unchanged production behavior); when explicitly set, both are forwarded
+     verbatim, so a disposable manifest can target a disposable W&B project
+     instead of build-manifest's own hardcoded production default.
 """
 from __future__ import annotations
 
@@ -283,6 +289,57 @@ def test_succeeds_and_invokes_deployed_harness_absolute_path_not_cwd_relative(tm
     # entry (it legitimately appears only as a trailing substring of the
     # deployed absolute path, e.g. ".../harness/scripts/rd1_p20_p24_job.py").
     assert "scripts/rd1_p20_p24_job.py" not in logged_lines
+
+
+def test_build_manifest_omits_wandb_project_entity_flags_by_default(tmp_path):
+    """RD1_WANDB_PROJECT / RD1_WANDB_ENTITY unset (every production launch
+    today): the build-manifest invocation must carry no --wandb-project /
+    --wandb-entity flag at all, so build-manifest keeps resolving its own
+    hardcoded production default exactly as before this override existed."""
+    repo_workdir = tmp_path / "repo_root"
+    repo_workdir.mkdir()
+    chain_dir = repo_workdir / ".scratch_local" / "rd1_p20_p24_chain"
+    deployed_scripts_dir = chain_dir / "harness" / "scripts"
+    deployed_scripts_dir.mkdir(parents=True)
+    (deployed_scripts_dir / "rd1_p20_p24_job.py").write_text("# deployed harness stub\n", encoding="utf-8")
+
+    python_log = tmp_path / "py.log"
+    env = _base_env(tmp_path, repo_workdir=repo_workdir, chain_dir=chain_dir, python_log=python_log)
+
+    proc = _run(env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    logged_lines = python_log.read_text(encoding="utf-8").splitlines()
+    assert "--wandb-project" not in logged_lines
+    assert "--wandb-entity" not in logged_lines
+
+
+def test_build_manifest_passes_through_wandb_project_entity_override_when_set(tmp_path):
+    """The authorized dual-provenance-diagnostic pattern: RD1_WANDB_PROJECT /
+    RD1_WANDB_ENTITY, when explicitly set, are forwarded verbatim as
+    --wandb-project / --wandb-entity to build-manifest, so a disposable
+    manifest can target a disposable project instead of the production
+    default."""
+    repo_workdir = tmp_path / "repo_root"
+    repo_workdir.mkdir()
+    chain_dir = repo_workdir / ".scratch_local" / "rd1_p20_p24_chain"
+    deployed_scripts_dir = chain_dir / "harness" / "scripts"
+    deployed_scripts_dir.mkdir(parents=True)
+    (deployed_scripts_dir / "rd1_p20_p24_job.py").write_text("# deployed harness stub\n", encoding="utf-8")
+
+    python_log = tmp_path / "py.log"
+    env = _base_env(tmp_path, repo_workdir=repo_workdir, chain_dir=chain_dir, python_log=python_log)
+    env["RD1_WANDB_PROJECT"] = "flashnh-disposable-diag-project"
+    env["RD1_WANDB_ENTITY"] = "disposable-entity"
+
+    proc = _run(env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    logged_lines = python_log.read_text(encoding="utf-8").splitlines()
+    assert "--wandb-project" in logged_lines
+    assert logged_lines[logged_lines.index("--wandb-project") + 1] == "flashnh-disposable-diag-project"
+    assert "--wandb-entity" in logged_lines
+    assert logged_lines[logged_lines.index("--wandb-entity") + 1] == "disposable-entity"
 
 
 # --- Task A: project-local temporary-file containment (review fix, 2026-09-27) ---

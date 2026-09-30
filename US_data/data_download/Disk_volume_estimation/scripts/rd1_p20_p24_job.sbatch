@@ -54,6 +54,13 @@ RD1_DRY_RUN="${RD1_DRY_RUN:-}"
 # building a new one. Both must be set together, and only for order 20.
 RD1_P20_PINNED_MANIFEST_PATH="${RD1_P20_PINNED_MANIFEST_PATH:-}"
 RD1_P20_PINNED_MANIFEST_SHA256="${RD1_P20_PINNED_MANIFEST_SHA256:-}"
+# Optional: override the W&B project/entity the freshly-built manifest (the
+# non-P20 branch below) targets. Left unset for every production launch, so
+# build-manifest keeps using its own hardcoded default (the one production
+# project) exactly as before. Only ever set for an authorized disposable
+# diagnostic, whose manifest must target a disposable project/entity instead.
+RD1_WANDB_PROJECT="${RD1_WANDB_PROJECT:-}"
+RD1_WANDB_ENTITY="${RD1_WANDB_ENTITY:-}"
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 REPO_WORKDIR="${REPO_WORKDIR:-${FLASHNH_BASE}/repos/flash-nh/US_data/data_download/Disk_volume_estimation}"
@@ -245,13 +252,22 @@ if [ "${RD1_PROPOSAL_ORDER}" = "20" ]; then
 else
     echo "--- P${RD1_PROPOSAL_ORDER}: building this proposal's own manifest (predecessor already passed via afterok) ---"
     MANIFEST_PATH="${MANIFEST_DIR}/rd1_p${RD1_PROPOSAL_ORDER}_manifest.json"
-    "${CANONICAL_PYTHON}" scripts/create_sweep_v2_six_axis_wandb_bridge_production_sweep.py build-manifest \
-        --manifest-path "${MANIFEST_PATH}" \
-        --wandb-sweep-id "${RD1_WANDB_SWEEP_ID}" \
-        --expected-commit "${RD1_EXPECTED_COMMIT}" \
-        --proposal-order "${RD1_PROPOSAL_ORDER}" \
-        --execution-generation "${RD1_EXECUTION_GENERATION}" \
+    BUILD_MANIFEST_ARGS=(
+        --manifest-path "${MANIFEST_PATH}"
+        --wandb-sweep-id "${RD1_WANDB_SWEEP_ID}"
+        --expected-commit "${RD1_EXPECTED_COMMIT}"
+        --proposal-order "${RD1_PROPOSAL_ORDER}"
+        --execution-generation "${RD1_EXECUTION_GENERATION}"
         --output-root-base "${RD1_OUTPUT_ROOT_BASE}"
+    )
+    if [ -n "${RD1_WANDB_PROJECT}" ]; then
+        BUILD_MANIFEST_ARGS+=(--wandb-project "${RD1_WANDB_PROJECT}")
+    fi
+    if [ -n "${RD1_WANDB_ENTITY}" ]; then
+        BUILD_MANIFEST_ARGS+=(--wandb-entity "${RD1_WANDB_ENTITY}")
+    fi
+    "${CANONICAL_PYTHON}" scripts/create_sweep_v2_six_axis_wandb_bridge_production_sweep.py build-manifest \
+        "${BUILD_MANIFEST_ARGS[@]}"
 fi
 
 echo "--- validating manifest before any W&B contact ---"
