@@ -145,11 +145,15 @@ esac
 # tracked-repo project root) so every job's bridge process runs out of this
 # checkout instead of silently defaulting to the tracked harness repo.
 PAYLOAD_REPOSITORY_PATH_REAL="$(realpath -m "${PAYLOAD_REPOSITORY_PATH}")"
-if [ ! -e "${PAYLOAD_REPOSITORY_PATH_REAL}/.git" ]; then
-    echo "FATAL: --payload-repository-path ${PAYLOAD_REPOSITORY_PATH_REAL} is not a git checkout" >&2
+# --payload-repository-path may legitimately be a subdirectory of a larger
+# checkout (e.g. this project nested inside a full repo clone) rather than a
+# git root itself, so existence is proved by a working git command (which
+# discovers the enclosing repo upward) rather than a literal <path>/.git
+# check, which would wrongly refuse a valid nested checkout.
+if ! _payload_head="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" rev-parse HEAD 2>&1)"; then
+    echo "FATAL: --payload-repository-path ${PAYLOAD_REPOSITORY_PATH_REAL} is not inside a git checkout (git rev-parse HEAD failed: ${_payload_head})" >&2
     exit 2
 fi
-_payload_head="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" rev-parse HEAD)"
 if [ "${_payload_head}" != "${EXPECTED_COMMIT}" ]; then
     echo "FATAL: --payload-repository-path HEAD ${_payload_head} does not match --expected-commit ${EXPECTED_COMMIT}" >&2
     exit 2
@@ -157,8 +161,10 @@ fi
 # Only tracked-content modifications make the checkout scientifically dirty;
 # untracked runtime artifacts (e.g. a wandb/ run-log directory left behind by
 # an earlier attempt) do not change what code executes and are intentionally
-# not flagged here so this check never forces deleting evidence.
-_payload_dirty="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" status --porcelain --untracked-files=no)"
+# not flagged here so this check never forces deleting evidence. Scoped with
+# "-- ." to this project's own subtree, since --payload-repository-path may
+# be a subdirectory of a larger checkout whose other paths are irrelevant.
+_payload_dirty="$(git -C "${PAYLOAD_REPOSITORY_PATH_REAL}" status --porcelain --untracked-files=no -- .)"
 if [ -n "${_payload_dirty}" ]; then
     echo "FATAL: --payload-repository-path ${PAYLOAD_REPOSITORY_PATH_REAL} has uncommitted tracked-file changes; refusing to submit against a non-pristine payload checkout" >&2
     exit 2

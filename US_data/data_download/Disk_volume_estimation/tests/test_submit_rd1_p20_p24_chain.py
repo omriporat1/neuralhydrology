@@ -87,24 +87,41 @@ def _write_stub_sbatch(bin_dir: Path, log_path: Path) -> None:
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
 
-def _make_payload_repo(base: Path, *, dirty: bool = False, untracked: bool = False) -> tuple[Path, str]:
+def _make_payload_repo(
+    base: Path, *, dirty: bool = False, untracked: bool = False, nested: bool = False,
+) -> tuple[Path, str]:
     """A real tiny git checkout standing in for the detached frozen-payload
     checkout. Its actual HEAD (content-addressed, cannot be forced to an
     arbitrary SHA) is returned alongside the path so callers pass it as
     ``--expected-commit`` for the pass case, or a different literal for the
-    HEAD-mismatch case."""
+    HEAD-mismatch case.
+
+    ``nested=True`` mirrors the real production topology: the git root
+    (``.git``) sits at the top of a larger checkout, and the project this
+    submitter operates on lives several directories below it (e.g.
+    ``US_data/data_download/Disk_volume_estimation``) rather than being the
+    git root itself. The returned path is that nested project directory,
+    not the git root, since that is what ``--payload-repository-path`` is
+    given in production."""
     repo = base / "payload_repo"
     repo.mkdir()
-    run = lambda *cmd: subprocess.run(cmd, cwd=repo, check=True, capture_output=True, text=True)
+    run = lambda *cmd, cwd=repo: subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
     run("git", "init", "-q")
     run("git", "config", "user.email", "test@example.com")
     run("git", "config", "user.name", "test")
     (repo / "README.md").write_text("payload\n", encoding="utf-8")
+    project_dir = repo
+    if nested:
+        project_dir = repo / "US_data" / "data_download" / "Disk_volume_estimation"
+        project_dir.mkdir(parents=True)
+        (project_dir / "marker.txt").write_text("nested project\n", encoding="utf-8")
     run("git", "add", ".")
     run("git", "commit", "-q", "-m", "payload")
     head = run("git", "rev-parse", "HEAD").stdout.strip()
     if dirty:
         (repo / "README.md").write_text("payload modified\n", encoding="utf-8")
+    if nested:
+        return project_dir, head
     if untracked:
         (repo / "wandb").mkdir()
         (repo / "wandb" / "debug.log").write_text("stray run artifact\n", encoding="utf-8")
@@ -403,6 +420,33 @@ def test_untracked_files_in_payload_repository_do_not_block_submission(tmp_path)
     payload_repo, payload_head = _make_payload_repo(tmp_path, untracked=True)
 
     args = _base_args(chain_dir, payload_repo, payload_head)
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(log_path.read_text(encoding="utf-8").strip().splitlines()) == 5
+
+
+def test_payload_repository_path_as_nested_project_subdirectory_accepted(tmp_path):
+    """--payload-repository-path may be a subdirectory of a larger checkout
+    (mirroring production: the payload checkout's .git sits above
+    US_data/data_download/Disk_volume_estimation, not inside it) rather
+    than a git root itself. A literal ``<path>/.git`` existence check would
+    wrongly refuse this; the validation must rely on git's own upward repo
+    discovery instead."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_project_dir, payload_head = _make_payload_repo(tmp_path, nested=True)
+    assert not (payload_project_dir / ".git").exists()
+
+    args = _base_args(chain_dir, payload_project_dir, payload_head)
     proc = subprocess.run(
         ["bash", str(SUBMIT_SCRIPT), *args],
         capture_output=True,
