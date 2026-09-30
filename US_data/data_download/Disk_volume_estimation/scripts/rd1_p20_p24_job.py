@@ -54,6 +54,7 @@ import math
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -377,19 +378,37 @@ def _wandb_sweep_run_ids(manifest_path: "str | Path", sweep_id: str) -> list[str
     return sorted(run.id for run in sweep.runs)
 
 
-def _wandb_resolve_latest_run_id(manifest_path: "str | Path", sweep_id: str) -> str:
+def _wandb_resolve_latest_run_id(
+    manifest_path: "str | Path",
+    sweep_id: str,
+    *,
+    sleep_fn: "Callable[[float], None]" = time.sleep,
+) -> str:
     """Read-only resolution of the most-recently-created run in
     ``sweep_id``, called exactly once after ``run_agent_with_retry`` reports
     overall success. Raises ``RuntimeError`` if the sweep has no runs at
     all (a successful agent exit with no resolvable run is itself a fatal,
     non-retryable condition -- the caller must not append a registry row
-    without a real run id)."""
+    without a real run id).
+
+    Root-cause-#3 fix (2026-09-30 real disposable diagnostic, job 46259249):
+    a fully successful training+validation attempt with a cleanly-synced,
+    valid W&B run was lost -- ``AGENT_FAILED reason=run_id_resolution_failed``
+    -- to a single transient W&B API error on this call, even though the
+    identically-shaped ``audit_run_ids_fn`` calls in ``run_agent_with_retry``
+    above are already wrapped in :func:`~src.baseline.rd1_p20_p24_retry.
+    fetch_with_backoff`. This call site was the one read-only W&B lookup in
+    this module left unprotected. ``sleep_fn`` defaults to real
+    ``time.sleep`` in production; tests inject a no-op to stay fast."""
     sweep_path = _resolve_canonical_sweep_path(manifest_path, sweep_id)
     import wandb  # noqa: PLC0415
 
-    api = wandb.Api()
-    sweep = api.sweep(sweep_path)
-    runs = sorted(sweep.runs, key=lambda run: run.created_at)
+    def _fetch_runs() -> list:
+        api = wandb.Api()
+        sweep = api.sweep(sweep_path)
+        return sorted(sweep.runs, key=lambda run: run.created_at)
+
+    runs = fetch_with_backoff(_fetch_runs, sleep_fn=sleep_fn)
     if not runs:
         raise RuntimeError("no runs found in sweep after a successful agent exit")
     return runs[-1].id
@@ -585,7 +604,12 @@ def validate_local_provenance_record(
     return objective_value
 
 
-def validate_terminal_wandb_run(manifest_path: "str | Path", run_id: str) -> float:
+def validate_terminal_wandb_run(
+    manifest_path: "str | Path",
+    run_id: str,
+    *,
+    sleep_fn: "Callable[[float], None]" = time.sleep,
+) -> float:
     """Independently confirm, via a fresh read-only W&B API call, that
     ``run_id`` reached a genuinely terminal, scientifically valid state --
     never trusted from local files or subprocess exit codes alone (the
@@ -594,15 +618,22 @@ def validate_terminal_wandb_run(manifest_path: "str | Path", run_id: str) -> flo
     local ``execution_provenance.json`` record. Fails closed -- raises
     :class:`RunAcceptanceError` -- on any non-``finished`` state, a
     missing/false ``flashnh/valid`` flag, a missing or non-finite objective
-    metric, or any W&B API error. Imports ``wandb`` lazily so importing this
-    module for the pure-function unit tests never requires the ``wandb``
-    package to be installed."""
+    metric, or a W&B API error that persists across
+    :func:`~src.baseline.rd1_p20_p24_retry.fetch_with_backoff`'s bounded
+    retries (root-cause-#3 fix, 2026-09-30: this lookup is the registry-
+    acceptance-gate sibling of ``_wandb_resolve_latest_run_id`` and was
+    equally exposed to a single transient W&B API error). Imports ``wandb``
+    lazily so importing this module for the pure-function unit tests never
+    requires the ``wandb`` package to be installed. ``sleep_fn`` defaults to
+    real ``time.sleep`` in production; tests inject a no-op to stay fast."""
     run_path = _resolve_canonical_run_path(manifest_path, run_id)
     import wandb  # noqa: PLC0415
 
-    api = wandb.Api()
+    def _fetch_run():
+        return wandb.Api().run(run_path)
+
     try:
-        run = api.run(run_path)
+        run = fetch_with_backoff(_fetch_run, sleep_fn=sleep_fn)
     except Exception as exc:  # noqa: BLE001 -- any lookup failure is fatal, never silently skipped
         raise RunAcceptanceError("wandb_run_lookup_failed", f"{run_path}: {exc}") from exc
 

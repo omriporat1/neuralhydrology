@@ -59,6 +59,20 @@ Covers, in order:
   22. ``_persist_attempt_evidence`` persists exactly one redacted evidence
       file per attempt, for both a successful and a failed attempt, and
       writes nothing outside the caller-supplied attempts directory.
+  23. ``_wandb_resolve_latest_run_id`` transparently retries a transient
+      W&B API error (via ``fetch_with_backoff``) and returns the correct
+      latest run id once the API call succeeds, and raises
+      ``RetryAuditError`` after exhausting the bounded backoff budget on a
+      persistent failure (root-cause-#3 regression: a real disposable
+      diagnostic run, job 46259249 on 2026-09-30, lost a fully successful
+      training+validation attempt to exactly this previously-unprotected
+      call site).
+  24. ``validate_terminal_wandb_run`` likewise transparently retries a
+      transient W&B API error and still enforces its full acceptance
+      contract (state/``flashnh/valid``/finite-objective) once the call
+      succeeds, and raises ``RunAcceptanceError("wandb_run_lookup_failed",
+      ...)`` -- unchanged from before this fix -- after exhausting backoff
+      on a persistent failure.
 
 Every W&B/subprocess-shaped input is a plain injected callable; never
 touches Moriah, W&B, or Slurm. The registry-acceptance/append tests
@@ -74,6 +88,7 @@ import argparse
 import hashlib
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -99,7 +114,10 @@ from scripts.rd1_p20_p24_job import (  # noqa: E402
     verify_pinned_manifest_checksum,
 )
 from src.baseline.rd1_p20_p24_registry import read_registry  # noqa: E402
-from src.baseline.rd1_p20_p24_retry import WANDB_SERVICE_STARTUP_FAILURE_MARKER  # noqa: E402
+from src.baseline.rd1_p20_p24_retry import (  # noqa: E402
+    WANDB_SERVICE_STARTUP_FAILURE_MARKER,
+    RetryAuditError,
+)
 from src.baseline.sweep_v2_six_axis_campaign import (  # noqa: E402
     CAMPAIGN_ID_V2,
     CONFIGURATION_CANONICALIZATION_VERSION_V2,
@@ -707,3 +725,123 @@ def test_persist_attempt_evidence_persists_and_redacts_on_success_and_failure(tm
     assert record_2["returncode"] == 1
     assert "hunter2" not in record_2["output_text_redacted"]
     assert "***REDACTED***" in record_2["output_text_redacted"]
+
+
+class _FakeWandbRun:
+    def __init__(self, run_id, *, created_at="2026-01-01T00:00:00Z", state="finished", summary=None):
+        self.id = run_id
+        self.created_at = created_at
+        self.state = state
+        self.summary = summary or {}
+
+
+class _FakeWandbSweep:
+    def __init__(self, runs):
+        self.runs = runs
+
+
+def test_wandb_resolve_latest_run_id_retries_transient_failure_then_succeeds(monkeypatch, short_tmp_path):
+    """Root-cause-#3 regression: a transient W&B API error (e.g. the exact
+    "An error occurred while verifying the API key." seen on job 46259249)
+    on the first two calls must not be fatal -- ``fetch_with_backoff``
+    retries and the correct latest run id is still returned once the API
+    call succeeds."""
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+
+    good_sweep = _FakeWandbSweep(
+        runs=[
+            _FakeWandbRun("run-old", created_at="2026-01-01T00:00:00Z"),
+            _FakeWandbRun("run-new", created_at="2026-01-02T00:00:00Z"),
+        ]
+    )
+    calls = {"n": 0}
+
+    class _FakeApi:
+        def sweep(self, path):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("An error occurred while verifying the API key.")
+            assert path == "rd1-test-entity/rd1-test-project/sweep-x"
+            return good_sweep
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
+    sleeps = []
+
+    run_id = rd1_job._wandb_resolve_latest_run_id(manifest_path, "sweep-x", sleep_fn=sleeps.append)
+
+    assert run_id == "run-new"
+    assert calls["n"] == 3
+    assert len(sleeps) == 2  # two backoff sleeps before the third, successful attempt
+
+
+def test_wandb_resolve_latest_run_id_raises_after_exhausting_backoff(monkeypatch, short_tmp_path):
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+
+    class _FakeApi:
+        def sweep(self, path):
+            raise RuntimeError("An error occurred while verifying the API key.")
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
+    sleeps = []
+
+    with pytest.raises(RetryAuditError):
+        rd1_job._wandb_resolve_latest_run_id(manifest_path, "sweep-x", sleep_fn=sleeps.append)
+
+    assert len(sleeps) == 2  # default fetch_with_backoff max_attempts=3 -> 2 backoff sleeps
+
+
+def test_validate_terminal_wandb_run_retries_transient_failure_then_succeeds(monkeypatch, short_tmp_path):
+    """Registry-acceptance-gate sibling of the above: a transient W&B API
+    error on the first call must not be fatal, and the full acceptance
+    contract (state/``flashnh/valid``/finite-objective) is still enforced
+    once the retried call succeeds."""
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+
+    good_run = _FakeWandbRun(
+        "run-x", state="finished", summary={"flashnh/valid": True, V2_METRIC_NAME: 0.42}
+    )
+    calls = {"n": 0}
+
+    class _FakeApi:
+        def run(self, path):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise RuntimeError("An error occurred while verifying the API key.")
+            assert path == "rd1-test-entity/rd1-test-project/run-x"
+            return good_run
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
+    sleeps = []
+
+    objective = rd1_job.validate_terminal_wandb_run(manifest_path, "run-x", sleep_fn=sleeps.append)
+
+    assert objective == pytest.approx(0.42)
+    assert calls["n"] == 2
+    assert len(sleeps) == 1
+
+
+def test_validate_terminal_wandb_run_raises_run_acceptance_error_after_exhausting_backoff(
+    monkeypatch, short_tmp_path
+):
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+
+    class _FakeApi:
+        def run(self, path):
+            raise RuntimeError("An error occurred while verifying the API key.")
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
+    sleeps = []
+
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        rd1_job.validate_terminal_wandb_run(manifest_path, "run-x", sleep_fn=sleeps.append)
+
+    assert excinfo.value.reason == "wandb_run_lookup_failed"
+    assert len(sleeps) == 2
