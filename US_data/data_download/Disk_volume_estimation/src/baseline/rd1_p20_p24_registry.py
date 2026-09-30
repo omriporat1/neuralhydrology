@@ -24,7 +24,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 try:
     import fcntl  # POSIX-only; the RD1 chain runs exclusively on Moriah/Catfish Linux nodes.
@@ -38,6 +38,7 @@ __all__ = [
     "registry_orders",
     "backup_registry",
     "append_row_verified",
+    "remove_rows_verified",
 ]
 
 DEFAULT_LOCK_TIMEOUT_SEC = 60
@@ -192,3 +193,96 @@ def append_row_verified(
         raise RegistryError("post_append_new_row_mismatch", str(new_row))
 
     return {"registry_backup_path": str(backup_path), "orders_after": re_orders}
+
+
+def remove_rows_verified(
+    registry_path: "str | Path",
+    orders_to_remove: "list[int]",
+    *,
+    expected_current_orders: "list[int]",
+    is_malformed_row: "Callable[[dict], bool]",
+    backup_dir: "str | Path",
+) -> dict:
+    """Remove exactly the rows in ``orders_to_remove`` under the caller's own
+    exclusive :class:`RegistryLock`, or raise :class:`RegistryError` and
+    leave the on-disk registry byte-identical to before the call.
+
+    The symmetric counterpart to :func:`append_row_verified`: same
+    lock-is-the-caller's-responsibility convention, same
+    backup-before-mutate / atomic-replace / reread-and-verify contract. This
+    module carries no knowledge of any particular order values or row shape
+    (e.g. no hardcoded P20-P24) -- the caller supplies both the rows to
+    remove and ``is_malformed_row``, a predicate that must return ``True``
+    for a row the caller has independently confirmed is safe to discard.
+
+    Preconditions enforced (in order), each a distinct fail-closed reason:
+
+    1. The on-disk registry's orders must equal ``expected_current_orders``
+       exactly (catches a registry that drifted since the caller's own
+       preflight read).
+    2. Every order in ``orders_to_remove`` must be present.
+    3. Every row named in ``orders_to_remove`` must satisfy
+       ``is_malformed_row`` (refuses to silently discard a well-formed row).
+    4. After the atomic replace, a fresh read must show every remaining row
+       byte-identical to before, none of ``orders_to_remove`` present, and
+       the full order set exactly
+       ``sorted(set(expected_current_orders) - set(orders_to_remove))``.
+
+    If a post-write verification fails, this never attempts an automatic
+    restore -- the backup written before the replace is left in place and
+    its path is carried in the raised :class:`RegistryError`'s detail, for
+    the caller to report and act on manually.
+    """
+    registry_path = Path(registry_path)
+    remove_set = {int(o) for o in orders_to_remove}
+
+    registry = read_registry(registry_path)
+    current_orders = registry_orders(registry)
+
+    if current_orders != list(expected_current_orders):
+        raise RegistryError(
+            "registry_not_at_expected_current_state",
+            f"orders={current_orders} expected_current={list(expected_current_orders)}",
+        )
+
+    missing = remove_set - set(current_orders)
+    if missing:
+        raise RegistryError("remove_order_not_present", f"missing={sorted(missing)}")
+
+    rows_by_order = {int(r["order"]): r for r in registry["runs"]}
+    not_malformed = [o for o in sorted(remove_set) if not is_malformed_row(rows_by_order[o])]
+    if not_malformed:
+        raise RegistryError("row_shape_not_malformed_refusing_removal", f"orders={not_malformed}")
+
+    backup_path = backup_registry(registry_path, backup_dir)
+
+    kept_rows = {o: r for o, r in rows_by_order.items() if o not in remove_set}
+    removed_rows = {o: rows_by_order[o] for o in sorted(remove_set)}
+    expected_final = sorted(set(current_orders) - remove_set)
+
+    registry["runs"] = [r for r in registry["runs"] if int(r["order"]) not in remove_set]
+    tmp_path = registry_path.with_suffix(registry_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(registry, fh, indent=2)
+    os.replace(tmp_path, registry_path)
+
+    reread = read_registry(registry_path)
+    re_orders = registry_orders(reread)
+    if re_orders != expected_final:
+        raise RegistryError(
+            "post_remove_orders_not_contiguous",
+            f"orders_after={re_orders} expected_final={expected_final} registry_backup_path={backup_path}",
+        )
+    for kept_order, kept_row in kept_rows.items():
+        match = next((r for r in reread["runs"] if r["order"] == kept_order), None)
+        if match != kept_row:
+            raise RegistryError(
+                "post_remove_kept_row_mutated",
+                f"order={kept_order} registry_backup_path={backup_path}",
+            )
+
+    return {
+        "registry_backup_path": str(backup_path),
+        "orders_after": re_orders,
+        "removed_rows": removed_rows,
+    }
