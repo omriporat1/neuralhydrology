@@ -314,6 +314,7 @@ set +e
     --path "${PATH}" \
     --home "${HOME}" \
     --repo-workdir "${REPO_WORKDIR}" \
+    --order "${RD1_PROPOSAL_ORDER}" \
     --max-attempts 2 \
     --attempts-dir "${RD1_ATTEMPTS_DIR}" \
     > "${RESULT_FILE}" 2>&1

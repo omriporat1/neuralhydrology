@@ -44,12 +44,25 @@ Covers, in order:
      payload working tree is refused before any ``sbatch`` call, the
      ``--export=`` value still carries no ``ALL`` token, and the fixed
      P20->P24 ``afterok`` topology from points 1-4 above is unaffected.
+ 11. ``--start-order 21`` (P21-P24 resume, 2026-09-30): submits exactly 4
+     invocations for orders 21-24, P21 carries no ``--dependency`` and
+     P22-P24 chain ``afterok`` exactly as in the P20-start case, no
+     invocation ever carries ``RD1_P20_PINNED_MANIFEST_PATH``/
+     ``RD1_P20_PINNED_MANIFEST_SHA256``, the frozen payload-path/allowlist
+     exports from point 10 are unaffected, a registry that is not exactly
+     P1-P20 is refused before any ``sbatch`` call, passing
+     ``--p20-pinned-manifest-path``/``--p20-pinned-manifest-sha256`` with
+     ``--start-order 21`` is refused before any ``sbatch`` call, and an
+     unsupported ``--start-order`` value is refused before any ``sbatch``
+     call.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -476,4 +489,176 @@ def test_refuses_dirty_payload_repository_worktree_before_any_sbatch_call(tmp_pa
     )
     assert proc.returncode != 0
     assert "uncommitted tracked-file changes" in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+# --- --start-order 21 resume path (Part B, 2026-09-30) ----------------------
+
+
+def _write_registry_with_orders(path: Path, orders: "list[int]") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"runs": [{"order": o} for o in orders]}), encoding="utf-8")
+
+
+def _resume_args(chain_dir: Path, registry_path: Path, payload_repo: Path, expected_commit: str) -> list[str]:
+    """Deliberately omits ``--p20-pinned-manifest-path``/``--sha256``:
+    unlike ``_base_args``, the resume path must not require (or accept)
+    them."""
+    return [
+        "--registry-path", str(registry_path),
+        "--chain-dir", str(chain_dir),
+        "--wandb-sweep-id", "disposable-test-sweep",
+        "--expected-commit", expected_commit,
+        "--execution-generation", "1",
+        "--output-root-base", str(chain_dir / "outputs"),
+        "--payload-repository-path", str(payload_repo),
+        "--start-order", "21",
+    ]
+
+
+def test_start_order_21_submits_exactly_p21_through_p24_with_correct_dependencies(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+    registry_path = chain_dir / "registry.json"
+    _write_registry_with_orders(registry_path, list(range(1, 21)))  # exactly P1-P20
+
+    args = _resume_args(chain_dir, registry_path, payload_repo, payload_head)
+    env = _env(bin_dir, tmp_path)
+    env["CANONICAL_PYTHON"] = sys.executable
+
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 0, proc.stderr
+    invocations = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(invocations) == 4
+
+    for order, line in zip(range(21, 25), invocations):
+        assert f"RD1_PROPOSAL_ORDER={order}" in line
+        assert "RD1_P20_PINNED_MANIFEST_PATH=" not in line
+        assert "RD1_P20_PINNED_MANIFEST_SHA256=" not in line
+        export_field = next(tok for tok in line.split() if tok.startswith("--export="))
+        tokens = export_field[len("--export="):].split(",")
+        assert "ALL" not in tokens
+        repo_workdir_tokens = [t for t in tokens if t.startswith("REPO_WORKDIR=")]
+        assert len(repo_workdir_tokens) == 1
+        assert repo_workdir_tokens[0].endswith("payload_repo")
+
+    # Never P20, never anything past P24.
+    assert not any("RD1_PROPOSAL_ORDER=20," in line or line.endswith("RD1_PROPOSAL_ORDER=20") for line in invocations)
+    assert not any("RD1_PROPOSAL_ORDER=25" in line for line in invocations)
+
+    assert "--dependency" not in invocations[0]
+    for line in invocations[1:]:
+        assert "--dependency=afterok:" in line
+
+
+def test_start_order_21_refuses_when_registry_not_exactly_p1_p20(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+    registry_path = chain_dir / "registry.json"
+    _write_registry_with_orders(registry_path, list(range(1, 20)))  # only P1-P19
+
+    args = _resume_args(chain_dir, registry_path, payload_repo, payload_head)
+    env = _env(bin_dir, tmp_path)
+    env["CANONICAL_PYTHON"] = sys.executable
+
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "resume precondition refused" in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+def test_start_order_21_refuses_p20_manifest_arguments_before_any_sbatch_call(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+    registry_path = chain_dir / "registry.json"
+    # Even a fully-valid P1-P20 registry must not matter here -- the args
+    # themselves are refused first, and this check must not require
+    # CANONICAL_PYTHON/a real registry read at all.
+    _write_registry_with_orders(registry_path, list(range(1, 21)))
+
+    args = _resume_args(chain_dir, registry_path, payload_repo, payload_head) + [
+        "--p20-pinned-manifest-path", str(chain_dir / "p20_manifest.json"),
+        "--p20-pinned-manifest-sha256", "0" * 64,
+    ]
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "must not be given with --start-order 21" in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+def test_start_order_invalid_value_refused_before_any_sbatch_call(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+
+    args = _base_args(chain_dir, payload_repo, payload_head) + ["--start-order", "22"]
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "--start-order must be 20 or 21" in proc.stderr
+    assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()
+
+
+def test_start_order_default_still_requires_p20_manifest_arguments(tmp_path):
+    """Regression guard: the default (omitted --start-order, i.e. 20) path
+    must still require the P20 pinned-manifest arguments exactly as before
+    this change."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "sbatch_invocations.log"
+    _write_stub_sbatch(bin_dir, log_path)
+    chain_dir = _chain_dir_under_project_local_scratch(tmp_path)
+    payload_repo, payload_head = _make_payload_repo(tmp_path)
+
+    args = _base_args(chain_dir, payload_repo, payload_head)
+    idx = args.index("--p20-pinned-manifest-path")
+    del args[idx:idx + 2]
+
+    proc = subprocess.run(
+        ["bash", str(SUBMIT_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        env=_env(bin_dir, tmp_path),
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode != 0
+    assert "p20-pinned-manifest-path" in proc.stderr
     assert not log_path.exists() or not log_path.read_text(encoding="utf-8").strip()

@@ -68,11 +68,18 @@ from src.baseline.sweep_v2_six_axis_campaign import (
     CONFIGURATION_CANONICALIZATION_VERSION_V2,
     DOMAIN_VERSION_V2,
     OBJECTIVE_ID_V2,
+    configuration_id_v2,
+    proposal_id_v2,
+    trial_id_v2,
 )
 from src.baseline.sweep_v2_six_axis_wandb_bridge_manifest import write_v2_wandb_bridge_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JOB_PY = REPO_ROOT / "scripts" / "rd1_p20_p24_job.py"
+
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.rd1_p20_p24_job import V2_METRIC_NAME  # noqa: E402
 
 _STUB_WANDB_MODULE = '''
 import json
@@ -102,6 +109,12 @@ class _Sweep:
         self.runs = [_Run(r) for r in run_ids]
 
 
+class _TerminalRun:
+    def __init__(self, state, summary):
+        self.state = state
+        self.summary = summary
+
+
 class _Api:
     def sweep(self, sweep_path):
         state = _load()
@@ -114,6 +127,15 @@ class _Api:
         if entry == "RAISE":
             raise RuntimeError("stub: W&B sweep audit unreachable")
         return _Sweep(entry)
+
+    def run(self, run_path):
+        state = _load()
+        state.setdefault("run_paths_seen", []).append(run_path)
+        _save(state)
+        lookup = state.get("run_lookup")
+        if not lookup:
+            raise RuntimeError(f"stub: no run_lookup configured for {run_path!r}")
+        return _TerminalRun(lookup["state"], lookup["summary"])
 
 
 def Api():
@@ -138,10 +160,68 @@ def _write_stub_wandb(tmp_path: Path) -> Path:
     return site_dir
 
 
-def _write_wandb_state(tmp_path: Path, snapshots: list) -> Path:
+def _write_wandb_state(tmp_path: Path, snapshots: list, *, run_lookup: "dict | None" = None) -> Path:
     state_path = tmp_path / "wandb_state.json"
-    state_path.write_text(json.dumps({"call_index": 0, "snapshots": snapshots}), encoding="utf-8")
+    state_path.write_text(
+        json.dumps({"call_index": 0, "snapshots": snapshots, "run_lookup": run_lookup}), encoding="utf-8"
+    )
     return state_path
+
+
+_PROVENANCE_HYPERPARAMETERS = {
+    "learning_rate": 5e-4,
+    "hidden_size": 128,
+    "embedding_dropout": 0.1,
+    "output_dropout": 0.1,
+    "batch_size": 256,
+    "seq_length": 72,
+}
+_PROVENANCE_SUPPORT_CONTRACT_SHA256 = "c" * 64
+
+
+def _write_success_provenance(
+    output_root: Path, *, order: int, sweep_id: str, run_id: str, objective_score: float = 0.5
+) -> None:
+    """A fully valid local ``execution_provenance.json`` record for a
+    successful attempt, built from the real v2 identity-derivation
+    primitives -- mirrors ``test_rd1_p20_p24_job.py``'s
+    ``_build_provenance_record``/``_write_provenance_file`` -- so that
+    ``resolve_run_id_from_local_provenance``'s full acceptance gate
+    (identity re-derivation + the stubbed terminal W&B lookup below) has
+    real local evidence to accept rather than a hand-typed fixture."""
+    configuration_id = configuration_id_v2(
+        _PROVENANCE_HYPERPARAMETERS,
+        support_contract_version=OBJECTIVE_ID_V2,
+        support_contract_sha256=_PROVENANCE_SUPPORT_CONTRACT_SHA256,
+    )
+    proposal_id = proposal_id_v2("bayesian", order)
+    trial_id = trial_id_v2(configuration_id, proposal_id, execution_generation=1)
+    record = {
+        "hyperparameters": dict(_PROVENANCE_HYPERPARAMETERS),
+        "search_arm": "bayesian",
+        "proposal_order": order,
+        "execution_generation": 1,
+        "configuration_id": configuration_id,
+        "proposal_id": proposal_id,
+        "trial_id": trial_id,
+        "campaign_id": CAMPAIGN_ID_V2,
+        "domain_version": DOMAIN_VERSION_V2,
+        "wandb_sweep_id": sweep_id,
+        "wandb_run_id": run_id,
+        "support_contract_version": OBJECTIVE_ID_V2,
+        "support_contract_sha256": _PROVENANCE_SUPPORT_CONTRACT_SHA256,
+        "execution_status": "VALID",
+        "objective_eligible": True,
+        "fixed_support_metric_name": V2_METRIC_NAME,
+        "objective_score": objective_score,
+    }
+    # A short, fixed directory name -- not the real (long) trial_id -- keeps
+    # this well under Windows' MAX_PATH once nested beneath pytest's own
+    # deep tmp_path; find_local_execution_provenance(_by_order) matches on
+    # the record's own JSON fields, never the enclosing directory name.
+    trial_dir = output_root / "t"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    (trial_dir / "execution_provenance.json").write_text(json.dumps(record), encoding="utf-8")
 
 
 def _write_stub_launcher(tmp_path: Path, counter_file: Path, outcomes: list[tuple[int, str]]) -> Path:
@@ -187,7 +267,7 @@ def _write_manifest(
         expected_runtime_python="/canonical/python",
         wandb_project="" if wandb_project is None else wandb_project,
         wandb_sweep_id=wandb_sweep_id,
-        output_root=str(REPO_ROOT / "tmp/out"),
+        output_root=str(path.parent / "out"),
         package_root=str(REPO_ROOT / "tmp/pkg"),
         screening_basin_ids_path=str(REPO_ROOT / "tmp/screening.txt"),
         screening_basin_ids_sha256="b" * 64,
@@ -219,6 +299,7 @@ def _run_cli(
     extra_args: list[str],
     manifest_kwargs: "dict | None" = None,
     repo_workdir: "str | None" = None,
+    order: int = 1,
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(site_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -241,6 +322,8 @@ def _run_cli(
         str(tmp_path),
         "--repo-workdir",
         repo_workdir if repo_workdir is not None else str(tmp_path),
+        "--order",
+        str(order),
         *extra_args,
     ]
     return subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60)
@@ -264,7 +347,14 @@ def test_no_retry_when_new_run_id_appears_in_audit(tmp_path):
 
 def test_one_retry_on_empty_diff_then_success(tmp_path):
     site_dir = _write_stub_wandb(tmp_path)
-    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"], ["r0"], ["r0", "r1"]])
+    _write_success_provenance(
+        tmp_path / "out", order=1, sweep_id=_DEFAULT_MANIFEST_SWEEP_ID, run_id="r1"
+    )
+    state_path = _write_wandb_state(
+        tmp_path,
+        snapshots=[["r0"], ["r0"], ["r0", "r1"]],
+        run_lookup={"state": "finished", "summary": {"flashnh/valid": True, V2_METRIC_NAME: 0.5}},
+    )
     counter_file = tmp_path / "attempt_counter.txt"
     launcher_path = _write_stub_launcher(
         tmp_path,
@@ -314,7 +404,14 @@ def test_audit_uses_full_canonical_sweep_path_never_bare_id(tmp_path):
     every path it was called with, and every one of them must be the full
     ``entity/project/sweep_id`` path -- never the bare sweep id alone."""
     site_dir = _write_stub_wandb(tmp_path)
-    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"], ["r0", "r1"]])
+    _write_success_provenance(
+        tmp_path / "out", order=1, sweep_id=_DEFAULT_MANIFEST_SWEEP_ID, run_id="r1"
+    )
+    state_path = _write_wandb_state(
+        tmp_path,
+        snapshots=[["r0"], ["r0", "r1"]],
+        run_lookup={"state": "finished", "summary": {"flashnh/valid": True, V2_METRIC_NAME: 0.5}},
+    )
     counter_file = tmp_path / "attempt_counter.txt"
     launcher_path = _write_stub_launcher(tmp_path, counter_file, outcomes=[(0, "ok")])
 
@@ -359,7 +456,14 @@ def test_repo_workdir_env_var_forwarded_to_launcher(tmp_path):
     environment (the subprocess env is a from-scratch allowlist, never
     inherited -- see ``_subprocess_attempt_fn``)."""
     site_dir = _write_stub_wandb(tmp_path)
-    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"]])
+    _write_success_provenance(
+        tmp_path / "out", order=1, sweep_id=_DEFAULT_MANIFEST_SWEEP_ID, run_id="r1"
+    )
+    state_path = _write_wandb_state(
+        tmp_path,
+        snapshots=[["r0"]],
+        run_lookup={"state": "finished", "summary": {"flashnh/valid": True, V2_METRIC_NAME: 0.5}},
+    )
     probe_file = tmp_path / "repo_workdir_seen.txt"
     launcher_path = tmp_path / "env_probe_launcher.sh"
     launcher_path.write_text(

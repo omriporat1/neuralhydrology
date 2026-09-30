@@ -9,10 +9,12 @@
 # socket handle and failed before creating any run).
 #
 # Submits P20 unconditionally (afterok on nothing), then P21 afterok P20,
-# P22 afterok P21, P23 afterok P22, P24 afterok P23. The loop below is
-# HARDCODED to exactly {20,21,22,23,24} -- there is no variable upper bound,
-# no "submit N more" option, and no code path that can ever produce a P25
-# submission from this script.
+# P22 afterok P21, P23 afterok P22, P24 afterok P23. The order set is fixed
+# to exactly {20,21,22,23,24} (the default --start-order 20), or, for the
+# P21 resume path (--start-order 21), exactly {21,22,23,24} with P21 itself
+# afterok nothing -- there is no variable upper bound, no "submit N more"
+# option, and no code path that can ever produce a P25 submission or
+# resubmit P20 from this script.
 #
 # Every sbatch call below uses an explicit --export= allowlist. There is no
 # --export=ALL anywhere in this script.
@@ -35,7 +37,18 @@
 #       --p20-pinned-manifest-path <path> \
 #       --p20-pinned-manifest-sha256 <sha256> \
 #       --payload-repository-path <path> \
-#       [--dry-run]
+#       [--start-order 20|21] [--dry-run]
+#
+# --start-order (optional, default 20): 20 submits the full fixed P20-P24
+# chain as above. 21 submits the P21-P24 resume chain instead -- P21 with no
+# dependency, P22 afterok P21, P23 afterok P22, P24 afterok P23 -- and:
+#   * requires the production registry to already hold exactly P1-P20
+#     (verified here, before any sbatch call -- see the resume-precondition
+#     check below);
+#   * requires --p20-pinned-manifest-path/--p20-pinned-manifest-sha256 to be
+#     OMITTED (P20 is not being submitted in this mode, so there is nothing
+#     for them to pin);
+#   * never submits P20, and never submits anything past P24.
 #
 # --payload-repository-path is required and points at a detached checkout
 # whose HEAD must exactly equal --expected-commit and whose working tree
@@ -55,8 +68,6 @@
 # preflight/manifest logic) with zero W&B/registry mutation.
 set -euo pipefail
 
-PROPOSAL_ORDERS=(20 21 22 23 24)
-
 REGISTRY_PATH=""
 CHAIN_DIR=""
 WANDB_SWEEP_ID=""
@@ -66,6 +77,7 @@ OUTPUT_ROOT_BASE=""
 P20_PINNED_MANIFEST_PATH=""
 P20_PINNED_MANIFEST_SHA256=""
 PAYLOAD_REPOSITORY_PATH=""
+START_ORDER=""
 DRY_RUN=""
 
 while [ "$#" -gt 0 ]; do
@@ -79,17 +91,37 @@ while [ "$#" -gt 0 ]; do
         --p20-pinned-manifest-path) P20_PINNED_MANIFEST_PATH="$2"; shift 2 ;;
         --p20-pinned-manifest-sha256) P20_PINNED_MANIFEST_SHA256="$2"; shift 2 ;;
         --payload-repository-path) PAYLOAD_REPOSITORY_PATH="$2"; shift 2 ;;
+        --start-order) START_ORDER="$2"; shift 2 ;;
         --dry-run) DRY_RUN="--dry-run"; shift ;;
         *) echo "FATAL: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-for _required_name in REGISTRY_PATH CHAIN_DIR WANDB_SWEEP_ID EXPECTED_COMMIT EXECUTION_GENERATION OUTPUT_ROOT_BASE P20_PINNED_MANIFEST_PATH P20_PINNED_MANIFEST_SHA256 PAYLOAD_REPOSITORY_PATH; do
+START_ORDER="${START_ORDER:-20}"
+case "${START_ORDER}" in
+    20|21) ;;
+    *) echo "FATAL: --start-order must be 20 or 21 (got ${START_ORDER})" >&2; exit 2 ;;
+esac
+case "${START_ORDER}" in
+    20) PROPOSAL_ORDERS=(20 21 22 23 24) ;;
+    21) PROPOSAL_ORDERS=(21 22 23 24) ;;
+esac
+
+REQUIRED_ARG_NAMES=(REGISTRY_PATH CHAIN_DIR WANDB_SWEEP_ID EXPECTED_COMMIT EXECUTION_GENERATION OUTPUT_ROOT_BASE PAYLOAD_REPOSITORY_PATH)
+if [ "${START_ORDER}" = "20" ]; then
+    REQUIRED_ARG_NAMES+=(P20_PINNED_MANIFEST_PATH P20_PINNED_MANIFEST_SHA256)
+fi
+for _required_name in "${REQUIRED_ARG_NAMES[@]}"; do
     if [ -z "${!_required_name}" ]; then
         echo "FATAL: --$(echo "${_required_name}" | tr '[:upper:]_' '[:lower:]-') is required" >&2
         exit 2
     fi
 done
+
+if [ "${START_ORDER}" = "21" ] && { [ -n "${P20_PINNED_MANIFEST_PATH}" ] || [ -n "${P20_PINNED_MANIFEST_SHA256}" ]; }; then
+    echo "FATAL: --p20-pinned-manifest-path/--p20-pinned-manifest-sha256 must not be given with --start-order 21 (P20 is not submitted in resume mode)" >&2
+    exit 2
+fi
 
 # A production launch must target only the one authorized sweep, never a
 # forbidden or disposable-rehearsal id (same static literals the maintained
@@ -170,11 +202,48 @@ if [ -n "${_payload_dirty}" ]; then
     exit 2
 fi
 
+# Resume precondition (Part B, 2026-09-30): before submitting the P21-P24
+# resume chain, the production registry must already hold exactly P1-P20.
+# Reuses the exact qualified check_preflight/compute_expected_prior_orders
+# gate that rd1_p20_p24_job.sbatch's own "preflight" subcommand enforces
+# (under an exclusive/shared RegistryLock) at job-run time for every order --
+# that per-job locked gate remains the sole authoritative, race-safe
+# enforcement point. This check is deliberately lock-free (it never touches
+# RegistryLock/fcntl, which is POSIX-only and irrelevant to a plain read) so
+# it can run here, at submission time, before any job is even queued: a
+# fail-fast convenience, not a replacement authority -- any registry drift
+# between this check and job dispatch is still caught by the per-job
+# preflight, unchanged.
+if [ "${START_ORDER}" = "21" ]; then
+    CANONICAL_PYTHON="${CANONICAL_PYTHON:-${FLASHNH_BASE}/envs/flashnh-moriah/bin/python}"
+    test -x "${CANONICAL_PYTHON}" || { echo "FATAL: MISSING canonical interpreter for resume precondition check: ${CANONICAL_PYTHON}" >&2; exit 2; }
+    echo "--- verifying production registry is exactly P1-P20 before any submission (resume precondition) ---" >&2
+    "${CANONICAL_PYTHON}" - "${REGISTRY_PATH}" "${_script_dir}/rd1_p20_p24_job.py" <<'PYEOF'
+import importlib.util
+import sys
+
+registry_path, job_module_path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("rd1_p20_p24_job_preflight_check", job_module_path)
+job = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = job  # dataclasses' frozen=True needs the module registered to resolve annotations
+spec.loader.exec_module(job)
+
+registry = job.read_registry(registry_path)
+current_orders = job.registry_orders(registry)
+try:
+    job.check_preflight(21, current_orders)
+except job.PreflightError as exc:
+    print(f"FATAL: resume precondition refused: {exc.reason}: {exc.detail}", file=sys.stderr)
+    sys.exit(1)
+print(f"RESUME_PREFLIGHT_OK start_order=21 current_orders={current_orders}")
+PYEOF
+fi
+
 LOCK_PATH="${CHAIN_DIR}/rd1_p20_p24_registry.lock"
 LOG_DIR="${CHAIN_DIR}/logs"
 mkdir -p "${CHAIN_DIR}" "${LOG_DIR}"
 
-echo "=== RD1 P20-P24 fixed chain submission (hardcoded orders: ${PROPOSAL_ORDERS[*]}) ===" >&2
+echo "=== RD1 P20-P24 fixed chain submission (start_order=${START_ORDER} orders: ${PROPOSAL_ORDERS[*]}) ===" >&2
 echo "registry=${REGISTRY_PATH} chain_dir=${CHAIN_DIR} sweep=${WANDB_SWEEP_ID} dry_run=${DRY_RUN:-<none>}" >&2
 
 PREVIOUS_JOB_ID=""

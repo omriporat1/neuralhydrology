@@ -101,9 +101,11 @@ __all__ = [
     "run_agent_with_retry",
     "redact_secrets",
     "find_local_execution_provenance",
+    "find_local_execution_provenance_by_order",
     "validate_local_provenance_record",
     "validate_terminal_wandb_run",
     "validate_run_for_registry_acceptance",
+    "resolve_run_id_from_local_provenance",
     "main",
 ]
 
@@ -298,8 +300,8 @@ def _subprocess_attempt_fn(agent_launcher_path: Path, env: dict) -> AgentAttempt
     the ``env -i`` pattern previously used directly in the sbatch script).
 
     Never parses a run id out of launcher stdout/stderr: run-id resolution
-    is a separate, explicit read-only W&B audit performed by the CLI wiring
-    (see ``_wandb_resolve_latest_run_id``), not text-scraped from the
+    is a separate, explicit step performed by the CLI wiring (see
+    ``resolve_run_id_from_local_provenance``), not text-scraped from the
     launcher's own output.
     """
     proc = subprocess.run(
@@ -378,42 +380,6 @@ def _wandb_sweep_run_ids(manifest_path: "str | Path", sweep_id: str) -> list[str
     return sorted(run.id for run in sweep.runs)
 
 
-def _wandb_resolve_latest_run_id(
-    manifest_path: "str | Path",
-    sweep_id: str,
-    *,
-    sleep_fn: "Callable[[float], None]" = time.sleep,
-) -> str:
-    """Read-only resolution of the most-recently-created run in
-    ``sweep_id``, called exactly once after ``run_agent_with_retry`` reports
-    overall success. Raises ``RuntimeError`` if the sweep has no runs at
-    all (a successful agent exit with no resolvable run is itself a fatal,
-    non-retryable condition -- the caller must not append a registry row
-    without a real run id).
-
-    Root-cause-#3 fix (2026-09-30 real disposable diagnostic, job 46259249):
-    a fully successful training+validation attempt with a cleanly-synced,
-    valid W&B run was lost -- ``AGENT_FAILED reason=run_id_resolution_failed``
-    -- to a single transient W&B API error on this call, even though the
-    identically-shaped ``audit_run_ids_fn`` calls in ``run_agent_with_retry``
-    above are already wrapped in :func:`~src.baseline.rd1_p20_p24_retry.
-    fetch_with_backoff`. This call site was the one read-only W&B lookup in
-    this module left unprotected. ``sleep_fn`` defaults to real
-    ``time.sleep`` in production; tests inject a no-op to stay fast."""
-    sweep_path = _resolve_canonical_sweep_path(manifest_path, sweep_id)
-    import wandb  # noqa: PLC0415
-
-    def _fetch_runs() -> list:
-        api = wandb.Api()
-        sweep = api.sweep(sweep_path)
-        return sorted(sweep.runs, key=lambda run: run.created_at)
-
-    runs = fetch_with_backoff(_fetch_runs, sleep_fn=sleep_fn)
-    if not runs:
-        raise RuntimeError("no runs found in sweep after a successful agent exit")
-    return runs[-1].id
-
-
 def find_local_execution_provenance(
     output_root: "str | Path",
     *,
@@ -458,6 +424,56 @@ def find_local_execution_provenance(
             "local_execution_provenance_ambiguous",
             f"{len(matches)} candidates matched order={expected_order} "
             f"run_id={expected_run_id}: {[str(m) for m in matches]}",
+        )
+    return matches[0]
+
+
+def find_local_execution_provenance_by_order(
+    output_root: "str | Path",
+    *,
+    expected_order: int,
+) -> Path:
+    """Order-only sibling of :func:`find_local_execution_provenance`, used
+    solely to resolve which run id this proposal's own attempt actually
+    created -- before any run id is known, so it cannot yet be part of the
+    match criteria. This is the fix for the root cause of a mis-registered
+    run (2026-09-30): the prior resolution path
+    (``_wandb_resolve_latest_run_id``, now removed) picked the sweep-wide
+    "most recently created" run, which silently selects a *different*,
+    later-created, possibly-crashed proposal's run whenever one exists in
+    the same sweep -- there was no requirement that the "latest" run be
+    the one this attempt itself produced.
+
+    A run id resolved via this order-only match is never trusted on its
+    own: the caller (:func:`resolve_run_id_from_local_provenance`) runs it
+    through the full, order+run_id-matching acceptance gate
+    (:func:`_run_registry_acceptance_core`) before returning it.
+
+    Fails closed -- raises :class:`RunAcceptanceError` -- on a missing
+    output root, zero matches, or more than one candidate for
+    ``expected_order``; never guesses "the newest one"."""
+    root = Path(output_root)
+    if not root.is_dir():
+        raise RunAcceptanceError("output_root_missing", str(root))
+
+    matches: list[Path] = []
+    for candidate in sorted(root.glob("*/execution_provenance.json")):
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("proposal_order") == expected_order:
+            matches.append(candidate)
+
+    if not matches:
+        raise RunAcceptanceError(
+            "local_execution_provenance_not_found",
+            f"no execution_provenance.json beneath {root} matches order={expected_order}",
+        )
+    if len(matches) > 1:
+        raise RunAcceptanceError(
+            "local_execution_provenance_ambiguous",
+            f"{len(matches)} candidates matched order={expected_order}: {[str(m) for m in matches]}",
         )
     return matches[0]
 
@@ -620,12 +636,12 @@ def validate_terminal_wandb_run(
     missing/false ``flashnh/valid`` flag, a missing or non-finite objective
     metric, or a W&B API error that persists across
     :func:`~src.baseline.rd1_p20_p24_retry.fetch_with_backoff`'s bounded
-    retries (root-cause-#3 fix, 2026-09-30: this lookup is the registry-
-    acceptance-gate sibling of ``_wandb_resolve_latest_run_id`` and was
-    equally exposed to a single transient W&B API error). Imports ``wandb``
-    lazily so importing this module for the pure-function unit tests never
-    requires the ``wandb`` package to be installed. ``sleep_fn`` defaults to
-    real ``time.sleep`` in production; tests inject a no-op to stay fast."""
+    retries (root-cause-#3 fix, 2026-09-30: this lookup was a single
+    transient-W&B-API-error hazard, now protected by ``fetch_with_backoff``
+    like every other W&B read in this module). Imports ``wandb`` lazily so
+    importing this module for the pure-function unit tests never requires
+    the ``wandb`` package to be installed. ``sleep_fn`` defaults to real
+    ``time.sleep`` in production; tests inject a no-op to stay fast."""
     run_path = _resolve_canonical_run_path(manifest_path, run_id)
     import wandb  # noqa: PLC0415
 
@@ -665,6 +681,56 @@ def validate_terminal_wandb_run(
 _OBJECTIVE_CROSS_CHECK_ABS_TOL = 1e-9
 
 
+def _run_registry_acceptance_core(
+    *,
+    manifest_path: Path,
+    manifest: dict,
+    wandb_sweep_id: str,
+    run_id: str,
+    order: int,
+) -> dict[str, Any]:
+    """Shared acceptance-check body behind both
+    :func:`validate_run_for_registry_acceptance` and
+    :func:`resolve_run_id_from_local_provenance`: exactly one local
+    ``execution_provenance.json`` matching ``order``/``run_id`` that
+    independently re-derives to a matching, ``VALID``, objective-eligible,
+    finite-objective identity; a fresh W&B API lookup of the same run id
+    independently confirming ``state == "finished"``, ``flashnh/valid is
+    True``, and a finite published objective; and agreement between the
+    two independently-obtained objective values. Assumes the caller has
+    already checked ``manifest["wandb_sweep_id"] == wandb_sweep_id``.
+
+    Returns ``{"objective": <float>, "manifest_sha256": <hex str>}``.
+    Raises :class:`RunAcceptanceError` (fail-closed) on any disagreement."""
+    output_root = manifest.get("output_root")
+    if not isinstance(output_root, str) or not output_root:
+        raise RunAcceptanceError("manifest_output_root_missing", repr(output_root))
+
+    provenance_path = find_local_execution_provenance(
+        output_root, expected_order=order, expected_run_id=run_id
+    )
+    local_objective = validate_local_provenance_record(
+        provenance_path,
+        expected_order=order,
+        expected_sweep_id=wandb_sweep_id,
+        expected_run_id=run_id,
+    )
+
+    wandb_objective = validate_terminal_wandb_run(manifest_path, run_id)
+
+    if not math.isclose(
+        local_objective, wandb_objective, rel_tol=0.0, abs_tol=_OBJECTIVE_CROSS_CHECK_ABS_TOL
+    ):
+        raise RunAcceptanceError(
+            "objective_cross_check_mismatch",
+            f"local execution_provenance.json objective={local_objective!r} disagrees "
+            f"with W&B summary objective={wandb_objective!r}",
+        )
+
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return {"objective": local_objective, "manifest_sha256": manifest_sha256}
+
+
 def validate_run_for_registry_acceptance(
     *,
     manifest_path: "str | Path",
@@ -702,33 +768,74 @@ def validate_run_for_registry_acceptance(
             f"manifest wandb_sweep_id {manifest_sweep_id!r} disagrees with "
             f"expected {wandb_sweep_id!r}",
         )
+    return _run_registry_acceptance_core(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        wandb_sweep_id=wandb_sweep_id,
+        run_id=run_id,
+        order=order,
+    )
+
+
+def resolve_run_id_from_local_provenance(
+    *,
+    manifest_path: "str | Path",
+    wandb_sweep_id: str,
+    order: int,
+) -> str:
+    """Resolve the run id this exact proposal (``order``) actually created,
+    from this attempt's own local ``execution_provenance.json`` -- never by
+    asking W&B for "whatever was most recently created in the sweep" (the
+    removed ``_wandb_resolve_latest_run_id``, root cause of a mis-registered
+    run on 2026-09-30: a sweep can contain another proposal's later-created,
+    crashed run, which a sweep-wide "latest" lookup has no way to exclude).
+
+    The resolved run id is never returned on local evidence alone: it is
+    run through the full registry-acceptance gate
+    (:func:`_run_registry_acceptance_core` -- identity re-derivation, a
+    fresh W&B terminal-state/``flashnh/valid``/finite-objective check, and
+    the local/W&B objective cross-check) before being returned, so a run id
+    this function hands back has already cleared full acceptance --
+    ``AGENT_OK run_id=...`` is only ever printed for a run that would also
+    pass ``append-registry-row``.
+
+    Fails closed -- raises :class:`RunAcceptanceError` -- if the manifest's
+    pinned sweep id disagrees with ``wandb_sweep_id``, if local provenance
+    for this order is missing or ambiguous, if that record carries no
+    usable ``wandb_run_id``, or if any acceptance check subsequently fails.
+    """
+    manifest_path = Path(manifest_path)
+    manifest = load_v2_wandb_bridge_manifest(manifest_path)
+    manifest_sweep_id = manifest["wandb_sweep_id"]
+    if manifest_sweep_id != wandb_sweep_id:
+        raise RunAcceptanceError(
+            "manifest_sweep_id_mismatch",
+            f"manifest wandb_sweep_id {manifest_sweep_id!r} disagrees with "
+            f"expected {wandb_sweep_id!r}",
+        )
     output_root = manifest.get("output_root")
     if not isinstance(output_root, str) or not output_root:
         raise RunAcceptanceError("manifest_output_root_missing", repr(output_root))
 
-    provenance_path = find_local_execution_provenance(
-        output_root, expected_order=order, expected_run_id=run_id
-    )
-    local_objective = validate_local_provenance_record(
-        provenance_path,
-        expected_order=order,
-        expected_sweep_id=wandb_sweep_id,
-        expected_run_id=run_id,
-    )
-
-    wandb_objective = validate_terminal_wandb_run(manifest_path, run_id)
-
-    if not math.isclose(
-        local_objective, wandb_objective, rel_tol=0.0, abs_tol=_OBJECTIVE_CROSS_CHECK_ABS_TOL
-    ):
+    provenance_path = find_local_execution_provenance_by_order(output_root, expected_order=order)
+    try:
+        record = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunAcceptanceError("local_provenance_record_unreadable", f"{provenance_path}: {exc}") from exc
+    run_id = record.get("wandb_run_id") if isinstance(record, dict) else None
+    if not isinstance(run_id, str) or not run_id:
         raise RunAcceptanceError(
-            "objective_cross_check_mismatch",
-            f"local execution_provenance.json objective={local_objective!r} disagrees "
-            f"with W&B summary objective={wandb_objective!r}",
+            "local_provenance_run_id_missing", f"{provenance_path}: wandb_run_id={run_id!r}"
         )
 
-    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    return {"objective": local_objective, "manifest_sha256": manifest_sha256}
+    _run_registry_acceptance_core(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        wandb_sweep_id=wandb_sweep_id,
+        run_id=run_id,
+        order=order,
+    )
+    return run_id
 
 
 def _cmd_preflight(args: argparse.Namespace) -> int:
@@ -839,10 +946,12 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
     persisted beneath it via ``on_attempt``, regardless of outcome -- purely
     additive; the ``AGENT_OK``/``AGENT_FAILED`` contract below is unchanged.
 
-    On overall success, resolves the created run id via one more read-only
-    W&B call and prints it for the sbatch wrapper to pass to
-    ``append-registry-row``. Never appends to the registry itself (kept as
-    a separate, existing subcommand/step).
+    On overall success, resolves the created run id from this attempt's own
+    local execution-provenance record (:func:`resolve_run_id_from_local_
+    provenance` -- order-scoped, never a sweep-wide "latest run" guess) and
+    prints it for the sbatch wrapper to pass to ``append-registry-row``.
+    Never appends to the registry itself (kept as a separate, existing
+    subcommand/step).
     """
     attempt_env = {
         "PATH": args.path,
@@ -885,9 +994,16 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        run_id = _wandb_resolve_latest_run_id(args.manifest_path, args.wandb_sweep_id)
-    except Exception as exc:  # noqa: BLE001 -- any resolution failure is fatal, never silently skipped
-        print(f"AGENT_FAILED reason=run_id_resolution_failed detail={exc}", file=sys.stderr)
+        run_id = resolve_run_id_from_local_provenance(
+            manifest_path=args.manifest_path,
+            wandb_sweep_id=args.wandb_sweep_id,
+            order=args.order,
+        )
+    except RunAcceptanceError as exc:
+        print(
+            f"AGENT_FAILED reason=run_id_resolution_failed detail={exc.reason}: {exc.detail}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"AGENT_OK run_id={run_id}")
@@ -936,6 +1052,13 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     p_run_agent.add_argument("--agent-launcher-path", required=True)
     p_run_agent.add_argument("--manifest-path", required=True)
     p_run_agent.add_argument("--wandb-sweep-id", required=True)
+    p_run_agent.add_argument(
+        "--order",
+        type=int,
+        required=True,
+        help="This attempt's own proposal order, used to resolve its run id from its own "
+        "local execution-provenance record rather than a sweep-wide 'latest run' guess.",
+    )
     p_run_agent.add_argument("--path", required=True, help="PATH value for the narrow attempt-env allowlist.")
     p_run_agent.add_argument("--home", required=True, help="HOME value for the narrow attempt-env allowlist.")
     p_run_agent.add_argument(

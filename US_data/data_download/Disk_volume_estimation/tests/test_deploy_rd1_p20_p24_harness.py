@@ -394,6 +394,21 @@ def _bash_abspath(dir_str: str, filename: str) -> str:
     return f"{proc.stdout.strip()}/{filename}"
 
 
+def _bash_git_dir() -> str:
+    """Resolves the directory bash's own ``command -v git`` would find, as a
+    POSIX-style path bash can consume directly in ``$PATH`` -- unlike
+    ``shutil.which("git")`` (a Windows-style ``C:\\...`` path from this
+    Python process's own PATH), which collides with ``$PATH``'s ``:``
+    separator when spliced into a bash-only env (the drive-letter colon
+    splits it into two bogus entries). Run with the inherited environment
+    (never the minimal per-test allowlist), matching ``_bash_abspath``."""
+    proc = subprocess.run(
+        ["bash", "-c", 'dirname "$(command -v git)"'], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
 def _write_stub_sbatch(bin_dir: Path, log_path: Path) -> None:
     stub = bin_dir / "sbatch"
     stub.write_text(
@@ -454,13 +469,27 @@ def test_deployed_submitter_invokes_deployed_job_sbatch_not_repo_path(tmp_path):
         "--registry-path", str(chain_dir / "registry.json"),
         "--chain-dir", str(chain_dir),
         "--wandb-sweep-id", "disposable-test-sweep",
-        "--expected-commit", "dabd2ca851bd2b3a03035886cfa50015f2c864b4",
+        # The submitter's --payload-repository-path check requires this to be
+        # the payload checkout's real HEAD (harness_commit below) -- the
+        # previous literal FROZEN_SCIENTIFIC_COMMIT hash was never a real
+        # commit of that checkout and predates --payload-repository-path
+        # existing at all.
+        "--expected-commit", harness_commit,
         "--execution-generation", "1",
         "--output-root-base", str(chain_dir / "outputs"),
         "--p20-pinned-manifest-path", str(chain_dir / "p20_manifest.json"),
         "--p20-pinned-manifest-sha256", "0" * 64,
+        # The disposable repo itself is a clean checkout pinned exactly at
+        # harness_commit, so it doubles as the required payload checkout.
+        "--payload-repository-path", str(repo),
     ]
-    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "REPO_WORKDIR": str(repo)}
+    # The submitter's --payload-repository-path check now shells out to git
+    # itself (a requirement that postdates this env allowlist), so git's own
+    # directory must be reachable too -- resolved via bash's own notion of
+    # where git lives (POSIX-style), since the module-level skipif above
+    # already guarantees git is on PATH here.
+    git_dir = _bash_git_dir()
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin:{git_dir}", "HOME": str(tmp_path), "REPO_WORKDIR": str(repo)}
     # Deliberately run from an unrelated cwd (NOT the harness dir, NOT the
     # repo) to prove resolution does not depend on caller cwd either.
     unrelated_cwd = tmp_path / "unrelated_cwd"

@@ -59,14 +59,22 @@ Covers, in order:
   22. ``_persist_attempt_evidence`` persists exactly one redacted evidence
       file per attempt, for both a successful and a failed attempt, and
       writes nothing outside the caller-supplied attempts directory.
-  23. ``_wandb_resolve_latest_run_id`` transparently retries a transient
-      W&B API error (via ``fetch_with_backoff``) and returns the correct
-      latest run id once the API call succeeds, and raises
-      ``RetryAuditError`` after exhausting the bounded backoff budget on a
-      persistent failure (root-cause-#3 regression: a real disposable
-      diagnostic run, job 46259249 on 2026-09-30, lost a fully successful
-      training+validation attempt to exactly this previously-unprotected
-      call site).
+  23. ``find_local_execution_provenance_by_order`` resolves a unique
+      order-only match, refuses (``local_execution_provenance_not_found``)
+      on zero matches, and refuses (``local_execution_provenance_ambiguous``)
+      on more than one. ``resolve_run_id_from_local_provenance`` resolves
+      the run id this proposal's own attempt created from that local
+      record -- selecting it over a later-created, differently-ordered
+      run elsewhere in the same sweep (the root-cause fix for a
+      mis-registered run on 2026-09-30: the removed
+      ``_wandb_resolve_latest_run_id`` picked the sweep-wide "most
+      recently created" run instead, with no guarantee it was this
+      attempt's own run) -- refuses on missing/ambiguous local provenance
+      for this order, refuses on a record with no usable ``wandb_run_id``,
+      and never falls back to any sweep-wide listing. A resolved run id is
+      additionally run through the full acceptance gate before being
+      returned, so it also refuses whenever the independent W&B lookup
+      disagrees with local state (not finished, not flagged valid).
   24. ``validate_terminal_wandb_run`` likewise transparently retries a
       transient W&B API error and still enforces its full acceptance
       contract (state/``flashnh/valid``/finite-objective) once the call
@@ -107,17 +115,16 @@ from scripts.rd1_p20_p24_job import (  # noqa: E402
     check_preflight,
     compute_expected_prior_orders,
     find_local_execution_provenance,
+    find_local_execution_provenance_by_order,
     redact_secrets,
+    resolve_run_id_from_local_provenance,
     run_agent_with_retry,
     validate_local_provenance_record,
     validate_run_for_registry_acceptance,
     verify_pinned_manifest_checksum,
 )
 from src.baseline.rd1_p20_p24_registry import read_registry  # noqa: E402
-from src.baseline.rd1_p20_p24_retry import (  # noqa: E402
-    WANDB_SERVICE_STARTUP_FAILURE_MARKER,
-    RetryAuditError,
-)
+from src.baseline.rd1_p20_p24_retry import WANDB_SERVICE_STARTUP_FAILURE_MARKER  # noqa: E402
 from src.baseline.sweep_v2_six_axis_campaign import (  # noqa: E402
     CAMPAIGN_ID_V2,
     CONFIGURATION_CANONICALIZATION_VERSION_V2,
@@ -735,63 +742,146 @@ class _FakeWandbRun:
         self.summary = summary or {}
 
 
-class _FakeWandbSweep:
-    def __init__(self, runs):
-        self.runs = runs
-
-
-def test_wandb_resolve_latest_run_id_retries_transient_failure_then_succeeds(monkeypatch, short_tmp_path):
-    """Root-cause-#3 regression: a transient W&B API error (e.g. the exact
-    "An error occurred while verifying the API key." seen on job 46259249)
-    on the first two calls must not be fatal -- ``fetch_with_backoff``
-    retries and the correct latest run id is still returned once the API
-    call succeeds."""
+def test_find_local_execution_provenance_by_order_unique_match(short_tmp_path):
     output_root = short_tmp_path
-    manifest_path = output_root / "manifest.json"
-    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
-
-    good_sweep = _FakeWandbSweep(
-        runs=[
-            _FakeWandbRun("run-old", created_at="2026-01-01T00:00:00Z"),
-            _FakeWandbRun("run-new", created_at="2026-01-02T00:00:00Z"),
-        ]
+    (output_root / "trial-a").mkdir()
+    (output_root / "trial-a" / "execution_provenance.json").write_text(
+        json.dumps({"proposal_order": 21, "wandb_run_id": "run-a"}), encoding="utf-8"
     )
-    calls = {"n": 0}
-
-    class _FakeApi:
-        def sweep(self, path):
-            calls["n"] += 1
-            if calls["n"] < 3:
-                raise RuntimeError("An error occurred while verifying the API key.")
-            assert path == "rd1-test-entity/rd1-test-project/sweep-x"
-            return good_sweep
-
-    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
-    sleeps = []
-
-    run_id = rd1_job._wandb_resolve_latest_run_id(manifest_path, "sweep-x", sleep_fn=sleeps.append)
-
-    assert run_id == "run-new"
-    assert calls["n"] == 3
-    assert len(sleeps) == 2  # two backoff sleeps before the third, successful attempt
+    found = find_local_execution_provenance_by_order(output_root, expected_order=21)
+    assert found == output_root / "trial-a" / "execution_provenance.json"
 
 
-def test_wandb_resolve_latest_run_id_raises_after_exhausting_backoff(monkeypatch, short_tmp_path):
+def test_find_local_execution_provenance_by_order_refuses_no_match(short_tmp_path):
+    output_root = short_tmp_path
+    (output_root / "trial-a").mkdir()
+    (output_root / "trial-a" / "execution_provenance.json").write_text(
+        json.dumps({"proposal_order": 20, "wandb_run_id": "run-a"}), encoding="utf-8"
+    )
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        find_local_execution_provenance_by_order(output_root, expected_order=21)
+    assert excinfo.value.reason == "local_execution_provenance_not_found"
+
+
+def test_find_local_execution_provenance_by_order_refuses_ambiguous_match(short_tmp_path):
+    output_root = short_tmp_path
+    for name in ("trial-a", "trial-b"):
+        (output_root / name).mkdir()
+        (output_root / name / "execution_provenance.json").write_text(
+            json.dumps({"proposal_order": 21, "wandb_run_id": f"run-{name}"}), encoding="utf-8"
+        )
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        find_local_execution_provenance_by_order(output_root, expected_order=21)
+    assert excinfo.value.reason == "local_execution_provenance_ambiguous"
+
+
+def test_resolve_run_id_from_local_provenance_selects_own_order_over_later_crashed_run(
+    monkeypatch, short_tmp_path
+):
+    """The regression scenario this fix exists for: a later-created run
+    from a DIFFERENT proposal order (e.g. a crashed retry of another
+    order) exists in the same sweep. The removed sweep-wide "latest run"
+    lookup would have picked that other run; this function must instead
+    select the run id recorded in THIS order's own local provenance,
+    regardless of what else was created later in the sweep."""
     output_root = short_tmp_path
     manifest_path = output_root / "manifest.json"
     _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
 
+    own_record = _build_provenance_record(order=21, sweep_id="sweep-x", run_id="run-own", objective_score=0.5)
+    _write_provenance_file(output_root, own_record)
+    # A different order's later-created run, still present in the same output_root/sweep.
+    other_record = _build_provenance_record(order=22, sweep_id="sweep-x", run_id="run-other-later", objective_score=0.9)
+    _write_provenance_file(output_root, other_record)
+
+    seen_run_ids = []
+
+    def fake_validate_terminal_wandb_run(_manifest_path, run_id, **_kwargs):
+        seen_run_ids.append(run_id)
+        assert run_id == "run-own"
+        return 0.5
+
+    monkeypatch.setattr(rd1_job, "validate_terminal_wandb_run", fake_validate_terminal_wandb_run)
+
+    run_id = resolve_run_id_from_local_provenance(
+        manifest_path=manifest_path, wandb_sweep_id="sweep-x", order=21
+    )
+
+    assert run_id == "run-own"
+    assert seen_run_ids == ["run-own"]  # never even looked at "run-other-later"
+
+
+def test_resolve_run_id_from_local_provenance_refuses_missing_provenance(short_tmp_path):
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+    # No execution_provenance.json written for order=21 at all.
+
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        resolve_run_id_from_local_provenance(manifest_path=manifest_path, wandb_sweep_id="sweep-x", order=21)
+    assert excinfo.value.reason == "local_execution_provenance_not_found"
+
+
+def test_resolve_run_id_from_local_provenance_refuses_ambiguous_provenance(short_tmp_path):
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+
+    for run_id, trial_dir_name in (("run-a", "trial-a"), ("run-b", "trial-b")):
+        record = _build_provenance_record(order=21, sweep_id="sweep-x", run_id=run_id)
+        _write_provenance_file(output_root, record, trial_dir_name=trial_dir_name)
+
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        resolve_run_id_from_local_provenance(manifest_path=manifest_path, wandb_sweep_id="sweep-x", order=21)
+    assert excinfo.value.reason == "local_execution_provenance_ambiguous"
+
+
+def test_resolve_run_id_from_local_provenance_refuses_when_wandb_run_not_finished(monkeypatch, short_tmp_path):
+    """Even with unambiguous local provenance, a fresh W&B lookup that
+    disagrees (not finished) must still refuse -- the strict terminal-
+    valid-finite acceptance contract is unchanged by this fix."""
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+    record = _build_provenance_record(order=21, sweep_id="sweep-x", run_id="run-own")
+    _write_provenance_file(output_root, record)
+
+    def fake_validate_terminal_wandb_run(_manifest_path, _run_id, **_kwargs):
+        raise RunAcceptanceError("wandb_run_not_finished", "state=crashed")
+
+    monkeypatch.setattr(rd1_job, "validate_terminal_wandb_run", fake_validate_terminal_wandb_run)
+
+    with pytest.raises(RunAcceptanceError) as excinfo:
+        resolve_run_id_from_local_provenance(manifest_path=manifest_path, wandb_sweep_id="sweep-x", order=21)
+    assert excinfo.value.reason == "wandb_run_not_finished"
+
+
+def test_resolve_run_id_from_local_provenance_never_lists_sweep_runs(monkeypatch, short_tmp_path):
+    """No sweep-wide fallback anywhere: this function must never call the
+    sweep-listing API at all, only a single-run lookup for its own
+    already-known run id."""
+    output_root = short_tmp_path
+    manifest_path = output_root / "manifest.json"
+    _write_test_manifest(manifest_path, output_root=output_root, wandb_sweep_id="sweep-x")
+    record = _build_provenance_record(order=21, sweep_id="sweep-x", run_id="run-own", objective_score=0.5)
+    _write_provenance_file(output_root, record)
+
+    good_run = _FakeWandbRun("run-own", state="finished", summary={"flashnh/valid": True, V2_METRIC_NAME: 0.5})
+
     class _FakeApi:
         def sweep(self, path):
-            raise RuntimeError("An error occurred while verifying the API key.")
+            raise AssertionError("must never list the sweep -- no sweep-wide fallback")
+
+        def run(self, path):
+            assert path == "rd1-test-entity/rd1-test-project/run-own"
+            return good_run
 
     monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
-    sleeps = []
 
-    with pytest.raises(RetryAuditError):
-        rd1_job._wandb_resolve_latest_run_id(manifest_path, "sweep-x", sleep_fn=sleeps.append)
-
-    assert len(sleeps) == 2  # default fetch_with_backoff max_attempts=3 -> 2 backoff sleeps
+    run_id = resolve_run_id_from_local_provenance(
+        manifest_path=manifest_path, wandb_sweep_id="sweep-x", order=21
+    )
+    assert run_id == "run-own"
 
 
 def test_validate_terminal_wandb_run_retries_transient_failure_then_succeeds(monkeypatch, short_tmp_path):
