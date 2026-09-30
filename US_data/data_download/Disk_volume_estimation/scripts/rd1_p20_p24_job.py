@@ -797,6 +797,13 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
     ``is_socket_failure_retry_eligible`` functions above -- this function
     adds no additional retry logic of its own.
 
+    ``REPO_WORKDIR`` is part of the allowlist (not just ``PATH``/``HOME``)
+    because ``run_sweep_v2_six_axis_wandb_agent_moriah.sbatch`` falls back to
+    its own hardcoded production default whenever ``REPO_WORKDIR`` is unset
+    in its environment, and the bridge script then refuses on a
+    ``repository_root`` mismatch if the caller actually meant somewhere else
+    (e.g. a dual-provenance payload checkout).
+
     When ``--attempts-dir`` is given, every attempt's redacted evidence is
     persisted beneath it via ``on_attempt``, regardless of outcome -- purely
     additive; the ``AGENT_OK``/``AGENT_FAILED`` contract below is unchanged.
@@ -811,6 +818,7 @@ def _cmd_run_agent_with_retry(args: argparse.Namespace) -> int:
         "HOME": args.home,
         "FLASHNH_SWEEP_V2_PRODUCTION_MANIFEST": args.manifest_path,
         "WANDB_SWEEP_ID": args.wandb_sweep_id,
+        "REPO_WORKDIR": args.repo_workdir,
     }
     agent_launcher_path = Path(args.agent_launcher_path)
 
@@ -899,6 +907,14 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     p_run_agent.add_argument("--wandb-sweep-id", required=True)
     p_run_agent.add_argument("--path", required=True, help="PATH value for the narrow attempt-env allowlist.")
     p_run_agent.add_argument("--home", required=True, help="HOME value for the narrow attempt-env allowlist.")
+    p_run_agent.add_argument(
+        "--repo-workdir",
+        required=True,
+        help="REPO_WORKDIR value for the narrow attempt-env allowlist (the agent-launcher "
+        "sbatch script falls back to its own production default when unset, which is wrong "
+        "whenever the caller's own REPO_WORKDIR points somewhere else, e.g. a dual-provenance "
+        "payload checkout).",
+    )
     p_run_agent.add_argument("--max-attempts", type=int, default=2)
     p_run_agent.add_argument(
         "--attempts-dir",

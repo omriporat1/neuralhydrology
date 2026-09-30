@@ -313,6 +313,7 @@ set +e
     --wandb-sweep-id "${RD1_WANDB_SWEEP_ID}" \
     --path "${PATH}" \
     --home "${HOME}" \
+    --repo-workdir "${REPO_WORKDIR}" \
     --max-attempts 2 \
     --attempts-dir "${RD1_ATTEMPTS_DIR}" \
     > "${RESULT_FILE}" 2>&1

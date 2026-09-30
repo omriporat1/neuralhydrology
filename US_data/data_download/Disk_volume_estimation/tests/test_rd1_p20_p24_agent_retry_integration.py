@@ -40,6 +40,20 @@ these additional scenarios can assert on it directly:
   7. A manifest whose own ``wandb_sweep_id`` disagrees with the CLI's
      ``--wandb-sweep-id`` fails closed before the agent launcher (and W&B)
      are ever contacted.
+
+Regression coverage (dual-provenance diagnostic fix, 2026-09-30): a real
+diagnostic attempt (Moriah job 46259195) failed because the narrow
+attempt-env allowlist built by ``_cmd_run_agent_with_retry`` never included
+``REPO_WORKDIR``, so the agent-launcher subprocess always fell back to
+``run_sweep_v2_six_axis_wandb_agent_moriah.sbatch``'s own hardcoded
+production default instead of the caller's intended value -- invisible in
+production (where they already coincide) but fatal whenever they must
+differ (e.g. a payload checkout used for provenance isolation), since the
+bridge script then refuses on a ``repository_root`` mismatch.
+  8. The exact ``--repo-workdir`` value passed on the CLI reaches the agent
+     launcher subprocess's environment as ``REPO_WORKDIR``, verified by a
+     stub launcher that echoes it back rather than by inspecting production
+     refusal behavior.
 """
 from __future__ import annotations
 
@@ -204,6 +218,7 @@ def _run_cli(
     launcher_path: Path,
     extra_args: list[str],
     manifest_kwargs: "dict | None" = None,
+    repo_workdir: "str | None" = None,
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(site_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -224,6 +239,8 @@ def _run_cli(
         env.get("PATH", ""),
         "--home",
         str(tmp_path),
+        "--repo-workdir",
+        repo_workdir if repo_workdir is not None else str(tmp_path),
         *extra_args,
     ]
     return subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60)
@@ -333,6 +350,36 @@ def test_missing_manifest_project_or_entity_fails_closed_before_agent_launch(tmp
     assert not counter_file.exists(), "the agent launcher must never run when identity resolution fails closed"
     final_state = json.loads(state_path.read_text())
     assert final_state.get("sweep_paths_seen", []) == [], "wandb must never be contacted when identity is unresolved"
+
+
+def test_repo_workdir_env_var_forwarded_to_launcher(tmp_path):
+    """Regression test for the real diagnostic failure (Moriah job
+    46259195): the launcher must observe REPO_WORKDIR exactly as passed on
+    the CLI, not a value inherited from this test process's own
+    environment (the subprocess env is a from-scratch allowlist, never
+    inherited -- see ``_subprocess_attempt_fn``)."""
+    site_dir = _write_stub_wandb(tmp_path)
+    state_path = _write_wandb_state(tmp_path, snapshots=[["r0"]])
+    probe_file = tmp_path / "repo_workdir_seen.txt"
+    launcher_path = tmp_path / "env_probe_launcher.sh"
+    launcher_path.write_text(
+        '#!/bin/bash\necho -n "${REPO_WORKDIR:-UNSET}" > "' + probe_file.as_posix() + '"\nexit 0\n',
+        encoding="utf-8",
+    )
+    launcher_path.chmod(0o755)
+    expected_repo_workdir = str(tmp_path / "distinct_payload_checkout")
+
+    proc = _run_cli(
+        tmp_path,
+        site_dir,
+        state_path,
+        launcher_path,
+        extra_args=["--max-attempts", "2"],
+        repo_workdir=expected_repo_workdir,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert probe_file.read_text() == expected_repo_workdir
 
 
 def test_manifest_sweep_id_mismatch_fails_closed_before_agent_launch(tmp_path):

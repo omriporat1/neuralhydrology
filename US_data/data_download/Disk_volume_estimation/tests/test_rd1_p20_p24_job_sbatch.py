@@ -61,6 +61,15 @@ Covers, in order:
      (unchanged production behavior); when explicitly set, both are forwarded
      verbatim, so a disposable manifest can target a disposable W&B project
      instead of build-manifest's own hardcoded production default.
+  10. (Dual-provenance diagnostic fix, 2026-09-30) The ``run-agent-with-
+      retry`` invocation always carries ``--repo-workdir "${REPO_WORKDIR}"``.
+      Regression test for the real diagnostic failure (Moriah job 46259195):
+      the agent-launcher subprocess's narrow env allowlist never included
+      REPO_WORKDIR, so it silently fell back to production's own default and
+      the bridge script refused on a repository_root mismatch whenever
+      REPO_WORKDIR was deliberately something else (e.g. a payload
+      checkout). Behaviorally a no-op in production, where REPO_WORKDIR
+      already equals the launcher's own default.
 """
 from __future__ import annotations
 
@@ -418,6 +427,55 @@ def test_result_file_lives_under_chain_dir_tmp_and_is_removed_on_exit(tmp_path):
     assert during_run_listing, "expected at least one file under ${RD1_CHAIN_DIR}/tmp during the agent attempt"
     # After the script exits, the EXIT trap has removed it: nothing left.
     assert list(tmp_dir.iterdir()) == []
+
+
+def _write_stub_python_capturing_run_agent_argv(bin_path: Path, argv_log_path: Path) -> None:
+    """A stub CANONICAL_PYTHON that behaves like the generic argv-logging
+    stub for every subcommand except ``run-agent-with-retry``, where it
+    instead writes the full argv (one token per line) to ``argv_log_path``
+    and prints ``AGENT_OK`` -- so a test can assert on exactly which flags
+    the sbatch script passed to that one invocation."""
+    bin_path.write_text(
+        "#!/bin/bash\n"
+        "for _a in \"$@\"; do\n"
+        '  if [ "${_a}" = "run-agent-with-retry" ]; then\n'
+        f'    printf \'%s\\n\' "$@" > "{argv_log_path.as_posix()}"\n'
+        '    echo "AGENT_OK run_id=stubrun123"\n'
+        "    exit 0\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
+
+
+def test_run_agent_with_retry_invocation_includes_repo_workdir(tmp_path):
+    repo_workdir = tmp_path / "repo_root"
+    repo_workdir.mkdir()
+    chain_dir = repo_workdir / ".scratch_local" / "chain"
+    deployed_scripts_dir = chain_dir / "harness" / "scripts"
+    deployed_scripts_dir.mkdir(parents=True)
+    (deployed_scripts_dir / "rd1_p20_p24_job.py").write_text("# stub, intercepted by CANONICAL_PYTHON\n", encoding="utf-8")
+
+    agent_launcher_dir = repo_workdir / "scripts"
+    agent_launcher_dir.mkdir(exist_ok=True)
+    (agent_launcher_dir / "run_sweep_v2_six_axis_wandb_agent_moriah.sbatch").write_text("# decoy\n", encoding="utf-8")
+
+    argv_log = tmp_path / "run_agent_argv.log"
+    stub_python = tmp_path / "stub_python_argv_capture.sh"
+    _write_stub_python_capturing_run_agent_argv(stub_python, argv_log)
+
+    env = _base_env(tmp_path, repo_workdir=repo_workdir, chain_dir=chain_dir, python_log=tmp_path / "py.log")
+    env["CANONICAL_PYTHON"] = str(stub_python)
+    del env["RD1_DRY_RUN"]  # must run past the dry-run early exit to reach run-agent-with-retry
+
+    proc = _run(env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    logged_lines = argv_log.read_text(encoding="utf-8").splitlines()
+    assert "--repo-workdir" in logged_lines
+    assert logged_lines[logged_lines.index("--repo-workdir") + 1] == str(repo_workdir)
 
 
 # --- Task B: invocation-time deployed-harness integrity verification -------
