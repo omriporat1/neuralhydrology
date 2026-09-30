@@ -48,6 +48,13 @@ Covers, in order:
      therefore before any agent launch) is ever reached. These tests use a
      real Python interpreter (``sys.executable``), not the generic
      argv-logging stub, since the verifier is real stdlib Python.
+  8. (Dual-provenance diagnostic fix, 2026-09-30) ``RD1_PROJECT_ROOT``
+     decouples the ``.scratch_local`` boundary check from ``REPO_WORKDIR``:
+     when explicitly set to a directory different from ``REPO_WORKDIR``, the
+     boundary check anchors to ``RD1_PROJECT_ROOT`` (accepting a chain_dir
+     beneath its ``.scratch_local/`` and refusing one beneath
+     ``REPO_WORKDIR``'s instead); when unset, behavior is unchanged
+     (``RD1_PROJECT_ROOT`` defaults to ``REPO_WORKDIR``, per tests 2-3 above).
 """
 from __future__ import annotations
 
@@ -175,6 +182,60 @@ def test_refuses_chain_dir_under_wrong_flashnh_base_scratch_local(tmp_path):
 
     assert proc.returncode != 0
     assert "must resolve beneath" in proc.stderr
+
+
+def test_project_root_decouples_boundary_check_from_repo_workdir(tmp_path):
+    """RD1_PROJECT_ROOT, when explicitly set, anchors the .scratch_local
+    boundary check instead of REPO_WORKDIR -- the authorized dual-provenance
+    diagnostic pattern, where REPO_WORKDIR must point at a separate
+    pinned-commit payload checkout while RD1_CHAIN_DIR must still resolve
+    beneath the real project's own .scratch_local/, not the payload
+    checkout's. Mirrors
+    test_succeeds_and_invokes_deployed_harness_absolute_path_not_cwd_relative
+    but with REPO_WORKDIR and RD1_PROJECT_ROOT deliberately different
+    directories."""
+    project_root = tmp_path / "project_root"
+    project_root.mkdir()
+    payload_checkout = tmp_path / "payload_checkout_other_commit"
+    payload_checkout.mkdir()
+    chain_dir = project_root / ".scratch_local" / "rd1_p20_p24_chain"
+
+    deployed_scripts_dir = chain_dir / "harness" / "scripts"
+    deployed_scripts_dir.mkdir(parents=True)
+    deployed_driver = deployed_scripts_dir / "rd1_p20_p24_job.py"
+    deployed_driver.write_text("# deployed harness stub, never actually executed by the stub interpreter\n", encoding="utf-8")
+
+    python_log = tmp_path / "py.log"
+    env = _base_env(tmp_path, repo_workdir=payload_checkout, chain_dir=chain_dir, python_log=python_log)
+    env["RD1_PROJECT_ROOT"] = str(project_root)
+
+    proc = _run(env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "DRY_RUN" in proc.stdout
+
+    logged_lines = [_norm(line) for line in python_log.read_text(encoding="utf-8").splitlines()]
+    assert _norm(str(deployed_driver)) in logged_lines
+
+
+def test_refuses_chain_dir_under_repo_workdir_scratch_local_when_project_root_differs(tmp_path):
+    """The inverse of the above: once RD1_PROJECT_ROOT is set, a chain_dir
+    beneath REPO_WORKDIR's own .scratch_local/ (the old anchor) is no longer
+    accepted -- proving the boundary check really moved, not merely widened."""
+    project_root = tmp_path / "project_root"
+    project_root.mkdir()
+    payload_checkout = tmp_path / "payload_checkout_other_commit"
+    payload_checkout.mkdir()
+    chain_dir = payload_checkout / ".scratch_local" / "rd1_p20_p24_chain"
+
+    env = _base_env(tmp_path, repo_workdir=payload_checkout, chain_dir=chain_dir, python_log=tmp_path / "py.log")
+    env["RD1_PROJECT_ROOT"] = str(project_root)
+
+    proc = _run(env)
+
+    assert proc.returncode != 0
+    assert "must resolve beneath" in proc.stderr
+    assert not chain_dir.exists()
 
 
 def test_refuses_when_harness_not_deployed(tmp_path):

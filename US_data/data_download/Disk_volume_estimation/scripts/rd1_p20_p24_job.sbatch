@@ -57,6 +57,13 @@ RD1_P20_PINNED_MANIFEST_SHA256="${RD1_P20_PINNED_MANIFEST_SHA256:-}"
 
 FLASHNH_BASE="${FLASHNH_BASE:-/sci/labs/efratmorin/omripo/Flash-NH}"
 REPO_WORKDIR="${REPO_WORKDIR:-${FLASHNH_BASE}/repos/flash-nh/US_data/data_download/Disk_volume_estimation}"
+# RD1_PROJECT_ROOT anchors the project-local artifact boundary check below.
+# It defaults to REPO_WORKDIR, preserving today's behavior exactly. It is
+# only ever set independently of REPO_WORKDIR for an authorized
+# dual-provenance diagnostic, where REPO_WORKDIR must point at a separate
+# pinned-commit payload checkout while RD1_CHAIN_DIR must still resolve
+# beneath the real project's .scratch_local/ (not the payload checkout's).
+RD1_PROJECT_ROOT="${RD1_PROJECT_ROOT:-${REPO_WORKDIR}}"
 CANONICAL_PYTHON="${CANONICAL_PYTHON:-${FLASHNH_BASE}/envs/flashnh-moriah/bin/python}"
 test -d "${REPO_WORKDIR}" || { echo "MISSING repo work directory" >&2; exit 1; }
 cd "${REPO_WORKDIR}"
@@ -66,18 +73,21 @@ export PATH="$(dirname "${CANONICAL_PYTHON}"):${PATH}"
 # Fail-closed project-local artifact boundary check (CLAUDE.md, non-
 # negotiable): RD1_CHAIN_DIR is where this job writes every manifest,
 # registry backup, and (see RD1_HARNESS_DIR below) reads the deployed
-# operational harness from. It must resolve strictly beneath this project's
-# own ".scratch_local/" -- never the broader Flash-NH base directory, and
-# never anywhere outside the project root -- checked here, before any
+# operational harness from. It must resolve strictly beneath the project
+# root's own ".scratch_local/" -- never the broader Flash-NH base directory,
+# and never anywhere outside the project root -- checked here, before any
 # directory is created and before any Python driver, manifest, or W&B
 # action runs. `realpath -m` normalizes without requiring the path to exist
-# yet (RD1_CHAIN_DIR itself is created by mkdir -p below).
+# yet (RD1_CHAIN_DIR itself is created by mkdir -p below). The boundary is
+# anchored to RD1_PROJECT_ROOT, not REPO_WORKDIR directly, so that an
+# authorized dual-provenance diagnostic can point REPO_WORKDIR at a separate
+# pinned-commit payload checkout without weakening this check.
 RD1_CHAIN_DIR_REAL="$(realpath -m "${RD1_CHAIN_DIR}")"
-REPO_WORKDIR_REAL="$(realpath -m "${REPO_WORKDIR}")"
+RD1_PROJECT_ROOT_REAL="$(realpath -m "${RD1_PROJECT_ROOT}")"
 case "${RD1_CHAIN_DIR_REAL}/" in
-    "${REPO_WORKDIR_REAL}/.scratch_local/"*) ;;
+    "${RD1_PROJECT_ROOT_REAL}/.scratch_local/"*) ;;
     *)
-        echo "FATAL: RD1_CHAIN_DIR must resolve beneath ${REPO_WORKDIR_REAL}/.scratch_local/ (got ${RD1_CHAIN_DIR_REAL})" >&2
+        echo "FATAL: RD1_CHAIN_DIR must resolve beneath ${RD1_PROJECT_ROOT_REAL}/.scratch_local/ (got ${RD1_CHAIN_DIR_REAL})" >&2
         exit 1
         ;;
 esac
