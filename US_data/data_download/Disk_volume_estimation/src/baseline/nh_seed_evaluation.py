@@ -53,6 +53,7 @@ from .nh_raw_space_evaluation import (
     derive_basin_area_km2_from_netcdf,
     evaluate_basin_raw_space,
     pooled_raw_space_metrics,
+    resolve_run_observation_cutoff,
 )
 from .package_audit import sha256_file
 
@@ -122,6 +123,7 @@ def raw_space_metrics_for_run_period(
     min_area_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
     compute_pooled: bool = False,
+    observation_cutoff=None,
 ) -> dict:
     """Reads one completed (period, epoch)'s NH evaluation pickle, self-derives
     each basin's area from the package's own data, converts obs/sim back to
@@ -136,7 +138,16 @@ def raw_space_metrics_for_run_period(
     :func:`src.baseline.nh_raw_space_evaluation.pooled_raw_space_metrics`),
     never the primary median-per-basin metric. Defaults to ``False`` so
     existing callers are unaffected.
+
+    Observation cutoff: when the run's own ``config.yml`` declares
+    ``flashnh_observation_cutoff`` (or ``observation_cutoff`` is passed; the
+    two must agree), area derivation reads no package observation later than
+    the cutoff, the ``test`` period is refused, and the result records
+    ``"observation_cutoff"``. Without either, behaviour is unchanged.
     """
+    cutoff = resolve_run_observation_cutoff(run_dir, observation_cutoff)
+    if cutoff is not None and period == "test":
+        raise NHSeedEvaluationError(f"run declares observation cutoff {cutoff}; the test period is refused")
     results = load_period_results(run_dir, period, epoch)
     actual_basin_ids = sorted(results.keys())
     if basin_ids is not None:
@@ -174,6 +185,7 @@ def raw_space_metrics_for_run_period(
                     lead_hours=lead_hours,
                     min_samples=min_area_samples,
                     max_relative_mad=max_relative_mad,
+                    observation_cutoff=cutoff,
                 )
             except RawSpaceEvaluationError as exc:
                 area_derivation_excluded.append({"basin_id": basin_id, "freq": freq, "reason": str(exc)})
@@ -230,6 +242,8 @@ def raw_space_metrics_for_run_period(
     }
     if compute_pooled:
         result["pooled"] = pooled_raw_space_metrics(pooled_obs_arrays, pooled_sim_arrays)
+    if cutoff is not None:
+        result["observation_cutoff"] = str(cutoff)
     return result
 
 

@@ -93,14 +93,46 @@ timestamp) is never silently ignored -- it raises ``FlashNHDatasetError``,
 because letting ``validity_mask.bad_hour_mask_from_timestamps``'s
 ``on_out_of_range="ignore"`` swallow it could silently turn a real,
 in-period gap into zero matched bad hours.
+
+Optional fixed common training support (train period only): when the NH
+config key ``flashnh_common_support_file`` (registered by
+``nh_register.register_flashnh_dataset``) names a checksummed training-support
+artifact from ``src/baseline/seqlen_common336_support.py``, the lookup table
+left after concerns A/B/C is further restricted to exactly the artifact's
+(basin, issue-time) pairs. This is what makes every sequence length L <= the
+artifact's ``seq_length_floor`` train on the same pairs. The restriction is
+fail-closed: the artifact's identity (lead, target, dynamic inputs, train
+dates, gap-artifact sha256, basin set) must match this dataset, and every
+support pair must already be admitted naturally -- a support pair missing from
+the natural lookup (including a basin NH dropped for having no samples) raises
+``FlashNHDatasetError`` rather than training on a smaller set. Validation and
+test datasets are never restricted here; common screening support is applied
+by the raw-space scorer instead.
+
+Optional observation cutoff (experiment-scoped sealed-period boundary): when
+the NH config key ``flashnh_observation_cutoff`` (registered by
+``nh_register.register_flashnh_dataset``) is set, each basin NetCDF is opened
+lazily and restricted BEFORE any value is read so that no observation later
+than the cutoff enters memory: every variable ends at the cutoff, and each
+lead-shifted target ``*_lead<NN>`` ends at ``cutoff - NN h`` (NaN-filled after
+that, never read) -- see
+``nh_raw_space_evaluation.select_through_observation_cutoff``. Without the key,
+GenericDataset's whole-file read is unchanged. With it, the ``test`` period
+and any period ending after the cutoff are refused. Concern B already removes
+every issue time whose lead target lies past the period end, so the lookup
+table is the same with or without the cutoff when the cutoff equals the last
+loaded period's end.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import xarray
@@ -112,6 +144,10 @@ from src.baseline.validity_mask import bad_hour_mask_from_timestamps, compute_hi
 __all__ = ["FlashNHDataset", "FlashNHDatasetError", "FlashNHFilterStats"]
 
 _LEAD_SUFFIX_RE = re.compile(r"lead(\d+)$")
+_COMMON_SUPPORT_CONFIG_KEY = "flashnh_common_support_file"
+COMMON_SUPPORT_RECEIPT_NAME = "flashnh_common_support_applied.json"
+
+LOGGER = logging.getLogger(__name__)
 
 
 class FlashNHDatasetError(ValueError):
@@ -144,6 +180,11 @@ class FlashNHFilterStats:
     n_gap_timestamps_loaded: int
     n_gap_timestamps_in_range: int
     n_gap_timestamps_ignored_outside_range: int
+    # Fixed common training support (None/0 when not configured).
+    common_support_id: str | None = None
+    common_support_checksum_sha256: str | None = None
+    n_natural_admitted: int | None = None
+    removed_for_common_support: int = 0
 
 
 def _normalize_timestamp(value) -> pd.Timestamp:
@@ -303,8 +344,52 @@ class FlashNHDataset(GenericDataset):
         # date-name-dependent logic (duplicate handling, frequency inference,
         # xarray.Dataset.from_dataframe) runs. Call the parent GenericDataset
         # loader unchanged, then adapt only the temporal index name in memory.
-        df = super()._load_basin_data(basin)
+        cutoff = self._observation_cutoff(basin)
+        if cutoff is None:
+            df = super()._load_basin_data(basin)
+        else:
+            df = self._load_basin_data_through_cutoff(basin, cutoff)
         return _adapt_temporal_index_to_date(df)
+
+    def _observation_cutoff(self, basin: str):
+        """The config's ``flashnh_observation_cutoff`` (``None`` when unset),
+        after refusing the test period and any period whose last hour lies
+        beyond it (fail closed rather than evaluating NaN-padded hours)."""
+        from src.baseline.nh_raw_space_evaluation import (
+            OBSERVATION_CUTOFF_CONFIG_KEY, RawSpaceEvaluationError, parse_observation_cutoff,
+        )
+
+        try:
+            cutoff = parse_observation_cutoff(self.cfg.as_dict().get(OBSERVATION_CUTOFF_CONFIG_KEY))
+        except RawSpaceEvaluationError as exc:
+            raise FlashNHDatasetError(str(exc)) from exc
+        if cutoff is None:
+            return None
+        if self.period == "test":
+            raise FlashNHDatasetError(f"config declares observation cutoff {cutoff}; the test period is refused")
+        last_hours = [_normalize_timestamp(d) + pd.Timedelta(days=1) - pd.Timedelta(hours=1)
+                      for d in self.start_and_end_dates[basin]["end_dates"]]
+        if max(last_hours) > cutoff:
+            raise FlashNHDatasetError(
+                f"{self.period} period for basin {basin} ends {max(last_hours)}, after observation cutoff {cutoff}")
+        return cutoff
+
+    def _load_basin_data_through_cutoff(self, basin: str, cutoff: pd.Timestamp) -> pd.DataFrame:
+        """GenericDataset's per-basin NetCDF read, restricted lazily before any
+        value is read: no variable past ``cutoff`` and no ``*_lead<NN>`` target
+        past ``cutoff - NN h`` (NaN there, never read). Same file discovery
+        rule as ``genericdataset.load_timeseries``."""
+        from src.baseline.nh_raw_space_evaluation import select_through_observation_cutoff
+
+        files_dir = Path(self.cfg.data_dir) / "time_series"
+        candidates = [files_dir / f"{basin}{ext}" for ext in (".nc4", ".nc")]
+        found = [path for path in candidates if path.is_file()]
+        if len(found) != 1:
+            raise FlashNHDatasetError(f"expected exactly one NetCDF file for basin {basin} in {files_dir}, "
+                                      f"found {[str(p) for p in found]}")
+        with xarray.open_dataset(found[0]) as ds:
+            coordinate = "date" if "date" in ds.coords else "time"
+            return select_through_observation_cutoff(ds, cutoff=cutoff, coordinate=coordinate).to_dataframe()
 
     def _create_lookup_table(self, xr: xarray.Dataset):
         super()._create_lookup_table(xr)
@@ -357,6 +442,14 @@ class FlashNHDataset(GenericDataset):
             kept[new_key] = (basin, indices)
             new_key += 1
 
+        support = None
+        n_natural = len(kept)
+        support_path = cfg.as_dict().get(_COMMON_SUPPORT_CONFIG_KEY)
+        if support_path not in (None, "None") and self.period == "train":
+            support = self._load_common_support(Path(support_path), seq_length, lead_hours)
+            kept = self._restrict_to_common_support(kept, support)
+            self._write_common_support_receipt(Path(support_path), support, seq_length, n_natural, len(kept))
+
         self.lookup_table = kept
         self.num_samples = len(kept)
 
@@ -378,4 +471,86 @@ class FlashNHDataset(GenericDataset):
             n_gap_timestamps_loaded=len(gap_timestamps),
             n_gap_timestamps_in_range=len(in_range_gaps),
             n_gap_timestamps_ignored_outside_range=n_gap_outside,
+            common_support_id=None if support is None else support["support_id"],
+            common_support_checksum_sha256=None if support is None else support["checksum_sha256"],
+            n_natural_admitted=None if support is None else n_natural,
+            removed_for_common_support=0 if support is None else n_natural - len(kept),
         )
+
+    def _load_common_support(self, path: Path, seq_length: int, lead_hours: int) -> dict:
+        """Load the checksummed training support and verify it describes this
+        dataset (fail closed on any mismatch)."""
+        from src.baseline.seqlen_common336_support import Common336SupportError, load_training_support
+
+        cfg = self.cfg
+        try:
+            support = load_training_support(path)
+        except Common336SupportError as exc:
+            raise FlashNHDatasetError(f"invalid common training support {path}: {exc}") from exc
+
+        def _single_date(value):
+            if isinstance(value, list):
+                if len(value) != 1:
+                    raise FlashNHDatasetError("common training support requires a single train period")
+                value = value[0]
+            return pd.Timestamp(value)
+
+        gap_path = Path(cfg.data_dir) / "masks" / "gap_timestamps.json"
+        checks = {
+            "seq_length <= seq_length_floor": seq_length <= support["seq_length_floor"],
+            "lead_hours": support["lead_hours"] == lead_hours,
+            "target_variable": [support["target_variable"]] == list(cfg.target_variables),
+            "dynamic_inputs": isinstance(cfg.dynamic_inputs, list)
+            and support["dynamic_inputs"] == list(cfg.dynamic_inputs),
+            "date_start": pd.Timestamp(support["date_start"]) == _single_date(cfg.train_start_date),
+            "date_end": pd.Timestamp(support["date_end"]) == _single_date(cfg.train_end_date),
+            "gap_artifact_sha256": gap_path.is_file()
+            and hashlib.sha256(gap_path.read_bytes()).hexdigest() == support["gap_artifact_sha256"],
+            "basin set": set(support["basin_ids"]) == set(self.basins),
+        }
+        failed = [name for name, ok in checks.items() if not ok]
+        if failed:
+            raise FlashNHDatasetError(f"common training support {path} does not match this dataset: {failed}")
+        return support
+
+    def _write_common_support_receipt(self, path: Path, support: dict, seq_length: int, n_natural: int,
+                                      n_kept: int) -> None:
+        """Durable proof, next to NH's own train-data scaler, that this run's
+        actual training loader applied the support (independent of logging)."""
+        train_dir = getattr(self.cfg, "train_dir", None)
+        if train_dir is None:
+            return
+        receipt = {"support_id": support["support_id"], "checksum_sha256": support["checksum_sha256"],
+                   "support_file": str(path), "seq_length": int(seq_length), "n_natural_admitted": int(n_natural),
+                   "n_kept": int(n_kept), "removed_for_common_support": int(n_natural - n_kept),
+                   "n_basins": len(support["basin_ids"])}
+        Path(train_dir).mkdir(parents=True, exist_ok=True)
+        (Path(train_dir) / COMMON_SUPPORT_RECEIPT_NAME).write_text(json.dumps(receipt, indent=1, sort_keys=True),
+                                                                   encoding="utf-8")
+
+    def _restrict_to_common_support(self, entries: dict, support: dict) -> dict:
+        """Keep exactly the support's (basin, issue-time) pairs out of the
+        naturally admitted ``entries``; raise if any support pair is absent."""
+        from src.baseline.seqlen_common336_support import decode_issue_intervals
+
+        freq = self.frequencies[0]
+        member = {}
+        for basin, intervals in support["per_basin_intervals"].items():
+            if basin not in self._dates:
+                continue  # NH dropped the basin; reported by the count check below
+            dates = np.asarray(self._dates[basin][freq], dtype="datetime64[ns]")
+            member[basin] = np.isin(dates, decode_issue_intervals(intervals))
+        restricted = {}
+        counts = dict.fromkeys(support["basin_ids"], 0)
+        for _, (basin, indices) in sorted(entries.items()):
+            if member[basin][indices[0]]:
+                restricted[len(restricted)] = (basin, indices)
+                counts[basin] += 1
+        short = {b: (counts[b], n) for b, n in support["eligible_counts"].items() if counts[b] != n}
+        if short:
+            raise FlashNHDatasetError(
+                f"{len(short)} basin(s) lack naturally admitted samples for common-support pairs "
+                f"(kept, expected): {dict(list(sorted(short.items()))[:10])}")
+        LOGGER.info("Flash-NH common training support %s (%s): %d of %d naturally admitted samples kept",
+                    support["support_id"], support["checksum_sha256"][:12], len(restricted), len(entries))
+        return restricted

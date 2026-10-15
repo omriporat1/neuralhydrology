@@ -53,6 +53,7 @@ from .nh_raw_space_evaluation import (
     aggregate_raw_space_metrics,
     derive_basin_area_km2_from_netcdf,
     evaluate_basin_raw_space,
+    resolve_run_observation_cutoff,
 )
 from .authenticated_period_results import (
     AuthenticatedPeriodResults,
@@ -326,12 +327,19 @@ def build_fixed_support_contract(
     return payload
 
 
-def validate_fixed_support_contract(data: dict, *, expected_contract_id: str = OBJECTIVE_ID_V2) -> dict:
+def validate_fixed_support_contract(data: dict, *, expected_contract_id: str = OBJECTIVE_ID_V2,
+                                    expected_seq_length_floor: int = SEQ_LENGTH_MAX) -> dict:
     """Strict schema/checksum validation. Raises :class:`FixedSupportContractError`
     on any missing/extra key, wrong schema/contract identity, wrong
     ``seq_length_floor``, inconsistent basin_id sets, inconsistent eligible
     counts, or checksum mismatch (a checksum mismatch means the payload was
-    altered after checksumming -- never silently tolerated)."""
+    altered after checksumming -- never silently tolerated).
+
+    ``expected_contract_id``/``expected_seq_length_floor`` default to the v2
+    Common-120 identity, so every existing caller is unchanged. A separately
+    identified contract family (e.g. the sequence-length Common-336 screening
+    contract in :mod:`seqlen_common336_support`) must pass BOTH explicitly; a
+    Common-120 contract can never validate as another id or floor."""
     if not isinstance(data, dict):
         raise FixedSupportContractError(f"contract must be a mapping, got {type(data).__name__}")
     missing = _REQUIRED_KEYS - set(data)
@@ -349,9 +357,10 @@ def validate_fixed_support_contract(data: dict, *, expected_contract_id: str = O
         )
     if data["contract_id"] != expected_contract_id:
         raise FixedSupportContractError(f"contract_id must be {expected_contract_id!r}, got {data['contract_id']!r}")
-    if data["seq_length_floor"] != SEQ_LENGTH_MAX:
+    if data["seq_length_floor"] != expected_seq_length_floor or not is_strict_int(data["seq_length_floor"]):
         raise FixedSupportContractError(
-            f"seq_length_floor must be {SEQ_LENGTH_MAX!r} (the v2 domain ceiling), got {data['seq_length_floor']!r}"
+            f"seq_length_floor must be {expected_seq_length_floor!r} for contract {expected_contract_id!r}, "
+            f"got {data['seq_length_floor']!r}"
         )
     for key in (
         "screening_basin_ids_sha256", "package_manifest_sha256", "package_file_checksums_sha256",
@@ -387,12 +396,14 @@ def validate_fixed_support_contract(data: dict, *, expected_contract_id: str = O
     return data
 
 
-def write_fixed_support_contract(data: dict, path) -> Path:
+def write_fixed_support_contract(data: dict, path, *, expected_contract_id: str = OBJECTIVE_ID_V2,
+                                 expected_seq_length_floor: int = SEQ_LENGTH_MAX) -> Path:
     """Validates, then writes ``data`` to ``path`` via atomic tmp-write +
     replace. Strict no-overwrite: refuses if ``path`` already exists (no
     force option -- a fixed-support artifact is never silently replaced)."""
     path = Path(path)
-    validate_fixed_support_contract(data)
+    validate_fixed_support_contract(data, expected_contract_id=expected_contract_id,
+                                    expected_seq_length_floor=expected_seq_length_floor)
     if path.exists():
         raise FixedSupportContractError(f"refusing to overwrite existing fixed-support contract: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,12 +469,14 @@ def build_support_contract_provenance(contract: Mapping) -> SupportContractProve
     )
 
 
-def load_fixed_support_contract(path, *, expected_contract_id: str = OBJECTIVE_ID_V2) -> dict:
+def load_fixed_support_contract(path, *, expected_contract_id: str = OBJECTIVE_ID_V2,
+                                expected_seq_length_floor: int = SEQ_LENGTH_MAX) -> dict:
     path = Path(path)
     if not path.is_file():
         raise FixedSupportContractError(f"fixed-support contract not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
-    return validate_fixed_support_contract(data, expected_contract_id=expected_contract_id)
+    return validate_fixed_support_contract(data, expected_contract_id=expected_contract_id,
+                                           expected_seq_length_floor=expected_seq_length_floor)
 
 
 def _frozen_array_copy(value) -> np.ndarray:
@@ -878,9 +891,14 @@ def evaluate_fixed_support_raw_space_metrics(
     return_admitted_series: bool = False,
     package_identity: Optional[QualifiedPackageIdentity] = None,
     authenticated_period_results: Optional[AuthenticatedPeriodResults] = None,
+    expected_contract_id: str = OBJECTIVE_ID_V2,
+    expected_seq_length_floor: int = SEQ_LENGTH_MAX,
+    observation_cutoff=None,
 ) -> dict:
     """Evaluates raw-space metrics restricted to ``contract``'s frozen
-    120h-floor common support. The returned dict is tagged
+    common support (by default the v2 120h-floor Common-120 contract;
+    ``expected_contract_id``/``expected_seq_length_floor`` select another
+    explicitly identified contract family and are checked, never inferred). The returned dict is tagged
     ``objective_scope="fixed_support"`` and is structurally distinct from
     :func:`evaluate_natural_support_raw_space_metrics`'s output -- the ONLY
     function permitted to feed the v2 primary objective is
@@ -924,10 +942,27 @@ def evaluate_fixed_support_raw_space_metrics(
     itself, so the simulations it evaluates are bound to a named pickle and
     a recorded digest on every path. The observed source facts are returned
     in ``result["evaluation_source"]``.
+
+    Observation cutoff: when the run's own ``config.yml`` declares
+    ``flashnh_observation_cutoff`` (or ``observation_cutoff`` is passed; the
+    two must agree), basin-area derivation reads no package observation later
+    than the cutoff, a contract whose lead-shifted support reaches past the
+    cutoff (or a ``test``-period contract) is refused, and the result records
+    ``"observation_cutoff"``. Without either, behaviour is unchanged.
     """
-    validate_fixed_support_contract(contract)
+    validate_fixed_support_contract(contract, expected_contract_id=expected_contract_id,
+                                    expected_seq_length_floor=expected_seq_length_floor)
     target_variable = contract["target_variable"]
     lead_hours = contract["lead_hours"]
+    cutoff = resolve_run_observation_cutoff(run_dir, observation_cutoff)
+    if cutoff is not None:
+        import pandas as pd
+
+        if contract["period"] == "test":
+            raise FixedSupportContractError(f"run declares observation cutoff {cutoff}; a test-period contract is refused")
+        if contract["date_dtype"] != "datetime64" or pd.Timestamp(contract["date_end"]) + pd.Timedelta(hours=23) > cutoff:
+            raise FixedSupportContractError(
+                f"contract period end {contract['date_end']} (last hour) lies beyond observation cutoff {cutoff}")
     requested = sorted(basin_ids) if basin_ids is not None else contract["basin_ids"]
     unknown = set(requested) - set(contract["basin_ids"])
     if unknown:
@@ -1049,6 +1084,7 @@ def evaluate_fixed_support_raw_space_metrics(
                 lead_hours=lead_hours,
                 min_samples=min_area_samples,
                 max_relative_mad=max_relative_mad,
+                observation_cutoff=cutoff,
             )
         except RawSpaceEvaluationError as exc:
             excluded.append({"basin_id": basin_id, "reason": f"area derivation failed: {exc}"})
@@ -1112,6 +1148,8 @@ def evaluate_fixed_support_raw_space_metrics(
         if per_basin
         else {"n_basins": 0, "n_admitted_total": 0, "n_sim_nonfinite_at_admitted_total": 0, "metrics": {}},
     }
+    if cutoff is not None:
+        result["observation_cutoff"] = str(cutoff)
     if return_admitted_series:
         result["admitted_series_by_basin"] = admitted_series_by_basin
     if require_full_screening_population:

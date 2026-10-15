@@ -34,9 +34,10 @@ generic evidence-reporting idiom used by every other Stage 1 audit module.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -47,6 +48,11 @@ __all__ = [
     "BasinAreaResult",
     "derive_basin_area_km2",
     "derive_basin_area_km2_from_netcdf",
+    "OBSERVATION_CUTOFF_CONFIG_KEY",
+    "parse_observation_cutoff",
+    "read_run_observation_cutoff",
+    "resolve_run_observation_cutoff",
+    "select_through_observation_cutoff",
     "PeriodConversionResult",
     "convert_period_to_raw_space",
     "raw_space_metrics",
@@ -63,6 +69,79 @@ class RawSpaceEvaluationError(Exception):
     """Raised for a setup/contract problem (insufficient samples, an
     inconsistent algebraic round-trip, shape mismatch, etc.), never for an
     ordinary "this basin/epoch has poor skill" outcome."""
+
+
+# ---------------------------------------------------------------------------
+# Optional observation cutoff (experiment-scoped sealed-period boundary)
+# ---------------------------------------------------------------------------
+
+#: NH config key naming the last package timestamp whose observation a run may
+#: read (ISO timestamp, e.g. ``"2024-12-31T23:00:00"``). Absent -> unchanged
+#: whole-file behaviour (every historical run/evaluation).
+OBSERVATION_CUTOFF_CONFIG_KEY = "flashnh_observation_cutoff"
+_LEAD_VARIABLE_RE = re.compile(r"_lead(\d+)$")
+
+
+def parse_observation_cutoff(value) -> Optional["pd.Timestamp"]:
+    """``None``/``"None"`` -> ``None``; otherwise a timezone-naive hourly
+    ``pandas.Timestamp`` (raises :class:`RawSpaceEvaluationError`)."""
+    import pandas as pd
+
+    if value is None or value == "None":
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise RawSpaceEvaluationError(f"invalid observation cutoff {value!r}: {exc}") from exc
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    if ts != ts.floor("h"):
+        raise RawSpaceEvaluationError(f"observation cutoff {value!r} is not on the hourly grid")
+    return ts
+
+
+def read_run_observation_cutoff(run_dir) -> Optional["pd.Timestamp"]:
+    """The cutoff declared in an NH run's own ``config.yml`` (``None`` if the
+    key is absent or the run directory has no ``config.yml``)."""
+    from ruamel.yaml import YAML
+
+    config_path = Path(run_dir) / "config.yml"
+    if not config_path.is_file():
+        return None
+    with config_path.open("r", encoding="utf-8") as fh:
+        cfg = YAML(typ="safe").load(fh) or {}
+    return parse_observation_cutoff(cfg.get(OBSERVATION_CUTOFF_CONFIG_KEY))
+
+
+def resolve_run_observation_cutoff(run_dir, observation_cutoff=None) -> Optional["pd.Timestamp"]:
+    """Explicit ``observation_cutoff`` and the run's declared cutoff must agree
+    when both are present; either alone applies; neither -> ``None``."""
+    explicit = parse_observation_cutoff(observation_cutoff)
+    declared = read_run_observation_cutoff(run_dir) if run_dir is not None else None
+    if explicit is not None and declared is not None and explicit != declared:
+        raise RawSpaceEvaluationError(
+            f"observation cutoff {explicit} contradicts the run's declared {OBSERVATION_CUTOFF_CONFIG_KEY} {declared}")
+    return explicit if explicit is not None else declared
+
+
+def select_through_observation_cutoff(ds, *, cutoff, coordinate: str):
+    """Lazily restrict an (unloaded) package ``xarray.Dataset`` so that no
+    observation later than ``cutoff`` is read: every variable is sliced to
+    ``coordinate <= cutoff``, and every lead-shifted ``*_lead<NN>`` variable
+    (whose value at ``t`` is the observation at ``t + NN h``) is read only
+    through ``cutoff - NN h`` and NaN-filled -- never read -- after that."""
+    import pandas as pd
+
+    if coordinate not in ds.coords:
+        raise RawSpaceEvaluationError(f"package dataset has no {coordinate!r} coordinate")
+    sub = ds.sel({coordinate: slice(None, cutoff)})
+    for name in list(sub.data_vars):
+        match = _LEAD_VARIABLE_RE.search(str(name))
+        if match is None:
+            continue
+        head = ds[name].sel({coordinate: slice(None, cutoff - pd.Timedelta(hours=int(match.group(1))))})
+        sub[name] = head.reindex({coordinate: sub[coordinate]})
+    return sub
 
 
 # ---------------------------------------------------------------------------
@@ -163,16 +242,23 @@ def derive_basin_area_km2_from_netcdf(
     lead_hours: int,
     min_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
+    observation_cutoff=None,
 ) -> BasinAreaResult:
     """I/O wrapper: reads ``qobs_m3s`` and ``target_variable`` from one
     package basin NetCDF (``time_series/<basin_id>.nc``) and calls
-    :func:`derive_basin_area_km2`."""
+    :func:`derive_basin_area_km2`. With ``observation_cutoff`` the read is
+    restricted first (:func:`select_through_observation_cutoff`), so the area
+    is derived only from observations at or before the cutoff."""
     import xarray as xr
 
     nc_path = Path(nc_path)
+    cutoff = parse_observation_cutoff(observation_cutoff)
     if not nc_path.is_file():
         raise RawSpaceEvaluationError(f"basin NetCDF not found: {nc_path}")
     with xr.open_dataset(nc_path) as ds:
+        if cutoff is not None:
+            coordinate = "date" if "date" in ds.coords else "time"
+            ds = select_through_observation_cutoff(ds, cutoff=cutoff, coordinate=coordinate)
         if "qobs_m3s" not in ds.data_vars:
             raise RawSpaceEvaluationError(f"{nc_path}: missing diagnostic variable 'qobs_m3s'")
         if target_variable not in ds.data_vars:
