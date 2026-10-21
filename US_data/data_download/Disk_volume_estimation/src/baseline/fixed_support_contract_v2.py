@@ -878,6 +878,46 @@ def derive_canonical_package_observed_series(
     return CanonicalPackageObservedSeries(basin_id=basin_id, date=support_dates, obs_m3s=canonical_obs_m3s)
 
 
+def _validate_contract_for_schema(
+    contract: dict,
+    *,
+    contract_schema: str,
+    expected_contract_id: str,
+    expected_seq_length_floor: int,
+    require_full_screening_population: bool,
+):
+    """Validate ``contract`` under the explicitly named schema and return its
+    per-basin support accessor ``basin_id -> datetime64 array``."""
+    if contract_schema == CONTRACT_SCHEMA_NAME:
+        validate_fixed_support_contract(contract, expected_contract_id=expected_contract_id,
+                                        expected_seq_length_floor=expected_seq_length_floor)
+        return lambda basin_id: _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+
+    from . import seqlen_common336_full_development as full_dev
+
+    if contract_schema != full_dev.CONTRACT_SCHEMA_NAME:
+        raise FixedSupportContractError(f"unknown fixed-support contract schema {contract_schema!r}")
+    if not isinstance(contract, dict) or contract.get("schema_name") != contract_schema:
+        raise FixedSupportContractError(
+            f"contract schema_name {contract.get('schema_name') if isinstance(contract, dict) else None!r} "
+            f"!= declared contract_schema {contract_schema!r}")
+    if require_full_screening_population:
+        raise FixedSupportContractError(
+            "require_full_screening_population is the 400-basin screening gate; it does not apply to the "
+            "full-development schema")
+    try:
+        full_dev.validate_full_development_support_contract(contract)
+    except full_dev.FullDevelopmentError as exc:
+        raise FixedSupportContractError(str(exc)) from exc
+    if contract["contract_id"] != expected_contract_id:
+        raise FixedSupportContractError(
+            f"contract_id {contract['contract_id']!r} != expected {expected_contract_id!r}")
+    if contract["seq_length_floor"] != expected_seq_length_floor:
+        raise FixedSupportContractError(
+            f"seq_length_floor {contract['seq_length_floor']!r} != expected {expected_seq_length_floor!r}")
+    return lambda basin_id: full_dev.full_development_support_dates(contract, basin_id)
+
+
 def evaluate_fixed_support_raw_space_metrics(
     *,
     run_dir,
@@ -894,6 +934,7 @@ def evaluate_fixed_support_raw_space_metrics(
     expected_contract_id: str = OBJECTIVE_ID_V2,
     expected_seq_length_floor: int = SEQ_LENGTH_MAX,
     observation_cutoff=None,
+    contract_schema: str = CONTRACT_SCHEMA_NAME,
 ) -> dict:
     """Evaluates raw-space metrics restricted to ``contract``'s frozen
     common support (by default the v2 120h-floor Common-120 contract;
@@ -949,9 +990,21 @@ def evaluate_fixed_support_raw_space_metrics(
     than the cutoff, a contract whose lead-shifted support reaches past the
     cutoff (or a ``test``-period contract) is refused, and the result records
     ``"observation_cutoff"``. Without either, behaviour is unchanged.
+
+    ``contract_schema`` selects the contract schema explicitly (never
+    inferred). The default is this module's v2 schema, unchanged. The only
+    other accepted value is the Common-336 full-development schema of
+    :mod:`.seqlen_common336_full_development`, whose own validator is applied
+    and whose run-length-encoded support is decoded per basin; the 400-basin
+    screening gate is refused for it (that module owns its completeness gate).
     """
-    validate_fixed_support_contract(contract, expected_contract_id=expected_contract_id,
-                                    expected_seq_length_floor=expected_seq_length_floor)
+    support_dates_for = _validate_contract_for_schema(
+        contract,
+        contract_schema=contract_schema,
+        expected_contract_id=expected_contract_id,
+        expected_seq_length_floor=expected_seq_length_floor,
+        require_full_screening_population=require_full_screening_population,
+    )
     target_variable = contract["target_variable"]
     lead_hours = contract["lead_hours"]
     cutoff = resolve_run_observation_cutoff(run_dir, observation_cutoff)
@@ -1041,7 +1094,7 @@ def evaluate_fixed_support_raw_space_metrics(
                 f"basin {basin_id!r}: run results coordinate/observation/simulation lengths disagree "
                 f"({run_date_values.shape}, {obs_mm_per_h.shape}, {sim_mm_per_h.shape})"
             )
-        support_dates = _deserialize_date_array(contract["per_basin_support"][basin_id], contract["date_dtype"])
+        support_dates = support_dates_for(basin_id)
         run_date_values = _canonicalize_timestamps_for_identity(
             run_date_values,
             date_dtype=contract["date_dtype"],
