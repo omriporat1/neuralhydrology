@@ -2,6 +2,38 @@
 
 # Decision Log
 
+## 2026-10-22 — Stop HPO and sequence-length exploration; P19 at 120 h is the working Stage-1 baseline; Common-336 length evidence recorded with its disclosed deviation; water-year rotation design PROPOSED — record only
+
+**Decision (user).** Stage 1 moves on from HPO. Sequence-length exploration stops. The historical P19 configuration at 120 h is the working Stage-1 baseline.
+- It is not a final promotion. 120 h is not claimed optimal.
+- On 2024 development data, L240 and L336 improved NSE over L120. Neither is settled as optimal for floods: flood context separates L120 from the longer windows but not L240 from L336, and L336's selected epochs sit at or near the 12-epoch limit.
+- The decision was made after the 2026-10-21 full-development comparison and is recorded here on 2026-10-22.
+
+**Evidence this rests on.** All of it is development-2024 evidence under the observation cutoff 2024-12-31 23:00 UTC. It is not a final-year, sealed-period or spatial test.
+
+| Step | Jobs / code | Outcome | Evidence (gitignored, checksummed) |
+|---|---|---|---|
+| 15-run screen (L72-L336 × seeds A/B/C, 400 screening basins) | code `6d1efc6` + `e8b9278` | 15/15 qualified; 212.58 GPU-h; mean within-seed Δ median NSE vs L120: L72 −0.052, L168 +0.022, L240 +0.067, L336 +0.105 | `.scratch_local/seqlen_common336_qual_20261017/` |
+| Full-development support build | `46436645`, code `6264d2e` | PASSED: 2,307 basins, 18,325,647 hours | `.scratch_local/c336_full_dev_support_v002/` |
+| GPU canary + close-out | `46442993` FAILED (runner defect, descriptive check); `46446690` completed R1-R9 | Technical canary complete; R9 rests on size/mtime for 16 files | `.scratch_local/c336_gpu_canary_v001*/` |
+| Nine-checkpoint comparison, 2,307 basins | `46484743`, `46484750`; extra diagnostic `46487286` | All nine passed every prescribed gate. Pooled median paired ΔNSE: L120→L240 +0.060, L240→L336 +0.018, L120→L336 +0.079 | `.scratch_local/c336_full_dev_comparison_v001/DECISION_MEMO.md` |
+
+**Disclosed deviation in the nine-checkpoint comparison.**
+1. An extra cross-run check, stricter than the prescribed gates, required bit-identical observed series. It **failed**: the L240 runs' stored target scale differs by 1.3e-7 relative (float32 rounding), giving observation differences up to 2.5e-4 m³/s.
+2. The rule declared before the diagnostic, |ΔNSE| ≤ 1e-6 in every basin, also **failed** (37-39 basins per L240 run, all with near-zero observed variance).
+3. A post-hoc robustness check (re-scoring against common observations) changed 0 better/worse classifications and no pooled median to 5 decimals. It is reported as a post-hoc check, not a pre-registered pass.
+
+Lesson: any cross-run observation-identity check needs a declared tolerance, or should score against package observations.
+
+**Water-year rotation — PROPOSED, NOT ENACTED.**
+- Proposal: five retrospective cycles over WY2021-WY2025 (Oct 1-Sep 30), each with three training years, one checkpoint-choice year and one assessment year; each year assessed once. Some training years fall after the year assessed; the user accepts this.
+- The five models would later each be scored on protected WY2026. Those are five scores of model variation on one test year, not five test years. WY2026 is never used to choose a model.
+- Stage-2 models should eventually use the same temporal protocol and comparable support.
+- Gates before any use: data feasibility, a frozen split contract, and a recorded, reviewed revision of the protection boundary. Until then calendar 2025, the spatial holdout and California stay sealed exactly as before. Historical HPO results keep their actual periods (training through 2023-12-31, development 2024).
+- Feasibility preflight (gitignored): `.scratch_local/wy_rotation_preflight_20261022/PREFLIGHT_MEMO.md`.
+
+No training, inference, Slurm job, protected-data read or code change accompanied this entry.
+
 ## 2026-10-13 — RD1 P1-P24 / R1-R12 development-screening evidence stage CLOSED: independent closure audit (34/34 checks), errata to the checksummed dashboard-v2 / Session A narrative, tracked evidence index, reconciliation of the 2026-10-07/08 entries — documentation + recompute only
 
 **Scope.** This entry closes the evidence stage covering 36 trials (P1-P24 Bayesian, R1-R12 random-control) × the same 400 Common-120 screening basins = 14,400 rows. Conditions: Seed A `967139`, `mf12x50000`, development-validation-2024 only.

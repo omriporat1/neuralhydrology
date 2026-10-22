@@ -1,5 +1,29 @@
 # Flash-NH Current State
 
+## HPO and sequence-length exploration stopped by user decision; the historical P19 120-hour configuration is the working Stage-1 baseline (not promoted, not claimed optimal); Common-336 length evidence recorded; water-year rotation design PROPOSED only (2026-10-22)
+
+**[RECORD ONLY — NO NEW RUN, NO PROMOTION, NO CHANGE TO PROTECTED PERIODS OR SPLITS]**
+
+**User decision.**
+- Stage 1 moves on from HPO and from sequence-length exploration.
+- The working Stage-1 baseline is the historical P19 configuration at 120 h (inputs `mrms_qpe_1h_mm` + `rtma_2t_K`, target `qobs_mm_per_h_lead06`, NSE loss, `mf12x50000`). It is a working baseline. It is not a final promotion and not a claim that 120 h is the optimal length.
+- L240 and L336 both improved 2024 development NSE over L120 (below). Neither is settled as optimal for floods.
+
+**Common-336 sequence-length evidence (development 2024 only; observation cutoff 2024-12-31 23:00 UTC).**
+- Screen `seqlen_common336_seed3_v001`: L72/120/168/240/336 h × seeds A/B/C, code `6d1efc6` + launcher fix `e8b9278`. All 15 runs completed and qualified (212.58 L4 GPU-h). Within-seed difference of median NSE vs the same seed's L120, on the 400 screening basins, mean of 3 seeds: L72 −0.052, L168 +0.022, L240 +0.067, L336 +0.105. Evidence: `.scratch_local/seqlen_common336_qual_20261017/` (bundle sha256 `7947f9a3…16e0`).
+- Full-development support build: job `46436645` PASSED, 2,307 basins, 18,325,647 admitted hours, contract checksum `4be82303…f5e8`. Code `6264d2e`. Evidence: `.scratch_local/c336_full_dev_support_v002/`.
+- GPU canary `46442993` ended FAILED from a runner defect in a descriptive check (it assumed every basin's date coordinate starts at 2024-01-01T00). CPU close-out `46446690` completed the remaining checks (R1-R9 pass; R9 rests on size/mtime for 16 files, not byte identity).
+- Nine-checkpoint, 2,307-basin comparison (L120/L240/L336 × 3 seeds; jobs `46484743` GPU, `46484750` CPU): all nine runs passed every prescribed qualification gate. Pooled median paired ΔNSE: L120→L240 +0.060 (69% of basin×seed pairs better), L240→L336 +0.018 (59%), L120→L336 +0.079 (71%). The 1,907 non-screening basins match the screening 400. Flood context separates L120 from the longer windows but not L240 from L336. Most L336 checkpoints sit at or near the 12-epoch limit.
+- **Deviation, disclosed.** An extra cross-run check, stricter than the prescribed gates, required bit-identical observed series across runs. It **failed**: the L240 runs store a target scale differing by 1.3e-7 (relative, float32 rounding), so their denormalized observations differ by up to 2.5e-4 m³/s. The rule declared before the diagnostic (|ΔNSE| ≤ 1e-6 in every basin) also **failed** in 37-39 basins per L240 run, all with near-zero observed variance. A post-hoc robustness check (re-scoring against common observations) changed 0 better/worse classifications and no pooled median to 5 decimals. That post-hoc criterion is disclosed, not a pre-registered pass. Evidence: `.scratch_local/c336_full_dev_comparison_v001/` (`DECISION_MEMO.md`; `BUNDLE_SHA256SUMS.txt` sha256 `23bf201d…3b65`, 1,964 files verified 2026-10-22).
+
+**Next design: water-year rotation — PROPOSED, NOT ENACTED.**
+- Five retrospective cycles over WY2021-WY2025 (Oct 1-Sep 30), each with three training years, one checkpoint-choice year and one assessment year; each year assessed once. The five models would later be scored once on protected WY2026: five scores of model variation on one test year, not five test years, and never used to pick a model.
+- This design is subject to a data-feasibility review and a frozen split contract. It does not change any current protection: calendar 2025, the spatial holdout and California stay sealed until a formal protection-boundary revision is recorded and reviewed.
+- Historical HPO and length results keep their actual calendar periods (training through 2023-12-31, development 2024).
+- Feasibility preflight (gitignored): `.scratch_local/wy_rotation_preflight_20261022/PREFLIGHT_MEMO.md`.
+
+Supersedes the "sequence-length" item of the 2026-10-13 open decisions below. Narrative: `docs/decision_log.md` (2026-10-22 entry).
+
 ## RD1 P1-P24 / R1-R12 development-screening evidence stage CLOSED (36 trials × 400 basins); closure audit, errata and evidence index committed; no winner, no promotion, next step is a user decision (2026-10-13)
 
 **[EVIDENCE-STAGE CLOSURE — DOCUMENTATION + INDEPENDENT RECOMPUTE ONLY; NOT A NEW ANALYSIS, NOT A SELECTION/PROMOTION, NOT A P25+ LAUNCH, NO SEALED-SCOPE ACCESS]**
