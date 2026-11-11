@@ -11,14 +11,17 @@ construction:
        ``self._dates`` (see "Research timeline construction" below), so
        cross-period antecedent history is preserved exactly as NH already
        does it.
-    B. Period-specific target boundary -- issue_time + lead_hours must stay
-       within *this period's own* last real timestamp
-       (``self._dates[basin][freq][-1]`` for the dataset instance being
-       built), so a training target cannot cross into validation, a
-       validation target cannot cross into test, and a test target cannot
-       cross beyond the research period. This is intentionally not the same
-       check as ``validity_mask.compute_boundary_valid``, which is not
-       period-aware.
+    B. Period-specific target boundary -- both the issue time and its target
+       time (issue_time + lead_hours) must lie inside one of *this period's
+       own* declared slices ``[start_date 00:00, end_date 23:59:59]`` (from
+       ``self.start_and_end_dates[basin]``; see "Multi-slice periods" below),
+       so a training target cannot cross into validation or into a year
+       excluded between two training slices, a validation target cannot
+       cross into test, and a test target cannot cross beyond the research
+       period. For a single-slice period this is the same check as the
+       former ``issue_time + lead_hours <= last loaded timestamp``. This is
+       intentionally not the same check as
+       ``validity_mask.compute_boundary_valid``, which is not period-aware.
     C. Basin-specific target availability -- the selected target variable's
        value at the issue timestamp must be non-NaN. Applied uniformly to
        train, validation, and test (NH itself only does this for training).
@@ -122,6 +125,25 @@ and any period ending after the cutoff are refused. Concern B already removes
 every issue time whose lead target lies past the period end, so the lookup
 table is the same with or without the cutoff when the cutoff equals the last
 loaded period's end.
+
+Multi-slice periods and train-target masking (water-year rotation): NH accepts
+a list of training slices and concatenates them per basin
+(``BaseDataset._load_or_create_xarray_dataset``). The lead-shifted target at
+issue time t holds the observation at t + lead, so the last ``lead`` issue
+hours of a slice carry observations from whatever follows the slice -- an
+excluded checkpoint, assessment or test year when the slices are separated.
+Concern B removes those issue hours from the lookup table. In addition, for the
+``train`` period only, every target value whose target time lies outside all
+declared slices is set to NaN in the loaded dataset, BEFORE NH computes the
+per-basin target std (NSE loss) and the feature scaler. Without this, those
+out-of-period observations would still enter the scaler and the NSE weights
+(and, with ``predict_last_n > 1``, earlier steps of a sample's target
+sequence). This also applies to single-slice training periods, where it
+removes the first ``lead`` hours of the following (validation) period from the
+scaler and per-basin std; lookup-table admission there is unchanged.
+Evaluation periods are not masked (their scaler comes from training and
+concern B governs their admission). Forcing inputs are never masked: input
+look-back across a slice boundary is allowed.
 """
 from __future__ import annotations
 
@@ -185,6 +207,9 @@ class FlashNHFilterStats:
     common_support_checksum_sha256: str | None = None
     n_natural_admitted: int | None = None
     removed_for_common_support: int = 0
+    # Multi-slice periods / train-target masking (see module docstring).
+    n_period_slices: int = 1
+    n_train_targets_masked_outside_period: int = 0
 
 
 def _normalize_timestamp(value) -> pd.Timestamp:
@@ -232,6 +257,35 @@ def _build_research_timeline(dates_by_basin: dict, freq: str) -> pd.DatetimeInde
             "no basin dates available to build the Flash-NH research timeline"
         )
     return pd.date_range(start=min(starts), end=max(ends), freq="h")
+
+
+def _period_slices(start_and_end_dates: dict) -> list:
+    """This period's declared slices for one basin as normalized
+    ``(first, last)`` timestamp pairs, ``last`` being the final second of the
+    end date -- the same inclusive bound NH uses when it slices the data."""
+    starts = start_and_end_dates["start_dates"]
+    ends = start_and_end_dates["end_dates"]
+    if len(starts) != len(ends) or not starts:
+        raise FlashNHDatasetError(
+            f"period slices need matching, non-empty start/end date lists, got {starts!r} / {ends!r}")
+    slices = []
+    for start, end in zip(starts, ends):
+        first = _normalize_timestamp(start)
+        last = _normalize_timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        if last < first:
+            raise FlashNHDatasetError(f"period slice ends before it starts: {start} .. {end}")
+        slices.append((first, last))
+    return slices
+
+
+def _inside_slices(times, slices: list) -> np.ndarray:
+    """Boolean mask: which of ``times`` (normalized, timezone-naive) lie inside
+    any of ``slices`` (inclusive bounds)."""
+    values = np.asarray(times, dtype="datetime64[ns]")
+    inside = np.zeros(values.shape, dtype=bool)
+    for first, last in slices:
+        inside |= (values >= np.datetime64(first, "ns")) & (values <= np.datetime64(last, "ns"))
+    return inside
 
 
 def _load_gap_timestamps(data_dir) -> list:
@@ -391,6 +445,36 @@ class FlashNHDataset(GenericDataset):
             coordinate = "date" if "date" in ds.coords else "time"
             return select_through_observation_cutoff(ds, cutoff=cutoff, coordinate=coordinate).to_dataframe()
 
+    def _load_or_create_xarray_dataset(self) -> xarray.Dataset:
+        # NH calls this once in _load_data, before the per-basin target std and
+        # the scaler are computed from the returned dataset.
+        xr = super()._load_or_create_xarray_dataset()
+        self._flashnh_n_train_targets_masked = 0
+        if self.period == "train":
+            xr = self._mask_train_targets_outside_period(xr)
+        return xr
+
+    def _mask_train_targets_outside_period(self, xr: xarray.Dataset) -> xarray.Dataset:
+        """Set every target value whose target time (date + lead) lies outside
+        all of this period's declared slices to NaN (see module docstring)."""
+        lead_delta = pd.Timedelta(hours=_parse_lead_hours(self.cfg.target_variables))
+        target = self.cfg.target_variables[0]
+        dates = pd.DatetimeIndex(xr["date"].values)
+        if dates.tz is not None:
+            dates = dates.tz_convert("UTC").tz_localize(None)
+        target_times = (dates + lead_delta).values
+        basins = [str(b) for b in np.atleast_1d(xr["basin"].values)]
+        keep = np.stack([_inside_slices(target_times, _period_slices(self.start_and_end_dates[b])) for b in basins])
+        values = xr[target].transpose("basin", "date")
+        keep_da = xarray.DataArray(keep, dims=("basin", "date"), coords={"basin": values["basin"], "date": values["date"]})
+        n_masked = int((~np.isnan(values.values) & ~keep).sum())
+        xr[target] = values.where(keep_da).astype(values.dtype).transpose(*xr[target].dims)
+        self._flashnh_n_train_targets_masked = n_masked
+        if n_masked:
+            LOGGER.info("Flash-NH: masked %d train target value(s) whose target time lies outside the declared "
+                        "training slices", n_masked)
+        return xr
+
     def _create_lookup_table(self, xr: xarray.Dataset):
         super()._create_lookup_table(xr)
         self.flashnh_filter_stats = self._apply_flashnh_filters()
@@ -418,6 +502,7 @@ class FlashNHDataset(GenericDataset):
         new_key = 0
 
         lead_delta = pd.Timedelta(hours=lead_hours)
+        slices_by_basin = {}
         for old_key in sorted(self.lookup_table.keys()):
             basin, indices = self.lookup_table[old_key]
             idx = indices[0]
@@ -429,8 +514,9 @@ class FlashNHDataset(GenericDataset):
                 removed_history += 1
                 continue
 
-            period_end = _normalize_timestamp(dates[-1])
-            if issue_ts + lead_delta > period_end:
+            if basin not in slices_by_basin:
+                slices_by_basin[basin] = _period_slices(self.start_and_end_dates[basin])
+            if not _inside_slices([issue_ts, issue_ts + lead_delta], slices_by_basin[basin]).all():
                 removed_boundary += 1
                 continue
 
@@ -475,6 +561,8 @@ class FlashNHDataset(GenericDataset):
             common_support_checksum_sha256=None if support is None else support["checksum_sha256"],
             n_natural_admitted=None if support is None else n_natural,
             removed_for_common_support=0 if support is None else n_natural - len(kept),
+            n_period_slices=max(len(self.start_and_end_dates[b]["start_dates"]) for b in self.start_and_end_dates),
+            n_train_targets_masked_outside_period=getattr(self, "_flashnh_n_train_targets_masked", 0),
         )
 
     def _load_common_support(self, path: Path, seq_length: int, lead_hours: int) -> dict:

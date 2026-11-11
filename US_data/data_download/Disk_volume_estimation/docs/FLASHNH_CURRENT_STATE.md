@@ -1,5 +1,16 @@
 # Flash-NH Current State
 
+## Water-year rotation ADOPTED (WY2026 = protected test year); gate 1 (multi-period training leak) fixed in code; gate 2 (frozen split contract + independent review) open; calendar 2025 still treated as sealed (2026-11-11)
+
+**User decision (2026-11-11).** The water-year rotation PROPOSED on 2026-10-22 (below) is adopted: five cycles over WY2021-WY2025 with the P19 120 h baseline, checkpoint choice on all 2,307 development basins, a flood-aware checkpoint pick reported for every arm, the unchanged 12-epoch / 50k-update budget, WY2026 as the protected test year, and a second magnitude-weighted-loss arm whose specification must be approved before any rotation score is seen. Full entry, cycle table and gates: `docs/decision_log.md` (2026-11-11).
+
+**Gate 1 — leak fix (implemented, part of the gate-2 review).** With a list of training periods, NH concatenates the periods, and the lead-shifted target at the last `lead` hours of a period held observations from the following, excluded year. `FlashNHDataset` (`src/baseline/nh_dataset.py`) now (a) blanks every training target whose target time lies outside all declared training periods, before the per-basin std and the scaler are computed, and (b) admits an issue hour only if both it and its target hour lie inside one period. New filter-stats fields: `n_period_slices`, `n_train_targets_masked_outside_period`. Tests: `tests/test_nh_dataset_multislice.py` (expected values derived by hand). Evaluation periods are not masked.
+- **Open user question.** (a) also applies to single-period training: the 6 first validation hours no longer enter the training scaler and per-basin std (about 6 of ~26k hours per basin). Lookup admission is unchanged, but earlier runs are no longer bit-reproducible with the new code. Recommended to keep; the alternative is to apply it only to multi-period training or behind a config switch.
+
+**Gate 2 — open.** Next: rotation split code (observation sealing by a list of windows, per-cycle training-period lists, support and split contracts with exact UTC bounds and warm-up handling), then an independent review (`docs/agent_handoff_rules.md` §3.2). Until it passes, calendar 2025 stays sealed; the spatial holdout and California stay sealed.
+
+**Workflow change (2026-11-11).** The ChatGPT prompt relay is retired: the user works with Claude Code directly, and independent review happens at the gates in `docs/agent_handoff_rules.md` §3.2 (ChatGPT's reviewer role: `docs/chatgpt_reviewer_role.md`). Weekly planning: `journal/`.
+
 ## HPO and sequence-length exploration stopped by user decision; the historical P19 120-hour configuration is the working Stage-1 baseline (not promoted, not claimed optimal); Common-336 length evidence recorded; water-year rotation design PROPOSED only (2026-10-22)
 
 **[RECORD ONLY — NO NEW RUN, NO PROMOTION, NO CHANGE TO PROTECTED PERIODS OR SPLITS]**

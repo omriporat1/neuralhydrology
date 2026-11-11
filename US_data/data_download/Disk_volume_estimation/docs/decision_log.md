@@ -2,6 +2,34 @@
 
 # Decision Log
 
+## 2026-11-11 — Water-year rotation ADOPTED; protection boundary revised (WY2026 = protected test year); magnitude-weighted loss arm agreed in principle — record only
+
+**Decision (user, 2026-11-11; discussed with the supervisor at the 2026-11-11 meeting).** This enacts the rotation PROPOSED on 2026-10-22.
+- **Rotation.** The Stage-1 baseline (P19, 120 h) is trained and assessed over five cycles on WY2021-WY2025 (Oct 1-Sep 30). Each cycle uses three training years, one checkpoint-choice year and one assessment year, and each year is assessed once:
+
+  | Cycle | Train | Checkpoint | Assess |
+  |---|---|---|---|
+  | 1 | 2023, 2024, 2025 | 2022 | 2021 |
+  | 2 | 2021, 2024, 2025 | 2023 | 2022 |
+  | 3 | 2021, 2022, 2025 | 2024 | 2023 |
+  | 4 | 2021, 2022, 2023 | 2025 | 2024 |
+  | 5 | 2022, 2023, 2024 | 2021 | 2025 |
+
+- **Protection boundary revised.** Jan-Sep 2025 joins development as part of WY2025. WY2026 (2025-10-01 to 2026-09-30) becomes the protected temporal test year. It is never used to choose a model; each rotation model (and each later arm) is scored on it once. The spatial holdout and California stay sealed exactly as before.
+- **Checkpoint choice** uses all 2,307 development basins on the cycle's checkpoint year (not the 400-basin screening subset).
+- **Flood-aware checkpoint choice for every arm, from the start.** Besides the median-NSE checkpoint, each run also reports the checkpoint chosen by a flood metric (for example NSE on hours above the observed Q98) on the same checkpoint year. The exact flood metric is fixed in the metric specification below.
+- **Training budget unchanged** for the 120 h baseline: 12 epochs × up to 50k updates, comparable with the search. Any cycle whose chosen epoch is 11 or 12 is flagged; the cap is revisited for longer windows or a new loss.
+- **WY2026 data** (USGS discharge, MRMS QPE, RTMA temperature for the months not yet held) is downloaded and packaged in parallel with the rotation.
+- **Second arm: magnitude-weighted loss.** Each hour's error is weighted by its observed flow, normalised per basin, with a tunable strength. It runs in the same rotation and is judged with the same metric set as the baseline. The supervisor agreed it is worth trying. Its weight formula, strength values, metric set and checkpoint rule are written down and approved before any rotation score is seen. It is not launched before then.
+
+**Gates before use.**
+1. Leak fix: multi-period training must not take target hours from an excluded year.
+2. Frozen split contract (exact UTC bounds per year, warm-up handling, basin population) with an independent review (`docs/agent_handoff_rules.md` §3.2). Until it passes, calendar 2025 is still treated as sealed.
+
+Evidence and design: `.scratch_local/wy_rotation_preflight_20261022/PREFLIGHT_MEMO.md` (gitignored); meeting brief `journal/meetings/2026-11-11.md`.
+
+No training, inference, Slurm job, protected-data read or code change accompanied this entry.
+
 ## 2026-10-22 — Stop HPO and sequence-length exploration; P19 at 120 h is the working Stage-1 baseline; Common-336 length evidence recorded with its disclosed deviation; water-year rotation design PROPOSED — record only
 
 **Decision (user).** Stage 1 moves on from HPO. Sequence-length exploration stops. The historical P19 configuration at 120 h is the working Stage-1 baseline.
