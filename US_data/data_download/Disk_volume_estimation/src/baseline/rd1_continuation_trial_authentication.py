@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Optional
@@ -191,7 +191,9 @@ class AuthenticatedContinuationRoster:
     targets: tuple = ()
     initial_controlled_trial_ids: tuple = ()
     continuation_only_trial_ids: tuple = ()
-    initial_slice_identity: "MappingProxyType" = MappingProxyType({})
+    initial_slice_identity: "MappingProxyType" = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __len__(self) -> int:
         return len(self.targets)

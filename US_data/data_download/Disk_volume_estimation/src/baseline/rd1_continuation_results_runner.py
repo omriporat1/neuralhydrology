@@ -58,7 +58,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -131,7 +131,9 @@ class ContinuationHydrologicalReviewResult:
     review: HydrologicalReviewResult
     initial_controlled_trial_ids: tuple
     continuation_only_trial_ids: tuple
-    initial_slice_identity: "MappingProxyType" = MappingProxyType({})
+    initial_slice_identity: "MappingProxyType" = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def two_arm_comparison_supported(self) -> bool:
