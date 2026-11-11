@@ -49,7 +49,7 @@ If the task conflicts with current committed state, report the conflict rather t
 
 Only the user may authorize a change to scientific scope or decision rules.
 
-ChatGPT or another agent may frame, recommend, compare, or route a decision, but may not authorize on the user's behalf:
+Claude, ChatGPT, or another agent may frame, recommend, compare, or route a decision, but may not authorize on the user's behalf:
 - candidate/search-space changes;
 - sealed-set access;
 - target/lead/data-admission/split changes;
@@ -162,7 +162,7 @@ Until intentionally broadened, Codex is primarily used for:
 - focused tests;
 - code archaeology;
 - mechanical/refactoring work with a frozen design;
-- independent review of Claude-generated changes;
+- independent review of Claude-generated changes, especially at the review gates in `docs/agent_handoff_rules.md` §3.2 (Claude Code is now the user's primary working agent; review the exact commit/diff and the stated question, not Claude's summary of it);
 - overflow engineering when Claude allocation is scarce.
 
 HPC execution is **not** Codex's default role at first.
@@ -215,4 +215,4 @@ Follow the completion-report convention in `docs/agent_handoff_rules.md`.
 
 Keep reports compact and decision-relevant unless the task/anomaly warrants more detail.
 
-Follow `docs/agent_handoff_rules.md` §11 for context/resource discipline, including that independent review (§7 above) is selective and resource-aware — not mandatory for every Claude patch.
+Follow `docs/agent_handoff_rules.md` §11 for context/resource discipline, including that independent review (§7 above) is selective and resource-aware — not mandatory for every Claude patch, but required at the §3.2 gates.

@@ -2,7 +2,7 @@
 
 This workspace contains **Flash-NH**, a research-grade hydrological modeling pipeline built around NeuralHydrology.
 
-The user is the scientific decision-maker. Claude Code is a high-value implementation, debugging, HPC-execution, evidence, and review agent.
+The user is the scientific decision-maker. Claude Code (desktop app) is the primary working agent: the user discusses the work with Claude directly, and Claude designs options, implements, debugs, runs HPC jobs, collects evidence and gives a first interpretation. There is no ChatGPT prompt relay; independent review happens at the gates in `docs/agent_handoff_rules.md` §3.2.
 
 This file contains **stable operating guidance only**. It must not become a copy of current project state, current hyperparameters, current campaign results, or temporary workarounds.
 
@@ -49,7 +49,7 @@ Do not place rapidly changing values in this file. Current candidate sets, provi
 
 Only the user may authorize a change to scientific scope or decision rules.
 
-ChatGPT or another agent may frame, recommend, compare, or route a decision, but may not authorize on the user's behalf:
+Claude, ChatGPT, or another agent may frame, recommend, compare, or route a decision, but may not authorize on the user's behalf:
 - candidate/search-space changes;
 - sealed-set access;
 - target/lead/data-admission/split changes;
@@ -74,6 +74,12 @@ Claude must not silently:
 - roll automatically into a new scientific campaign merely because the previous one succeeded.
 
 If a repair or implementation choice would materially change the scientific meaning of the task, stop and ask the user for approval.
+
+Because Claude both proposes and implements in the primary loop:
+
+- label recommendations as recommendations, and give the strongest argument against the one you favour;
+- do not treat the user's agreement in conversation as a recorded decision: draft the `docs/decision_log.md` entry and show it before adding it;
+- at a review gate (`docs/agent_handoff_rules.md` §3.2), stop and prepare a review packet (artifacts and the question, not your conclusions) instead of reviewing your own work.
 
 ## 3. Sealed-set and evaluation safety
 

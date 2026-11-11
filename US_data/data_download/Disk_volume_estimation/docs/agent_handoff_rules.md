@@ -10,7 +10,7 @@ Scientific policy lives in the scientific/current-state docs. Git/artifact/evide
 
 Only the user may authorize a change to scientific scope or decision rules.
 
-ChatGPT may help frame, recommend, compare, or route decisions, but it does not authorize scientific changes on the user's behalf.
+Any agent (Claude Code in the primary working loop, ChatGPT, Codex, or another reviewer) may help frame, recommend, compare, or route decisions, but no agent authorizes scientific changes on the user's behalf. This matters most for the agent that both proposes and implements: its recommendations are labelled as recommendations, and the user decides.
 
 Explicit user approval is required for changes such as:
 - candidate/search-space expansion or alteration;
@@ -37,24 +37,42 @@ Preferred handoff objects are:
 
 A clean Git commit is the preferred cross-agent implementation/review boundary when practical, but a dirty-tree review is allowed when explicitly intended and clearly scoped.
 
-## 3. Preferred agent roles
+## 3. Working loop and agent roles
 
-| Agent | Preferred role |
+*Revised 2026-11-11 (user decision). Earlier, ChatGPT drafted prompts, Claude Code implemented them, and the user relayed output between the two by copy-paste. That relay is retired.*
+
+### 3.1 Primary working loop
+
+The user works directly with **Claude Code (desktop app)**, which has direct access to the repository, evidence and remote hosts. In that loop Claude Code does discussion, design options, implementation, testing, HPC execution, evidence collection, and first-pass interpretation. The user decides; Claude recommends.
+
+The weekly planning layer is `journal/` (daily log, weekly supervisor-meeting brief, meeting outcome and week plan). Approved scientific decisions still go to `docs/decision_log.md` and `docs/FLASHNH_CURRENT_STATE.md`, which remain the durable state (§11.1).
+
+### 3.2 Independent review gates
+
+Because one agent now proposes, implements and interprets, independent review is required at these points (it is not required for routine work):
+
+1. **Design freeze** for anything that touches split/period membership, sealed-scope protection, target/lead alignment, data admission, or the evaluation rule — before implementation is treated as final.
+2. **Before launching a new campaign** or any compute commitment the user has not already sized and approved.
+3. **Before a scientific conclusion, promotion, or selection is written to `docs/decision_log.md`.**
+4. Risky integration as described in §11.6 (provenance/artifact identity, W&B/production paths, HPC plumbing).
+
+Rules for a gate review:
+
+- The reviewer receives the artifacts (exact commit/diff, design memo, evidence paths, the question), **not the implementing agent's conclusions** about them.
+- The reviewer can be a fresh Claude session or subagent, Codex, or ChatGPT. Pick by what it is reviewing: code and plumbing suit Codex or a fresh Claude; scientific framing and interpretation suit ChatGPT or a fresh Claude.
+- Findings and disagreements go to the user, who decides. The implementing agent does not overrule a reviewer finding on its own.
+- A gate may be skipped only by the user, explicitly, for a specific item.
+
+### 3.3 Agent roles
+
+| Agent | Role |
 |---|---|
-| **ChatGPT** | Scientific strategy, experiment design, interpretation, workflow/routing control, prompt design, cross-agent review |
-| **Claude Code** | Difficult repo integration, multi-file implementation, complex debugging, Slurm/HPC execution, remote evidence workflows |
-| **Codex** | Bounded implementation, focused tests, code archaeology, independent code review, mechanical/refactoring work under a frozen design, overflow engineering |
+| **Claude Code (desktop app)** | Primary working agent: discussion, design options, implementation, debugging, Slurm/HPC execution, evidence, first-pass interpretation, journal and decision-log drafting |
+| **ChatGPT** | Independent second opinion at review gates: scientific framing, experimental design, interpretation, overclaiming checks. See `docs/chatgpt_reviewer_role.md`. Not a routine relay or prompt writer |
+| **Codex** | Independent code review of exact commits/diffs at gates; bounded implementation or overflow engineering when useful |
 | **Copilot** | Micro-edits, autocomplete, tiny local refactors/fixes |
 
 These are defaults, not rigid capability boundaries.
-
-Use the agent that best matches the task while minimizing duplicated expensive work.
-
-Cross-model review is most useful when it adds independent value, for example:
-
-- Claude implementation -> Codex review of the exact commit/diff;
-- Codex implementation -> Claude review of risky integration/HPC aspects;
-- ChatGPT reviews scientific framing/interpretation regardless of implementation agent.
 
 Do not ask a second agent to reimplement work merely for redundancy.
 
@@ -171,7 +189,7 @@ Do not paste large diffs, full logs, or large tables into the completion message
 
 ## 10. Prompt/handoff template
 
-Use/adapt this lightweight structure when helpful:
+In the primary loop (§3.1) no prompt is needed: the task is agreed in conversation. Use/adapt this lightweight structure when handing work to a separate session, subagent, Codex, or a gate reviewer:
 
 ```text
 Project: Flash-NH
@@ -228,6 +246,8 @@ Repository state — exact Git state, current-state/scientific docs, tests, comp
 
 Prefer one coherent role and bounded objective per material session (implementation, correction, independent review, or remote execution/evidence collection). Do not carry a completed session into a substantially different role merely because nominal context remains. Milestone/role completion is a natural retirement point — but do not mechanically split work when continuity is genuinely cheaper and safer.
 
+In the primary loop (§3.1), discussing and implementing one bounded objective in the same session is normal. Independent review (§3.2) always happens in a separate session or agent, never in the session that did the work.
+
 ### 11.3 Targeted repository inspection
 
 Default to targeted inspection (symbol search, grep/find, bounded line ranges, exact interfaces/diffs) and widen only as needed. Do not read entire large modules/test suites/historical documents merely because they are named in a prompt — but whole-file/broad inspection remains appropriate when the task genuinely requires it. Avoid unnecessary rereads of unchanged material; a targeted reread is appropriate after compaction, to reconfirm an authoritative fact, or when debugging/integration genuinely requires it.
@@ -250,12 +270,12 @@ Compaction is not automatically a failure or stop condition. If it occurs mid-ta
 
 ### 11.8 Shared resource-aware routing
 
-Agent routing must weigh both task fit/risk and current resource headroom when known. Some agent surfaces draw from shared constrained usage pools: when telemetry indicates Codex usage shares constrained OpenAI-side capacity with ChatGPT's strategic work, treat that capacity as shared, and preserve enough headroom for ChatGPT's high-value responsibilities (scientific interpretation, milestone planning, workflow control, report review, prompt design, resolving ambiguities, handoff/closure decisions).
+Agent routing must weigh both task fit/risk and current resource headroom when known. Some agent surfaces draw from shared constrained usage pools (for example, Codex and ChatGPT may share OpenAI-side capacity); treat such capacity as shared.
 
-Therefore: do not spend Codex on routine confirmation or symmetrical duplication; prefer Claude for implementation/routine verification when independence adds little; use Codex selectively when independent review materially reduces risk. However, resource conservation must never be used to skip genuinely important independent review — when independence materially matters, do the review and economize elsewhere.
+Therefore: do not spend Codex or ChatGPT on routine confirmation or symmetrical duplication; use Claude for implementation and routine verification; use an independent reviewer at the §3.2 gates and when independence otherwise materially reduces risk. Resource conservation must never be used to skip a required gate review — when independence materially matters, do the review and economize elsewhere.
 
 Do not encode assumptions about a specific product plan (fixed hourly/weekly limits, quota percentages, reset schedules) as durable policy — those are runtime facts that may change. The durable rule is that directly-visible runtime telemetry informs routing.
 
 ### 11.9 User burden
 
-Each agent should report the resource telemetry it can directly observe; ChatGPT should use the latest available agent/environment telemetry when routing subsequent work. Only ask the user for resource information when it materially affects a routing decision and no agent/environment can observe it directly. Never guess unavailable quota information.
+Each agent should report the resource telemetry it can directly observe; the primary working agent should use the latest available telemetry when routing subsequent work. Only ask the user for resource information when it materially affects a routing decision and no agent/environment can observe it directly. Never guess unavailable quota information.
