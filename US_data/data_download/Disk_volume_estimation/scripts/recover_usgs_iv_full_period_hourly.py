@@ -100,9 +100,109 @@ WY_CHUNKS: list[tuple[str, str, str]] = [
 # Period-aware chunk selection
 # ---------------------------------------------------------------------------
 
+WY_CHUNK_MODES = ("legacy", "derived")
+
+
+def derive_wy_chunks(
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> list[tuple[str, str, str]]:
+    """
+    Water-year chunk table derived from the requested period (additive,
+    opt-in via --wy-chunks derived; the legacy WY_CHUNKS table stays the
+    default so the 2020-10-14..2025-12-31 product remains reproducible).
+
+    One chunk per water year (WYyyyy = Oct 1 of yyyy-1 .. Sep 30 of yyyy,
+    end at 23:59:59Z) that overlaps [start_ts, end_ts]. Inner bounds are the
+    water-year boundaries; the outermost bounds are widened by the 15-min snap
+    tolerance so that compute_active_chunks() keeps its +/-15 min head/tail
+    buffer even when the period starts or ends exactly on a water-year
+    boundary (e.g. a standalone WY2026 fetch starting 2025-10-01T00:00Z still
+    requests the 2025-09-30T23:45..23:59 readings that snap to its first hour,
+    as the multi-year legacy run did via its WY2025 chunk).
+    """
+    chunks: list[tuple[str, str, str]] = []
+    first_wy = start_ts.year + (1 if start_ts.month >= 10 else 0)
+    last_wy = end_ts.year + (1 if end_ts.month >= 10 else 0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    for wy in range(first_wy, last_wy + 1):
+        wy_s = pd.Timestamp(f"{wy - 1}-10-01T00:00:00")
+        wy_e = pd.Timestamp(f"{wy}-09-30T23:59:59")
+        if wy == first_wy:
+            wy_s = min(wy_s, start_ts - SNAP_TOLERANCE)
+        if wy == last_wy:
+            wy_e = max(wy_e, end_ts + SNAP_TOLERANCE)
+        chunks.append((f"WY{wy}", wy_s.strftime(fmt), wy_e.strftime(fmt)))
+    return chunks
+
+
+def check_chunk_table_covers_period(
+    chunk_table: list[tuple[str, str, str]],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> None:
+    """Fail loudly if any hour of [start_ts, end_ts] lies outside the chunk table.
+
+    Without this, hours past the last chunk are never requested and silently
+    become NaN in the canonical NetCDF.
+    """
+    covered_s = min(pd.Timestamp(s.replace("Z", "")) for _, s, _ in chunk_table)
+    covered_e = max(pd.Timestamp(e.replace("Z", "")) for _, _, e in chunk_table)
+    if start_ts < covered_s or end_ts > covered_e:
+        raise SystemExit(
+            f"ERROR: requested period {start_ts} .. {end_ts} is not covered by the "
+            f"WY chunk table ({covered_s} .. {covered_e}). Use --wy-chunks derived "
+            f"for periods outside the legacy 2020-10-14..2025-12-31 table."
+        )
+
+
+WINDOW_LOCK_NAME = "wy_chunk_windows.json"
+
+
+def enforce_derived_window_lock(
+    out_dir: pathlib.Path,
+    active_chunks: list[tuple[str, str, str]],
+    dry_run: bool,
+) -> None:
+    """Bind a derived-mode out-dir to one set of request windows.
+
+    The raw cache is keyed by STAID + chunk label (e.g. ``WY2026``), not by the
+    request window, so two derived runs with different windows in the same
+    out-dir would silently reuse each other's cached rows. This lock refuses:
+      * a derived run whose windows differ from the ones recorded in the lock;
+      * a derived run into an out-dir that already holds canonical NetCDFs or
+        raw-cache parquets but no lock (e.g. the legacy full-period root), so
+        ``--force`` can never overwrite products of another run.
+    The lock is written on the first non-dry run; a dry run only checks.
+    """
+    lock = out_dir / WINDOW_LOCK_NAME
+    windows = [list(c) for c in active_chunks]
+    if lock.exists():
+        recorded = json.loads(lock.read_text(encoding="utf-8")).get("active_chunks")
+        if recorded != windows:
+            raise SystemExit(
+                f"ERROR: {lock} records request windows {recorded}, but this run "
+                f"requests {windows}. Use a fresh --out-dir for a different window."
+            )
+        return
+    has_nc = any((out_dir / "canonical").glob("*.nc"))
+    has_cache = any((out_dir / "raw_cache").glob("*/*.parquet"))
+    if has_nc or has_cache:
+        raise SystemExit(
+            f"ERROR: --wy-chunks derived needs a fresh --out-dir; {out_dir} already "
+            f"holds canonical NetCDFs or raw-cache parquets without {WINDOW_LOCK_NAME}."
+        )
+    if not dry_run:
+        lock.write_text(
+            json.dumps({"wy_chunks": "derived", "active_chunks": windows}, indent=2),
+            encoding="utf-8",
+        )
+
+
 def compute_active_chunks(
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
+    chunk_table: list[tuple[str, str, str]] | None = None,
 ) -> list[tuple[str, str, str]]:
     """
     Return the WY_CHUNKS that overlap [start_ts, end_ts] with request windows
@@ -120,7 +220,8 @@ def compute_active_chunks(
     fetch_start = start_ts - buf  # head buffer covers snap window of first hour
     fetch_end   = end_ts   + buf  # tail buffer covers snap window of last  hour
 
-    for wy_label, wy_start_str, wy_end_str in WY_CHUNKS:
+    table = WY_CHUNKS if chunk_table is None else chunk_table
+    for wy_label, wy_start_str, wy_end_str in table:
         wy_s = pd.Timestamp(wy_start_str.replace("Z", ""))
         wy_e = pd.Timestamp(wy_end_str.replace("Z", ""))
         if wy_e < start_ts or wy_s > end_ts:
@@ -632,6 +733,10 @@ def write_canonical_nc(
         "milestone":                 "2I-B",
         "data_access_date":          generated_utc[:10],
     }
+    # Record the chunk mode only when it is not the legacy default, so legacy
+    # NetCDF attributes stay byte-identical to the v001 products.
+    if args_dict.get("wy_chunks", "legacy") != "legacy":
+        ds["streamflow"].attrs["wy_chunk_mode"] = args_dict["wy_chunks"]
     ds["time"].attrs = {
         "timezone":    "UTC (naive datetime64; no tz offset stored)",
         "description": "UTC hourly, proleptic_gregorian calendar",
@@ -864,6 +969,15 @@ def parse_args() -> argparse.Namespace:
                    help="Overwrite existing files and re-download cached chunks.")
     p.add_argument("--dry-run", action="store_true",
                    help="Report what would be done without any API calls or writes.")
+    p.add_argument(
+        "--wy-chunks", choices=WY_CHUNK_MODES, default="legacy",
+        help=(
+            "Water-year request chunk table. 'legacy' (default) = the pinned "
+            "2020-10-14..2025-12-31 WY_CHUNKS table; 'derived' = one chunk per "
+            "water year overlapping --start/--end (needed for periods after "
+            "2025-12-31, e.g. WY2026)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -933,14 +1047,21 @@ def main() -> None:
     print(f"Target grid: {args.start} to {args.end} = {n_hours} hourly steps")
 
     # Compute period-aware WY chunks (filtered + clipped to requested period)
-    active_chunks = compute_active_chunks(start_ts, end_ts)
-    print(f"Active WY chunks ({len(active_chunks)}/{len(WY_CHUNKS)} total):")
+    chunk_table = (
+        derive_wy_chunks(start_ts, end_ts) if args.wy_chunks == "derived" else WY_CHUNKS
+    )
+    check_chunk_table_covers_period(chunk_table, start_ts, end_ts)
+    active_chunks = compute_active_chunks(start_ts, end_ts, chunk_table)
+    print(f"WY chunk table: {args.wy_chunks}")
+    print(f"Active WY chunks ({len(active_chunks)}/{len(chunk_table)} total):")
     for label, cs, ce in active_chunks:
         print(f"  {label}: {cs} to {ce}")
+    if args.wy_chunks == "derived":
+        enforce_derived_window_lock(out_dir, active_chunks, args.dry_run)
 
     generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_hash      = git_commit_hash()
-    args_dict     = {"start": args.start, "end": args.end}
+    args_dict     = {"start": args.start, "end": args.end, "wy_chunks": args.wy_chunks}
 
     sess          = make_session()
     acquisition_log: list[dict] = []
@@ -978,6 +1099,7 @@ def main() -> None:
                 "start":        args.start,
                 "end":          args.end,
                 "force":        args.force,
+                **({"wy_chunks": args.wy_chunks} if args.wy_chunks != "legacy" else {}),
             },
             "n_hours_target":   n_hours,
             "n_stations":       len(staids),

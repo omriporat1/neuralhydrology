@@ -193,6 +193,14 @@ def parse_args() -> argparse.Namespace:
         help="Create shard manifests and run recovery dry-runs; no network calls.",
     )
     p.add_argument(
+        "--wy-chunks", choices=("legacy", "derived"), default="legacy",
+        help=(
+            "Passed to each shard as --wy-chunks. 'legacy' (default) keeps the "
+            "pinned 2020-10-14..2025-12-31 chunk table; 'derived' is required "
+            "for periods after 2025-12-31 (e.g. WY2026)."
+        ),
+    )
+    p.add_argument(
         "--python", type=str, default=sys.executable,
         metavar="PATH",
         help="Python interpreter for shard subprocesses. Default: current interpreter.",
@@ -236,6 +244,7 @@ def main() -> None:
     print(f"  Out root:     {out_root}")
     print(f"  Dry-run:      {args.dry_run}")
     print(f"  Force:        {args.force}")
+    print(f"  WY chunks:    {args.wy_chunks}")
     print(f"  Git:          {git_hash[:12]}")
     print("=" * 60)
 
@@ -263,6 +272,8 @@ def main() -> None:
             cmd.append("--dry-run")
         if args.force:
             cmd.append("--force")
+        if args.wy_chunks != "legacy":
+            cmd.extend(["--wy-chunks", args.wy_chunks])
 
         shard_records.append({
             "shard_id":     shard_id,
@@ -362,6 +373,7 @@ def main() -> None:
         "n_shards":           n_shards,
         "start":              args.start,
         "end":                args.end,
+        "wy_chunks":          args.wy_chunks,
         "dry_run":            args.dry_run,
         "force":              args.force,
         "n_pass":             n_pass,
