@@ -43,6 +43,8 @@ def build_synthetic_package(
     static_attribute_values: dict = None,
     declared_gap_hours: list = None,
     coordinate_name: str = "date",
+    research_start: str = RESEARCH_START,
+    n_hours: int = N_HOURS,
 ) -> Path:
     """Write a tiny GenericDataset-compatible package plus a Flash-NH
     gap_timestamps.json mask artifact under ``base_dir``. Returns the config
@@ -74,6 +76,11 @@ def build_synthetic_package(
     1.13's own requirement). Pass ``"time"`` to reproduce the certified
     Stage 1 package's real on-disk convention, e.g. for the
     FlashNHDataset ``time``-to-``date`` adapter's regression test.
+
+    ``research_start`` / ``n_hours`` (defaults: the 96-hour 2000-01-01
+    window) move or stretch the hourly timeline, e.g. onto real water-year
+    dates for the rotation split contract's vertical test. The config's
+    period dates stay the 2000-01 defaults; such callers rewrite them.
     """
     target_nan_hours_by_basin = target_nan_hours_by_basin or {}
     if declared_gap_hours is None:
@@ -86,7 +93,7 @@ def build_synthetic_package(
     basins_dir.mkdir(parents=True, exist_ok=True)
     masks_dir.mkdir(parents=True, exist_ok=True)
 
-    dates = pd.date_range(RESEARCH_START, periods=N_HOURS, freq="h")
+    dates = pd.date_range(research_start, periods=n_hours, freq="h")
 
     if dynamic_input_values is not None:
         dynamic_input_names = list(dynamic_input_values.keys())
@@ -99,14 +106,14 @@ def build_synthetic_package(
             for name in dynamic_input_names:
                 data_vars[name] = (coordinate_name, np.asarray(dynamic_input_values[name][basin], dtype=np.float64))
         else:
-            precip = np.arange(N_HOURS, dtype=np.float64)
+            precip = np.arange(n_hours, dtype=np.float64)
             for h in bad_hours:
                 precip[h] = np.nan
             data_vars["precip"] = (coordinate_name, precip)
 
-        target = np.full(N_HOURS, np.nan, dtype=np.float64)
-        for i in range(N_HOURS):
-            if i + lead_hours <= N_HOURS - 1:
+        target = np.full(n_hours, np.nan, dtype=np.float64)
+        for i in range(n_hours):
+            if i + lead_hours <= n_hours - 1:
                 target[i] = i + lead_hours
         for h in target_nan_hours_by_basin.get(basin, []):
             target[h] = np.nan

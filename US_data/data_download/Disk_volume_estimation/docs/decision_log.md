@@ -2,6 +2,23 @@
 
 # Decision Log
 
+## 2026-11-12 — Rotation split contract v001 FROZEN (gate 2 passed) — record only
+
+**Decision (user, 2026-11-12).**
+- Contract `flashnh_wy_rotation_split_v001` is frozen. It is generated deterministically by `src/baseline/wy_rotation_split.py` (`build_split_contract()`); checksum `125b071b261fcc8a0bbb50254dc3babf9ad0eb2cb3b15e804910ff66d7422983`. It encodes the rotation table, 6 h lead and water-year bounds of 2026-11-11, plus convention A and single-year target blanking (entry below).
+- Basin population: the 2,307 development basins in `config/stage1_baseline_splits_v001/development_train.txt`, pinned by the portable membership hash (sorted unique ids, LF) `397ab432564c18c3abc5158a47ada2b28840bbf6f0c213d2475444fded33858f`.
+- Observation upper bound 2025-09-30 23:00 UTC: no observation later than this is readable in any cycle or period, judged by observation time (row time + lead for lead-shifted targets). The loader-sealing increment enforces it. **No rotation run (training or evaluation) starts before that increment is implemented and reviewed.**
+- Gate 2 review: an independent fresh-context Claude reviewer returned "pass with fixes" (5 findings: portable basin hash, strict verifier, WY2026 lead-tail exposure, overclaiming test, verify-first basin check). All were fixed, and a narrow re-check by the same reviewer confirmed them. A second review via ChatGPT was skipped by user decision.
+- With gate 2 passed, calendar 2025 is no longer sealed for the development rotation. WY2026 remains the protected test year, and job 45625077's test outputs stay unopened.
+
+## 2026-11-12 — Rotation split: boundary-hour convention and single-year target blanking — record only
+
+**Decision (user, 2026-11-12).**
+- **Boundary hours (convention A).** A sample is admitted only when its issue hour and its target hour (issue + lead) both lie in one slice of the period. Contiguous training water years form one slice. Each slice therefore loses its first `lead` target hours: 6 h for every checkpoint and assessment period, and 0-12 h per training set. No hour-precise admission setting is added. The per-cycle losses are recorded in the split contract.
+- **Single-year training.** The training-target blanking from the leak fix (3dad779) also applies when training has a single slice. Lead-shifted targets past the slice end never enter the training data, the target scaler or the per-basin std. The code already behaves this way; this records it as intended.
+
+Status: the split contract `flashnh_wy_rotation_split_v001` (`src/baseline/wy_rotation_split.py`) stays PROPOSED until the gate 2 review.
+
 ## 2026-11-11 — Water-year rotation ADOPTED; protection boundary revised (WY2026 = protected test year); magnitude-weighted loss arm agreed in principle — record only
 
 **Decision (user, 2026-11-11; discussed with the supervisor at the 2026-11-11 meeting).** This enacts the rotation PROPOSED on 2026-10-22.
