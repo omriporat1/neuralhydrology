@@ -144,6 +144,46 @@ scaler and per-basin std; lookup-table admission there is unchanged.
 Evaluation periods are not masked (their scaler comes from training and
 concern B governs their admission). Forcing inputs are never masked: input
 look-back across a slice boundary is allowed.
+
+Water-year rotation sealing (split contract): when the NH config keys
+``flashnh_split_contract`` (path to the frozen contract JSON; relative paths
+resolve against the project root) and ``flashnh_rotation_cycle`` (int) are set
+-- both or neither, and never together with ``flashnh_observation_cutoff`` --
+each basin NetCDF is opened lazily and restricted BEFORE any observation value
+is read (``nh_raw_space_evaluation.select_readable_observations``):
+
+- forcing inputs (every non-target BaseDataset ``keep_cols`` column, plus any
+  approved ``*_gap`` flag in the file) are read whole, because look-back may
+  cross any boundary. Every forcing input must be an approved package dynamic
+  input (``package_assembly.DYNAMIC_INPUTS``); anything else is refused, so a
+  new package variable cannot be read unsealed without a deliberate change;
+- every observation variable -- ``qobs_m3s`` (observation at t) and every
+  ``*_lead<NN>`` (observation at t + NN h), not only the configured target --
+  keeps a value only where its observation time lies in this period's readable
+  windows (``wy_rotation_split.readable_observation_windows``) and not after
+  the contract's observation upper bound (2025-09-30 23:00). Everything else is
+  NaN and never read;
+- every other variable is dropped.
+
+So no sealed value reaches the loaded data, the scaler, the per-basin target
+std, or ``save_train_data``'s ``train_data.p``. The checks run once per dataset
+instance, before NH reads anything, and are fail-closed: the contract verifies
+as the frozen contract; the cycle is in its table; the config's period dates
+and the per-basin dates NH uses equal ``cycle_nh_dates(cycle)``; the target lead
+equals the contract lead; every basin is in the contract's pinned population;
+and ``train_data_file``, ``per_basin_*_periods_file``,
+``additional_feature_files``, ``additional_features`` passed to the dataset,
+``flashnh_common_support_file`` (built under the pre-rotation split; user
+decision 2026-11-15), observation variables as model inputs, and lagged or
+duplicated observation variables are refused. The ``test`` period is allowed
+(the assessment year is readable only for ``test``). The train-target masking
+above stays as defense in depth; under a contract it is expected to mask 0
+values, and its count is reported in ``FlashNHFilterStats``. Each period writes
+a receipt ``flashnh_split_sealing_<period>.json`` in ``cfg.train_dir`` (the
+sealing identity plus ``period``; counts on the train receipt only; identical
+rewrites skipped); the raw-space scorer requires matching train and
+scored-period receipts. Contract + population verification is memoised per
+process, keyed on the config values and the two files' (path, mtime, size).
 """
 from __future__ import annotations
 
@@ -161,6 +201,7 @@ import xarray
 from neuralhydrology.datasetzoo.genericdataset import GenericDataset
 from neuralhydrology.utils.errors import NoEvaluationDataError, NoTrainDataError
 
+from src.baseline.nh_raw_space_evaluation import SPLIT_SEALING_RECEIPT_TEMPLATE
 from src.baseline.validity_mask import bad_hour_mask_from_timestamps, compute_history_valid
 
 __all__ = ["FlashNHDataset", "FlashNHDatasetError", "FlashNHFilterStats"]
@@ -168,8 +209,71 @@ __all__ = ["FlashNHDataset", "FlashNHDatasetError", "FlashNHFilterStats"]
 _LEAD_SUFFIX_RE = re.compile(r"lead(\d+)$")
 _COMMON_SUPPORT_CONFIG_KEY = "flashnh_common_support_file"
 COMMON_SUPPORT_RECEIPT_NAME = "flashnh_common_support_applied.json"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 LOGGER = logging.getLogger(__name__)
+
+#: Contract + population verification, memoised per process: NH's tester
+#: builds one dataset per basin, and each would otherwise re-verify the
+#: contract and re-hash the population file. Keyed on the sealing config
+#: values; reused only while both files keep their (path, mtime, size).
+_SEALING_VERIFICATION_CACHE: dict = {}
+
+
+def _file_stamp(path) -> tuple:
+    stat = Path(path).stat()
+    return str(Path(path).resolve()), stat.st_mtime_ns, stat.st_size
+
+
+def _verified_sealing_and_population(cfg_dict: dict):
+    """``(RotationSealing, population set)`` for a config declaring a split
+    contract, ``(None, None)`` for one that declares none. Fail closed
+    (:class:`FlashNHDatasetError`) as ``parse_rotation_sealing`` and
+    ``verify_basin_population`` do."""
+    from src.baseline.nh_raw_space_evaluation import (
+        OBSERVATION_CUTOFF_CONFIG_KEY, ROTATION_CYCLE_CONFIG_KEY, SPLIT_CONTRACT_CONFIG_KEY, RawSpaceEvaluationError,
+        parse_rotation_sealing,
+    )
+    from src.baseline.wy_rotation_split import WyRotationSplitError, verify_basin_population
+
+    key = tuple(repr(cfg_dict.get(k)) for k in (SPLIT_CONTRACT_CONFIG_KEY, ROTATION_CYCLE_CONFIG_KEY,
+                                                OBSERVATION_CUTOFF_CONFIG_KEY))
+    cached = _SEALING_VERIFICATION_CACHE.get(key)
+    if cached is not None:
+        sealing, population_path, stamps, population = cached
+        try:
+            if stamps == (_file_stamp(sealing.contract_path), _file_stamp(population_path)):
+                return sealing, population
+        except OSError:
+            pass
+        del _SEALING_VERIFICATION_CACHE[key]
+    try:
+        sealing = parse_rotation_sealing(cfg_dict, project_root=_PROJECT_ROOT)
+    except RawSpaceEvaluationError as exc:
+        raise FlashNHDatasetError(str(exc)) from exc
+    if sealing is None:
+        return None, None
+    where = f"split contract {sealing.contract_id} cycle {sealing.cycle}"
+    try:
+        contract_stamp = _file_stamp(sealing.contract_path)
+        contract = _load_contract_json(sealing.contract_path)
+        population_path = _PROJECT_ROOT / contract["basin_population"]["path"]
+        population_stamp = _file_stamp(population_path)
+        population = frozenset(verify_basin_population(contract, _PROJECT_ROOT))
+    except (WyRotationSplitError, OSError, KeyError, TypeError) as exc:
+        raise FlashNHDatasetError(f"{where}: basin population refused: {exc}") from exc
+    _SEALING_VERIFICATION_CACHE[key] = (sealing, population_path, (contract_stamp, population_stamp), population)
+    return sealing, population
+
+
+def _approved_forcing_variables() -> frozenset:
+    """Variables a sealed load may read whole: the package's approved dynamic
+    inputs (forcing and their gap flags), ``package_assembly.DYNAMIC_INPUTS``.
+    A new package variable must be added there deliberately before a rotation
+    run can read it unsealed."""
+    from src.baseline.package_assembly import DYNAMIC_INPUTS
+
+    return frozenset(DYNAMIC_INPUTS)
 
 
 class FlashNHDatasetError(ValueError):
@@ -210,6 +314,9 @@ class FlashNHFilterStats:
     # Multi-slice periods / train-target masking (see module docstring).
     n_period_slices: int = 1
     n_train_targets_masked_outside_period: int = 0
+    # Water-year rotation sealing (None when not configured).
+    split_contract_checksum_sha256: str | None = None
+    rotation_cycle: int | None = None
 
 
 def _normalize_timestamp(value) -> pd.Timestamp:
@@ -237,6 +344,29 @@ def _parse_lead_hours(target_variables) -> int:
             f"target variable {name!r} does not end with a 'lead<NN>' suffix"
         )
     return int(match.group(1))
+
+
+def _is_unset(value) -> bool:
+    return value is None or value == "None" or value == [] or value == ""
+
+
+def _as_timestamp_list(value, *, day_first: bool = False) -> list:
+    """A date or list of dates as a list of normalized Timestamps (a scalar is
+    a one-item list). ``day_first`` parses NH's DD/MM/YYYY strings."""
+    if value is None:
+        return []
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    out = []
+    for item in items:
+        if day_first and isinstance(item, str):
+            out.append(_normalize_timestamp(pd.to_datetime(item, format="%d/%m/%Y")))
+        else:
+            out.append(_normalize_timestamp(item))
+    return out
+
+
+def _load_contract_json(path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _build_research_timeline(dates_by_basin: dict, freq: str) -> pd.DatetimeIndex:
@@ -398,12 +528,179 @@ class FlashNHDataset(GenericDataset):
         # date-name-dependent logic (duplicate handling, frequency inference,
         # xarray.Dataset.from_dataframe) runs. Call the parent GenericDataset
         # loader unchanged, then adapt only the temporal index name in memory.
+        sealing = self._rotation_sealing()
+        if sealing is not None:
+            df = self._load_basin_data_sealed(basin, sealing)
+            return _adapt_temporal_index_to_date(df)
         cutoff = self._observation_cutoff(basin)
         if cutoff is None:
             df = super()._load_basin_data(basin)
         else:
             df = self._load_basin_data_through_cutoff(basin, cutoff)
         return _adapt_temporal_index_to_date(df)
+
+    # -- water-year rotation sealing -------------------------------------
+
+    def _rotation_sealing(self):
+        """The run's verified rotation sealing (``None`` without the contract
+        keys). Resolved and checked once per dataset instance; every check is
+        fail-closed (see module docstring, "Water-year rotation sealing")."""
+        if not hasattr(self, "_flashnh_rotation_sealing"):
+            self._flashnh_rotation_sealing = self._resolve_rotation_sealing()
+        return self._flashnh_rotation_sealing
+
+    def _resolve_rotation_sealing(self):
+        from src.baseline.nh_raw_space_evaluation import observation_offset_hours
+
+        cfg_dict = self.cfg.as_dict()
+        sealing, population = _verified_sealing_and_population(cfg_dict)
+        if sealing is None:
+            return None
+        where = f"split contract {sealing.contract_id} cycle {sealing.cycle}"
+
+        if self.period not in sealing.windows_by_period:
+            raise FlashNHDatasetError(f"{where}: unknown period {self.period!r}")
+        lead_hours = _parse_lead_hours(self.cfg.target_variables)
+        if lead_hours != sealing.lead_hours:
+            raise FlashNHDatasetError(
+                f"{where}: target lead {lead_hours} h differs from the contract lead {sealing.lead_hours} h")
+
+        # Period dates: config keys, then the per-basin dates NH actually uses.
+        expected = {key: _as_timestamp_list(value, day_first=True) for key, value in sealing.nh_dates.items()}
+        for key, want in expected.items():
+            got = _as_timestamp_list(cfg_dict.get(key))
+            if got != want:
+                raise FlashNHDatasetError(f"{where}: config {key} {got} differs from the contract {want}")
+        for key in ("per_basin_train_periods_file", "per_basin_validation_periods_file",
+                    "per_basin_test_periods_file"):
+            if not _is_unset(cfg_dict.get(key)):
+                raise FlashNHDatasetError(f"{where}: {key} is not allowed")
+        want_starts = expected[f"{self.period}_start_date"]
+        want_ends = expected[f"{self.period}_end_date"]
+        for basin, dates in self.start_and_end_dates.items():
+            if (_as_timestamp_list(list(dates["start_dates"])) != want_starts
+                    or _as_timestamp_list(list(dates["end_dates"])) != want_ends):
+                raise FlashNHDatasetError(f"{where}: {self.period} dates for basin {basin} differ from the contract")
+
+        outside = sorted(str(b) for b in self.basins if str(b) not in population)
+        if outside:
+            raise FlashNHDatasetError(
+                f"{where}: {len(outside)} basin(s) not in the contract population: {outside[:10]}")
+
+        # Anything that could bring observations in by another route.
+        if not _is_unset(cfg_dict.get("train_data_file")):
+            raise FlashNHDatasetError(f"{where}: train_data_file is not allowed (it bypasses the sealed read)")
+        if self.cfg.additional_feature_files:
+            raise FlashNHDatasetError(f"{where}: additional_feature_files is not allowed")
+        if getattr(self, "additional_features", None):
+            raise FlashNHDatasetError(f"{where}: additional_features passed to the dataset are not allowed")
+        if not _is_unset(cfg_dict.get(_COMMON_SUPPORT_CONFIG_KEY)):
+            # User decision 2026-11-15: the fixed common-support sample lists
+            # were built under the pre-rotation split and reflect observation
+            # presence in now-sealed years.
+            raise FlashNHDatasetError(f"{where}: {_COMMON_SUPPORT_CONFIG_KEY} is not allowed (built under the "
+                                      "pre-rotation split)")
+        derived = list((self.cfg.lagged_features or {}).keys()) + list((self.cfg.duplicate_features or {}).keys())
+        derived_obs = [v for v in derived if observation_offset_hours(v) is not None]
+        if derived_obs:
+            raise FlashNHDatasetError(f"{where}: lagged/duplicated observation variable(s) {derived_obs}")
+        inputs = [v for v in self._flashnh_keep_columns() if v not in self.cfg.target_variables]
+        obs_inputs = [v for v in inputs if observation_offset_hours(v) is not None]
+        if obs_inputs:
+            raise FlashNHDatasetError(f"{where}: observation variable(s) {obs_inputs} configured as model inputs")
+        unapproved = [v for v in inputs if v not in _approved_forcing_variables()]
+        if unapproved:
+            raise FlashNHDatasetError(
+                f"{where}: input(s) {unapproved} are not approved package forcing variables "
+                "(package_assembly.DYNAMIC_INPUTS); only those are read without sealing")
+        return sealing
+
+    def _flashnh_keep_columns(self) -> list:
+        """The columns BaseDataset keeps per basin (its ``keep_cols``)."""
+        cfg = self.cfg
+        cols = list(cfg.target_variables) + list(cfg.evolving_attributes) + list(cfg.mass_inputs) \
+            + list(cfg.autoregressive_inputs)
+        if isinstance(cfg.dynamic_inputs, list):
+            cols += list(cfg.dynamic_inputs_flattened)
+        else:
+            cols += [i for inputs in cfg.dynamic_inputs.values() for i in inputs]
+        cols += list(cfg.dynamic_conceptual_inputs)
+        return sorted(set(cols))
+
+    def _basin_netcdf(self, basin: str) -> Path:
+        files_dir = Path(self.cfg.data_dir) / "time_series"
+        candidates = [files_dir / f"{basin}{ext}" for ext in (".nc4", ".nc")]
+        found = [path for path in candidates if path.is_file()]
+        if len(found) != 1:
+            raise FlashNHDatasetError(f"expected exactly one NetCDF file for basin {basin} in {files_dir}, "
+                                      f"found {[str(p) for p in found]}")
+        return found[0]
+
+    def _load_basin_data_sealed(self, basin: str, sealing) -> pd.DataFrame:
+        """Per-basin NetCDF read restricted lazily, before any observation
+        value is read, to this period's readable windows and the contract's
+        observation upper bound
+        (``nh_raw_space_evaluation.select_readable_observations``). Forcing
+        inputs are read whole; every other variable is dropped."""
+        from src.baseline.nh_raw_space_evaluation import RawSpaceEvaluationError, select_readable_observations
+
+        windows = sealing.readable_windows(self.period)
+        inputs = [v for v in self._flashnh_keep_columns() if v not in self.cfg.target_variables]
+        with xarray.open_dataset(self._basin_netcdf(basin)) as ds:
+            coordinate = "date" if "date" in ds.coords else "time"
+            approved_gap_flags = {v for v in _approved_forcing_variables() if v.endswith("_gap")}
+            forcing = inputs + [str(v) for v in ds.data_vars if str(v) in approved_gap_flags and str(v) not in inputs]
+            try:
+                sealed = select_readable_observations(ds, windows=windows, coordinate=coordinate,
+                                                      forcing_variables=forcing, upper_bound=sealing.upper_bound)
+            except RawSpaceEvaluationError as exc:
+                raise FlashNHDatasetError(f"basin {basin}: {exc}") from exc
+            return sealed.to_dataframe()
+
+    def _write_sealing_receipt(self, sealing, n_masked: int) -> None:
+        """Durable proof in ``train_dir`` that this period's loader applied the
+        rotation sealing (one small JSON per period)."""
+        from src.baseline.nh_raw_space_evaluation import _RECEIPT_IDENTITY_KEYS
+
+        train_dir = getattr(self.cfg, "train_dir", None)
+        if train_dir is None:
+            return
+        train_dir = Path(train_dir)
+        receipt = dict(sealing.receipt(), period=self.period)
+        path = train_dir / SPLIT_SEALING_RECEIPT_TEMPLATE.format(period=self.period)
+        if self.is_train:
+            # NH evaluates one basin per dataset instance, so counts are
+            # meaningful (and recorded) for the training load only.
+            receipt.update(n_basins=len(self.basins), n_train_targets_masked_outside_period=int(n_masked))
+            text = json.dumps(receipt, indent=1, sort_keys=True)
+            if path.is_file() and path.read_text(encoding="utf-8") == text:
+                return
+            train_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            return
+
+        # Evaluation: NH restores cfg.train_dir from the run's saved config.yml,
+        # which is stale for a moved/copied run (and may be a path of another
+        # machine). Never create it; write only next to a training receipt of
+        # the same sealing, so a receipt cannot land in an unrelated folder.
+        # When skipped, the raw-space scorer refuses the run (fail closed).
+        def identity(p: Path):
+            try:
+                got = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            return tuple(got.get(k) for k in _RECEIPT_IDENTITY_KEYS) if isinstance(got, dict) else None
+
+        want = tuple(receipt[k] for k in _RECEIPT_IDENTITY_KEYS)
+        train_receipt = train_dir / SPLIT_SEALING_RECEIPT_TEMPLATE.format(period="train")
+        if identity(train_receipt) != want:
+            LOGGER.warning("split-sealing receipt for the %s period not written: no matching training receipt in "
+                           "%s (cfg.train_dir may be stale for a moved run); raw-space scoring will refuse it",
+                           self.period, train_dir)
+            return
+        if path.is_file() and identity(path) == want:
+            return  # keeps an existing receipt (e.g. the training counts when evaluating the train period)
+        path.write_text(json.dumps(receipt, indent=1, sort_keys=True), encoding="utf-8")
 
     def _observation_cutoff(self, basin: str):
         """The config's ``flashnh_observation_cutoff`` (``None`` when unset),
@@ -435,23 +732,22 @@ class FlashNHDataset(GenericDataset):
         rule as ``genericdataset.load_timeseries``."""
         from src.baseline.nh_raw_space_evaluation import select_through_observation_cutoff
 
-        files_dir = Path(self.cfg.data_dir) / "time_series"
-        candidates = [files_dir / f"{basin}{ext}" for ext in (".nc4", ".nc")]
-        found = [path for path in candidates if path.is_file()]
-        if len(found) != 1:
-            raise FlashNHDatasetError(f"expected exactly one NetCDF file for basin {basin} in {files_dir}, "
-                                      f"found {[str(p) for p in found]}")
-        with xarray.open_dataset(found[0]) as ds:
+        with xarray.open_dataset(self._basin_netcdf(basin)) as ds:
             coordinate = "date" if "date" in ds.coords else "time"
             return select_through_observation_cutoff(ds, cutoff=cutoff, coordinate=coordinate).to_dataframe()
 
     def _load_or_create_xarray_dataset(self) -> xarray.Dataset:
         # NH calls this once in _load_data, before the per-basin target std and
-        # the scaler are computed from the returned dataset.
+        # the scaler are computed from the returned dataset. The rotation
+        # sealing is resolved (and every fail-closed check run) BEFORE the
+        # parent reads anything, including the train_data_file shortcut.
+        sealing = self._rotation_sealing()
         xr = super()._load_or_create_xarray_dataset()
         self._flashnh_n_train_targets_masked = 0
         if self.period == "train":
             xr = self._mask_train_targets_outside_period(xr)
+        if sealing is not None:
+            self._write_sealing_receipt(sealing, self._flashnh_n_train_targets_masked)
         return xr
 
     def _mask_train_targets_outside_period(self, xr: xarray.Dataset) -> xarray.Dataset:
@@ -563,6 +859,10 @@ class FlashNHDataset(GenericDataset):
             removed_for_common_support=0 if support is None else n_natural - len(kept),
             n_period_slices=max(len(self.start_and_end_dates[b]["start_dates"]) for b in self.start_and_end_dates),
             n_train_targets_masked_outside_period=getattr(self, "_flashnh_n_train_targets_masked", 0),
+            split_contract_checksum_sha256=(None if getattr(self, "_flashnh_rotation_sealing", None) is None
+                                            else self._flashnh_rotation_sealing.contract_checksum_sha256),
+            rotation_cycle=(None if getattr(self, "_flashnh_rotation_sealing", None) is None
+                            else self._flashnh_rotation_sealing.cycle),
         )
 
     def _load_common_support(self, path: Path, seq_length: int, lead_hours: int) -> dict:

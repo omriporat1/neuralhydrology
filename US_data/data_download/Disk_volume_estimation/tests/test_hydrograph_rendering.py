@@ -130,7 +130,12 @@ def _build_fixture(tmp_path, basin_ids, *, n_result=300, n_package=200, freq="1H
         _write_package_netcdf(package_root, basin_id, n=n_package, seed=i, with_mrms=with_mrms, start=start)
         results[basin_id] = _basin_result_entry(n=n_result, seed=100 + i, freq=freq, start=start)
 
-    result_pickle_path = tmp_path / "validation_results.p"
+    # NH's run layout with a (contract-free) config.yml: the renderer refuses a
+    # results pickle whose run directory it cannot locate (decision 2026-11-15).
+    run_dir = tmp_path / "run"
+    result_pickle_path = run_dir / "validation" / "model_epoch006" / "validation_results.p"
+    result_pickle_path.parent.mkdir(parents=True)
+    (run_dir / "config.yml").write_text("experiment_name: fixture\ndataset: flashnh\n")
     with open(result_pickle_path, "wb") as fh:
         pickle.dump(results, fh)
 

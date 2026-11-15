@@ -52,8 +52,12 @@ from .nh_raw_space_evaluation import (
     aggregate_raw_space_metrics,
     derive_basin_area_km2_from_netcdf,
     evaluate_basin_raw_space,
+    observation_times_outside_windows,
+    parse_observation_cutoff,
     pooled_raw_space_metrics,
+    read_run_rotation_sealing,
     resolve_run_observation_cutoff,
+    verify_run_sealing_receipts,
 )
 from .package_audit import sha256_file
 
@@ -144,8 +148,38 @@ def raw_space_metrics_for_run_period(
     two must agree), area derivation reads no package observation later than
     the cutoff, the ``test`` period is refused, and the result records
     ``"observation_cutoff"``. Without either, behaviour is unchanged.
+
+    Water-year rotation sealing: when the run's ``config.yml`` declares
+    ``flashnh_split_contract`` / ``flashnh_rotation_cycle`` (verified as for the
+    dataset; an explicit ``observation_cutoff`` is then refused), each basin's
+    area is derived only from observations in the cycle's TRAINING readable
+    windows (never the scored period's), ``lead_hours`` must equal the contract
+    lead, and every finite scored observation must have its observation time
+    (issue date + lead) inside the scored period's readable windows and not
+    after the contract's upper bound -- otherwise the results did not come from
+    a sealed loader and the call raises. The run must also prove it was loaded
+    sealed: its config must use ``dataset: flashnh``, and ``train_data`` must
+    hold the loader's sealing receipts for ``train`` and for ``period`` with the
+    same contract checksum, cycle and windows. A run with sealing receipts but
+    no (or a contract-free) ``config.yml`` is refused. The result records
+    ``"split_contract"``.
     """
-    cutoff = resolve_run_observation_cutoff(run_dir, observation_cutoff)
+    try:
+        sealing = read_run_rotation_sealing(run_dir) if run_dir is not None else None
+        if sealing is not None:
+            verify_run_sealing_receipts(run_dir, sealing, ("train", period))
+    except RawSpaceEvaluationError as exc:
+        raise NHSeedEvaluationError(str(exc)) from exc
+    if sealing is not None:
+        if parse_observation_cutoff(observation_cutoff) is not None:
+            raise NHSeedEvaluationError("an observation cutoff cannot be applied to a split-contract run")
+        if int(lead_hours) != sealing.lead_hours:
+            raise NHSeedEvaluationError(
+                f"lead_hours {lead_hours} differs from the split contract lead {sealing.lead_hours}")
+        period_windows = sealing.readable_windows(period)
+        cutoff = None
+    else:
+        cutoff = resolve_run_observation_cutoff(run_dir, observation_cutoff)
     if cutoff is not None and period == "test":
         raise NHSeedEvaluationError(f"run declares observation cutoff {cutoff}; the test period is refused")
     results = load_period_results(run_dir, period, epoch)
@@ -186,6 +220,8 @@ def raw_space_metrics_for_run_period(
                     min_samples=min_area_samples,
                     max_relative_mad=max_relative_mad,
                     observation_cutoff=cutoff,
+                    readable_windows=None if sealing is None else sealing.training_windows,
+                    observation_upper_bound=None if sealing is None else sealing.upper_bound,
                 )
             except RawSpaceEvaluationError as exc:
                 area_derivation_excluded.append({"basin_id": basin_id, "freq": freq, "reason": str(exc)})
@@ -203,6 +239,9 @@ def raw_space_metrics_for_run_period(
                 )
                 continue
 
+            if sealing is not None:
+                _check_scored_observations_readable(xr_ds[obs_key], basin_id=basin_id, lead_hours=lead_hours,
+                                                    windows=period_windows, upper_bound=sealing.upper_bound)
             obs_mm_per_h = xr_ds[obs_key].values.reshape(-1)
             sim_mm_per_h = xr_ds[sim_key].values.reshape(-1)
             basin_metrics = evaluate_basin_raw_space(
@@ -244,7 +283,33 @@ def raw_space_metrics_for_run_period(
         result["pooled"] = pooled_raw_space_metrics(pooled_obs_arrays, pooled_sim_arrays)
     if cutoff is not None:
         result["observation_cutoff"] = str(cutoff)
+    if sealing is not None:
+        result["split_contract"] = sealing.receipt()
     return result
+
+
+def _check_scored_observations_readable(obs, *, basin_id: str, lead_hours: int, windows, upper_bound) -> None:
+    """Raise unless every finite scored observation of a split-contract run
+    has its observation time (issue date + lead) inside the scored period's
+    readable windows and not after the upper bound. NH results carry the issue
+    date on ``date`` and, for ``predict_last_n == 1``, a single ``time_step``."""
+    import numpy as np
+    import pandas as pd
+
+    extra = [d for d in obs.dims if d not in ("date", "time_step")]
+    if "date" not in obs.dims or extra or obs.sizes.get("time_step", 1) != 1:
+        raise NHSeedEvaluationError(
+            f"basin {basin_id}: split-contract scoring supports results on (date[, time_step=1]) only, "
+            f"got dims {dict(obs.sizes)}")
+    values = np.asarray(obs.values, dtype=np.float64).reshape(-1)
+    obs_times = pd.DatetimeIndex(obs["date"].values) + pd.Timedelta(hours=int(lead_hours))
+    outside = observation_times_outside_windows(obs_times, windows=windows, upper_bound=upper_bound)
+    leaked = np.isfinite(values) & outside
+    if leaked.any():
+        first = obs_times[np.flatnonzero(leaked)[0]]
+        raise NHSeedEvaluationError(
+            f"basin {basin_id}: {int(leaked.sum())} finite scored observation(s) lie outside the period's "
+            f"readable windows (first at observation time {first}); results were not produced by a sealed loader")
 
 
 def require_holdout_bundle(generated_dir) -> None:

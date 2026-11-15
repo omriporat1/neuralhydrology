@@ -66,6 +66,8 @@ from .nh_raw_space_evaluation import (
     convert_period_to_raw_space,
     derive_basin_area_km2_from_netcdf,
     raw_space_metrics,
+    read_run_rotation_sealing,
+    verify_run_sealing_receipts,
 )
 from .nh_seed_evaluation import (
     NHSeedEvaluationError,
@@ -550,11 +552,19 @@ def load_basin_series(
     freq: Optional[str] = None,
     min_area_samples: int = 100,
     max_relative_mad: float = 1e-4,
+    area_readable_windows=None,
+    area_observation_upper_bound=None,
 ) -> BasinSeries:
     """Extract one basin's observed/predicted series from an already-loaded
     NH result pickle, self-derive its area, and convert to raw m^3/s with
     metrics -- entirely via reused :mod:`src.baseline.nh_raw_space_evaluation`
-    functions (no second conversion/metric implementation)."""
+    functions (no second conversion/metric implementation).
+
+    ``area_readable_windows``/``area_observation_upper_bound`` restrict the
+    area derivation's observation read (passed to
+    :func:`derive_basin_area_km2_from_netcdf`); the render entry points set
+    them from a rotation run's split contract (training windows), see
+    :func:`_rotation_area_scope`."""
     xr_ds = extract_basin_xr(results, basin_id, target_variable, freq=freq)
 
     dates = pd.to_datetime(np.asarray(xr_ds["date"].values))
@@ -583,6 +593,8 @@ def load_basin_series(
             lead_hours=lead_hours,
             min_samples=min_area_samples,
             max_relative_mad=max_relative_mad,
+            readable_windows=area_readable_windows,
+            observation_upper_bound=area_observation_upper_bound,
         )
     except RawSpaceEvaluationError as exc:
         raise HydrographRenderingError(str(exc)) from exc
@@ -1207,6 +1219,61 @@ def _event_window_rows(basin_id: str, events: Mapping[str, EventWindow]) -> list
     return rows
 
 
+def _run_dir_of_result_pickle(result_pickle_path: Path, period: str) -> Path:
+    """The run directory a result pickle sits in: the path must have NH's
+    ``<run_dir>/<period>/model_epochNNN/<period>_results.p`` layout
+    (:func:`period_results_path`) with the run's ``config.yml`` present.
+
+    User decision 2026-11-15 (question a): otherwise refuse. Without the run
+    directory the tool cannot tell whether the run was trained under a split
+    contract, so it would derive the basin area from the whole file (sealed
+    hours included); a pickle copied out of its run folder, or one of another
+    period, is therefore not accepted."""
+    path = Path(result_pickle_path)
+    if (path.name == f"{period}_results.p" and len(path.parents) >= 3
+            and path.parent.name.startswith("model_epoch") and path.parent.parent.name == period
+            and (path.parents[2] / "config.yml").is_file()):
+        return path.parents[2]
+    raise HydrographRenderingError(
+        f"cannot locate the run directory of result pickle {path}: expected "
+        f"<run_dir>/{period}/model_epochNNN/{period}_results.p with <run_dir>/config.yml, so the run's split "
+        "contract (if any) can be checked before the basin area is derived. Pass the pickle inside its run "
+        "folder (or run_dir=) instead of a copy.")
+
+
+def _rotation_area_scope(run_dir, *, period: str, lead_hours: int):
+    """``(readable_windows, observation_upper_bound)`` for the area derivation
+    of a run trained under a water-year rotation split contract -- its
+    training windows, as the raw-space scorer uses -- or ``(None, None)`` for a
+    run without one (or no known run directory). Fail closed when the run
+    carries sealing receipts without a usable contract config, when the train
+    or ``period`` receipt is missing or does not match, or when ``lead_hours``
+    differs from the contract lead.
+
+    User decision 2026-11-15 (3b): only this figure tool's area read is
+    locked. Other whole-file area callers (``rd1_c4_f_hydrograph_runner``,
+    ``devpop_common120_audit_evaluator``, ``common_support_audit``,
+    ``fixed_support_contract_v2``,
+    ``scripts/aggregate_stage1_seed_checkpoint_report.py``) must not be used
+    on rotation runs until they are locked the same way (rule recorded in
+    ``docs/decision_log.md``, question b). A result pickle whose run
+    directory cannot be located is refused by
+    :func:`_run_dir_of_result_pickle` (question a)."""
+    if run_dir is None:
+        return None, None
+    try:
+        sealing = read_run_rotation_sealing(run_dir)
+        if sealing is None:
+            return None, None
+        verify_run_sealing_receipts(run_dir, sealing, ("train", period))
+    except RawSpaceEvaluationError as exc:
+        raise HydrographRenderingError(str(exc)) from exc
+    if int(lead_hours) != sealing.lead_hours:
+        raise HydrographRenderingError(
+            f"lead_hours={lead_hours} differs from the run's split contract lead {sealing.lead_hours} h")
+    return sealing.training_windows, sealing.upper_bound
+
+
 def render_stage1_hydrographs(
     *,
     run_dir=None,
@@ -1255,14 +1322,21 @@ def render_stage1_hydrographs(
     if write_outputs:
         _assert_out_dir_is_safe(Path(out_dir), resolved_repo_root, force=force)
 
+    # Locate the run (config.yml required, also under run_dir=) and check its
+    # split contract before the pickle is unpickled (question a).
     if result_pickle is not None:
         result_pickle_path = Path(result_pickle)
         if not result_pickle_path.is_file():
             raise HydrographRenderingError(f"result pickle not found: {result_pickle_path}")
+        area_windows, area_upper_bound = _rotation_area_scope(
+            _run_dir_of_result_pickle(result_pickle_path, period), period=period, lead_hours=lead_hours)
         with open(result_pickle_path, "rb") as fh:
             results = pickle.load(fh)
     else:
         result_pickle_path = period_results_path(run_dir, period, epoch)
+        if result_pickle_path.is_file():  # a missing pickle keeps load_period_results' own error
+            area_windows, area_upper_bound = _rotation_area_scope(
+                _run_dir_of_result_pickle(result_pickle_path, period), period=period, lead_hours=lead_hours)
         try:
             results = load_period_results(run_dir, period, epoch)
         except NHSeedEvaluationError as exc:
@@ -1293,6 +1367,8 @@ def render_stage1_hydrographs(
             freq=freq,
             min_area_samples=min_area_samples,
             max_relative_mad=max_relative_mad,
+            area_readable_windows=area_windows,
+            area_observation_upper_bound=area_upper_bound,
         )
         basin_series_by_id[basin_id] = bs
         events_by_basin[basin_id] = _events_for_basin(bs)
@@ -1476,6 +1552,8 @@ def render_stage1_compact_comparison_package(
     result_pickle_path = Path(result_pickle)
     if not result_pickle_path.is_file():
         raise HydrographRenderingError(f"result pickle not found: {result_pickle_path}")
+    area_windows, area_upper_bound = _rotation_area_scope(
+        _run_dir_of_result_pickle(result_pickle_path, "validation"), period="validation", lead_hours=lead_hours)
     with open(result_pickle_path, "rb") as fh:
         results = pickle.load(fh)
 
@@ -1491,6 +1569,7 @@ def render_stage1_compact_comparison_package(
             results=results, basin_id=basin_id, target_variable=target_variable,
             package_root=package_root, lead_hours=lead_hours, freq=freq,
             min_area_samples=min_area_samples, max_relative_mad=max_relative_mad,
+            area_readable_windows=area_windows, area_observation_upper_bound=area_upper_bound,
         )
         basin_series_by_id[basin_id] = bs
         events_by_basin[basin_id] = _events_for_basin(bs)

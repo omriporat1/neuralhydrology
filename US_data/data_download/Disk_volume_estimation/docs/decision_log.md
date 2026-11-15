@@ -2,6 +2,27 @@
 
 # Decision Log
 
+## 2026-11-15 — Loader sealing for split contract v001: review fixes and scope decisions — record only
+
+**Decision (user, 2026-11-15).**
+- **Review fixes.** The six fixes from the independent loader-sealing review (F1-F6) are applied:
+  - The raw-space scorer accepts a contract run only under `dataset: flashnh`, and only with matching train and scored-period sealing receipts.
+  - A run with sealing receipts but a missing or contract-free `config.yml` is refused.
+  - Under a contract, only the approved package inputs (`package_assembly.DYNAMIC_INPUTS`) are read unsealed. Extra features passed to the dataset are refused.
+  - The frozen contract checksum is pinned outside the generator code.
+  - Receipt counts are kept for training only.
+  - At evaluation, a receipt is written only beside a matching training receipt and never into a missing folder. A moved run is then refused at scoring rather than scored without a receipt.
+- **Common-support sample lists.** `flashnh_common_support_file` is refused under a split contract. The fixed sample lists were built under the pre-rotation split and reflect which hours had observations in years that are now sealed.
+- **Basin area in figures.** The hydrograph-figure tool (`src/baseline/hydrograph_rendering.py`) now derives a rotation run's basin area only from that run's training windows, as the scorer does. Area is constant in time, so this does not change any number. It only keeps sealed hours from being read.
+  - The tool refuses a results pickle whose run folder it cannot locate (`<run>/validation/model_epochNNN/validation_results.p` with the run's `config.yml`), because it could not tell whether the run is a rotation run. This holds whether the pickle or the run folder is passed, is checked before the pickle is opened, and applies to all runs, including pre-rotation ones; a copied pickle must be used from its run folder.
+  - Accepted side effect (user, 2026-11-15): old evidence pickles copied out of their run folders are refused; to redraw them, use the original run folder or copy the run's `config.yml` alongside in the run layout.
+  - Rule, recorded here only (no code guard yet): the other tools that read the whole file for the area (`rd1_c4_f_hydrograph_runner`, `devpop_common120_audit_evaluator`, `common_support_audit`, `fixed_support_contract_v2`, `scripts/aggregate_stage1_seed_checkpoint_report.py`) must not be run on rotation runs until they are locked the same way. Each gets that lock when it is first needed for rotation runs.
+- **Wrong dataset stopped at launch.** A config that sets the split-contract keys under a dataset other than `flashnh` is refused when the config is loaded (NH's config-key check, after Flash-NH registration), so it cannot train unsealed. For continue-training and finetune, which lay a partial config over the base run's config, the combined config is checked. Not active under NH `dev_mode`. The scorer's refusal stays as a second line.
+- **Data package.** Rotation runs use the current package. The WY2026-refetched package is not used for the development rotation.
+- **Review route.** The fix round gets a fresh-context Claude review of the fix diff only, and the two guards above a further narrow fresh review (its fixes applied). A ChatGPT review is skipped by user decision.
+
+Status: loader-sealing review gate passed (fresh review, fix-round review and a narrow review of the two guards, all "pass with fixes", fixes applied; packet `.scratch_local/review_packets/20261112_loader_sealing_v001/`). Committed with the user's approval on 2026-11-15; not pushed. Rotation runs may now be prepared under this sealing. The spatial holdout, California and WY2026 stay sealed, and job 45625077's test outputs stay unopened.
+
 ## 2026-11-12 — Rotation split contract v001 FROZEN (gate 2 passed) — record only
 
 **Decision (user, 2026-11-12).**

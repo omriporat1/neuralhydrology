@@ -53,6 +53,21 @@ __all__ = [
     "read_run_observation_cutoff",
     "resolve_run_observation_cutoff",
     "select_through_observation_cutoff",
+    "SPLIT_CONTRACT_CONFIG_KEY",
+    "ROTATION_CYCLE_CONFIG_KEY",
+    "RAW_OBSERVATION_VARIABLE",
+    "observation_offset_hours",
+    "select_readable_observations",
+    "RotationSealing",
+    "parse_rotation_sealing",
+    "read_run_rotation_sealing",
+    "SEALED_DATASET_KEY",
+    "SPLIT_SEALING_RECEIPT_TEMPLATE",
+    "FROZEN_SPLIT_CONTRACT_CHECKSUMS",
+    "split_sealing_receipt_path",
+    "run_has_split_sealing_receipts",
+    "verify_run_sealing_receipts",
+    "observation_times_outside_windows",
     "PeriodConversionResult",
     "convert_period_to_raw_space",
     "raw_space_metrics",
@@ -115,7 +130,21 @@ def read_run_observation_cutoff(run_dir) -> Optional["pd.Timestamp"]:
 
 def resolve_run_observation_cutoff(run_dir, observation_cutoff=None) -> Optional["pd.Timestamp"]:
     """Explicit ``observation_cutoff`` and the run's declared cutoff must agree
-    when both are present; either alone applies; neither -> ``None``."""
+    when both are present; either alone applies; neither -> ``None``.
+
+    A run whose ``config.yml`` declares a water-year rotation split contract
+    (``flashnh_split_contract`` / ``flashnh_rotation_cycle``) is refused: its
+    observations are sealed by readable windows, not by a single cutoff, and a
+    caller that only knows the cutoff would read sealed observations."""
+    if run_dir is not None:
+        declared_cfg = _read_run_config(run_dir)
+        if run_has_split_sealing_receipts(run_dir) or not (
+                _unset(declared_cfg.get(SPLIT_CONTRACT_CONFIG_KEY))
+                and _unset(declared_cfg.get(ROTATION_CYCLE_CONFIG_KEY))):
+            raise RawSpaceEvaluationError(
+                f"run {run_dir} declares a water-year rotation split contract (or carries its sealing "
+                "receipts); this caller only applies an "
+                "observation cutoff and would read sealed observations (use the rotation-sealing path)")
     explicit = parse_observation_cutoff(observation_cutoff)
     declared = read_run_observation_cutoff(run_dir) if run_dir is not None else None
     if explicit is not None and declared is not None and explicit != declared:
@@ -142,6 +171,303 @@ def select_through_observation_cutoff(ds, *, cutoff, coordinate: str):
         head = ds[name].sel({coordinate: slice(None, cutoff - pd.Timedelta(hours=int(match.group(1))))})
         sub[name] = head.reindex({coordinate: sub[coordinate]})
     return sub
+
+
+# ---------------------------------------------------------------------------
+# Water-year rotation sealing (split contract + rotation cycle)
+# ---------------------------------------------------------------------------
+
+#: NH config key naming the frozen water-year rotation split contract JSON
+#: (``src.baseline.wy_rotation_split``). A relative path is resolved against
+#: the project root, so one config works locally and on Moriah.
+SPLIT_CONTRACT_CONFIG_KEY = "flashnh_split_contract"
+#: NH config key naming the rotation cycle (int) of that contract.
+ROTATION_CYCLE_CONFIG_KEY = "flashnh_rotation_cycle"
+#: The raw discharge observation in a package NetCDF (observation at row time).
+RAW_OBSERVATION_VARIABLE = "qobs_m3s"
+#: NH dataset key of the sealed loader (``src.baseline.nh_register``). A run
+#: declaring a split contract under any other ``dataset`` was loaded unsealed.
+SEALED_DATASET_KEY = "flashnh"
+#: Per-period receipt FlashNHDataset writes in NH's ``train_dir``
+#: (``<run_dir>/train_data``) after a sealed load.
+SPLIT_SEALING_RECEIPT_TEMPLATE = "flashnh_split_sealing_{period}.json"
+#: Content checksums of the frozen split contracts this code accepts, pinned
+#: here so an edit to the contract-generating code cannot silently produce a
+#: different contract that still verifies against itself.
+FROZEN_SPLIT_CONTRACT_CHECKSUMS = {
+    "flashnh_wy_rotation_split_v001": "125b071b261fcc8a0bbb50254dc3babf9ad0eb2cb3b15e804910ff66d7422983",
+}
+#: Receipt fields that identify the sealing (the contract path is excluded:
+#: it legitimately differs between machines).
+_RECEIPT_IDENTITY_KEYS = ("contract_id", "contract_checksum_sha256", "rotation_cycle", "lead_hours",
+                          "observation_upper_bound_utc", "readable_observation_windows")
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def observation_offset_hours(name) -> Optional[int]:
+    """Hours from row time to observation time for an observation variable:
+    0 for ``qobs_m3s``, ``NN`` for any ``*_lead<NN>`` variable, ``None`` for a
+    variable that holds no observation (forcing, gap flags, anything else)."""
+    name = str(name)
+    if name == RAW_OBSERVATION_VARIABLE:
+        return 0
+    match = _LEAD_VARIABLE_RE.search(name)
+    return None if match is None else int(match.group(1))
+
+
+def _check_hourly_coordinate(ds, coordinate: str):
+    import pandas as pd
+
+    if coordinate not in ds.coords:
+        raise RawSpaceEvaluationError(f"package dataset has no {coordinate!r} coordinate")
+    index = pd.DatetimeIndex(ds.indexes[coordinate])
+    if index.tz is not None:
+        raise RawSpaceEvaluationError(f"package coordinate {coordinate!r} must be naive UTC")
+    if not index.is_monotonic_increasing or not index.is_unique:
+        raise RawSpaceEvaluationError(f"package coordinate {coordinate!r} must be strictly increasing")
+    return index
+
+
+def select_readable_observations(ds, *, windows, coordinate: str, forcing_variables, upper_bound):
+    """Lazily restrict an (unloaded) package ``xarray.Dataset`` to what one
+    rotation period may read, BEFORE any observation value is read.
+
+    - ``forcing_variables`` are kept whole (forcing look-back may cross any
+      water-year boundary). Each must exist and must not be an observation
+      variable (see :func:`observation_offset_hours`).
+    - Every observation variable (``qobs_m3s`` and every ``*_lead<NN>``, not
+      only the configured target) keeps a value only at rows whose
+      observation time (row time + offset) lies inside one of ``windows``
+      (inclusive :class:`~src.baseline.wy_rotation_split.TimeWindow`-like
+      objects with ``first``/``last``) and not after ``upper_bound``. Only those
+      row ranges are read (label slices on the lazy array); every other row is
+      NaN and never read.
+    - Every other variable is dropped, so an unknown variable is sealed by
+      default.
+
+    Returns a new Dataset on the file's full coordinate."""
+    import pandas as pd
+    import xarray as xr
+
+    index = _check_hourly_coordinate(ds, coordinate)
+    upper_bound = pd.Timestamp(upper_bound)
+    forcing_variables = list(dict.fromkeys(str(v) for v in forcing_variables))
+    bad = [v for v in forcing_variables if observation_offset_hours(v) is not None]
+    if bad:
+        raise RawSpaceEvaluationError(f"observation variable(s) {bad} cannot be read as unrestricted forcing")
+    missing = [v for v in forcing_variables if v not in ds.data_vars]
+    if missing:
+        raise RawSpaceEvaluationError(f"forcing variable(s) {missing} not in the package dataset")
+
+    full = xr.DataArray(index.values, dims=(coordinate,), name=coordinate)
+    out = xr.Dataset(coords={coordinate: full})
+    for name in forcing_variables:
+        out[name] = ds[name]
+    for name in ds.data_vars:
+        offset = observation_offset_hours(name)
+        if offset is None:
+            continue
+        shift = pd.Timedelta(hours=offset)
+        pieces = []
+        for window in windows:
+            first, last = pd.Timestamp(window.first), min(pd.Timestamp(window.last), upper_bound)
+            if last < first:
+                continue
+            piece = ds[name].sel({coordinate: slice(first - shift, last - shift)})
+            if piece.sizes[coordinate]:
+                pieces.append(piece.load())
+        if pieces:
+            values = xr.concat(pieces, dim=coordinate) if len(pieces) > 1 else pieces[0]
+            if not pd.DatetimeIndex(values.indexes[coordinate]).is_unique:
+                raise RawSpaceEvaluationError(f"readable windows overlap for {name!r}")
+            values = values.astype("float64", copy=False).reindex({coordinate: full})
+        else:
+            values = xr.DataArray(np.full(len(index), np.nan), dims=(coordinate,), coords={coordinate: full})
+        out[name] = values.astype(ds[name].dtype if np.issubdtype(ds[name].dtype, np.floating) else "float64")
+        out[name].attrs = dict(ds[name].attrs)
+    return out
+
+
+def observation_times_outside_windows(times, *, windows, upper_bound) -> "np.ndarray":
+    """Boolean mask: which observation ``times`` lie outside every one of
+    ``windows`` (inclusive) or after ``upper_bound``."""
+    import pandas as pd
+
+    values = np.asarray(times, dtype="datetime64[ns]")
+    inside = np.zeros(values.shape, dtype=bool)
+    for window in windows:
+        inside |= ((values >= np.datetime64(pd.Timestamp(window.first), "ns"))
+                   & (values <= np.datetime64(pd.Timestamp(window.last), "ns")))
+    inside &= values <= np.datetime64(pd.Timestamp(upper_bound), "ns")
+    return ~inside
+
+
+@dataclass(frozen=True)
+class RotationSealing:
+    """One rotation run's sealing identity, resolved from its config and the
+    verified frozen contract. ``windows_by_period`` maps each NH period
+    (train / validation / test) to its readable observation windows."""
+
+    contract_path: str
+    contract_id: str
+    contract_checksum_sha256: str
+    cycle: int
+    lead_hours: int
+    upper_bound: "pd.Timestamp"
+    windows_by_period: Mapping
+    nh_dates: Mapping
+
+    def readable_windows(self, period: str) -> tuple:
+        if period not in self.windows_by_period:
+            raise RawSpaceEvaluationError(f"unknown NH period {period!r}")
+        return self.windows_by_period[period]
+
+    @property
+    def training_windows(self) -> tuple:
+        return self.windows_by_period["train"]
+
+    def receipt(self) -> dict:
+        return {"split_contract": self.contract_path, "contract_id": self.contract_id,
+                "contract_checksum_sha256": self.contract_checksum_sha256, "rotation_cycle": self.cycle,
+                "lead_hours": self.lead_hours, "observation_upper_bound_utc": self.upper_bound.isoformat(),
+                "readable_observation_windows": {
+                    p: [[w.first.isoformat(), w.last.isoformat()] for w in ws]
+                    for p, ws in self.windows_by_period.items()}}
+
+
+def _unset(value) -> bool:
+    return value is None or value == "None"
+
+
+def parse_rotation_sealing(config: Mapping, *, project_root=None) -> Optional[RotationSealing]:
+    """Resolve ``flashnh_split_contract`` + ``flashnh_rotation_cycle`` from an
+    NH config mapping. Neither -> ``None``. Fail closed
+    (:class:`RawSpaceEvaluationError`) when only one is set, when
+    ``flashnh_observation_cutoff`` is also set, when the contract does not
+    verify as the frozen contract, or when the cycle is not an int in its
+    table."""
+    from .wy_rotation_split import (
+        NH_PERIODS, OBSERVATION_UPPER_BOUND, WyRotationSplitError, cycle_nh_dates, load_split_contract,
+        readable_observation_windows,
+    )
+    from .wy_rotation_split import _cycles_from_contract
+
+    path_value = config.get(SPLIT_CONTRACT_CONFIG_KEY)
+    cycle_value = config.get(ROTATION_CYCLE_CONFIG_KEY)
+    if _unset(path_value) and _unset(cycle_value):
+        return None
+    if _unset(path_value) or _unset(cycle_value):
+        raise RawSpaceEvaluationError(
+            f"{SPLIT_CONTRACT_CONFIG_KEY} and {ROTATION_CYCLE_CONFIG_KEY} must be set together "
+            f"(got {path_value!r} / {cycle_value!r})")
+    if not _unset(config.get(OBSERVATION_CUTOFF_CONFIG_KEY)):
+        raise RawSpaceEvaluationError(
+            f"{OBSERVATION_CUTOFF_CONFIG_KEY} cannot be combined with {SPLIT_CONTRACT_CONFIG_KEY}")
+    if type(cycle_value) is not int:
+        raise RawSpaceEvaluationError(f"{ROTATION_CYCLE_CONFIG_KEY} must be an int, got {cycle_value!r}")
+    path = Path(str(path_value))
+    if not path.is_absolute():
+        path = Path(project_root if project_root is not None else _PROJECT_ROOT) / path
+    try:
+        contract = load_split_contract(path)
+    except WyRotationSplitError as exc:
+        raise RawSpaceEvaluationError(f"split contract {path} refused: {exc}") from exc
+    pinned = FROZEN_SPLIT_CONTRACT_CHECKSUMS.get(contract["contract_id"])
+    if pinned is None or contract["checksum_sha256"] != pinned:
+        raise RawSpaceEvaluationError(
+            f"split contract {path} ({contract['contract_id']!r}, checksum {contract['checksum_sha256']}) is not "
+            "a pinned frozen contract")
+    cycles = {c.cycle: c for c in _cycles_from_contract(contract)}
+    if cycle_value not in cycles:
+        raise RawSpaceEvaluationError(
+            f"{ROTATION_CYCLE_CONFIG_KEY} {cycle_value} is not in the contract table {sorted(cycles)}")
+    cycle = cycles[cycle_value]
+    bound = OBSERVATION_UPPER_BOUND
+    if contract["observation_upper_bound_utc"] != bound.strftime("%Y-%m-%dT%H:%M:%SZ"):
+        raise RawSpaceEvaluationError("contract observation upper bound differs from the frozen value")
+    return RotationSealing(
+        contract_path=str(path), contract_id=contract["contract_id"],
+        contract_checksum_sha256=contract["checksum_sha256"], cycle=cycle.cycle,
+        lead_hours=int(contract["conventions"]["lead_hours"]), upper_bound=bound,
+        windows_by_period={p: readable_observation_windows(cycle, p) for p in NH_PERIODS},
+        nh_dates=cycle_nh_dates(cycle))
+
+
+def _read_run_config(run_dir) -> dict:
+    from ruamel.yaml import YAML
+
+    config_path = Path(run_dir) / "config.yml"
+    if not config_path.is_file():
+        return {}
+    with config_path.open("r", encoding="utf-8") as fh:
+        return YAML(typ="safe").load(fh) or {}
+
+
+def split_sealing_receipt_path(run_dir, period: str) -> Path:
+    """Where FlashNHDataset leaves its sealing receipt for ``period`` in an NH
+    run directory (NH's ``train_dir`` is ``<run_dir>/train_data``)."""
+    return Path(run_dir) / "train_data" / SPLIT_SEALING_RECEIPT_TEMPLATE.format(period=period)
+
+
+def run_has_split_sealing_receipts(run_dir) -> bool:
+    """Whether a sealed loader left any split-sealing receipt in ``run_dir``."""
+    train_dir = Path(run_dir) / "train_data"
+    return train_dir.is_dir() and any(train_dir.glob(SPLIT_SEALING_RECEIPT_TEMPLATE.format(period="*")))
+
+
+def read_run_rotation_sealing(run_dir, *, project_root=None) -> Optional[RotationSealing]:
+    """The rotation sealing declared in an NH run's own ``config.yml``;
+    ``None`` for a run with neither contract key and no sealing receipt.
+
+    Fail closed when the run has sealing receipts but no ``config.yml``, or a
+    ``config.yml`` that declares no contract (the record of how the run was
+    loaded is missing or contradicts the receipts), and when the config
+    declares a contract under a ``dataset`` other than ``flashnh`` (the
+    contract keys are then ignored by NH and the data were loaded unsealed)."""
+    has_receipts = run_has_split_sealing_receipts(run_dir)
+    if not (Path(run_dir) / "config.yml").is_file():
+        if has_receipts:
+            raise RawSpaceEvaluationError(
+                f"run {run_dir} has split-sealing receipts but no config.yml; cannot verify how it was loaded")
+        return None
+    config = _read_run_config(run_dir)
+    sealing = parse_rotation_sealing(config, project_root=project_root)
+    if sealing is None:
+        if has_receipts:
+            raise RawSpaceEvaluationError(
+                f"run {run_dir} has split-sealing receipts but its config.yml declares no split contract")
+        return None
+    if config.get("dataset") != SEALED_DATASET_KEY:
+        raise RawSpaceEvaluationError(
+            f"run {run_dir} declares a split contract under dataset {config.get('dataset')!r}; only the "
+            f"{SEALED_DATASET_KEY!r} dataset applies the sealing, so this run was loaded unsealed")
+    return sealing
+
+
+def verify_run_sealing_receipts(run_dir, sealing: RotationSealing, periods) -> None:
+    """Fail closed unless the sealed loader left a receipt for every one of
+    ``periods`` in ``run_dir`` whose sealing identity (contract id, checksum,
+    cycle, lead, upper bound, readable windows) equals ``sealing``'s."""
+    import json
+
+    want = sealing.receipt()
+    for period in dict.fromkeys(periods):
+        path = split_sealing_receipt_path(run_dir, period)
+        if not path.is_file():
+            raise RawSpaceEvaluationError(
+                f"run {run_dir}: no split-sealing receipt for the {period} period ({path}); the {period} data "
+                "were not loaded by the sealed loader")
+        try:
+            got = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RawSpaceEvaluationError(f"unreadable split-sealing receipt {path}: {exc}") from exc
+        if not isinstance(got, dict) or got.get("period") != period:
+            raise RawSpaceEvaluationError(f"split-sealing receipt {path} is not for the {period} period")
+        differs = [k for k in _RECEIPT_IDENTITY_KEYS if got.get(k) != want[k]]
+        if differs:
+            raise RawSpaceEvaluationError(
+                f"split-sealing receipt {path} does not match the run's declared sealing: {differs}")
 
 
 # ---------------------------------------------------------------------------
@@ -243,22 +569,43 @@ def derive_basin_area_km2_from_netcdf(
     min_samples: int = DEFAULT_MIN_AREA_SAMPLES,
     max_relative_mad: float = DEFAULT_MAX_RELATIVE_MAD,
     observation_cutoff=None,
+    readable_windows=None,
+    observation_upper_bound=None,
 ) -> BasinAreaResult:
     """I/O wrapper: reads ``qobs_m3s`` and ``target_variable`` from one
     package basin NetCDF (``time_series/<basin_id>.nc``) and calls
     :func:`derive_basin_area_km2`. With ``observation_cutoff`` the read is
     restricted first (:func:`select_through_observation_cutoff`), so the area
-    is derived only from observations at or before the cutoff."""
+    is derived only from observations at or before the cutoff.
+
+    With ``readable_windows`` (a rotation run's TRAINING readable windows) and
+    ``observation_upper_bound`` -- both required together, and exclusive with
+    ``observation_cutoff`` -- the read goes through
+    :func:`select_readable_observations` first, so the area is derived only
+    from observations whose observation time lies in those windows and not
+    after the bound. Each area sample pairs ``target[t]`` with
+    ``qobs_m3s[t + lead]``, which share one observation time, so a sample is
+    either wholly readable or wholly sealed."""
     import xarray as xr
 
     nc_path = Path(nc_path)
     cutoff = parse_observation_cutoff(observation_cutoff)
+    if (readable_windows is None) != (observation_upper_bound is None):
+        raise RawSpaceEvaluationError("readable_windows and observation_upper_bound must be given together")
+    if readable_windows is not None and cutoff is not None:
+        raise RawSpaceEvaluationError("observation_cutoff cannot be combined with readable_windows")
+    if readable_windows is not None and not tuple(readable_windows):
+        raise RawSpaceEvaluationError("readable_windows is empty")
     if not nc_path.is_file():
         raise RawSpaceEvaluationError(f"basin NetCDF not found: {nc_path}")
     with xr.open_dataset(nc_path) as ds:
         if cutoff is not None:
             coordinate = "date" if "date" in ds.coords else "time"
             ds = select_through_observation_cutoff(ds, cutoff=cutoff, coordinate=coordinate)
+        elif readable_windows is not None:
+            coordinate = "date" if "date" in ds.coords else "time"
+            ds = select_readable_observations(ds, windows=tuple(readable_windows), coordinate=coordinate,
+                                              forcing_variables=(), upper_bound=observation_upper_bound)
         if "qobs_m3s" not in ds.data_vars:
             raise RawSpaceEvaluationError(f"{nc_path}: missing diagnostic variable 'qobs_m3s'")
         if target_variable not in ds.data_vars:
