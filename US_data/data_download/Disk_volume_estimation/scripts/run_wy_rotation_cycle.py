@@ -167,7 +167,8 @@ def main(argv=None) -> int:
         receipt.update(status="COMPLETE", finished_utc=time.time())
         _write_json(receipt_path, receipt)
         print(json.dumps({"run_id": row["run_id"], "status": "COMPLETE", "epochs_evaluated": len(epochs),
-                          "n_basins_per_epoch": sorted({e["n_basins"] for e in evidence["per_epoch"].values()})}))
+                          "n_basins_per_epoch": sorted({e["n_basins"] for e in evidence["per_epoch"].values()}),
+                          "n_basins_missing_explained": len(evidence["missing_basins"])}))
         return 0
     except BaseException as exc:  # recorded, then re-raised: never a silent pass
         receipt.update(status="FAILED", finished_utc=time.time(), error=repr(exc), traceback=traceback.format_exc())

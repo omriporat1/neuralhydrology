@@ -55,18 +55,19 @@ def contract_path(tmp_path_factory) -> Path:
                                    wy.build_split_contract())
 
 
-def _results_dataset(dates, *, sim_finite=True) -> xr.Dataset:
+def _results_dataset(dates, *, sim_finite=True, obs_finite=True) -> xr.Dataset:
     n = len(dates)
     sim = np.full((n, 1), 0.5) if sim_finite else np.full((n, 1), np.nan)
-    return xr.Dataset({f"{TARGET}_obs": (("date", "time_step"), np.full((n, 1), 0.25)),
+    obs = np.full((n, 1), 0.25) if obs_finite else np.full((n, 1), np.nan)
+    return xr.Dataset({f"{TARGET}_obs": (("date", "time_step"), obs),
                        f"{TARGET}_sim": (("date", "time_step"), sim)},
                       coords={"date": pd.DatetimeIndex(dates), "time_step": [0]})
 
 
-def _write_results(nh_run_dir: Path, epoch: int, basins, dates, *, drop=(), nan_sim=()) -> Path:
+def _write_results(nh_run_dir: Path, epoch: int, basins, dates, *, drop=(), nan_sim=(), nan_obs=()) -> Path:
     path = rot.results_pickle_path(nh_run_dir, epoch)
     path.parent.mkdir(parents=True, exist_ok=True)
-    results = {b: {"1h": {"xr": _results_dataset(dates, sim_finite=b not in nan_sim)}}
+    results = {b: {"1h": {"xr": _results_dataset(dates, sim_finite=b not in nan_sim, obs_finite=b not in nan_obs)}}
                for b in basins if b not in drop}
     with path.open("wb") as fh:
         pickle.dump(results, fh)
@@ -381,7 +382,9 @@ def test_verify_score_blind_run_passes_a_clean_run(tmp_path, contract_path):
 
 
 @pytest.mark.parametrize("damage, match", [
-    ("missing_basin", "basin keys"),
+    ("missing_basin", "differs between epochs"),
+    ("extra_basin", "outside the population"),
+    ("nan_obs", "no finite observation"),
     ("nan_sim", "no finite simulation"),
     ("outside_window", "leave the checkpoint-year window"),
     ("metrics_file", "metric file"),
@@ -396,6 +399,10 @@ def test_verify_score_blind_run_reports_problems(tmp_path, contract_path, damage
     d, basins = run["nh_run_dir"], run["basins"]
     if damage == "missing_basin":
         _write_results(d, 2, basins, run["dates"], drop={basins[0]})
+    elif damage == "extra_basin":
+        _write_results(d, 2, basins + ["09090909"], run["dates"])
+    elif damage == "nan_obs":
+        _write_results(d, 2, basins, run["dates"], nan_obs={basins[1]})
     elif damage == "nan_sim":
         _write_results(d, 2, basins, run["dates"], nan_sim={basins[1]})
     elif damage == "outside_window":
@@ -416,6 +423,123 @@ def test_verify_score_blind_run_reports_problems(tmp_path, contract_path, damage
     evidence = rot.verify_score_blind_run(d, cycle=1, epochs=[1, 2], population=basins)
     assert not evidence["passed"]
     assert any(match in p for p in evidence["problems"]), evidence["problems"]
+
+
+def _drop_in_all_epochs(run, dropped, epochs=(1, 2)):
+    for e in epochs:
+        _write_results(run["nh_run_dir"], e, run["basins"], run["dates"], drop=set(dropped))
+
+
+def test_verify_accepts_missing_basins_explained_by_zero_admissible_targets(tmp_path, contract_path):
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1, 2))
+    _drop_in_all_epochs(run, {run["basins"][0], run["basins"][2]})
+    calls = []
+
+    def counter(nh_run_dir, basins, *, sealing, target, project_root):
+        calls.append((list(basins), target, sealing.cycle))
+        return {b: 0 for b in basins}
+
+    evidence = rot.verify_score_blind_run(run["nh_run_dir"], cycle=1, epochs=[1, 2], population=run["basins"],
+                                          missing_basin_counter=counter)
+    assert evidence["passed"], evidence["problems"]
+    assert calls == [([run["basins"][0], run["basins"][2]], TARGET, 1)]  # only the missing ones, once
+    assert evidence["missing_basins"] == [run["basins"][0], run["basins"][2]]
+    assert evidence["missing_basin_admissible_target_counts"] == {run["basins"][0]: 0, run["basins"][2]: 0}
+    assert evidence["n_basins_evaluated"] == 1
+    assert all(r["n_basins_missing"] == 2 and not r["basins_equal_population"]
+               for r in evidence["per_epoch"].values())
+
+
+def test_verify_clean_run_never_calls_the_counter(tmp_path, contract_path):
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1, 2))
+
+    def counter(*a, **k):
+        raise AssertionError("no missing basin, no read")
+
+    evidence = rot.verify_score_blind_run(run["nh_run_dir"], cycle=1, epochs=[1, 2], population=run["basins"],
+                                          missing_basin_counter=counter)
+    assert evidence["passed"] and evidence["missing_basins"] == [] and evidence["n_basins_evaluated"] == 3
+
+
+@pytest.mark.parametrize("counts", [{"01010101": 5}, {}, {"01010101": None}])
+def test_verify_rejects_unexplained_missing_basins(tmp_path, contract_path, counts):
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1, 2))
+    _drop_in_all_epochs(run, {"01010101"})
+    evidence = rot.verify_score_blind_run(
+        run["nh_run_dir"], cycle=1, epochs=[1, 2], population=run["basins"],
+        missing_basin_counter=lambda *a, **k: {b: (-1 if n is None else n) for b, n in counts.items()})
+    assert not evidence["passed"]
+    assert any("have admissible checkpoint-year targets" in p and "01010101" in p for p in evidence["problems"])
+    assert evidence["missing_basins"] == ["01010101"]
+
+
+def _write_package_basin(data_dir: Path, basin: str, finite_rows) -> None:
+    dates = pd.date_range("2021-09-25 00:00", "2022-10-05 23:00", freq="h")
+    lead = np.full(len(dates), np.nan)
+    qobs = np.full(len(dates), 1.0)  # raw discharge finite everywhere: must not count
+    for ts in finite_rows:
+        lead[dates.get_loc(pd.Timestamp(ts))] = 0.3
+    ts_dir = data_dir / "time_series"
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    xr.Dataset({TARGET: (("date",), lead), "qobs_m3s": (("date",), qobs),
+                "precip_mm": (("date",), np.zeros(len(dates)))},
+               coords={"date": dates}).to_netcdf(ts_dir / f"{basin}.nc")
+
+
+def test_default_counter_counts_only_admissible_issue_times(tmp_path, contract_path):
+    data_dir = tmp_path / "package"
+    # Finite lead-06 targets only where the issue time or the observation time leaves WY2022, or in
+    # the sealed years: none is admissible.
+    _write_package_basin(data_dir, "01010101", ["2021-09-30 18:00", "2021-09-30 23:00", "2022-09-30 18:00",
+                                                "2022-09-30 23:00", "2022-10-02 00:00"])
+    # Admissible: first and last issue times of the window, and one mid-year hour.
+    _write_package_basin(data_dir, "02020202", ["2021-10-01 00:00", "2022-03-01 12:00", "2022-09-30 17:00",
+                                                "2022-09-30 18:00"])
+    _write_package_basin(data_dir, "03030303", [])
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1,),
+                         extra_config={"data_dir": data_dir.as_posix()})
+    counts = rot.count_admissible_checkpoint_targets(run["nh_run_dir"], ["03030303", "01010101", "02020202"],
+                                                     sealing=run["sealing"], target=TARGET)
+    assert counts == {"01010101": 0, "02020202": 3, "03030303": 0}
+
+    _drop_in_all_epochs(run, {"01010101", "03030303"}, epochs=(1,))
+    evidence = rot.verify_score_blind_run(run["nh_run_dir"], cycle=1, epochs=[1], population=run["basins"])
+    assert evidence["passed"], evidence["problems"]
+    _drop_in_all_epochs(run, {"02020202"}, epochs=(1,))
+    evidence = rot.verify_score_blind_run(run["nh_run_dir"], cycle=1, epochs=[1], population=run["basins"])
+    assert not evidence["passed"] and "02020202=3" in " ".join(evidence["problems"])
+
+
+def test_default_counter_fails_closed_without_a_netcdf(tmp_path, contract_path):
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1,),
+                         extra_config={"data_dir": (tmp_path / "nowhere").as_posix()})
+    with pytest.raises(rot.WyRotationRunsError, match="expected one NetCDF"):
+        rot.count_admissible_checkpoint_targets(run["nh_run_dir"], ["01010101"], sealing=run["sealing"],
+                                                target=TARGET)
+    # Inside the verifier the failure is a problem, and the missing list is still recorded.
+    _drop_in_all_epochs(run, {"01010101"}, epochs=(1,))
+    evidence = rot.verify_score_blind_run(run["nh_run_dir"], cycle=1, epochs=[1], population=run["basins"])
+    assert not evidence["passed"]
+    assert evidence["missing_basins"] == ["01010101"]
+    assert any("missing-basin count failed" in p and "expected one NetCDF" in p for p in evidence["problems"])
+
+
+def test_default_counter_issue_times_match_the_split_admission_rule(tmp_path, contract_path):
+    # A target finite at every row: the count must equal the issue hours whose target hour the
+    # split contract's slice rule admits (admitted_target_windows shifted back by the lead).
+    data_dir = tmp_path / "package"
+    dates = pd.date_range("2021-09-25 00:00", "2022-10-05 23:00", freq="h")
+    _write_package_basin(data_dir, "01010101", list(dates))
+    run = _synthetic_run(tmp_path, contract_path, cycle=1, epochs=(1,),
+                         extra_config={"data_dir": data_dir.as_posix()})
+    cycle = next(c for c in wy.ROTATION_TABLE_V001 if c.cycle == 1)
+    lead = pd.Timedelta(hours=run["sealing"].lead_hours)
+    expected = sum(len(pd.date_range(w.first - lead, w.last - lead, freq="h"))
+                   for w in wy.admitted_target_windows(cycle, "validation"))
+    counts = rot.count_admissible_checkpoint_targets(run["nh_run_dir"], ["01010101"], sealing=run["sealing"],
+                                                     target=TARGET)
+    assert counts == {"01010101": expected}
+    assert expected == 365 * 24 - 6
 
 
 def test_verify_score_blind_run_fails_closed_on_sealing(tmp_path, contract_path):

@@ -478,13 +478,65 @@ def log_epoch_timestamps(output_log) -> dict[int, str]:
     return out
 
 
+def count_admissible_checkpoint_targets(nh_run_dir, basins, *, sealing, target: str,
+                                        project_root=None) -> dict[str, int]:
+    """Independent count, per basin, of checkpoint-year issue times ``t`` with
+    ``t`` and ``t + lead`` inside the checkpoint-year window and a finite
+    ``target`` at ``t``. Reads the run's package NetCDF through the sealed
+    reader (validation windows, contract upper bound, no forcing), so only
+    checkpoint-year observations are touched; only finiteness is counted.
+
+    Deliberately ignores the forcing-gap history rule: a basin that has
+    finite targets but loses every sample to forcing gaps counts > 0 and is
+    therefore NOT explained (fail closed)."""
+    import numpy as np
+    import pandas as pd
+    import xarray
+
+    from .nh_raw_space_evaluation import select_readable_observations
+
+    nh_run_dir = Path(nh_run_dir)
+    config = yaml.safe_load((nh_run_dir / "config.yml").read_text(encoding="utf-8")) or {}
+    data_dir = Path(str(config.get("data_dir")))
+    if not data_dir.is_absolute() and project_root is not None:
+        data_dir = Path(project_root) / data_dir
+    windows = sealing.readable_windows("validation")
+    lead = pd.Timedelta(hours=int(sealing.lead_hours))
+    first = pd.to_datetime(sealing.nh_dates["validation_start_date"], format="%d/%m/%Y")
+    last = pd.to_datetime(sealing.nh_dates["validation_end_date"], format="%d/%m/%Y") + pd.Timedelta(hours=23)
+    counts = {}
+    for basin in sorted(map(str, basins)):
+        found = [p for p in (data_dir / "time_series" / f"{basin}{ext}" for ext in (".nc4", ".nc")) if p.is_file()]
+        if len(found) != 1:
+            raise WyRotationRunsError(f"basin {basin}: expected one NetCDF in {data_dir / 'time_series'}, "
+                                      f"found {[str(p) for p in found]}")
+        with xarray.open_dataset(found[0]) as ds:
+            coordinate = "date" if "date" in ds.coords else "time"
+            if target not in ds.data_vars:
+                raise WyRotationRunsError(f"basin {basin}: target {target!r} not in {found[0].name}")
+            sealed = select_readable_observations(ds[[target]], windows=windows, coordinate=coordinate,
+                                                  forcing_variables=(), upper_bound=sealing.upper_bound)
+            issue = sealed[target].sel({coordinate: slice(first, last - lead)})
+            counts[basin] = int(np.isfinite(np.asarray(issue.values, dtype=float)).sum())
+    return counts
+
+
 def verify_score_blind_run(nh_run_dir, *, cycle: int, epochs, population, target: str = "qobs_mm_per_h_lead06",
-                           project_root=None) -> dict[str, Any]:
+                           project_root=None, missing_basin_counter: Optional[Callable] = None) -> dict[str, Any]:
     """Fail closed unless the run was loaded sealed for ``cycle`` (train and
-    validation receipts matching the contract), trained on and evaluated over
-    exactly ``population`` for every epoch in ``epochs``, inside the
-    checkpoint-year window, and left no metric file or score line. Returns a
-    score-free evidence record."""
+    validation receipts matching the contract), trained on ``population`` and
+    evaluated, for every epoch in ``epochs``, over ``population`` minus an
+    explained-missing set, inside the checkpoint-year window, and left no
+    metric file or score line. Returns a score-free evidence record.
+
+    Explained-missing gate (Omri, 2026-11-15): NH's tester silently skips a
+    basin whose Flash-NH filter leaves no checkpoint-year sample. A basin
+    absent from ``validation_results.p`` is accepted only when it is absent
+    from every epoch alike and an independent count
+    (``missing_basin_counter``, default
+    :func:`count_admissible_checkpoint_targets`) finds 0 admissible
+    finite-target issue times for it. Extra keys always fail. The full
+    missing list and the counts are recorded."""
     import pandas as pd
 
     nh_run_dir = Path(nh_run_dir)
@@ -503,6 +555,7 @@ def verify_score_blind_run(nh_run_dir, *, cycle: int, epochs, population, target
     window_first = pd.to_datetime(sealing.nh_dates["validation_start_date"], format="%d/%m/%Y")
     window_last = pd.to_datetime(sealing.nh_dates["validation_end_date"], format="%d/%m/%Y") + pd.Timedelta(hours=23)
     per_epoch = {}
+    missing_by_epoch = {}
     for epoch in sorted(int(e) for e in epochs):
         path = results_pickle_path(nh_run_dir, epoch)
         if not path.is_file():
@@ -529,9 +582,14 @@ def verify_score_blind_run(nh_run_dir, *, cycle: int, epochs, population, target
                       v["first_date"] is None or pd.Timestamp(v["first_date"]) > window_first
                       or pd.Timestamp(v["last_date"]) < window_last for v in e.values())),
                   "pickle_bytes": path.stat().st_size}
-        if keys != population:
-            missing, extra = sorted(set(population) - set(keys)), sorted(set(keys) - set(population))
-            problems.append(f"epoch {epoch}: {len(keys)} basin keys; missing {missing[:5]} extra {extra[:5]}")
+        missing, extra = sorted(set(population) - set(keys)), sorted(set(keys) - set(population))
+        record["n_basins_missing"] = len(missing)
+        missing_by_epoch[epoch] = missing
+        if extra:
+            problems.append(f"epoch {epoch}: {len(extra)} basin keys outside the population: {extra}")
+        if record["n_basins_without_finite_obs"]:
+            problems.append(f"epoch {epoch}: {record['n_basins_without_finite_obs']} evaluated basins have no "
+                            "finite observation")
         if firsts and (min(firsts) < window_first or max(lasts) > window_last):
             problems.append(f"epoch {epoch}: dates {min(firsts)}..{max(lasts)} leave the checkpoint-year window "
                             f"{window_first}..{window_last}")
@@ -544,6 +602,28 @@ def verify_score_blind_run(nh_run_dir, *, cycle: int, epochs, population, target
         if metric_files:
             problems.append(f"epoch {epoch}: metric file(s) present {metric_files}")
         per_epoch[epoch] = record
+
+    missing_sets = {tuple(m) for m in missing_by_epoch.values()}
+    missing_basins = sorted(set().union(*missing_by_epoch.values())) if missing_by_epoch else []
+    if len(missing_sets) > 1:
+        problems.append("the missing basin set differs between epochs: "
+                        + "; ".join(f"epoch {e}: {m}" for e, m in sorted(missing_by_epoch.items())))
+    missing_counts = {}
+    if missing_basins and len(missing_sets) == 1:  # differing sets already fail; nothing to explain
+        from .nh_raw_space_evaluation import RawSpaceEvaluationError
+
+        counter = missing_basin_counter or count_admissible_checkpoint_targets
+        try:
+            missing_counts = {str(b): int(n) for b, n in counter(nh_run_dir, missing_basins, sealing=sealing,
+                                                                 target=target, project_root=project_root).items()}
+        except (WyRotationRunsError, RawSpaceEvaluationError, OSError, KeyError, TypeError, ValueError) as exc:
+            # Fail closed but keep the evidence (the missing list) instead of losing it to the exception.
+            problems.append(f"the missing-basin count failed: {exc!r}")
+            missing_counts = {}
+        unexplained = sorted(b for b in missing_basins if missing_counts.get(b, -1) != 0)
+        if unexplained:
+            problems.append(f"{len(unexplained)} missing basin(s) have admissible checkpoint-year targets (or no "
+                            f"count): " + ", ".join(f"{b}={missing_counts.get(b)}" for b in unexplained))
 
     log = nh_run_dir / "output.log"
     score_lines = 0
@@ -558,5 +638,8 @@ def verify_score_blind_run(nh_run_dir, *, cycle: int, epochs, population, target
                 "train_receipt_counts": {k: train_receipt.get(k) for k in
                                          ("n_basins", "n_train_targets_masked_outside_period")},
                 "receipts_verified": ["train", "validation"], "per_epoch": per_epoch,
+                "missing_basins": missing_basins,
+                "missing_basin_admissible_target_counts": missing_counts,
+                "n_basins_evaluated": len(population) - len(missing_basins),
                 "score_lines_in_output_log": score_lines, "problems": problems, "passed": not problems}
     return evidence
