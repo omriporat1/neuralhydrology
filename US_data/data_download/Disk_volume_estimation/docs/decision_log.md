@@ -2,6 +2,122 @@
 
 # Decision Log
 
+## 2026-11-16 — Water-year rotation: metric, checkpoint and arm-2 spec v001 FROZEN (gate 1 passed) — record only
+
+**Decision (user; choices given 2026-11-15, review-round answers A-G and freeze 2026-11-16).** The rotation (`flashnh_wy_rotation_split_v001`, 5 cycles over WY2021-WY2025) is scored and compared under `docs/wy_rotation_metric_spec_v001.md`. Its sha256 is `157ece673ed50cfa6dbc2c5e46dfe1ee724b0ca713fcd01a2373e7d3549fa898` (as frozen). The spec was written and approved before any rotation score existed. Its §6 records every choice and governs where it differs from the option text in the body.
+
+- **Metrics (D1, D2).** Per basin, on the assessment year, in raw m³/s. Only the qualified helpers are used: `raw_space_metrics`, and the RD1 Q98 package in `stage1_v2_12plus12_hydrological_consumer.py`.
+  - Primary overall metric: NSE.
+  - Primary flood metric: Q98-normalised RMSE, i.e. the RMSE on the basin's top-2% hours divided by its Q98.
+  - Secondary metrics: KGE (with r, α, β), PBIAS, high-flow NSE, relative volume bias on Q98+ hours, signed error at the observed peak hour.
+  - Guard: PBIAS on the hours below the Q98.
+  - Pooled result: median over all basin-years, with the per-cycle medians shown beside it.
+  - Sensitivities:
+    - WY2021-23 only;
+    - the lowest-variance decile removed, with variance measured in mm/h.
+  - Scoring gates G1-G4 apply. Cross-arm observations (G4) must be bit-identical. This is checked score-blind before any metric is computed. A mismatch stops the comparison as a technical fault. No tolerance applies.
+- **Checkpoint picks (D3-D7).** Both picks are made per run on the cycle's checkpoint year, over epochs 1-12, on all 2,307 development basins.
+  - NSE pick: highest median NSE.
+  - Flood pick: lowest median Q98-normalised RMSE, with no NSE guard.
+  - Flood threshold: per basin, the observed Q98 of that same year. Hours at the threshold value count as flood hours.
+  - Flood eligibility:
+    - Q98 > 0;
+    - at least 50 flood hours;
+    - at most 5% of admitted hours flagged;
+    - a basin-year with no admitted hours is ineligible.
+  - Ineligible basins are left out of the flood median and are listed. Eligibility counts are published before scoring. If fewer than 50% of basins are eligible in a cycle, the flood pick still counts and the cycle is flagged.
+  - Ties: an exact tie goes to the earliest epoch, then for arm 2 to the smallest λ.
+  - Per-epoch curves are scored on the checkpoint year only. The assessment year is scored only at the picked checkpoints, after both picks are fixed.
+  - Epoch 11/12: every pick there is flagged. If 2 or more of 5 cycles are flagged, the arm is labelled "possibly budget-limited" and the budget question returns to the user. No automatic retraining.
+- **Arm 2 (D8-D13, D16).** A magnitude-weighted NSE loss.
+  - Weight: w = (1 + λ·min(q/Q98_train,b, 5)) / M_b. It is normalised so that each basin's mean weight over its training targets is 1. λ = 0 reproduces the baseline exactly.
+  - Dry basins (training Q98 = 0) get weight 1 for every hour (no emphasis) and are listed.
+  - Strengths: λ ∈ {0.5, 2, 8}, one run each per cycle.
+  - λ is chosen per cycle, jointly with the epoch, on that cycle's own checkpoint year (36 candidates per pick rule).
+  - Choosing λ on one cycle, or on the pooled checkpoint years, is ruled out, because every checkpoint year is another cycle's assessment year.
+  - Strength-edge flag: a pick at λ = 0.5 or 8 is flagged. If 2 or more of 5 cycles pick the same edge, the λ range is labelled "possibly too narrow" and returns to the user. No automatic runs.
+  - Metrics and picks are identical to the baseline's.
+  - Implementation:
+    - a `MaskedNSELoss` subclass, registered through `nh_register`;
+    - both the trainer and the tester loss lookup patched;
+    - the per-basin std computed for the new loss name;
+    - the per-basin constants (Q98_b, M_b) computed on the training dataset only, saved, and reused by evaluation datasets.
+  - Before launch:
+    - tests: λ = 0 identity, mean weight 1 over the finite blanked training targets, trainer/tester resolution, constant reuse, sealing;
+    - a code review (gate 4);
+    - a canary that opens no scores.
+- **Comparison (D14, D15).**
+  - Primary comparison: arm 2 vs baseline, both with the flood pick.
+  - Reference baseline: the NSE pick. Both picks are always reported.
+  - Secondary, descriptive only: each λ picks its own epoch (both rules) and is compared with the baseline in the same paired way. These rows are never used for the claim below.
+  - Statistics, paired per basin-year:
+    - the pooled median difference;
+    - the fraction of basin-years improved;
+    - sign agreement across cycles (k/5);
+    - a 95% basin-bootstrap percentile interval. It resamples the 2,307 basins with all 5 years together: 2,000 resamples, seed 20261115. Undefined or ineligible basin-years are dropped pairwise.
+  - "Arm 2 improves flood skill" is claimed only if all four hold:
+    - the bootstrap interval of the primary flood metric excludes 0 in arm 2's favour;
+    - at least 4 of 5 cycles agree in sign;
+    - the pooled median ΔNSE is ≥ −0.02;
+    - the pooled median of the paired change in |PBIAS| on below-Q98 hours is ≤ +5 pp.
+  - All other outcomes use the wording fixed in the spec. No outcome adopts arm 2 by itself.
+- **Compute implied:** about 170 L4 GPU-h for the baseline plus about 510 for arm 2, so about 680 GPU-h in total (20 runs), before WY2026 scoring. Authorizing the launch is a separate decision.
+
+**Why.**
+- The flood-aware pick and arm 2 were agreed at the 2026-11-11 meeting. Both had to be fixed before any score existed, so the rule cannot follow the results.
+- Reusing the qualified Q98 package keeps continuity with the RD1 P17-P19 diagnostics and avoids writing parallel metric math.
+- The user departed from Claude's recommendations in two places: the budget flag escalates at 2/5 rather than 3/5, and λ = 0.5 was added to {2, 8}. Reasons were not stated.
+
+**Rejected alternatives.**
+- Flood pick on high-flow NSE: its yardstick is noisy when a year has few storms.
+- A flood pick with an NSE guard.
+- Flood threshold taken from the training years.
+- Eligibility at 50 hours only, or at 100 hours.
+- Tie rule with a tolerance.
+- Weighting by mean flow, a power law, or a step function.
+- A cap at 10×, or no cap.
+- λ ∈ {2, 8}, or one fixed λ.
+- Piloting λ on one cycle.
+- ΔNSE tolerance of −0.01 or −0.05.
+- PBIAS tolerance of 2 or 10 pp.
+- A cross-arm observation tolerance (the provisional RD1 envelope): with identical data and arithmetic, any difference is a fault, not noise.
+- A < 50%-eligible cycle decided by the user after scoring.
+
+**Not changed.**
+- Split contract, sealing, inputs, scaler, sequence length, the 12-epoch budget, and seed (A only).
+- Event metrics and peak-timing alignment stay deferred.
+- WY2026, California and the spatial holdout stay sealed.
+- Which checkpoints go to WY2026 is a later decision, made before WY2026 is opened.
+
+**Review.**
+- Gate 1: a fresh-context Claude reviewer (2026-11-15) returned "sound with changes" and found no leakage.
+- The fixes were applied:
+  - plug-in at both call sites, with std gating and train-only constants;
+  - the scorer date seam;
+  - no-admitted-hours ineligibility;
+  - bootstrap and λ-tie details;
+  - curves on the checkpoint year only;
+  - wording alignment.
+- The user answered the open questions A-G on 2026-11-16.
+- A second review via ChatGPT was skipped by user decision.
+- Packet: `.scratch_local/wy_rotation_metric_spec_v001/review_packet_gate1/`.
+
+Status: the spec is frozen. Implementing the arm-2 loss and the per-basin scorer seam needs its own code review (gate 4). No rotation run has been launched; the launch still needs the user's go-ahead.
+
+## 2026-11-15 — Rotation checkpoint evaluation: explained-missing basin rule — record only
+
+**Decision (user, 2026-11-15).**
+- **Evaluation population per cycle.** Each cycle's checkpoint-year evaluation covers the development basins (2,307) that have at least one admissible checkpoint-year sample under the Flash-NH filter. NH's tester skips any other basin.
+  - A missing basin is accepted only when an independent count, read through the sealed reader from the checkpoint-year windows only, finds 0 issue times with a finite target inside the window (issue and issue + lead both inside it).
+  - The missing set must be the same in every epoch. Any extra basin fails.
+  - The full missing list and the counts are recorded in each cycle's score-blind evidence.
+- **Why.** Canary job 46731318 failed only on the old check, which required exactly 2,307 basin keys: 18 basins had no checkpoint-year (WY2022) sample. That check was there to catch NH's `validate_n_random_basins` truncation, and it still does, because an unexplained missing basin fails.
+- **Accepted cost.** The evaluated population differs between cycles. Any comparison across cycles, or with pooled metrics, must state the per-cycle population. The independent count is stricter than the filter (it ignores forcing-gap history), so a basin that loses every sample only to forcing gaps fails the run rather than being accepted. **Kept on purpose (user, 2026-11-16):** such a basin keeps failing the run, and gets its own decision only if it actually occurs.
+
+**Review.** A fresh-context Claude reviewer (round 2 of the run-plumbing packet, `.scratch_local/review_packets/20261115_wy_rotation_run_plumbing/`) returned "ready with fixes". Fixes 1, 3 and 4 were applied. Fix 2 (a CPU check before any GPU rerun) is the re-verify job 46748201. Finding 5 (the target name comes from a default) was not changed, because a mismatch already fails.
+
+Status: committed as 80a8d99 (51 tests pass locally) and pushed. CPU re-verify of the canary run dir (job 46748201, 2026-11-16) passed: 2,289 basins evaluated in both epochs; the same 18 missing basins, each with 0 admissible checkpoint-year targets. Evidence: `.scratch_local/wy_rotation_runs_v001/canary_evidence/`.
+
 ## 2026-11-15 — Loader sealing for split contract v001: review fixes and scope decisions — record only
 
 **Decision (user, 2026-11-15).**
