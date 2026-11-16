@@ -98,9 +98,9 @@ Tests: `tests/test_usgs_iv_wy_chunks.py`, 13 passed and network-free. Inside the
 
 They are needed only **after** the downloads finish, so they do not block the launch.
 
-- **C1. Curated builder** (`build_stage1_curated_forcing_fullperiod.py`). Add `--period-start/--period-end` (default 2020-10-14/2025-12-31), `--expected-hours`, `--expected-mrms-gaps` and `--expected-rtma-gaps`, all with defaults equal to the current pins. The month list should derive from the period instead of `_ALL_MONTHS`. The "full build" detection should derive from the expected month count instead of `== 63`. Also add a launcher wrapper `run_wy2026_curated_forcing_h2o.sh` with `PRODUCT_DIR=…/stage1_basin_hourly_forcings_wy2026_v001`. Never use `--overwrite` on v001.
+- **C1. Curated builder** (`build_stage1_curated_forcing_fullperiod.py`). Add `--period-start/--period-end` (default 2020-10-14/2025-12-31), `--expected-hours`, `--expected-mrms-gaps` and `--expected-rtma-gaps`, all with defaults equal to the current pins. The month list should derive from the period instead of `_ALL_MONTHS`. The "full build" detection should derive from the expected month count instead of `== 63`. Also add a launcher wrapper `run_wy2026_curated_forcing_h2o.sh` with `PRODUCT_DIR=…/stage1_basin_hourly_forcings_wy2026_v001`. Never use `--overwrite` on v001. A non-default period writes `period_lock.json`. Without that lock, the builder refuses (exit 2) an `--out-dir` that holds anything other than `build.log` and empty subdirectories.
 - **C2. Curated auditor** (`audit_stage1_curated_forcing_basin_parquets.py`). Add the same period arguments plus `--known-rtma-gap-timestamps`; for WY2026 the expected value is 2026-09-23T19Z. Defaults keep v001 behaviour.
-- **C3. USGS auditor** (`audit_usgs_iv_recovered_targets.py`). Add period arguments (WY boundaries derived from the period) and `--structural-only`. That mode skips `compute_quality_audit` (negatives/zeros/flatline/spike/min/max/p50), all PNG plots and the Jan-2023 comparison. It writes only: coverage per basin, per month and per WY; gap count; longest gap; last valid timestamp; NaN count; snap counts; file/attribute validation; counts of USGS qualifier codes (P/A/ice/equipment) per basin, approved 2026-11-12, counts only. The fixed summary period string must come from the arguments. In structural-only mode, no output may be named or shaped like `target_status.csv`.
+- **C3. USGS auditor** (`audit_usgs_iv_recovered_targets.py`). Add period arguments (WY boundaries derived from the period) and `--structural-only`. That mode skips `compute_quality_audit` (negatives/zeros/flatline/spike/min/max/p50), all PNG plots and the Jan-2023 comparison. It writes only: coverage per basin and per WY, and per month aggregated across basins; gap count; longest gap; count and total hours of gaps over 24 h (no gap start times); first/last valid timestamp and late-gap flag; NaN count; snap counts; file/attribute validation; counts of USGS qualifier codes (P/A/ice/equipment) per basin, approved 2026-11-12, counts only. The fixed summary period string must come from the arguments. In structural-only mode, no output may be named or shaped like `target_status.csv`.
 
 Each change gets focused synthetic tests. Under `docs/agent_handoff_rules.md` §3.2 (risky integration / sealed-scope protection), C3 gets an independent review before it runs on WY2026.
 
@@ -194,10 +194,10 @@ No raw GRIB, staging, chunks or discharge values are transferred.
 - USGS (C3 `--structural-only`):
   - file/attribute validation;
   - hourly grid length (8,760);
-  - coverage per basin, per month and per WY;
-  - gap count; longest gap; last valid timestamp;
+  - coverage per basin and per WY, and per month aggregated across basins (no per-basin month rows);
+  - per basin: gap count; longest gap; count and total hours of gaps longer than 24 h; first and last valid timestamp; late-gap flag. No gap start times (Omri, 2026-11-15: counts only);
   - NaN count; snap counts;
-  - count of negatives turned into NaN (a mechanical cleaning rule; only the count is reported).
+  - per basin, the count of negative values present in the NC (only the count is reported). The fetch replaces only USGS no-data sentinels (≤ −999990) with NaN, so other negative readings stay in the WY2026 NCs; they would become NaN only in a package build (U6).
 - No min/max/quantiles, flatline or spike tests, plots, hydrographs, metrics, or Jan-2023 comparison.
 - Forcing: the extractor's 12 structural checks, the gap inventory, row counts, and the Oct–Dec bit-identity check against v001. No visual QC or animations.
 - Open sub-question: are USGS **qualifier counts** (provisional vs approved, ice, equipment) allowed? They describe data status, not values. The recommendation is yes, as counts only.
@@ -280,7 +280,13 @@ mkdir -p /data42/omrip/Flash-NH/tmp/stage1_usgs_iv_wy2026_v001/canonical_merged 
 The expected count is 2,843 less any basin with no data at all; the launcher summary lists them.
 
 **After the downloads (needs the §3 changes plus review):**
-- L4. Structural USGS audit (C3) → `audit_structural/`.
+- L4. Structural USGS audit (C3) → `audit_structural/`. Run exactly this command; `--structural-only` is mandatory. Without it, the script refuses (exit 2) any NC that extends past 2025-12-31T23Z or carries `wy_chunk_mode`. It also refuses (exit 2) if any NC header in the directory cannot be read: this fails closed, and also applies to a v001 directory, where a corrupt file used to be skipped. Structural mode refuses `--staids` (exit 2), because a basin subset would turn the all-basin monthly table into per-basin rows.
+
+```bash
+cd /data42/omrip/Flash-NH/repos/flash-nh/US_data/data_download/Disk_volume_estimation && /data42/omrip/Flash-NH/envs/flashnh-stage1/bin/python scripts/audit_usgs_iv_recovered_targets.py --structural-only --canonical-dir /data42/omrip/Flash-NH/tmp/stage1_usgs_iv_wy2026_v001/canonical_merged --out-dir /data42/omrip/Flash-NH/tmp/stage1_usgs_iv_wy2026_v001 --expected-start 2025-10-01T00:00:00Z --expected-end 2026-09-30T23:00:00Z
+```
+
+  Exit 0 means every NC loaded and is on the 8,760-h grid with matching period attributes. Exit 1 means a load error or a grid or period mismatch; the details are in `audit_structural/structural_summary.json` (counts and file names only). Exit 2 means bad arguments (dates, `--staids`, a missing `--canonical-dir`), and nothing is written.
 - L5. Curated WY2026 forcing build and audit (C1/C2) → `stage1_basin_hourly_forcings_wy2026_v001/`, plus the Oct–Dec bit-identity check against v001.
 - L6. Pull compact evidence (§7). Report to the rotation-split session: the paths of the two WY2026 basin-average products, for its package step.
 

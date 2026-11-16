@@ -83,7 +83,7 @@ log = logging.getLogger(__name__)
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -126,7 +126,98 @@ def _parse_args() -> argparse.Namespace:
         "--expected-rtma-gaps", type=int, default=None,
         help="Expected RTMA gap-hours per basin. If set, each basin is checked exactly.",
     )
-    return p.parse_args()
+    # Non-default full-period products (additive; defaults reproduce the v001 audit)
+    p.add_argument(
+        "--period-start", default=None,
+        help="Full-period mode only: first hour of the product, UTC. "
+             "Default: 2020-10-14T00:00:00Z (v001).",
+    )
+    p.add_argument(
+        "--period-end", default=None,
+        help="Full-period mode only: last hour of the product, UTC. "
+             "Default: 2025-12-31T23:00:00Z (v001).",
+    )
+    p.add_argument(
+        "--known-rtma-gap-timestamps", nargs="+", default=None,
+        help="Full-period mode only: the hours where rtma_gap must be True (and False "
+             "everywhere else), UTC. Required with a non-default period. "
+             "Default: 2020-11-12T09:00Z and T10:00Z (v001).",
+    )
+    p.add_argument(
+        "--product-name", default=None,
+        help="Full-period mode only: product name expected in dataset_config.json and "
+             f"written in audit_summary.md. Required with a non-default period. "
+             f"Default: {PRODUCT_NAME}.",
+    )
+    return p.parse_args(argv)
+
+
+def _parse_utc(value: str) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def _resolve_full_period(args: argparse.Namespace) -> dict:
+    """Resolve the full-period index, gap expectations and known RTMA gaps.
+
+    No period arguments: the v001 behaviour, unchanged (including the legacy
+    --expected-rows override that counts forward from the v001 start). A
+    non-default period must state every expected value explicitly, and the known
+    RTMA gap hours must lie inside it and number exactly --expected-rtma-gaps.
+    """
+    new_args = (args.period_start, args.period_end,
+                args.known_rtma_gap_timestamps, args.product_name)
+    if all(v is None for v in new_args):
+        full_index = _fullperiod_index()
+        if args.expected_rows is not None:
+            full_index = pd.date_range(_PERIOD_START, periods=args.expected_rows, freq="h")
+        return {
+            "is_default":         True,
+            "full_index":         full_index,
+            "expected_mrms_gaps": args.expected_mrms_gaps if args.expected_mrms_gaps is not None
+                                  else _FULL_PERIOD_MRMS_GAPS,
+            "expected_rtma_gaps": args.expected_rtma_gaps if args.expected_rtma_gaps is not None
+                                  else _FULL_PERIOD_RTMA_GAPS,
+            "known_rtma_gaps":    list(_KNOWN_RTMA_GAP_TIMESTAMPS),
+            "product_name":       PRODUCT_NAME,
+        }
+
+    missing = [
+        flag for flag, val in (
+            ("--period-start",              args.period_start),
+            ("--period-end",                args.period_end),
+            ("--expected-rows",             args.expected_rows),
+            ("--expected-mrms-gaps",        args.expected_mrms_gaps),
+            ("--expected-rtma-gaps",        args.expected_rtma_gaps),
+            ("--known-rtma-gap-timestamps", args.known_rtma_gap_timestamps),
+            ("--product-name",              args.product_name),
+        ) if val is None
+    ]
+    if missing:
+        raise ValueError("a non-default period also requires: " + ", ".join(missing))
+    start = _parse_utc(args.period_start)
+    end   = _parse_utc(args.period_end)
+    full_index = pd.date_range(start, end, freq="h")
+    if len(full_index) == 0 or full_index[-1] != end:
+        raise ValueError(f"period {start} .. {end} is empty or not whole hours")
+    if len(full_index) != args.expected_rows:
+        raise ValueError(f"--expected-rows {args.expected_rows} does not match the "
+                         f"period ({len(full_index)} h)")
+    known = sorted({_parse_utc(t) for t in args.known_rtma_gap_timestamps})
+    outside = [t for t in known if t < start or t > end or t != t.floor("h")]
+    if outside:
+        raise ValueError(f"known RTMA gap hours outside the period or off the hour: {outside}")
+    if len(known) != args.expected_rtma_gaps:
+        raise ValueError(f"{len(known)} known RTMA gap hours but --expected-rtma-gaps "
+                         f"{args.expected_rtma_gaps}")
+    return {
+        "is_default":         False,
+        "full_index":         full_index,
+        "expected_mrms_gaps": args.expected_mrms_gaps,
+        "expected_rtma_gaps": args.expected_rtma_gaps,
+        "known_rtma_gaps":    known,
+        "product_name":       args.product_name,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +334,18 @@ def check_basin_parquet(
     strict_rtma_gaps: bool,
     expected_mrms_gaps: int | None = None,
     expected_rtma_gaps: int | None = None,
+    known_rtma_gaps: list[pd.Timestamp] | None = None,
+    gate_known_rtma_gaps: bool = False,
 ) -> bool:
-    """Run all per-basin Parquet checks."""
+    """Run all per-basin Parquet checks.
+
+    known_rtma_gaps defaults to the v001 timestamps. gate_known_rtma_gaps makes the
+    known-gap location check count toward the verdict; it is False by default only
+    to keep the legacy single-month behaviour, where that check was logged but its
+    result was not used.
+    """
+    if known_rtma_gaps is None:
+        known_rtma_gaps = list(_KNOWN_RTMA_GAP_TIMESTAMPS)
     ok = True
     n_expected = len(full_index)
 
@@ -300,7 +401,9 @@ def check_basin_parquet(
 
     # RTMA gap timestamps — applies to 2020-11 single-month and full-period audits
     if strict_rtma_gaps or month == "2020-11" or expected_rtma_gaps is not None:
-        _check_rtma_gaps_2020_11(staid, df)
+        known_ok = _check_known_rtma_gaps(staid, df, known_rtma_gaps)
+        if gate_known_rtma_gaps:
+            ok &= known_ok
 
     # NaN consistency: at rtma_gap=True hours, ALL RTMA data cols should be NaN
     if "rtma_gap" in df.columns:
@@ -322,7 +425,7 @@ def check_basin_parquet(
     # MRMS not falsely flagged at the known RTMA-only gap hours
     if (month == "2020-11" or expected_mrms_gaps is not None) and \
             "mrms_qpe_1h_mm_gap" in df.columns:
-        rtma_gap_ts   = set(_KNOWN_RTMA_GAP_TIMESTAMPS)
+        rtma_gap_ts   = set(known_rtma_gaps)
         rtma_gap_rows = df[df["valid_time_utc"].isin(rtma_gap_ts)]
         if len(rtma_gap_rows) > 0:
             mrms_false_flag = rtma_gap_rows["mrms_qpe_1h_mm_gap"].any()
@@ -376,11 +479,20 @@ def check_basin_parquet(
 
 def _check_rtma_gaps_2020_11(staid: str, df: pd.DataFrame) -> bool:
     """Verify rtma_gap is True at the two known 2020-11 RTMA gap timestamps."""
+    return _check_known_rtma_gaps(staid, df, _KNOWN_RTMA_GAPS_2020_11)
+
+
+def _check_known_rtma_gaps(
+    staid: str,
+    df: pd.DataFrame,
+    known_rtma_gaps: list[pd.Timestamp],
+) -> bool:
+    """Verify rtma_gap is True exactly at the known RTMA gap timestamps."""
     ok = True
     if "rtma_gap" not in df.columns:
         return ok
 
-    for ts in _KNOWN_RTMA_GAPS_2020_11:
+    for ts in known_rtma_gaps:
         row = df[df["valid_time_utc"] == ts]
         if len(row) == 0:
             ok &= _check(f"{staid} rtma_gap row exists at {ts}", False)
@@ -389,8 +501,8 @@ def _check_rtma_gaps_2020_11(staid: str, df: pd.DataFrame) -> bool:
         ok &= _check(f"{staid} rtma_gap=True at {ts}", flag_val,
                      f"got {flag_val}" if not flag_val else "")
 
-    # Verify no other hours have rtma_gap=True (for 2020-11)
-    gap_ts_set = set(_KNOWN_RTMA_GAPS_2020_11)
+    # Verify no other hours have rtma_gap=True
+    gap_ts_set = set(known_rtma_gaps)
     extra_gaps = df[df["rtma_gap"] & ~df["valid_time_utc"].isin(gap_ts_set)]
     ok &= _check(
         f"{staid} rtma_gap=False outside known gap hours",
@@ -435,11 +547,19 @@ def write_audit_summary(
     expected_rows: int,
     expected_mrms_gaps: int | None,
     expected_rtma_gaps: int | None,
+    product_name: str = PRODUCT_NAME,
+    known_rtma_gaps: list[pd.Timestamp] | None = None,
+    period: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> None:
-    """Write audit_summary.md to the product directory."""
+    """Write audit_summary.md to the product directory.
+
+    The defaults reproduce the v001 summary; a period line is added only when given.
+    """
+    if known_rtma_gaps is None:
+        known_rtma_gaps = list(_KNOWN_RTMA_GAP_TIMESTAMPS)
     result_str = "PASS" if all_pass else "FAIL"
     lines = [
-        f"# Audit Summary — {PRODUCT_NAME}\n",
+        f"# Audit Summary — {product_name}\n",
         f"**Date:** {datetime.now(timezone.utc).isoformat()}",
         f"**Product directory:** {product_dir}",
         f"**Audit mode:** {mode}",
@@ -447,6 +567,8 @@ def write_audit_summary(
         f"**Basins checked:** {n_basins_checked}",
         f"**Expected rows per basin:** {expected_rows}",
     ]
+    if period is not None:
+        lines.append(f"**Period:** {period[0].isoformat()} to {period[1].isoformat()}")
     if expected_mrms_gaps is not None:
         lines.append(f"**Expected MRMS gap-hours per basin:** {expected_mrms_gaps}")
         lines.append(
@@ -461,7 +583,7 @@ def write_audit_summary(
         )
     lines += [
         f"**Known RTMA gap timestamps:** "
-        f"{', '.join(str(t) for t in _KNOWN_RTMA_GAP_TIMESTAMPS)}",
+        f"{', '.join(str(t) for t in known_rtma_gaps)}",
         f"\n## Result: {result_str}",
         "",
         f"Audit exited with result **{result_str}**. "
@@ -477,8 +599,8 @@ def write_audit_summary(
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    args = _parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
 
     product_dir = Path(args.product_dir)
     if not product_dir.exists():
@@ -487,25 +609,44 @@ def main() -> None:
 
     # ---- Determine audit mode ----
     full_period_mode = args.full_period
+    period_info: dict | None = None
+    if not full_period_mode and any(
+        v is not None for v in (args.period_start, args.period_end,
+                                args.known_rtma_gap_timestamps, args.product_name)
+    ):
+        log.error("--period-start/--period-end/--known-rtma-gap-timestamps/--product-name "
+                  "are only accepted with --full-period")
+        sys.exit(2)
     if full_period_mode:
+        try:
+            period_info = _resolve_full_period(args)
+        except ValueError as exc:
+            log.error("Period arguments: %s", exc)
+            sys.exit(2)
         month               = "full-period"
-        full_index          = _fullperiod_index()
-        expected_mrms_gaps  = args.expected_mrms_gaps  if args.expected_mrms_gaps  is not None \
-                              else _FULL_PERIOD_MRMS_GAPS
-        expected_rtma_gaps  = args.expected_rtma_gaps  if args.expected_rtma_gaps  is not None \
-                              else _FULL_PERIOD_RTMA_GAPS
-        if args.expected_rows is not None:
-            full_index = pd.date_range(_PERIOD_START, periods=args.expected_rows, freq="h")
+        full_index          = period_info["full_index"]
+        expected_mrms_gaps  = period_info["expected_mrms_gaps"]
+        expected_rtma_gaps  = period_info["expected_rtma_gaps"]
+        known_rtma_gaps     = period_info["known_rtma_gaps"]
+        # The known-gap location check gates the verdict for non-default periods.
+        # The v001 default keeps its legacy behaviour (check logged, not gated).
+        gate_known          = not period_info["is_default"]
         strict_rtma = True
         log.info("Auditing curated product (FULL-PERIOD mode): %s", product_dir)
         log.info("Full-period index: %d hourly slots (%s → %s)",
                  len(full_index), full_index[0], full_index[-1])
+        if not period_info["is_default"]:
+            log.info("Non-default period: product %s, known RTMA gaps %s",
+                     period_info["product_name"],
+                     [t.isoformat() for t in known_rtma_gaps])
     else:
         month               = args.month
         strict_rtma         = args.strict_rtma_gaps or (month == "2020-11")
         full_index          = _month_full_index(month)
         expected_mrms_gaps  = args.expected_mrms_gaps
         expected_rtma_gaps  = args.expected_rtma_gaps
+        known_rtma_gaps     = list(_KNOWN_RTMA_GAP_TIMESTAMPS)
+        gate_known          = False
         log.info("Auditing curated product: %s", product_dir)
         log.info("Month %s: %d hourly slots", month, len(full_index))
 
@@ -515,6 +656,24 @@ def main() -> None:
     log.info("--- Metadata file checks ---")
     meta_ok, config, manifest = check_metadata_files(product_dir)
     all_pass &= meta_ok
+
+    # ---- Non-default period: dataset_config must describe the requested product ----
+    # A missing or empty config fails these checks too (every field compares unequal).
+    if period_info is not None and not period_info["is_default"]:
+        config = config or {}
+        all_pass &= _check(
+            "dataset_config product_name",
+            config.get("product_name") == period_info["product_name"],
+            f"got {config.get('product_name')!r}",
+        )
+        all_pass &= _check(
+            "dataset_config period",
+            config.get("period_start_utc") == full_index[0].isoformat()
+            and config.get("period_end_utc") == full_index[-1].isoformat()
+            and config.get("n_hours_expected") == len(full_index),
+            f"got {config.get('period_start_utc')} .. {config.get('period_end_utc')}, "
+            f"{config.get('n_hours_expected')} h",
+        )
 
     # ---- Manifest completeness ----
     expected_n = args.expected_basins or (len(manifest) if manifest else 0)
@@ -547,6 +706,8 @@ def main() -> None:
                 staid, bp, full_index, month, strict_rtma,
                 expected_mrms_gaps=expected_mrms_gaps,
                 expected_rtma_gaps=expected_rtma_gaps,
+                known_rtma_gaps=known_rtma_gaps,
+                gate_known_rtma_gaps=gate_known,
             )
             all_pass &= basin_ok
 
@@ -592,6 +753,10 @@ def main() -> None:
             expected_rows = len(full_index),
             expected_mrms_gaps = expected_mrms_gaps,
             expected_rtma_gaps = expected_rtma_gaps,
+            product_name  = period_info["product_name"],
+            known_rtma_gaps = known_rtma_gaps,
+            period        = None if period_info["is_default"]
+                            else (full_index[0], full_index[-1]),
         )
 
     sys.exit(0 if all_pass else 1)

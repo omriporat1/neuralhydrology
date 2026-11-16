@@ -194,9 +194,13 @@ def compute_per_basin_coverage(
 # Per-water-year coverage
 # ---------------------------------------------------------------------------
 
-def compute_wy_coverage(staid: str, sf: pd.Series) -> list[dict]:
+def compute_wy_coverage(
+    staid: str,
+    sf: pd.Series,
+    boundaries: list[tuple[str, pd.Timestamp, pd.Timestamp]] | None = None,
+) -> list[dict]:
     rows = []
-    for wy_label, wy_start, wy_end in WY_BOUNDARIES:
+    for wy_label, wy_start, wy_end in (WY_BOUNDARIES if boundaries is None else boundaries):
         mask  = (sf.index >= wy_start) & (sf.index <= wy_end)
         chunk = sf[mask]
         n_tot = len(chunk)
@@ -608,8 +612,15 @@ def write_summary(
     git_hash: str,
     generated_utc: str,
     n_hours_target: int,
+    period_start: pd.Timestamp | None = None,
+    period_end: pd.Timestamp | None = None,
 ) -> None:
     n_basins   = len(per_basin)
+    if period_start is None or period_end is None:
+        period_str = "2020-10-14T00:00:00Z to 2025-12-31T23:00:00Z"
+    else:
+        period_str = (f"{period_start:%Y-%m-%dT%H:%M:%S}Z to "
+                      f"{period_end:%Y-%m-%dT%H:%M:%S}Z")
     n_pass_val = sum(1 for r in per_basin if r.get("coverage_fraction", 0) >= 0.90)
     n_late_gap = sum(1 for r in gap_rows if r.get("late_2025_gap_flag"))
     n_neg      = sum(1 for r in qual_rows if r.get("n_negative_values", 0) > 0)
@@ -640,7 +651,7 @@ def write_summary(
         "|---|---|",
         f"| Basins audited | {n_basins} |",
         f"| Target hourly steps per basin | {n_hours_target:,} |",
-        f"| Period | 2020-10-14T00:00:00Z to 2025-12-31T23:00:00Z |",
+        f"| Period | {period_str} |",
         f"| Total valid hours (all basins) | {total_valid:,} |",
         f"| Total NaN hours (all basins) | {total_nan:,} |",
         f"| Overall coverage fraction | {overall_cov:.4f} ({100*overall_cov:.2f}%) |",
@@ -775,10 +786,427 @@ def write_summary(
 
 
 # ---------------------------------------------------------------------------
+# Structural-only audit (protected periods, e.g. the WY2026 test year)
+# ---------------------------------------------------------------------------
+#
+# Reports only availability and file structure: coverage, gap lengths and
+# timestamps, snap counts, attribute checks, the count of negative values and the
+# qualifier counts recorded in the NC attributes. It never computes or writes a
+# discharge statistic (min/max/quantiles/means), never classifies targets and never
+# plots. It writes only under <out-dir>/audit_structural/.
+
+STRUCTURAL_SUBDIR = "audit_structural"
+
+STRUCTURAL_OUTPUT_FILES = (
+    "per_basin_structural.csv",
+    "per_water_year_coverage.csv",
+    "per_month_coverage_all_basins.csv",
+    "gap_audit.csv",
+    "structural_summary.json",
+    "structural_summary.md",
+    "run_provenance.json",
+)
+
+# Qualifier counts recorded by recover_usgs_iv_full_period_hourly.py (raw IV obs).
+# n_ice_raw_obs counts qualifiers matching "Ice|Eqp", i.e. ice OR equipment.
+_QUALIFIER_ATTRS = {
+    "n_provisional_raw_obs":        "n_provisional_raw_obs",
+    "n_ice_or_equipment_raw_obs":   "n_ice_raw_obs",
+    "n_estimated_raw_obs":          "n_estimated_raw_obs",
+}
+
+
+def _parse_iso_naive(value: str) -> pd.Timestamp:
+    """Parse an ISO time ('...Z' allowed) to a UTC-naive Timestamp."""
+    ts = pd.Timestamp(str(value).strip())
+    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
+
+
+def derive_wy_boundaries(
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    """Water years (Oct 1 .. Sep 30, labelled by end year) clipped to the period.
+
+    For the v001 period this reproduces WY_BOUNDARIES exactly.
+    """
+    first_wy = period_start.year + (1 if period_start.month >= 10 else 0)
+    last_wy  = period_end.year + (1 if period_end.month >= 10 else 0)
+    out = []
+    for wy in range(first_wy, last_wy + 1):
+        wy_start = pd.Timestamp(f"{wy - 1}-10-01")
+        wy_end   = pd.Timestamp(f"{wy}-09-30 23:00:00")
+        out.append((f"WY{wy}", max(wy_start, period_start), min(wy_end, period_end)))
+    return out
+
+
+def _attr_int(attrs: dict, key: str):
+    """Integer value of an NC attribute, or None if absent/unparseable."""
+    try:
+        return int(str(attrs[key]).strip())
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def compute_structural_basin_row(
+    staid: str,
+    sf: pd.Series,
+    attrs: dict,
+    target_index: pd.DatetimeIndex,
+    nc_name: str,
+) -> dict:
+    """Per-basin structural row: availability, file/attr checks, counts only."""
+    n_total = len(sf)
+    is_nan  = sf.isna()
+    n_valid = int((~is_nan).sum())
+    n_nan   = n_total - n_valid
+    valid_idx = sf.index[~is_nan.values]
+    # A count only (data plan §8b); no value is retained.
+    n_neg = int((sf.values[~is_nan.values] < 0).sum()) if n_valid else 0
+
+    grid_ok = bool(sf.index.equals(target_index))
+    try:
+        attr_start = _parse_iso_naive(attrs.get("period_start_utc", ""))
+        attr_end   = _parse_iso_naive(attrs.get("period_end_utc", ""))
+        period_attrs_match = bool(attr_start == target_index[0] and attr_end == target_index[-1])
+    except (ValueError, TypeError):
+        period_attrs_match = False
+    attr_n_valid = _attr_int(attrs, "n_valid_hours")
+    attr_n_nan   = _attr_int(attrs, "n_nan_hours")
+    attr_n_total = _attr_int(attrs, "n_hours_total")
+
+    row = {
+        "STAID":                   staid,
+        "nc_file":                 nc_name,
+        "n_hours_total":           n_total,
+        "n_hours_expected":        len(target_index),
+        "grid_ok":                 grid_ok,
+        "n_valid":                 n_valid,
+        "n_nan":                   n_nan,
+        "coverage_fraction":       round(n_valid / n_total, 6) if n_total else 0.0,
+        "has_any_valid":           n_valid > 0,
+        "first_valid_utc":         str(valid_idx[0]) if n_valid else "",
+        "last_valid_utc":          str(valid_idx[-1]) if n_valid else "",
+        "n_exact_snaps":           _attr_int(attrs, "snap_n_exact"),
+        "n_nearest_snaps":         _attr_int(attrs, "snap_n_nearest"),
+        "n_missing_snaps":         _attr_int(attrs, "snap_n_missing"),
+        "median_cadence_min":      attrs.get("median_cadence_minutes", ""),
+        "systematic_offset_flag":  str(attrs.get("systematic_offset_flag", "")),
+        "n_negative_values":       n_neg,
+        "units_ok":                str(attrs.get("units", "")) == "m3 s-1",
+        "period_attrs_match":      period_attrs_match,
+        "attr_counts_match":       (attr_n_valid == n_valid and attr_n_nan == n_nan
+                                    and attr_n_total == n_total),
+        "wy_chunk_mode":           str(attrs.get("wy_chunk_mode", "")),
+    }
+    for col, key in _QUALIFIER_ATTRS.items():
+        row[col] = _attr_int(attrs, key)
+    return row
+
+
+def _total_large_gap_hours(sf: pd.Series, min_hours: int = 24) -> int:
+    """Total hours in NaN runs longer than min_hours (all runs, not just the first 20)."""
+    is_nan = sf.isna().to_numpy().astype(np.int8)
+    if not is_nan.any():
+        return 0
+    edges = np.diff(np.concatenate(([0], is_nan, [0])))
+    lengths = np.flatnonzero(edges == -1) - np.flatnonzero(edges == 1)
+    return int(lengths[lengths > min_hours].sum())
+
+
+def _structural_gap_row(staid: str, sf: pd.Series, period_end: pd.Timestamp) -> dict:
+    """Gap counts and hours only (Omri, 2026-11-15: no gap start times).
+
+    Reuses compute_gap_audit, then drops the per-gap start times
+    (large_gap_starts_json) and the free-text note, and names the late-gap flag
+    for any period end. First/last valid timestamps stay in per_basin_structural.csv.
+    """
+    row = compute_gap_audit(staid, sf, period_end=period_end)
+    row.pop("large_gap_starts_json")
+    row.pop("late_2025_gap_note")
+    row["late_gap_flag"] = row.pop("late_2025_gap_flag")
+    row["total_large_gap_hours_gt24h"] = _total_large_gap_hours(sf)
+    return row
+
+
+def _add_month_coverage(acc: dict, staid: str, sf: pd.Series) -> None:
+    """Accumulate one basin's monthly coverage into an all-basin aggregate."""
+    for r in compute_month_coverage(staid, sf):
+        a = acc.setdefault((int(r["year"]), int(r["month"])), {
+            "n_basins": 0, "total_basin_hours": 0, "total_valid_hours": 0,
+            "total_nan_hours": 0, "n_basins_full_coverage": 0,
+            "n_basins_zero_coverage": 0,
+        })
+        a["n_basins"]          += 1
+        a["total_basin_hours"] += r["n_hours_total"]
+        a["total_valid_hours"] += r["n_valid"]
+        a["total_nan_hours"]   += r["n_nan"]
+        a["n_basins_full_coverage"] += int(r["n_nan"] == 0)
+        a["n_basins_zero_coverage"] += int(r["n_valid"] == 0)
+
+
+def _month_coverage_rows(acc: dict) -> list[dict]:
+    """All-basin monthly coverage rows; no per-basin month rows are written."""
+    rows = []
+    for (yr, mo), a in sorted(acc.items()):
+        tot = a["total_basin_hours"]
+        rows.append({"year": yr, "month": mo, **a,
+                     "coverage_fraction": round(a["total_valid_hours"] / tot, 6) if tot else 0.0})
+    return rows
+
+
+def _structural_summary(
+    basin_rows: list[dict],
+    gap_rows: list[dict],
+    load_errors: list[dict],
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+    n_hours_target: int,
+) -> dict:
+    n = len(basin_rows)
+    total_valid = sum(r["n_valid"] for r in basin_rows)
+    total_hours = sum(r["n_hours_total"] for r in basin_rows)
+
+    def count(pred):
+        return sum(1 for r in basin_rows if pred(r))
+
+    def total(col):
+        vals = [r[col] for r in basin_rows if r[col] is not None]
+        return {"sum": int(sum(vals)), "n_basins_with_attr": len(vals),
+                "n_basins_gt0": sum(1 for v in vals if v > 0)}
+
+    return {
+        "period_start_utc":           f"{period_start:%Y-%m-%dT%H:%M:%S}Z",
+        "period_end_utc":             f"{period_end:%Y-%m-%dT%H:%M:%S}Z",
+        "n_hours_per_basin_expected": n_hours_target,
+        "n_nc_files_audited":         n,
+        "n_load_errors":              len(load_errors),
+        "n_grid_ok":                  count(lambda r: r["grid_ok"]),
+        "n_period_attrs_match":       count(lambda r: r["period_attrs_match"]),
+        "n_attr_counts_match":        count(lambda r: r["attr_counts_match"]),
+        "n_units_ok":                 count(lambda r: r["units_ok"]),
+        "n_systematic_offset_flag":   count(lambda r: r["systematic_offset_flag"] == "True"),
+        "n_zero_valid_hours":         count(lambda r: not r["has_any_valid"]),
+        "n_full_coverage":            count(lambda r: r["n_nan"] == 0 and r["n_hours_total"] > 0),
+        "n_coverage_ge_90pct":         count(lambda r: r["coverage_fraction"] >= 0.90),
+        "n_coverage_lt_50pct":         count(lambda r: r["coverage_fraction"] < 0.50),
+        "n_with_negative_values":     count(lambda r: r["n_negative_values"] > 0),
+        "n_late_gap_flag":            sum(1 for r in gap_rows if r["late_gap_flag"]),
+        "late_gap_threshold_days":    LATE_2025_GAP_DAYS,
+        "total_valid_hours":          total_valid,
+        "total_hours":                total_hours,
+        "overall_coverage_fraction":  round(total_valid / total_hours, 6) if total_hours else 0.0,
+        "qualifier_counts_raw_obs":   {col: total(col) for col in _QUALIFIER_ATTRS},
+        "qualifier_note":             (
+            "Counts of raw IV observations whose qualifier matched P (provisional), "
+            "Ice|Eqp (ice or equipment) or e (estimated), as recorded in the NC "
+            "attributes. The NCs carry no total raw-observation count, so the number "
+            "of approved observations cannot be derived here."
+        ),
+        "load_errors":                load_errors,
+    }
+
+
+def _structural_summary_md(summary: dict, generated_utc: str, git_hash: str) -> str:
+    lines = [
+        "# USGS IV structural audit (counts only)",
+        "",
+        f"Generated: {generated_utc}  |  git: {git_hash}  |  Script: {SCRIPT_NAME} --structural-only",
+        "",
+        "No discharge statistics are computed or reported in this mode.",
+        "",
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Period | {summary['period_start_utc']} to {summary['period_end_utc']} |",
+    ]
+    for key, val in summary.items():
+        if key in ("period_start_utc", "period_end_utc", "qualifier_counts_raw_obs",
+                   "qualifier_note", "load_errors"):
+            continue
+        lines.append(f"| {key} | {val} |")
+    lines += ["", "## Qualifier counts (raw IV observations)", "",
+              "| Qualifier | Sum | Basins with attr | Basins > 0 |", "|---|---|---|---|"]
+    for col, t in summary["qualifier_counts_raw_obs"].items():
+        lines.append(f"| {col} | {t['sum']} | {t['n_basins_with_attr']} | {t['n_basins_gt0']} |")
+    lines += ["", summary["qualifier_note"], ""]
+    if summary["load_errors"]:
+        lines += ["## Load errors", ""]
+        lines += [f"- {e['nc_file']}: {e['error']}" for e in summary["load_errors"]]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def run_structural_only(args: argparse.Namespace) -> int:
+    """Structural-only audit. Returns a process exit code."""
+    if not (args.expected_start and args.expected_end):
+        print("ERROR: --structural-only requires --expected-start and --expected-end",
+              file=sys.stderr)
+        return 2
+    if args.staids:
+        # A basin subset would turn the all-basin monthly table into per-basin rows.
+        print("ERROR: --staids is not allowed with --structural-only; the audit "
+              "always covers every NC in --canonical-dir", file=sys.stderr)
+        return 2
+    if not args.canonical_dir.is_dir():
+        print(f"ERROR: --canonical-dir {args.canonical_dir} is not a directory",
+              file=sys.stderr)
+        return 2
+    try:
+        period_start = _parse_iso_naive(args.expected_start)
+        period_end   = _parse_iso_naive(args.expected_end)
+    except (ValueError, TypeError) as exc:
+        print(f"ERROR: --expected-start/--expected-end not parseable: {exc}", file=sys.stderr)
+        return 2
+    for name, ts in (("--expected-start", period_start), ("--expected-end", period_end)):
+        if ts != ts.floor("h"):
+            print(f"ERROR: {name} {ts} is not on a whole hour", file=sys.stderr)
+            return 2
+    if period_end <= period_start:
+        print("ERROR: --expected-end is not after --expected-start", file=sys.stderr)
+        return 2
+    target_index   = pd.date_range(period_start, period_end, freq="h")
+    n_hours_target = len(target_index)
+
+    canon_dir = args.canonical_dir
+    out_dir   = args.out_dir / STRUCTURAL_SUBDIR
+    nc_paths  = sorted(canon_dir.glob("*_hourly.nc"))
+    if not nc_paths:
+        print(f"ERROR: no canonical NC files found in {canon_dir}", file=sys.stderr)
+        return 1
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    git_hash      = git_commit_hash()
+    wy_bounds     = derive_wy_boundaries(period_start, period_end)
+    print(f"Structural audit: {len(nc_paths)} NC file(s), period "
+          f"{period_start} .. {period_end} ({n_hours_target} h)")
+
+    basin_rows: list[dict] = []
+    wy_rows:    list[dict] = []
+    month_acc:  dict = {}
+    gap_rows:   list[dict] = []
+    load_errors: list[dict] = []
+    for i, nc_path in enumerate(nc_paths, 1):
+        staid = nc_path.stem.replace("_hourly", "").zfill(8)
+        try:
+            sf, attrs = load_canonical_nc(nc_path)
+        except Exception as exc:  # report and continue; counted in the summary
+            load_errors.append({"nc_file": nc_path.name, "error": type(exc).__name__})
+            continue
+        basin_rows.append(compute_structural_basin_row(staid, sf, attrs, target_index,
+                                                       nc_path.name))
+        wy_rows.extend(compute_wy_coverage(staid, sf, boundaries=wy_bounds))
+        _add_month_coverage(month_acc, staid, sf)
+        gap_rows.append(_structural_gap_row(staid, sf, period_end))
+        del sf
+        if i % 250 == 0 or i == len(nc_paths):
+            print(f"  {i}/{len(nc_paths)} files read")
+
+    pd.DataFrame(basin_rows).to_csv(out_dir / "per_basin_structural.csv", index=False)
+    pd.DataFrame(wy_rows).to_csv(out_dir / "per_water_year_coverage.csv", index=False)
+    pd.DataFrame(_month_coverage_rows(month_acc)).to_csv(
+        out_dir / "per_month_coverage_all_basins.csv", index=False)
+    pd.DataFrame(gap_rows).to_csv(out_dir / "gap_audit.csv", index=False)
+
+    summary = _structural_summary(basin_rows, gap_rows, load_errors,
+                                  period_start, period_end, n_hours_target)
+    (out_dir / "structural_summary.json").write_text(json.dumps(summary, indent=2),
+                                                     encoding="utf-8")
+    (out_dir / "structural_summary.md").write_text(
+        _structural_summary_md(summary, generated_utc, git_hash), encoding="utf-8")
+    prov = {
+        "script":          SCRIPT_NAME,
+        "mode":            "structural-only",
+        "git_commit":      git_hash,
+        "generated_utc":   generated_utc,
+        "python_version":  sys.version,
+        "pandas_version":  pd.__version__,
+        "numpy_version":   np.__version__,
+        "xarray_version":  xr.__version__,
+        "canonical_dir":   str(canon_dir),
+        "period_start":    summary["period_start_utc"],
+        "period_end":      summary["period_end_utc"],
+        "n_hours_target":  n_hours_target,
+        "n_basins":        len(basin_rows),
+        "outputs":         list(STRUCTURAL_OUTPUT_FILES),
+    }
+    (out_dir / "run_provenance.json").write_text(json.dumps(prov, indent=2), encoding="utf-8")
+
+    print(f"Wrote {len(STRUCTURAL_OUTPUT_FILES)} files to {out_dir}")
+    print(f"  files={summary['n_nc_files_audited']} load_errors={summary['n_load_errors']} "
+          f"grid_ok={summary['n_grid_ok']} period_attrs_match={summary['n_period_attrs_match']} "
+          f"zero_valid={summary['n_zero_valid_hours']} late_gap={summary['n_late_gap_flag']}")
+    # Exit 1 on any structural failure. Stale NC count attributes (attr_counts_match)
+    # are reported but not gated.
+    n = summary["n_nc_files_audited"]
+    failed = (load_errors
+              or summary["n_grid_ok"] != n or summary["n_period_attrs_match"] != n)
+    if failed:
+        print("STRUCTURAL AUDIT: FAIL (load errors, grid or period-attr mismatch)")
+    return 1 if failed else 0
+
+
+# ---------------------------------------------------------------------------
+# Protected-period guard for the legacy (value-statistics) mode
+# ---------------------------------------------------------------------------
+
+# The legacy mode computes discharge statistics, a target-status classification,
+# QC plots and the Jan-2023 comparison. It must never run on data after the v001
+# period end: WY2026 is the protected test year (docs/wy2026_data_plan.md §0, §8b),
+# where only --structural-only is allowed.
+LEGACY_MAX_PERIOD_END = PERIOD_END
+
+
+def _peek_nc_header(nc_path: pathlib.Path) -> tuple[pd.Timestamp | None, dict]:
+    """Last time step and streamflow attrs of an NC, without reading any values."""
+    with xr.open_dataset(str(nc_path)) as ds:
+        t = pd.DatetimeIndex(ds["time"].values)
+        attrs = dict(ds["streamflow"].attrs)
+    return (t.max() if len(t) else None), attrs
+
+
+def legacy_protected_period_reason(
+    nc_paths: list[pathlib.Path],
+    expected_end: str = "",
+) -> str | None:
+    """Return why the legacy mode must refuse, or None if it may run.
+
+    Refuses when the requested period ends after LEGACY_MAX_PERIOD_END, or when
+    any NC carries the derived-WY-chunk marker, ends after that date by its
+    attributes, or has a time axis extending past it. A file that cannot be
+    read is reported as a reason too (fail closed).
+    """
+    if expected_end:
+        try:
+            end = _parse_iso_naive(expected_end)
+        except (ValueError, TypeError):
+            return f"--expected-end {expected_end!r} is not a valid time"
+        if end > LEGACY_MAX_PERIOD_END:
+            return f"--expected-end {expected_end} is after {LEGACY_MAX_PERIOD_END}"
+    for nc_path in nc_paths:
+        try:
+            t_max, attrs = _peek_nc_header(nc_path)
+        except Exception as exc:
+            return f"{nc_path.name}: header unreadable ({type(exc).__name__})"
+        if "wy_chunk_mode" in attrs:
+            return f"{nc_path.name}: carries the wy_chunk_mode attribute (WY-chunk refetch)"
+        pe = str(attrs.get("period_end_utc", "")).strip()
+        if pe:
+            try:
+                if _parse_iso_naive(pe) > LEGACY_MAX_PERIOD_END:
+                    return f"{nc_path.name}: period_end_utc {pe} is after {LEGACY_MAX_PERIOD_END}"
+            except (ValueError, TypeError):
+                return f"{nc_path.name}: period_end_utc {pe!r} is not a valid time"
+        if t_max is not None and t_max > LEGACY_MAX_PERIOD_END:
+            return f"{nc_path.name}: time axis extends past {LEGACY_MAX_PERIOD_END}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CLI + Main
 # ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Audit full-period USGS IV recovered targets for Flash-NH Stage 1 2I-B."
     )
@@ -818,22 +1246,26 @@ def parse_args() -> argparse.Namespace:
         help="Skip the Jan 2023 vs 2H-C comparison entirely. "
              "Useful for smoke runs on HPC where 2H-C files are not available.",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--structural-only", action="store_true",
+        help="Structural audit for a protected period (e.g. the WY2026 test year): "
+             "coverage, gaps, snap counts, attribute checks and qualifier counts only. "
+             "No value statistics, no target-status classification, no plots, no Jan-2023 "
+             "comparison. Requires --expected-start and --expected-end. Writes only to "
+             "<out-dir>/audit_structural/.",
+    )
+    return p.parse_args(argv)
 
 
-def main() -> None:
-    args       = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args       = parse_args(argv)
+    if args.structural_only:
+        sys.exit(run_structural_only(args))
     canon_dir  = args.canonical_dir
     out_dir    = args.out_dir
     audit_dir  = out_dir / "audit"
     qc_dir     = out_dir / "qc"
     prov_dir   = out_dir / "provenance"
-
-    for d in (audit_dir, qc_dir, prov_dir):
-        d.mkdir(parents=True, exist_ok=True)
-
-    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    git_hash      = git_commit_hash()
 
     # Discover NC files
     if args.staids:
@@ -845,6 +1277,20 @@ def main() -> None:
     if not nc_paths:
         print(f"No canonical NC files found in {canon_dir}", file=sys.stderr)
         sys.exit(1)
+
+    # Protected-period guard: checked before any directory is created or value read.
+    reason = legacy_protected_period_reason(nc_paths, args.expected_end)
+    if reason:
+        print(f"ERROR: refusing the value-statistics audit: {reason}. Data after "
+              f"{LEGACY_MAX_PERIOD_END} (the WY2026 test year) may only be audited "
+              "with --structural-only.", file=sys.stderr)
+        sys.exit(2)
+
+    for d in (audit_dir, qc_dir, prov_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    git_hash      = git_commit_hash()
 
     print(f"Auditing {len(nc_paths)} canonical NC file(s)")
 
@@ -960,7 +1406,8 @@ def main() -> None:
     # Summary
     write_summary(
         out_dir, per_basin_rows, wy_rows, gap_rows, qual_rows, jan_rows,
-        status_rows, git_hash, generated_utc, n_hours_target
+        status_rows, git_hash, generated_utc, n_hours_target,
+        period_start=audit_start, period_end=audit_end,
     )
 
     # Provenance

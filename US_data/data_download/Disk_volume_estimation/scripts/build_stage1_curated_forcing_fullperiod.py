@@ -79,7 +79,7 @@ _CURATED_COLS: list[str] = (
 
 _FORBIDDEN_VARS: set[str] = {"10wdir", "orog"}
 
-# Stage 1 full-period bounds
+# Stage 1 full-period bounds (defaults; override with --period-start/--period-end)
 _PERIOD_START = pd.Timestamp("2020-10-14 00:00:00", tz="UTC")
 _PERIOD_END   = pd.Timestamp("2025-12-31 23:00:00", tz="UTC")
 
@@ -93,6 +93,9 @@ _EXPECTED_TOTAL_HOURS = 45_720
 _EXPECTED_MRMS_GAPS   = 136
 _EXPECTED_RTMA_GAPS   = 2
 
+# Full-build basin count of the fixed v001 basin list (used for smoke_build)
+_FULL_BUILD_N_BASINS = 2752
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -105,7 +108,7 @@ log = logging.getLogger(__name__)
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -142,7 +145,43 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Validate inputs, print the build plan, and exit without writing files.",
     )
-    return p.parse_args()
+    # Period arguments (additive; defaults reproduce the v001 product exactly)
+    p.add_argument(
+        "--period-start", default=None,
+        help="First hour of the product, UTC (e.g. 2025-10-01T00:00:00Z). "
+             "Default: 2020-10-14T00:00:00Z (v001).",
+    )
+    p.add_argument(
+        "--period-end", default=None,
+        help="Last hour of the product, UTC (e.g. 2026-09-30T23:00:00Z). "
+             "Default: 2025-12-31T23:00:00Z (v001).",
+    )
+    p.add_argument(
+        "--expected-hours", type=int, default=None,
+        help="Expected rows per basin for the full period. Required when a "
+             "non-default period is given; not accepted without one "
+             "(v001 pins 45720).",
+    )
+    p.add_argument(
+        "--expected-mrms-gaps", type=int, default=None,
+        help="Expected MRMS gap-hours per basin (reported in build_summary.md). "
+             "Required with, and only accepted with, a non-default period "
+             "(v001 pins 136).",
+    )
+    p.add_argument(
+        "--expected-rtma-gaps", type=int, default=None,
+        help="Expected RTMA gap-hours per basin (reported in build_summary.md). "
+             "Required with, and only accepted with, a non-default period "
+             "(v001 pins 2).",
+    )
+    p.add_argument(
+        "--product-name", default=None,
+        help=f"Product name recorded in dataset_config.json and build_summary.md. "
+             f"Required with, and only accepted with, a non-default period; must "
+             f"differ from {PRODUCT_NAME}. A non-default period writes period_lock.json "
+             f"and refuses an output directory that already holds another product.",
+    )
+    return p.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -166,18 +205,170 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _month_index(
+    month: str,
+    period_start: pd.Timestamp,
+    period_end: pd.Timestamp,
+) -> pd.DatetimeIndex:
+    """Return the hourly UTC index for one month, clipped to the product period."""
+    m_start = pd.Timestamp(f"{month}-01 00:00:00", tz="UTC")
+    m_end   = (m_start + pd.offsets.MonthEnd(1)).normalize() + pd.Timedelta(hours=23)
+    return pd.date_range(max(m_start, period_start), min(m_end, period_end), freq="h")
+
+
 def _stage1_month_index(month: str) -> pd.DatetimeIndex:
-    """Return the hourly UTC index for one Stage 1 month.
+    """Return the hourly UTC index for one Stage 1 (v001) month.
 
     2020-10 starts at 2020-10-14T00Z (not the 1st); all other months are full.
     """
-    if month == "2020-10":
-        start = _PERIOD_START
-        end   = pd.Timestamp("2020-10-31 23:00:00", tz="UTC")
-    else:
-        start = pd.Timestamp(f"{month}-01 00:00:00", tz="UTC")
-        end   = (start + pd.offsets.MonthEnd(1)).normalize() + pd.Timedelta(hours=23)
-    return pd.date_range(start, end, freq="h")
+    return _month_index(month, _PERIOD_START, _PERIOD_END)
+
+
+def _parse_utc_hour(value: str, name: str) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    if ts != ts.floor("h"):
+        raise ValueError(f"{name}={value!r} is not on a whole UTC hour")
+    return ts
+
+
+def _resolve_period(args: argparse.Namespace) -> dict:
+    """Resolve the product period and its expected values from the CLI.
+
+    With no period arguments the v001 pins are returned unchanged. A non-default
+    period must state every expected value and a product name different from v001,
+    so a WY2026 build can never be mistaken for, or written as, the v001 product.
+    """
+    if args.period_start is None and args.period_end is None:
+        stray = [
+            flag for flag, val in (
+                ("--expected-hours",     args.expected_hours),
+                ("--expected-mrms-gaps", args.expected_mrms_gaps),
+                ("--expected-rtma-gaps", args.expected_rtma_gaps),
+                ("--product-name",       args.product_name),
+            ) if val is not None
+        ]
+        if stray:
+            raise ValueError(
+                "only accepted together with --period-start/--period-end: "
+                + ", ".join(stray)
+            )
+        return {
+            "is_default":         True,
+            "start":              _PERIOD_START,
+            "end":                _PERIOD_END,
+            "months":             list(_ALL_MONTHS),
+            "expected_hours":     _EXPECTED_TOTAL_HOURS,
+            "expected_mrms_gaps": _EXPECTED_MRMS_GAPS,
+            "expected_rtma_gaps": _EXPECTED_RTMA_GAPS,
+            "product_name":       PRODUCT_NAME,
+        }
+
+    missing = [
+        flag for flag, val in (
+            ("--period-start",       args.period_start),
+            ("--period-end",         args.period_end),
+            ("--expected-hours",     args.expected_hours),
+            ("--expected-mrms-gaps", args.expected_mrms_gaps),
+            ("--expected-rtma-gaps", args.expected_rtma_gaps),
+            ("--product-name",       args.product_name),
+        ) if val is None
+    ]
+    if missing:
+        raise ValueError("a non-default period also requires: " + ", ".join(missing))
+    if args.product_name == PRODUCT_NAME:
+        raise ValueError(
+            f"--product-name {PRODUCT_NAME} is reserved for the default v001 period"
+        )
+    start = _parse_utc_hour(args.period_start, "--period-start")
+    end   = _parse_utc_hour(args.period_end, "--period-end")
+    if end <= start:
+        raise ValueError(f"--period-end {end} is not after --period-start {start}")
+    n_hours = len(pd.date_range(start, end, freq="h"))
+    if n_hours != args.expected_hours:
+        raise ValueError(
+            f"--expected-hours {args.expected_hours} does not match the period "
+            f"{start.isoformat()} .. {end.isoformat()} ({n_hours} h)"
+        )
+    months = [
+        str(p) for p in pd.period_range(
+            start.tz_localize(None).to_period("M"),
+            end.tz_localize(None).to_period("M"),
+            freq="M",
+        )
+    ]
+    return {
+        "is_default":         False,
+        "start":              start,
+        "end":                end,
+        "months":             months,
+        "expected_hours":     args.expected_hours,
+        "expected_mrms_gaps": args.expected_mrms_gaps,
+        "expected_rtma_gaps": args.expected_rtma_gaps,
+        "product_name":       args.product_name,
+    }
+
+
+_PERIOD_LOCK_NAME = "period_lock.json"
+
+
+def _period_lock_payload(period: dict) -> dict:
+    return {
+        "product_name":     period["product_name"],
+        "period_start_utc": period["start"].isoformat(),
+        "period_end_utc":   period["end"].isoformat(),
+        "n_hours":          period["expected_hours"],
+    }
+
+
+_LOCKLESS_ALLOWED = frozenset({"build.log"})
+
+
+def _check_period_lock(out_dir: Path, period: dict, write: bool) -> None:
+    """Refuse to build a non-default period into a directory built for another one.
+
+    The lock is written only for non-default periods, so the v001 output layout is
+    unchanged. A directory that already holds product files but no lock (such as
+    the v001 product) is refused. A resume with the same period passes. A default
+    (v001) build into a directory that carries a lock is refused, so a non-default
+    product can never be relabelled as v001.
+    """
+    lock_path = out_dir / _PERIOD_LOCK_NAME
+    if period["is_default"]:
+        if lock_path.exists():
+            raise ValueError(
+                f"{lock_path} exists, so {out_dir} holds a non-default period product; "
+                "refusing a default (v001) build into it"
+            )
+        return
+    payload   = _period_lock_payload(period)
+    if lock_path.exists():
+        with open(lock_path) as f:
+            recorded = json.load(f)
+        if recorded != payload:
+            raise ValueError(
+                f"{lock_path} records {recorded}, but this run requests {payload}; "
+                "refusing to mix periods in one product directory"
+            )
+        return
+    # Without a lock the directory must be new or empty: only the launcher's
+    # build.log and empty subdirectories are tolerated. Any other file (for
+    # example a v001 Parquet when --out-dir points inside the v001 product)
+    # counts as an existing product.
+    occupied = sorted(
+        entry.name for entry in (out_dir.iterdir() if out_dir.is_dir() else ())
+        if entry.name not in _LOCKLESS_ALLOWED
+        and (not entry.is_dir() or any(entry.iterdir()))
+    )
+    if occupied:
+        raise ValueError(
+            f"{out_dir} already holds {occupied} but no {_PERIOD_LOCK_NAME}; "
+            "refusing to build a non-default period into an existing product"
+        )
+    if write:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as f:
+            json.dump(payload, f, indent=2)
 
 
 def _load_chunk(path: Path, staids: list[str]) -> pd.DataFrame:
@@ -275,7 +466,11 @@ def _basin_stats(staid: str, wide: pd.DataFrame, sha: str) -> dict:
 # Basin list resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_staids(args: argparse.Namespace, forcing_root: Path) -> list[str]:
+def _resolve_staids(
+    args: argparse.Namespace,
+    forcing_root: Path,
+    all_months: list[str] = _ALL_MONTHS,
+) -> list[str]:
     """Return the ordered list of STAIDs to build."""
     if args.staids:
         return list(args.staids)
@@ -292,7 +487,7 @@ def _resolve_staids(args: argparse.Namespace, forcing_root: Path) -> list[str]:
     else:
         # Derive from first available monthly chunk
         staids = None
-        for month in _ALL_MONTHS:
+        for month in all_months:
             chunk_path = forcing_root / "chunks" / month / f"combined_{month}.parquet"
             if chunk_path.exists():
                 log.info("Deriving STAID list from %s", chunk_path)
@@ -315,15 +510,33 @@ def _resolve_staids(args: argparse.Namespace, forcing_root: Path) -> list[str]:
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:  # noqa: C901
-    args         = _parse_args()
+def main(argv: list[str] | None = None) -> None:  # noqa: C901
+    args         = _parse_args(argv)
     forcing_root = Path(args.forcing_root)
     out_dir      = Path(args.out_dir)
+
+    # ---- Resolve the product period (v001 pins unless --period-* given) ----
+    try:
+        period = _resolve_period(args)
+    except ValueError as exc:
+        log.error("Period arguments: %s", exc)
+        sys.exit(2)
+    all_months   = period["months"]
+    n_all_months = len(all_months)
+    product_name = period["product_name"]
+
+    def month_index(month: str) -> pd.DatetimeIndex:
+        return _month_index(month, period["start"], period["end"])
+
+    if not period["is_default"]:
+        log.info("Non-default period: %s .. %s (%d months, %d h), product %s",
+                 period["start"].isoformat(), period["end"].isoformat(),
+                 n_all_months, period["expected_hours"], product_name)
 
     # ---- Discover available monthly chunks ----
     available_months: list[str] = []
     missing_months:   list[str] = []
-    for month in _ALL_MONTHS:
+    for month in all_months:
         p = forcing_root / "chunks" / month / f"combined_{month}.parquet"
         if p.exists():
             available_months.append(month)
@@ -331,31 +544,44 @@ def main() -> None:  # noqa: C901
             missing_months.append(month)
 
     if missing_months:
-        log.warning("%d / 63 monthly chunks not found: %s%s",
-                    len(missing_months), missing_months[:5],
+        log.warning("%d / %d monthly chunks not found: %s%s",
+                    len(missing_months), n_all_months, missing_months[:5],
                     " …" if len(missing_months) > 5 else "")
     if not available_months:
         log.error("No monthly chunk Parquets found. Check --forcing-root.")
         sys.exit(1)
-    log.info("Monthly chunks available: %d / 63", len(available_months))
+    if missing_months and not period["is_default"]:
+        # A non-default product is all-or-nothing: a partial build would write short
+        # basin Parquets that a later resume reuses.
+        log.error("Non-default period needs every monthly chunk; missing: %s", missing_months)
+        sys.exit(1)
+    log.info("Monthly chunks available: %d / %d", len(available_months), n_all_months)
 
     # ---- Resolve STAIDs ----
-    selected_staids = _resolve_staids(args, forcing_root)
+    selected_staids = _resolve_staids(args, forcing_root, all_months)
     n_basins        = len(selected_staids)
 
     # ---- Compute expected rows per basin ----
-    expected_rows = sum(len(_stage1_month_index(m)) for m in available_months)
-    is_full_build = (len(available_months) == 63 and args.max_basins is None
+    all_months_present = len(available_months) == n_all_months
+    expected_rows = sum(len(month_index(m)) for m in available_months)
+    is_full_build = (all_months_present and args.max_basins is None
                      and args.staids is None and args.basin_list is None)
-    if expected_rows != _EXPECTED_TOTAL_HOURS and len(available_months) == 63:
+    if expected_rows != period["expected_hours"] and all_months_present:
         log.error("Full-period index mismatch: got %d hours, expected %d",
-                  expected_rows, _EXPECTED_TOTAL_HOURS)
+                  expected_rows, period["expected_hours"])
         sys.exit(1)
+
+    # ---- Refuse to mix periods in one product directory ----
+    try:
+        _check_period_lock(out_dir, period, write=not args.dry_run)
+    except ValueError as exc:
+        log.error("Output directory: %s", exc)
+        sys.exit(2)
 
     # ---- Dry-run ----
     if args.dry_run:
-        actual_start = _stage1_month_index(available_months[0])[0]
-        actual_end   = _stage1_month_index(available_months[-1])[-1]
+        actual_start = month_index(available_months[0])[0]
+        actual_end   = month_index(available_months[-1])[-1]
         log.info("[DRY-RUN] Build plan:")
         log.info("  Forcing root:     %s", forcing_root)
         log.info("  Output dir:       %s", out_dir)
@@ -389,7 +615,7 @@ def main() -> None:  # noqa: C901
 
     for m_idx, month in enumerate(available_months, 1):
         chunk_path  = forcing_root / "chunks" / month / f"combined_{month}.parquet"
-        month_index = _stage1_month_index(month)
+        m_index     = month_index(month)
         month_tmp   = tmp_dir / month
         month_tmp.mkdir(exist_ok=True)
 
@@ -403,7 +629,7 @@ def main() -> None:  # noqa: C901
             continue
 
         log.info("[%d/%d] %s (%d h) — loading chunk …",
-                 m_idx, len(available_months), month, len(month_index))
+                 m_idx, len(available_months), month, len(m_index))
         chunk_df = _load_chunk(chunk_path, selected_staids)
         _check_forbidden_vars(chunk_df, month)
         log.info("[%d/%d] %s — %d rows loaded, building basin intermediates …",
@@ -415,7 +641,7 @@ def main() -> None:  # noqa: C901
             if out_tmp.exists() and not args.overwrite:
                 continue
             bdf  = chunk_df[chunk_df["STAID"] == staid]
-            wide = _build_basin_wide(staid, bdf, month_index)
+            wide = _build_basin_wide(staid, bdf, m_index)
             wide.to_parquet(out_tmp, index=True, engine="pyarrow", compression="snappy")
             n_written += 1
 
@@ -441,6 +667,11 @@ def main() -> None:  # noqa: C901
                      s_idx, n_basins, staid)
             sha  = _sha256(out_path)
             wide = pd.read_parquet(out_path)
+            if not period["is_default"] and len(wide) != expected_rows:
+                log.error("STAID=%s: existing %s has %d rows, expected %d; delete it and "
+                          "rerun", staid, out_path, len(wide), expected_rows)
+                n_failed += 1
+                continue
             manifest_rows.append(_basin_stats(staid, wide, sha))
             checksum_lines.append(f"{sha}  time_series/{staid}.parquet")
             continue
@@ -497,8 +728,8 @@ def main() -> None:  # noqa: C901
     # ====================================================================
     log.info("=== Phase 3: Writing metadata ===")
 
-    actual_start = _stage1_month_index(available_months[0])[0]
-    actual_end   = _stage1_month_index(available_months[-1])[-1]
+    actual_start = month_index(available_months[0])[0]
+    actual_end   = month_index(available_months[-1])[-1]
 
     # manifest.json
     with open(out_dir / "manifest.json", "w") as f:
@@ -511,9 +742,9 @@ def main() -> None:  # noqa: C901
     log.info("Wrote checksums.sha256")
 
     # dataset_config.json
-    smoke_build = len(manifest_rows) < 2752 or len(available_months) < 63
+    smoke_build = len(manifest_rows) < _FULL_BUILD_N_BASINS or not all_months_present
     config = {
-        "product_name":       PRODUCT_NAME,
+        "product_name":       product_name,
         "schema_version":     SCHEMA_VERSION,
         "period_start_utc":   actual_start.isoformat(),
         "period_end_utc":     actual_end.isoformat(),
@@ -549,6 +780,16 @@ def main() -> None:  # noqa: C901
         "run_end_utc":        run_end.isoformat(),
         "wall_seconds":       wall_s,
     }
+    if not period["is_default"]:
+        # Added only for non-default periods so v001 provenance keeps its key set.
+        prov["period_args"] = {
+            "period_start_utc":   period["start"].isoformat(),
+            "period_end_utc":     period["end"].isoformat(),
+            "expected_hours":     period["expected_hours"],
+            "expected_mrms_gaps": period["expected_mrms_gaps"],
+            "expected_rtma_gaps": period["expected_rtma_gaps"],
+            "product_name":       product_name,
+        }
     with open(out_dir / "run_provenance.json", "w") as f:
         json.dump(prov, f, indent=2)
     log.info("Wrote run_provenance.json")
@@ -565,14 +806,21 @@ def main() -> None:  # noqa: C901
     if len(manifest_rows) > n_shown:
         rows_table += f"\n| … ({len(manifest_rows) - n_shown} more) | | | |"
 
-    expected_mrms_total = _EXPECTED_MRMS_GAPS * len(manifest_rows) if len(available_months) == 63 else "N/A"
-    expected_rtma_total = _EXPECTED_RTMA_GAPS * len(manifest_rows) if len(available_months) == 63 else "N/A"
+    expected_mrms_total = (period["expected_mrms_gaps"] * len(manifest_rows)
+                           if all_months_present else "N/A")
+    expected_rtma_total = (period["expected_rtma_gaps"] * len(manifest_rows)
+                           if all_months_present else "N/A")
+    if all_months_present and (n_mrms_total, n_rtma_total) != (expected_mrms_total,
+                                                               expected_rtma_total):
+        log.warning("Gap totals differ from expected: MRMS %d vs %d, RTMA %d vs %d "
+                    "(the curated auditor is the authoritative check)",
+                    n_mrms_total, expected_mrms_total, n_rtma_total, expected_rtma_total)
 
     summary = (
         f"# Curated Forcing Build Summary — Full Period\n\n"
-        f"**Product:** {PRODUCT_NAME}\n"
+        f"**Product:** {product_name}\n"
         f"**Period:** {actual_start.isoformat()} – {actual_end.isoformat()}\n"
-        f"**Months processed:** {len(available_months)} / 63\n"
+        f"**Months processed:** {len(available_months)} / {n_all_months}\n"
         f"**Basins built:** {len(manifest_rows)}\n"
         f"**Rows per basin:** {expected_rows}\n"
         f"**Full build:** {not smoke_build}\n"
