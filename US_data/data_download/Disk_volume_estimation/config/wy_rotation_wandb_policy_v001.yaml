@@ -1,0 +1,26 @@
+# Flash-NH water-year rotation campaign -- W&B tracking policy (design v2,
+# adopted by Omri 2026-11-16). Read by scripts/run_wy_rotation_cycle.py
+# --wandb-policy and src/baseline/wy_rotation_tracking.py.
+#
+# Stage A only (training side): NH training loss per epoch, timing, memory,
+# receipt status, the explained-missing basin list, and small evidence files.
+# No skill score of any kind: stage B/C/D key prefixes are closed in code.
+#
+# Portable policy ONLY: no machine paths, no credentials. Online mode needs
+# WANDB_API_KEY in the job environment (the sbatch reads it from ~/.netrc,
+# as in the RD1 sweeps); this file and the tracking code never read, store or
+# log it. A W&B failure degrades tracking and never stops a run.
+
+policy_name: wy_rotation_wandb_policy_v001
+policy_version: "1"
+created: "2026-11-16"
+enabled: true
+mode: online
+project: flashnh-wy-rotation
+entity: null
+tags: ["wy-rotation", "v001"]
+
+# Ceiling for any file uploaded to a run's Files tab (config, receipt,
+# score-blind evidence JSON). Checkpoints and prediction pickles are never
+# uploaded.
+max_artifact_reference_bytes: 1048576

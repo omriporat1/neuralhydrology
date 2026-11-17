@@ -2,6 +2,21 @@
 
 # Decision Log
 
+## 2026-11-17 — Erratum to the metric spec v001: G1 population read under the explained-missing rule — record only
+
+**Decision (user, 2026-11-17).**
+- **Population.** G1 ("every scored epoch holds all 2,307 development basins") and §2 ("on all 2,307 development basins") in `docs/wy_rotation_metric_spec_v001.md` are read under the 2026-11-15 explained-missing rule. A scored epoch holds every development basin except the explained-missing ones.
+  - An explained-missing basin has 0 admissible targets in the scored window, confirmed by the independent sealed count.
+  - The missing set must be the same in every epoch and in every arm of the cycle.
+  - An unexplained missing basin still fails G1. G1 therefore still catches `validate_n_random_basins` truncation.
+- **Assessment year.** The same rule applies to the assessment-year scoring at the picked checkpoints: the count is taken from the assessment-year windows only.
+- **Statistics.** An explained-missing basin-year is undefined and is dropped pairwise, as §2d and §4c already do for ineligible or undefined basin-years. The bootstrap still resamples all 2,307 basins. Each cycle's evaluated population is reported.
+- **Nothing else changes.** Metrics, picks, thresholds, comparison rules and the spec file (and its sha256 `157ece67…a898`, which the W&B stage-B gate checks) all stay as they are.
+
+**Why.** This is a textual reconciliation, not a new rule. The spec was frozen (commit d63497d) after the explained-missing rule but did not take it in. Cycle 1's checkpoint year (WY2022) has 18 basins with no admissible target (canary re-verify job 46748201), so G1 read literally would fail every cycle-1 run.
+
+**Alternative considered.** A spec v002 with G1 corrected in the text. Rejected: it would need a new sha256, a change to the W&B gate's pinned hash and arguably another gate-1 review, for a one-sentence clarification of a rule already recorded on 2026-11-15. Accepted cost: the spec must be read together with this entry.
+
 ## 2026-11-16 — Water-year rotation: metric, checkpoint and arm-2 spec v001 FROZEN (gate 1 passed) — record only
 
 **Decision (user; choices given 2026-11-15, review-round answers A-G and freeze 2026-11-16).** The rotation (`flashnh_wy_rotation_split_v001`, 5 cycles over WY2021-WY2025) is scored and compared under `docs/wy_rotation_metric_spec_v001.md`. Its sha256 is `157ece673ed50cfa6dbc2c5e46dfe1ee724b0ca713fcd01a2373e7d3549fa898` (as frozen). The spec was written and approved before any rotation score existed. Its §6 records every choice and governs where it differs from the option text in the body.

@@ -655,3 +655,169 @@ def test_runner_refuses_on_provenance_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(rc, "verify_commit_and_interpreter", refuse)
     with pytest.raises(SystemExit, match="provenance"):
         runner.main(["--manifest", str(tmp_path / "none.json"), "--expected-commit", "abc"])
+
+
+# --------------------------------------------------------------------------- runner with W&B stage A (fake wandb)
+
+def _tracked_policy(tmp_path) -> Path:
+    policy = yaml.safe_load((ROOT / "config" / "wy_rotation_wandb_policy_v001.yaml").read_text(encoding="utf-8"))
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    return path
+
+
+def _fake_nh(monkeypatch, runner, manifest):
+    population = wy.verify_basin_population(wy.load_split_contract(manifest["split_contract"]["path"]), ROOT)
+
+    def fake_train(request):
+        config = yaml.safe_load(Path(request.config_path).read_text(encoding="utf-8"))
+        nh_run_dir = Path(config["run_dir"]) / f"{config['experiment_name']}_1511_120000"
+        nh_run_dir.mkdir(parents=True)
+        (nh_run_dir / "config.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
+        for e in range(1, request.additional_epochs + 1):
+            (nh_run_dir / f"model_epoch{e:03d}.pt").write_bytes(b"w")
+        (nh_run_dir / "output.log").write_text(_log_text(range(1, request.additional_epochs + 1)), encoding="utf-8")
+        _write_receipts(nh_run_dir, nre.read_run_rotation_sealing(nh_run_dir), len(population), periods=("train",))
+
+    def fake_tester_factory(nh_run_dir):
+        sealing = nre.read_run_rotation_sealing(nh_run_dir)
+        _write_receipts(nh_run_dir, sealing, len(population), periods=("validation",))
+        start = pd.to_datetime(sealing.nh_dates["validation_start_date"], format="%d/%m/%Y")
+        return FakeTester(nh_run_dir, population, pd.date_range(start, periods=3, freq="h"))
+
+    monkeypatch.setattr(po, "default_train_chunk", fake_train)
+    monkeypatch.setattr(runner, "_tester_factory", fake_tester_factory)
+
+
+@needs_p19
+def test_runner_with_wandb_policy_tracks_stage_a_only(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from src.baseline import wy_rotation_tracking as trk
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest)
+    assert runner.main(["--manifest", str(canary), "--expected-commit", "abc",
+                        "--wandb-policy", str(_tracked_policy(tmp_path))]) == 0
+    config_dir = Path(manifest["config_dir"])
+    receipt = json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE"
+    assert receipt["wandb"]["backend"] == "wandb" and not receipt["wandb"]["degraded"]
+    assert receipt["wandb"]["id"] == trk.wandb_run_id(manifest["run_id"])
+    (run,) = fake.runs
+    kw = run.init_kwargs
+    assert (kw["name"], kw["group"], kw["job_type"]) == ("canary-c1-base", "canary", "canary")
+    assert kw["dir"] == str(config_dir / "wandb") and kw["config"]["checkpoint_wy"] == 2022
+    assert kw["config"]["git_commit"] == "abc" and kw["config"]["hyperparameters"]["seq_length"] == 120
+    losses = [p for p in run.logs if "train/avg_total_loss" in p]
+    assert [p["epoch"] for p in losses] == [1, 2]
+    for payload in run.logs:  # every key sent passed the stage-A gate
+        trk.check_metric_keys(payload)
+    trk.check_metric_keys(run.summary)
+    assert run.summary["verify/passed"] is True and run.summary["status/receipt"] == "COMPLETE"
+    assert sorted(Path(p).name for p, _, _ in run.saved) == sorted(
+        ["config.yaml", runner.EVIDENCE_NAME, runner.RECEIPT_NAME])
+    assert run.exit_code == 0
+
+
+@needs_p19
+def test_runner_completes_when_wandb_init_fails(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    install_fake_wandb(monkeypatch, fail_init=True)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest)
+    with pytest.warns(RuntimeWarning):
+        assert runner.main(["--manifest", str(canary), "--expected-commit", "abc",
+                            "--wandb-policy", str(_tracked_policy(tmp_path))]) == 0
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE"
+    assert receipt["wandb"]["degraded"] and "rotation_init" in receipt["wandb"]["degraded_operations"]
+
+
+@needs_p19
+def test_runner_failure_finishes_the_wandb_run_as_failed(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    nh_run_dir = Path(manifest["config_dir"]) / "runs" / f"{manifest['run_id']}_1511_120000"
+    nh_run_dir.mkdir(parents=True)
+    (nh_run_dir / "model_epoch001.pt").write_bytes(b"w")
+    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("retrained"))
+    with pytest.raises(rot.WyRotationRunsError, match="not the flat 1..2 set"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc",
+                     "--wandb-policy", str(_tracked_policy(tmp_path))])
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    (run,) = fake.runs
+    assert receipt["status"] == "FAILED" and run.exit_code == 1 and run.summary["status/receipt"] == "FAILED"
+    assert [Path(p).name for p, _, _ in run.saved] == [runner.RECEIPT_NAME]  # no stale evidence uploaded
+
+
+def test_runner_refuses_a_missing_wandb_policy_before_writing_anything(tmp_path, monkeypatch):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from src.baseline.wandb_tracking import TrackingError
+
+    runner = _load_runner()
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    with pytest.raises(TrackingError, match="not found"):
+        runner.main(["--manifest", str(tmp_path / "none.json"), "--expected-commit", "abc",
+                     "--wandb-policy", str(tmp_path / "absent.yaml")])
+
+
+@needs_p19
+def test_runner_keeps_complete_when_a_signal_arrives_during_wandb_close(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest)
+    original_init = fake.init
+
+    def init(**kwargs):
+        run = original_init(**kwargs)
+        run.finish = lambda exit_code=0: runner._raise_on_sigterm(15, None)  # Slurm time limit mid-finish
+        return run
+
+    fake.init = init
+    with pytest.raises(SystemExit, match="signal 15"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc",
+                     "--wandb-policy", str(_tracked_policy(tmp_path))])
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE" and "signal 15" in receipt["post_complete_error"]
+
+
+@needs_p19
+def test_runner_records_failed_when_a_signal_arrives_during_wandb_init(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    fake.init = lambda **kwargs: runner._raise_on_sigterm(15, None)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("trained after a signal"))
+    with pytest.raises(SystemExit, match="signal 15"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc",
+                     "--wandb-policy", str(_tracked_policy(tmp_path))])
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "FAILED" and "signal 15" in receipt["error"]
