@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -64,10 +65,33 @@ CONFIG_KEYS = ("model", "head", "hidden_size", "seq_length", "predict_last_n", "
                "static_attributes", "target_variables", "statics_embedding", "dynamics_embedding",
                "flashnh_rotation_cycle", "flashnh_magnitude_weight_lambda")
 
+# File names W&B writes itself in a run's files/ dir. ``run.save`` links an
+# uploaded file into files/<relative path>; a Flash-NH file uploaded under one
+# of these names gets overwritten by W&B through that link (smoke job 46762307:
+# the canary's frozen config.yaml was replaced by W&B's own config at finish).
+WANDB_RESERVED_FILE_NAMES = frozenset({"config.yaml", "wandb-summary.json", "wandb-metadata.json",
+                                       "requirements.txt", "output.log", "diff.patch", "conda-environment.yaml"})
+# Every Flash-NH file is uploaded as a private copy under this sub-path of the
+# run's Files (e.g. ``flashnh/config.yaml``); the frozen original is never linked.
+UPLOAD_SUBDIR = "flashnh"
+UPLOAD_STAGING_DIRNAME = "flashnh_upload_staging"
+
 _EPOCH_LOSS_PATTERN = re.compile(r"^Epoch (\d+) average loss: (.*)$")
 _LOG_LINE_PATTERN = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+: Epoch (\d+) average loss: (.*)$")
 _LOSS_ITEM_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*): ([-+]?(?:\d+\.?\d*(?:[eE][-+]?\d+)?|nan|inf))")
 _LOSS_KEY_SAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def check_upload_name(upload_name: str) -> str:
+    """Return ``upload_name`` (a relative POSIX path in the run's Files) or
+    raise if W&B owns that name or the path is not a plain relative one."""
+    parts = upload_name.split("/")
+    if not upload_name or upload_name.startswith("/") or "\\" in upload_name or any(
+            p in ("", ".", "..") for p in parts):
+        raise TrackingError(f"upload name {upload_name!r} is not a plain relative POSIX path")
+    if upload_name in WANDB_RESERVED_FILE_NAMES or parts[0] == "wandb" or parts[0] == "media":
+        raise TrackingError(f"upload name {upload_name!r} is reserved by W&B in a run's files/ dir")
+    return upload_name
 
 
 def wandb_run_id(flashnh_run_id: str) -> str:
@@ -164,9 +188,10 @@ class RotationTracker:
     """Stage-A tracker of one rotation run. ``run`` is a ``TrackingRun``
     (backend "null" when tracking is off or ``wandb.init`` failed)."""
 
-    def __init__(self, run: TrackingRun, *, layout: Mapping[str, str]):
+    def __init__(self, run: TrackingRun, *, layout: Mapping[str, str], upload_staging_dir=None):
         self.run = run
         self.layout = dict(layout)
+        self.upload_staging_dir = Path(upload_staging_dir) if upload_staging_dir is not None else None
         self.epochs_logged: set[int] = set()
         self._last_epoch_created: Optional[float] = None
         self._handler: Optional[logging.Handler] = None
@@ -194,17 +219,40 @@ class RotationTracker:
             _guard_backend_call(self.run, "rotation_summary", _set)
 
     def save_file(self, path, *, max_bytes: Optional[int] = None) -> None:
-        """Upload one small evidence file (receipt, evidence JSON, config) to the run's Files."""
+        """Upload one small evidence file (receipt, evidence JSON, config) to the
+        run's Files as ``flashnh/<name>``.
+
+        W&B links a saved file into its files/ dir and may later write through
+        that link, so the upload is always a private byte copy in the staging
+        dir, never the Flash-NH original."""
         p = Path(path)
+        upload_name = check_upload_name(f"{UPLOAD_SUBDIR}/{p.name}")  # a programming error raises
         limit = max_bytes or self.run.max_artifact_reference_bytes
         if not p.is_file() or p.stat().st_size > limit:
             _mark_degraded(self.run, "rotation_save_file",
                            TrackingError(f"{p} missing or larger than {limit} bytes; not uploaded"))
             return
-        self.run.artifact_references.append({"name": p.name, "path": str(p), "size_bytes": p.stat().st_size})
-        if self.run.backend == "wandb":
-            _guard_backend_call(self.run, "rotation_save_file",
-                                lambda: self.run._wandb_run.save(str(p), base_path=str(p.parent), policy="now"))
+        self.run.artifact_references.append({"name": upload_name, "path": str(p), "size_bytes": p.stat().st_size,
+                                             "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
+        if self.run.backend != "wandb":
+            return
+        if self.upload_staging_dir is None:
+            _mark_degraded(self.run, "rotation_save_file",
+                           TrackingError("no upload staging dir; refusing to link the original file"))
+            return
+
+        def _copy_and_save():
+            staging = self.upload_staging_dir
+            copy = staging / upload_name
+            if copy.resolve() == p.resolve():
+                raise TrackingError(f"staging copy {copy} would be the original file")
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            if copy.is_symlink():
+                copy.unlink()
+            shutil.copyfile(p, copy)
+            self.run._wandb_run.save(str(copy), base_path=str(staging), policy="now")
+
+        _guard_backend_call(self.run, "rotation_save_file", _copy_and_save)
 
     # ---- training loss --------------------------------------------------------------
     def _already_logged_upto(self) -> int:
@@ -358,7 +406,8 @@ def init_rotation_tracker(policy: Mapping[str, Any], *, flashnh_run_id: str, con
     else:
         tracker = RotationTracker(TrackingRun(backend="wandb", max_artifact_reference_bytes=max_bytes,
                                               run_identity=dict(config), wandb_run=wandb_run, mode=policy["mode"],
-                                              wandb_run_id=run_id), layout=layout)
+                                              wandb_run_id=run_id), layout=layout,
+                                  upload_staging_dir=Path(wandb_dir) / UPLOAD_STAGING_DIRNAME)
     # NH's setup_logging uses logging.basicConfig, a no-op once the root logger
     # has any handler: undo any root-logger change made during init.
     if list(root.handlers) != root_handlers or root.level != root_level:

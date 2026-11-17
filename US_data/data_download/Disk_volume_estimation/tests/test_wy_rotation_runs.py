@@ -719,9 +719,13 @@ def test_runner_with_wandb_policy_tracks_stage_a_only(canary, monkeypatch, tmp_p
         trk.check_metric_keys(payload)
     trk.check_metric_keys(run.summary)
     assert run.summary["verify/passed"] is True and run.summary["status/receipt"] == "COMPLETE"
-    assert sorted(Path(p).name for p, _, _ in run.saved) == sorted(
-        ["config.yaml", runner.EVIDENCE_NAME, runner.RECEIPT_NAME])
+    assert run.uploaded_names() == sorted(
+        ["flashnh/config.yaml", f"flashnh/{runner.EVIDENCE_NAME}", f"flashnh/{runner.RECEIPT_NAME}"])
     assert run.exit_code == 0
+    # the fake W&B finish writes its own files/config.yaml through any link, as
+    # real W&B did in smoke job 46762307: the frozen config must be untouched
+    assert rot.sha256_file(config_dir / "config.yaml") == manifest["config_sha256"]
+    rot.verify_canary_manifest(manifest)
 
 
 @needs_p19
@@ -763,7 +767,7 @@ def test_runner_failure_finishes_the_wandb_run_as_failed(canary, monkeypatch, tm
     receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
     (run,) = fake.runs
     assert receipt["status"] == "FAILED" and run.exit_code == 1 and run.summary["status/receipt"] == "FAILED"
-    assert [Path(p).name for p, _, _ in run.saved] == [runner.RECEIPT_NAME]  # no stale evidence uploaded
+    assert run.uploaded_names() == [f"flashnh/{runner.RECEIPT_NAME}"]  # no stale evidence uploaded
 
 
 def test_runner_refuses_a_missing_wandb_policy_before_writing_anything(tmp_path, monkeypatch):

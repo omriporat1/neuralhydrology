@@ -3,9 +3,11 @@ module (the local venv has no wandb; the real-package qualification is an
 online smoke on Moriah)."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +38,15 @@ class FakeRun:
 
     def finish(self, exit_code=0):
         self.exit_code = exit_code
+        # What real W&B does at finish (smoke job 46762307): it writes its own
+        # files/config.yaml (and summary), through the link run.save made there.
+        for path, base_path, _ in self.saved:
+            if Path(path).relative_to(base_path).as_posix() in ("config.yaml", "wandb-summary.json"):
+                Path(path).write_text("_wandb:\n  value: {}\n", encoding="utf-8")
+
+    def uploaded_names(self) -> list[str]:
+        """Names in the run's Files, as W&B derives them from (path, base_path)."""
+        return sorted(Path(p).relative_to(b).as_posix() for p, b, _ in self.saved)
 
 
 def install_fake_wandb(monkeypatch, *, fail_init=False, init_touches_root_logger=False):
@@ -229,8 +240,62 @@ def test_save_file_uploads_small_files_only(monkeypatch, tmp_path):
     tracker.save_file(small)
     with pytest.warns(RuntimeWarning):
         tracker.save_file(big)
-    assert fake.runs[0].saved == [(str(small), str(tmp_path), "now")]
+    staging = tmp_path / "wandb" / trk.UPLOAD_STAGING_DIRNAME
+    assert fake.runs[0].saved == [(str(staging / "flashnh" / "receipt.json"), str(staging), "now")]
+    assert fake.runs[0].uploaded_names() == ["flashnh/receipt.json"]
     assert "rotation_save_file" in tracker.run.degraded_operations
+
+
+def test_uploaded_frozen_config_survives_wandb_finish(monkeypatch, tmp_path):
+    # Regression for smoke job 46762307: the frozen config.yaml was uploaded as
+    # files/config.yaml (W&B's reserved name) through a link to the original,
+    # and W&B's own config overwrote it at finish.
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    config_dir = tmp_path / "run_config_dir"
+    config_dir.mkdir()
+    frozen = config_dir / "config.yaml"
+    frozen.write_bytes(b"experiment_name: frozen\nseq_length: 120\n")
+    before = hashlib.sha256(frozen.read_bytes()).hexdigest()
+    tracker.save_file(frozen)
+    tracker.finish(failed=False)
+    assert hashlib.sha256(frozen.read_bytes()).hexdigest() == before
+    run = fake.runs[0]
+    assert run.uploaded_names() == ["flashnh/config.yaml"]
+    (saved_path, _, _) = run.saved[0]
+    assert Path(saved_path) != frozen and Path(saved_path).read_bytes() == frozen.read_bytes()
+    assert tracker.run.artifact_references[0]["sha256"] == before and not tracker.run.degraded
+
+
+@pytest.mark.parametrize("name", sorted(trk.WANDB_RESERVED_FILE_NAMES) + ["wandb/x.json", "media/a.png"])
+def test_wandb_reserved_upload_names_are_refused(name):
+    with pytest.raises(TrackingError, match="reserved"):
+        trk.check_upload_name(name)
+
+
+@pytest.mark.parametrize("name", ["", "/abs.json", "../x.json", "flashnh/../config.yaml", "a\\b.json", "a//b"])
+def test_non_plain_upload_names_are_refused(name):
+    with pytest.raises(TrackingError, match="plain relative"):
+        trk.check_upload_name(name)
+
+
+def test_every_uploaded_name_sits_under_the_flashnh_subdir(monkeypatch, tmp_path):
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    for name in ("config.yaml", "output.log", "wandb-summary.json", "requirements.txt"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+        tracker.save_file(tmp_path / name)
+    assert fake.runs[0].uploaded_names() == ["flashnh/config.yaml", "flashnh/output.log", "flashnh/requirements.txt",
+                                             "flashnh/wandb-summary.json"]
+    for name in fake.runs[0].uploaded_names():
+        assert name not in trk.WANDB_RESERVED_FILE_NAMES
+
+
+def test_save_file_without_a_staging_dir_never_links_the_original(monkeypatch, tmp_path):
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    tracker.upload_staging_dir = None
+    (tmp_path / "config.yaml").write_text("x", encoding="utf-8")
+    with pytest.warns(RuntimeWarning):
+        tracker.save_file(tmp_path / "config.yaml")
+    assert fake.runs[0].saved == [] and "rotation_save_file" in tracker.run.degraded_operations
 
 
 def test_finish_marks_failed_runs(monkeypatch, tmp_path):
