@@ -2,6 +2,22 @@
 
 # Decision Log
 
+## 2026-11-17 — Parallel Claude sessions: one shared checkout, a daily control session owns the shared docs — record only
+
+**Decision (user, 2026-11-17; approved as drafted).**
+- **Mode A: one shared checkout.** Parallel Claude Code sessions all work in the main checkout on `master`. No Git worktrees (CLAUDE.md's worktree rule is unchanged).
+  - Each session commits only its own files, by explicit path. Never `git add -A` or `git add .`; never switch branch, stash, reset or rebase while another session is open.
+  - Two sessions never edit the same file at the same time. If two tasks need the same file, they run one after the other.
+  - Capacity: two or three code sessions plus the control session.
+- **Rule 1 — shared docs have one owner.** The day's control session alone edits `docs/decision_log.md`, `docs/FLASHNH_CURRENT_STATE.md` and `journal/`. A feature session that reaches a decision writes `DECISION_LOG_DRAFT_<topic>.md` in its `.scratch_local/` work folder; the control session shows it to the user and adds it after approval.
+- **Rule 2 — the brief names the files.** The control session writes each feature session's brief with the files it owns, whether it may commit or push, and a check that no other open session owns those files.
+- **Rule 3 — Moriah runs only pushed master commits, one launch at a time.** The job checks `HEAD == EXPECTED_COMMIT` (as the rotation runner already does).
+- **Revisit trigger.** At the first real file overlap that would force two needed tasks into sequence, revisit mode B (worktrees under `.scratch_local\wt\<2 letters>`, needs `core.longpaths`, a CLAUDE.md/`repo_policy.md` amendment and absolute evidence paths). The user leans towards B at that point. Mode C (app worktrees at the repo root) would change the project-boundary rule and is not adopted.
+
+**Why.** The 2026-11-16/17 sessions (run builder, WY2026 clip, W&B stage A, the lab talk) worked in one checkout without collisions because each was told which files to leave alone. Writing that down costs nothing and keeps CLAUDE.md as it is.
+
+**Strongest argument against (recorded).** In a shared checkout one session's uncommitted edits are visible to another session's tests and to `git status`, so a mistake (a stray `git add -A`, a branch switch) can catch another session's half-done work. Worktrees would make that impossible rather than merely forbidden.
+
 ## 2026-11-17 — Erratum to the metric spec v001: G1 population read under the explained-missing rule — record only
 
 **Decision (user, 2026-11-17).**
@@ -16,6 +32,71 @@
 **Why.** This is a textual reconciliation, not a new rule. The spec was frozen (commit d63497d) after the explained-missing rule but did not take it in. Cycle 1's checkpoint year (WY2022) has 18 basins with no admissible target (canary re-verify job 46748201), so G1 read literally would fail every cycle-1 run.
 
 **Alternative considered.** A spec v002 with G1 corrected in the text. Rejected: it would need a new sha256, a change to the W&B gate's pinned hash and arguably another gate-1 review, for a one-sentence clarification of a rule already recorded on 2026-11-15. Accepted cost: the spec must be read together with this entry.
+
+## 2026-11-16 — Rotation campaign tracked in W&B (staged, score-blind order) and a fixed hydrograph reference panel (addendum to the frozen metric spec) — record only
+
+**Decision (user, 2026-11-16; confirmed as drafted 2026-11-17).**
+- **W&B tracking for the rotation campaign.** Project `flashnh-wy-rotation`.
+  - One W&B run per training run: 20 runs, 5 cycles × (baseline + λ ∈ {0.5, 2, 8}). They are grouped by arm variant, with cycle as a config field.
+  - Plus one report run per cycle and one pooled report run. WY2026 runs come later, one per chosen checkpoint.
+- **Logging opens in stages, each gated in code:**
+  - A: training-side information: train loss, timing, memory, receipts, missing basins.
+  - B: per-epoch checkpoint-year scores and figures. Opens only once the frozen spec's sha256 matches.
+  - C: assessment-year scores at the picked checkpoints. Opens only after a recorded pick for every arm of that cycle.
+  - D: WY2026. Opens only after a separate unseal decision.
+  - Each stage has an allow-list of metric-key prefixes, and keys from a closed stage are refused before sending. NH's normalised-space validation metrics are never logged.
+- **W&B is a mirror, not an authority.** Every value comes from the qualified Flash-NH raw-space scorer. Flash-NH evidence files stay authoritative (CLAUDE.md §4).
+- **Artifacts:** small files (configs, receipts, evidence JSON, figures) are uploaded. Checkpoints and prediction pickles are referenced by path + sha256 only, never uploaded.
+- **Hydrograph reference panel (addendum to `docs/wy_rotation_metric_spec_v001.md`, which is not edited):**
+  - About 12 development basins, chosen by attributes and observed-flow flashiness only (area × flashiness strata, spread over regions), never by model output.
+  - Basins that are ineligible in any rotation year (WY2021-2025) are excluded. WY2026 observations are not used to pick the panel (WY2026 is sealed).
+  - The list is frozen as a file with its sha256 before any rotation score exists.
+  - The same panel is shown for every run and every scored year (and later WY2026): the year's largest observed event, and the full year.
+  - Figures illustrate; they do not decide. The spec's §4e overlay figures are unchanged.
+
+**Why.** W&B is where the user returns to a run, including in meetings with the supervisor. A fixed panel shows the same basins in every run, so runs can be compared by eye without the basins being picked by the results.
+
+**Rejected alternatives.**
+- Training-side-only logging (design v1): too thin to return to a run.
+- Uploading picked checkpoints for model loading from W&B: not needed.
+- Sharing setup for the supervisor: the user screen-shares.
+
+**Strongest argument against (recorded).** Dashboards invite informal judgements, such as reading λ curves by eye. Stages B and C also add plotting code that must be reviewed like scientific code. The fixed rules decide; W&B only displays.
+
+Status: stage A committed and pushed as ec16ec4. CPU smoke 46762307 completed with tracking online and no scores sent. It found that uploading the Flash-NH `config.yaml` under W&B's reserved name let W&B overwrite the run's frozen config at finish. The fix (upload under a non-reserved path such as `flashnh/config.yaml`, refuse W&B's reserved names) goes through review before the campaign. Stages B and C come later, with the scorer seam.
+
+## 2026-11-16 — WY2026 data refetch, structural QC and legacy-audit clip — record only
+
+**Decision (user, 2026-11-12 to 2026-11-16).**
+- **Refetch.** All of WY2026 (2025-10-01 to 2026-09-30 UTC) was refetched from USGS IV with `--wy-chunks derived`, not appended to the v001 product. The 2020-10-14 to 2025-12-31 products and their pinned defaults are unchanged.
+- **Structural QC only.** The WY2026 targets are audited only with `audit_usgs_iv_recovered_targets.py --structural-only`. It reports coverage, gaps, snap counts, file and attribute checks, and USGS qualifier codes as counts only. Gap start times are not reported, and monthly coverage is aggregated across basins. No value statistics, status classes, plots or Jan-2023 comparison are produced for WY2026.
+- **Legacy-audit clip (Q1, option C).** The legacy value-statistics mode refuses any NC past 2025-12-31T23, any NC carrying `wy_chunk_mode`, and any unreadable header. It also drops every value after 2025-09-30T23 before computing anything, because the v001 NCs hold Oct-Dec 2025.
+  - The WY2026 row of the water-year table is omitted.
+  - A run whose whole period lies after that hour is refused.
+  - File-level NC attributes (snap counts, raw-observation qualifier counts, cadence, offset flag) are copied as stored and still describe the full stored period.
+- **Negative values (Q2).** `n_negative_values` stays a per-basin count in both modes.
+- **Availability does not change membership.** 34 basins have no valid WY2026 hour: 33 stations for which USGS returned no time series, and 02336030, which returned a series with every hour NaN. They stay in the 2,307-basin development population and the holdout list. Test evaluation must handle all-NaN WY2026 targets.
+- **Forcing.** The WY2026 curated forcing (`stage1_basin_hourly_forcings_wy2026_v001`) covers 2,752 basins over 8,760 hours.
+  - It has one pinned RTMA gap, at 2026-09-23T19Z, which is upstream: the object is missing on S3.
+  - Oct-Dec 2025 is bit-identical to v001 for all 2,752 basins.
+- **Known prior exposure.** Old v001 legacy audit reports were written before this clip, so they include Oct-Dec 2025 value statistics. They stay as they are and are not opened. The sealed NH loader already excludes those hours from every rotation run.
+
+Status: the C1-C3 code was reviewed by two fresh-context Claude reviews (all findings applied) and committed as a17002e. The same code ran on h2o on 2026-11-15:
+- The structural audit returned rc 0, with 2,843/2,843 NCs on the 8,760-h grid.
+- The curated build returned 2,752/2,752 basins, and the auditor passed.
+
+The Q1 clip is a separate change, reviewed in `.scratch_local/review_packets/20261116_wy2026_q1_legacy_clip/` (fresh-context review: ready with fixes; findings 1-5 applied) and committed as 5db8e38 (88 tests pass). Both commits were pushed with ec16ec4 on 2026-11-17.
+
+**Follow-up decisions (Omri, 2026-11-17).**
+- Q-a: the legacy output keeps the Oct-Dec file-level count columns; summary.md carries a one-sentence note that they describe the whole stored period.
+- Q-b: the v001 legacy audit is not re-run; the old reports stay as they are and unopened.
+- Two pre-existing behaviours are left unchanged: no trim to the requested dates, and `--expected-start` without `--expected-end` is ignored.
+
+Products, kept apart from every package builder and loader:
+- `/data42/omrip/Flash-NH/tmp/stage1_usgs_iv_wy2026_v001/canonical_merged/`
+- `.../stage1_forcing_fullperiod/stage1_basin_hourly_forcings_wy2026_v001/`
+
+The NH package step belongs to the rotation-split session. WY2026 remains the protected test year.
 
 ## 2026-11-16 — Water-year rotation: metric, checkpoint and arm-2 spec v001 FROZEN (gate 1 passed) — record only
 

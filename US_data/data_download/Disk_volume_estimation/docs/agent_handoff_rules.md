@@ -76,6 +76,13 @@ These are defaults, not rigid capability boundaries.
 
 Do not ask a second agent to reimplement work merely for redundancy.
 
+### 3.4 Parallel sessions and the daily control session
+
+*Added 2026-11-17 (user decision; see decision_log).*
+
+- Each working day has one **control session** ("Day YYYY-MM-DD control"), started fresh. It plans the day (newest `journal/meetings/*.md` week plan, `FLASHNH_CURRENT_STATE.md`, the last `journal/log.md` entry, the calendar), starts and briefs feature sessions, routes review gates to `/review-packet`, watches Moriah jobs, and closes the day (`/eod`, `FLASHNH_CURRENT_STATE.md` update, commit of the shared docs by explicit path, archiving finished sessions). It does not do heavy implementation itself. The skills `/plan-day` and `/close-day` carry the morning and evening steps.
+- Feature sessions do one bounded task each (§11.2) in the shared checkout and follow rules 1-3 of the 2026-11-17 decision-log entry.
+
 ## 4. Bounded tasks and decision envelopes
 
 A task is suitable for bounded implementation/review when its scientific objective and acceptance criteria are already frozen enough that the agent does not need to invent a new scientific choice.
