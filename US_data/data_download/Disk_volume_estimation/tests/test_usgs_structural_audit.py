@@ -416,6 +416,162 @@ def test_legacy_guard_allows_v001_period_file(tmp_path):
     assert "after" in aud.legacy_protected_period_reason([p], "2026-01-01T00:00:00Z")
 
 
+# ---------------------------------------------------------------------------
+# Legacy mode drops every value after 2025-09-30T23 (WY2026) before any statistic
+# ---------------------------------------------------------------------------
+
+SPIKE = 12345.0
+
+
+def _legacy_run_ok(canon_dir, out_dir, extra=()):
+    aud.main(["--canonical-dir", str(canon_dir), "--out-dir", str(out_dir),
+              "--skip-jan2023-comparison",
+              "--pilot-manifest", str(out_dir.parent / "no_manifest.csv"), *extra])
+
+
+def _all_output_text(out_dir):
+    return "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                     for p in sorted(out_dir.rglob("*"))
+                     if p.suffix in (".csv", ".md", ".json"))
+
+
+def test_legacy_clip_constants():
+    assert aud.LEGACY_VALUE_STATS_END == pd.Timestamp("2025-09-30 23:00:00")
+    assert aud.LEGACY_MAX_PERIOD_END == pd.Timestamp("2025-12-31 23:00:00")
+    assert [b[0] for b in aud.LEGACY_WY_BOUNDARIES] == [
+        "WY2021", "WY2022", "WY2023", "WY2024", "WY2025"]
+    s = pd.Series(1.0, index=pd.date_range("2025-09-30 22:00", "2025-10-01 01:00", freq="h"))
+    assert list(aud.clip_to_legacy_value_window(s).index) == [
+        pd.Timestamp("2025-09-30 22:00"), pd.Timestamp("2025-09-30 23:00")]
+
+
+def test_legacy_mode_drops_wy2026_values(tmp_path):
+    # v001-shaped tail: Sep-Dec 2025. Oct-Dec carry a spike, a negative value and
+    # a long NaN run, none of which may reach any output.
+    idx = pd.date_range("2025-09-01", "2025-12-31 23:00", freq="h")
+    v = np.full(len(idx), 5.0)
+    v[idx == pd.Timestamp("2025-11-15 12:00")] = SPIKE
+    v[idx == pd.Timestamp("2025-12-10 06:00")] = -3.0
+    v[(idx >= pd.Timestamp("2025-12-15")) & (idx <= pd.Timestamp("2025-12-31 23:00"))] = np.nan
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", v, index=idx,
+              attrs_override={"period_start_utc": "2025-09-01T00:00:00Z",
+                              "period_end_utc": "2025-12-31T23:00:00Z",
+                              "wy_chunk_mode": None})
+    out = tmp_path / "o"
+    _legacy_run_ok(d, out)
+
+    a = out / "audit"
+    q = pd.read_csv(a / "quality_audit.csv").iloc[0]
+    assert q["max_streamflow_m3s"] == 5.0 and q["min_streamflow_m3s"] == 5.0
+    assert q["n_negative_values"] == 0 and not q["suspicious_spike_flag"]
+    pb = pd.read_csv(a / "per_basin_coverage.csv").iloc[0]
+    assert pb["n_hours_total"] == 30 * 24 and pb["n_nan"] == 0
+    assert pb["last_valid_utc"] == "2025-09-30 23:00:00"
+    assert not pb["late_2025_gap_flag"]
+    assert pd.read_csv(a / "gap_audit.csv").iloc[0]["longest_gap_hours"] == 0
+    assert "WY2026" not in set(pd.read_csv(a / "per_water_year_coverage.csv")["water_year"])
+    m = pd.read_csv(a / "per_month_coverage.csv")
+    assert list(zip(m["year"], m["month"])) == [(2025, 9)]
+    wy = pd.read_csv(a / "per_water_year_coverage.csv").set_index("water_year")
+    assert wy.loc["WY2025", "n_hours_total"] == 30 * 24
+    # Spike, negative value and late gap all sit after the clip, so none of the
+    # review statuses they would trigger may appear. (The fixture holds only
+    # Sep 2025, so WY2021-WY2024 coverage is 0 and the status is USABLE_WITH_GAPS.)
+    st = pd.read_csv(a / "target_status.csv").iloc[0]
+    assert st["target_status"] not in ("TARGET_QUALITY_REVIEW", "TARGET_OPERATIONAL_REVIEW")
+    assert st["n_negative_values"] == 0 and not st["suspicious_spike_flag"]
+
+    prov = json.loads((out / "provenance" / "run_provenance.json").read_text())
+    assert prov["value_stats_clipped"] is True and prov["audit_end_capped"] is True
+    assert prov["value_stats_end_utc"] == "2025-09-30T23:00:00Z"
+    assert prov["n_hours_target"] == 30 * 24
+    summ = json.loads((out / "summary.json").read_text())
+    assert summ["value_stats_end_utc"] == "2025-09-30T23:00:00Z"
+    md = (out / "summary.md").read_text(encoding="utf-8")
+    assert "2025-09-01T00:00:00Z to 2025-09-30T23:00:00Z" in md
+    assert "File-level NC attribute columns" in md and "whole stored period" in md
+    text = _all_output_text(out)
+    assert "12345" not in text and "-3.0" not in text
+
+
+def test_legacy_mode_refuses_period_inside_wy2026(tmp_path):
+    # A v001-period file whose whole window is Oct-Dec 2025: nothing is left
+    # after the clip, so the run refuses before creating any output.
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", np.full(len(V001_TAIL), 5.0), index=V001_TAIL,
+              attrs_override=_V001_ATTRS)
+    assert aud.legacy_protected_period_reason([d / "01000001_hourly.nc"]) is None
+    assert _run_legacy(d, tmp_path / "o") == 2
+    assert not (tmp_path / "o").exists()
+
+
+def test_legacy_mode_unclipped_window_unchanged(tmp_path):
+    idx = pd.date_range("2023-01-01", "2023-01-31 23:00", freq="h")
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", np.full(len(idx), 5.0), index=idx,
+              attrs_override={"period_start_utc": "2023-01-01T00:00:00Z",
+                              "period_end_utc": "2023-01-31T23:00:00Z",
+                              "wy_chunk_mode": None})
+    out = tmp_path / "o"
+    _legacy_run_ok(d, out, extra=["--expected-start", "2023-01-01T00:00:00Z",
+                                  "--expected-end", "2023-01-31T23:00:00Z"])
+    prov = json.loads((out / "provenance" / "run_provenance.json").read_text())
+    assert prov["value_stats_clipped"] is False and prov["audit_end_capped"] is False
+    assert prov["n_hours_target"] == 744
+    assert pd.read_csv(out / "audit" / "per_basin_coverage.csv").iloc[0]["n_hours_total"] == 744
+
+
+def test_legacy_clip_flag_follows_data_not_period(tmp_path):
+    # Requested period ends before the clip, but the file still holds Oct-Dec 2025:
+    # those hours are dropped and the provenance must say so.
+    idx = pd.date_range("2025-09-01", "2025-12-31 23:00", freq="h")
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", np.full(len(idx), 5.0), index=idx,
+              attrs_override={"period_start_utc": "2025-09-01T00:00:00Z",
+                              "period_end_utc": "2025-12-31T23:00:00Z",
+                              "wy_chunk_mode": None})
+    out = tmp_path / "o"
+    _legacy_run_ok(d, out, extra=["--expected-start", "2025-09-01T00:00:00Z",
+                                  "--expected-end", "2025-09-15T23:00:00Z"])
+    prov = json.loads((out / "provenance" / "run_provenance.json").read_text())
+    assert prov["value_stats_clipped"] is True and prov["audit_end_capped"] is False
+
+
+def test_legacy_period_args_accept_utc_offset(tmp_path):
+    idx = pd.date_range("2023-01-01", "2023-01-31 23:00", freq="h")
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", np.full(len(idx), 5.0), index=idx,
+              attrs_override={"period_start_utc": "2023-01-01T00:00:00Z",
+                              "period_end_utc": "2023-01-31T23:00:00Z",
+                              "wy_chunk_mode": None})
+    out = tmp_path / "o"
+    _legacy_run_ok(d, out, extra=["--expected-start", "2023-01-01T00:00:00+00:00",
+                                  "--expected-end", "2023-01-31T23:00:00+00:00"])
+    prov = json.loads((out / "provenance" / "run_provenance.json").read_text())
+    assert prov["n_hours_target"] == 744
+
+
+def test_jan2023_plot_reads_clipped_series(tmp_path, monkeypatch):
+    idx = pd.date_range("2023-01-01", "2023-01-31 23:00", freq="h")
+    d = tmp_path / "c"
+    d.mkdir()
+    _write_nc(d / "01000001_hourly.nc", np.full(len(idx), 5.0), index=idx,
+              attrs_override={"wy_chunk_mode": None})
+    calls = []
+    real = aud.clip_to_legacy_value_window
+    monkeypatch.setattr(aud, "clip_to_legacy_value_window",
+                        lambda s: calls.append(len(s)) or real(s))
+    aud.make_comparison_plot([{"STAID": "01000001", "comparison_status": "PASS"}],
+                             d, tmp_path / "qc" / "plot.png")
+    assert calls == [len(idx)]
+
+
 def test_derive_wy_boundaries_matches_legacy_table():
     assert aud.derive_wy_boundaries(aud.PERIOD_START, aud.PERIOD_END) == aud.WY_BOUNDARIES
 

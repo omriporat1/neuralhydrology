@@ -560,6 +560,7 @@ def make_comparison_plot(
 
         try:
             sf_full, _ = load_canonical_nc(nc_path)
+            sf_full = clip_to_legacy_value_window(sf_full)
             jan_mask = (sf_full.index >= JAN2023_START) & (sf_full.index <= JAN2023_END)
             sf_jan = sf_full[jan_mask]
             ax.plot(sf_jan.index, sf_jan.values, color="steelblue", lw=1.5,
@@ -652,6 +653,11 @@ def write_summary(
         f"| Basins audited | {n_basins} |",
         f"| Target hourly steps per basin | {n_hours_target:,} |",
         f"| Period | {period_str} |",
+        f"| Value statistics end | {LEGACY_VALUE_STATS_END:%Y-%m-%dT%H:%M:%S}Z "
+        "(later hours are WY2026, protected, and are dropped) |",
+        "| File-level NC attribute columns | snap counts, raw-observation qualifier "
+        "counts, cadence and offset flag are copied from the NC as stored and describe "
+        "its whole stored period, including any hours after the value-statistics end |",
         f"| Total valid hours (all basins) | {total_valid:,} |",
         f"| Total NaN hours (all basins) | {total_nan:,} |",
         f"| Overall coverage fraction | {overall_cov:.4f} ({100*overall_cov:.2f}%) |",
@@ -760,6 +766,7 @@ def write_summary(
         "git_commit":               git_hash,
         "n_basins":                 n_basins,
         "n_hours_target":           n_hours_target,
+        "value_stats_end_utc":      f"{LEGACY_VALUE_STATS_END:%Y-%m-%dT%H:%M:%S}Z",
         "total_valid_hours":        total_valid,
         "total_nan_hours":          total_nan,
         "overall_coverage":         round(overall_cov, 6),
@@ -1156,6 +1163,19 @@ def run_structural_only(args: argparse.Namespace) -> int:
 # where only --structural-only is allowed.
 LEGACY_MAX_PERIOD_END = PERIOD_END
 
+# The v001 NCs run to 2025-12-31T23, so they also hold Oct-Dec 2025, the first
+# three months of WY2026. The legacy mode drops every value after this hour
+# before computing anything (Omri, 2026-11-16, Q1 option C). File-level NC
+# attributes (snap counts, raw-observation qualifier counts, cadence, offset
+# flag) are copied as stored and still describe the NC's full period.
+LEGACY_VALUE_STATS_END = pd.Timestamp("2025-09-30T23:00:00")
+LEGACY_WY_BOUNDARIES = [b for b in WY_BOUNDARIES if b[1] <= LEGACY_VALUE_STATS_END]
+
+
+def clip_to_legacy_value_window(sf: pd.Series) -> pd.Series:
+    """Drop every hour after LEGACY_VALUE_STATS_END (WY2026, protected)."""
+    return sf[sf.index <= LEGACY_VALUE_STATS_END]
+
 
 def _peek_nc_header(nc_path: pathlib.Path) -> tuple[pd.Timestamp | None, dict]:
     """Last time step and streamflow attrs of an NC, without reading any values."""
@@ -1286,34 +1306,46 @@ def main(argv: list[str] | None = None) -> None:
               "with --structural-only.", file=sys.stderr)
         sys.exit(2)
 
-    for d in (audit_dir, qc_dir, prov_dir):
-        d.mkdir(parents=True, exist_ok=True)
-
-    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    git_hash      = git_commit_hash()
-
     print(f"Auditing {len(nc_paths)} canonical NC file(s)")
 
     # Resolve effective audit period
     # Priority: CLI args > first NC file attrs > module-level defaults
     audit_start, audit_end = PERIOD_START, PERIOD_END
     if args.expected_start and args.expected_end:
-        audit_start = pd.Timestamp(args.expected_start.replace("Z", ""))
-        audit_end   = pd.Timestamp(args.expected_end.replace("Z", ""))
+        audit_start = _parse_iso_naive(args.expected_start)
+        audit_end   = _parse_iso_naive(args.expected_end)
         print(f"  Audit period (CLI): {audit_start} to {audit_end}")
     else:
         try:
-            _, peek_attrs = load_canonical_nc(nc_paths[0])
+            _, peek_attrs = _peek_nc_header(nc_paths[0])
             ps = peek_attrs.get("period_start_utc", "")
             pe = peek_attrs.get("period_end_utc", "")
             if ps and pe:
-                audit_start = pd.Timestamp(ps.replace("Z", ""))
-                audit_end   = pd.Timestamp(pe.replace("Z", ""))
+                audit_start = _parse_iso_naive(ps)
+                audit_end   = _parse_iso_naive(pe)
                 print(f"  Audit period (NC attrs): {audit_start} to {audit_end}")
             else:
                 print(f"  Audit period (default): {audit_start} to {audit_end}")
         except Exception:
             print(f"  Audit period (default): {audit_start} to {audit_end}")
+
+    # WY2026 clip: no value after LEGACY_VALUE_STATS_END enters any statistic.
+    if audit_start > LEGACY_VALUE_STATS_END:
+        print(f"ERROR: refusing the value-statistics audit: the period starts at "
+              f"{audit_start}, after {LEGACY_VALUE_STATS_END}; those hours belong to "
+              "the WY2026 test year. Use --structural-only.", file=sys.stderr)
+        sys.exit(2)
+    audit_end_capped = audit_end > LEGACY_VALUE_STATS_END
+    if audit_end_capped:
+        audit_end = LEGACY_VALUE_STATS_END
+        print(f"  Value statistics clipped at {LEGACY_VALUE_STATS_END} "
+              "(later hours are WY2026, protected)")
+
+    for d in (audit_dir, qc_dir, prov_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    git_hash      = git_commit_hash()
 
     # Build expected target index from effective period
     target_index    = pd.date_range(audit_start, audit_end, freq="h")
@@ -1325,6 +1357,9 @@ def main(argv: list[str] | None = None) -> None:
     gap_rows:       list[dict] = []
     qual_rows:      list[dict] = []
     jan_rows:       list[dict] = []
+    # True once any loaded series held an hour after LEGACY_VALUE_STATS_END
+    # (set from the data, whatever period was requested).
+    value_stats_clipped = False
 
     for nc_path in nc_paths:
         staid = nc_path.stem.replace("_hourly", "").zfill(8)
@@ -1335,6 +1370,9 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as exc:
             print(f"  [{staid}] ERROR loading: {exc}")
             continue
+        n_before = len(sf)
+        sf = clip_to_legacy_value_window(sf)
+        value_stats_clipped = value_stats_clipped or len(sf) < n_before
 
         # Verify no -9999 sentinels in decoded array
         n_sentinel = int(np.sum(sf.values == -9999.0))
@@ -1342,7 +1380,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  [{staid}] WARNING: {n_sentinel} decoded -9999 values found!")
 
         per_basin_rows.append(compute_per_basin_coverage(staid, sf, attrs, period_end=audit_end))
-        wy_rows.extend(compute_wy_coverage(staid, sf))
+        wy_rows.extend(compute_wy_coverage(staid, sf, LEGACY_WY_BOUNDARIES))
         month_rows.extend(compute_month_coverage(staid, sf))
         gap_rows.append(compute_gap_audit(staid, sf, period_end=audit_end))
         qual_rows.append(compute_quality_audit(staid, sf, attrs))
@@ -1423,6 +1461,15 @@ def main(argv: list[str] | None = None) -> None:
         "canonical_dir":   str(canon_dir),
         "n_basins":        len(per_basin_rows),
         "n_hours_target":  n_hours_target,
+        "value_stats_end_utc":      f"{LEGACY_VALUE_STATS_END:%Y-%m-%dT%H:%M:%S}Z",
+        "value_stats_clipped":      value_stats_clipped,
+        "audit_end_capped":         audit_end_capped,
+        "value_stats_clip_note": (
+            "Every value after value_stats_end_utc (WY2026, protected) was dropped "
+            "before any statistic; the WY2026 water-year row is omitted. File-level "
+            "NC attributes (snap_n_*, n_*_raw_obs, median_cadence_minutes, "
+            "systematic_offset_flag) are copied as stored and cover the NC's full period."
+        ),
     }
     (prov_dir / "run_provenance.json").write_text(
         json.dumps(prov, indent=2, default=str), encoding="utf-8"
