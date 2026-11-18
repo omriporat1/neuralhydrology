@@ -2,6 +2,23 @@
 
 # Decision Log
 
+## 2026-11-18 — Rotation runner: refuse repeated runs, narrow resume, W&B system metadata off — record only
+
+**Decision (user, 2026-11-18).**
+- **Repeated runs are refused.** If a cycle's folder already holds a receipt, evidence, an archived copy, or a non-empty `runs/` or `wandb/`, `scripts/run_wy_rotation_cycle.py` stops before writing anything, with a non-zero exit. This now includes a COMPLETE cycle (it used to be a silent no-op).
+  - The only way back is `--resume-from-job JOBID`: for a FAILED or STARTED receipt written by that job, with the same run id and manifest and the full set of trained checkpoints. A resume never trains; it re-evaluates the missing epochs and re-runs the score-blind verifier. The operator must make sure a STARTED job is dead.
+  - Retraining after a training failure is not provided: it needs a new attempt id, which is a separate decision.
+- **Launch of baseline cycles 2-5 uses `--array=1-4`.** Row 0 (cycle 1, COMPLETE) would now be refused. The campaign sbatch comment that calls a COMPLETE rerun a no-op is corrected at launch.
+- **A resumed run reuses its deterministic W&B id** and logs into the earlier failed W&B run. The failure reason stays recorded on Moriah: the FAILED receipt (error + traceback) is kept as `<name>.job<JOBID>.json`, alongside the Slurm log.
+- **W&B system metadata is off** (`x_disable_meta=True`). W&B no longer collects the program name and arguments, the Slurm environment, disk details or its system-metadata block. It still records the host name, git remote and commit, Python version and platform, and the package list (checked in the real-package offline test; the account email cannot be checked offline). Loss curves, system charts and the Flash-NH run config (incl. `git_commit`) are unchanged. The Slurm job and array ids are added to the W&B run config so each W&B run still names its Moriah job.
+- **W&B tracking always closes** (`finish()` in `finally`, exactly once, including on errors and signals), without changing the receipt's status.
+
+**Why.** Deferred from the cycle-1 launch (2026-11-17). A repeated launch must never silently retrain or overwrite a run's evidence. The 11-17 W&B smoke (job 46762307) showed the metadata W&B collects by default; none of it is needed for the science and it keeps the project shareable.
+
+**Strongest argument against (recorded).** `x_*` settings are private W&B API and may change between wandb versions without notice. Mitigation: wandb is pinned at 0.28.1 and a real-package offline smoke test checks that the program arguments and Slurm environment are absent, against a control run (setting off) which shows that the test can detect them. Separately, refusing a COMPLETE rerun turns a harmless repeat into a failed Slurm row.
+
+Code: this commit (`scripts/run_wy_rotation_cycle.py`, `src/baseline/wy_rotation_tracking.py` and their two test files). Gate review (fresh Claude): READY WITH FIXES. Findings 4 (metadata comment and a vacuous assertion) and 6b (W&B run left open if setup fails after init) were fixed before this commit. Findings 1-3 and 5 concern only `--resume-from-job` and are deferred: they must be fixed before any first resume. Review packet `.scratch_local/review_packets/20261118_wy_rotation_runner_fixes/`.
+
 ## 2026-11-17 — Parallel Claude sessions: one shared checkout, a daily control session owns the shared docs — record only
 
 **Decision (user, 2026-11-17; approved as drafted).**

@@ -621,9 +621,15 @@ def test_runner_end_to_end_with_fake_nh(canary, monkeypatch):
     assert receipt["git_commit"] == "abc" and set(receipt["epoch_end_timestamps"]) == {"1", "2"}
     assert evidence["passed"] and {r["n_basins"] for r in evidence["per_epoch"].values()} == {2307}
     assert calls == {"train": 1, "tester": 1}
-    # a COMPLETE receipt makes a rerun a no-op
-    assert runner.main(["--manifest", str(canary), "--expected-commit", "abc"]) == 0
+    # a COMPLETE run is never rerun, not even with --resume-from-job; nothing is touched
+    before = (config_dir / runner.RECEIPT_NAME).read_bytes()
+    with pytest.raises(runner.RunRefused, match="COMPLETE; a rerun needs a new attempt id"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc"])
+    with pytest.raises(runner.RunRefused, match="the receipt is COMPLETE"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc", "--resume-from-job", "none"])
     assert calls == {"train": 1, "tester": 1}
+    assert (config_dir / runner.RECEIPT_NAME).read_bytes() == before
+    assert not list(config_dir.glob("*.job*.json"))
 
 
 @needs_p19
@@ -634,14 +640,122 @@ def test_runner_refuses_an_incomplete_checkpoint_set_and_records_failed(canary, 
     manifest = json.loads(canary.read_text(encoding="utf-8"))
     monkeypatch.setattr(rc, "verify_commit_and_interpreter",
                         lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
-    nh_run_dir = Path(manifest["config_dir"]) / "runs" / f"{manifest['run_id']}_1511_120000"
-    nh_run_dir.mkdir(parents=True)
-    (nh_run_dir / "model_epoch001.pt").write_bytes(b"w")  # interrupted after epoch 1 of 2
-    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("retrained"))
+    _fake_nh(monkeypatch, runner, manifest, train_epochs=1)  # training stopped after epoch 1 of 2
     with pytest.raises(rot.WyRotationRunsError, match="not the flat 1..2 set"):
         runner.main(["--manifest", str(canary), "--expected-commit", "abc"])
     receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
-    assert receipt["status"] == "FAILED" and receipt["trained_in_this_job"] is False
+    assert receipt["status"] == "FAILED" and receipt["trained_in_this_job"] is True
+    # ... and that run cannot be resumed: a resume never trains
+    with pytest.raises(runner.RunRefused, match="not the flat 1..2 set of a completed training"):
+        runner.main(["--manifest", str(canary), "--expected-commit", "abc", "--resume-from-job", "none"])
+
+
+def _cli(canary, *extra):
+    return ["--manifest", str(canary), "--expected-commit", "abc", *extra]
+
+
+@needs_p19
+@pytest.mark.parametrize("leftover", ["runs", "wandb", "receipt", "evidence", "archive"])
+def test_runner_refuses_any_leftover_of_an_earlier_attempt_before_writing(canary, monkeypatch, leftover):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("trained over a leftover"))
+    path = {"runs": config_dir / "runs" / f"{manifest['run_id']}_1511_120000" / "model_epoch001.pt",
+            "wandb": config_dir / "wandb" / "debug.log",
+            "receipt": config_dir / runner.RECEIPT_NAME,
+            "evidence": config_dir / runner.EVIDENCE_NAME,
+            "archive": config_dir / "wy_rotation_run_receipt.job123.json"}[leftover]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"status": "FAILED", "slurm_job_id": "77"}', encoding="utf-8")
+    listing = sorted(p.relative_to(config_dir).as_posix() for p in config_dir.rglob("*"))
+    with pytest.raises(runner.RunRefused, match="refusing to run: .* already has"):
+        runner.main(_cli(canary))
+    assert sorted(p.relative_to(config_dir).as_posix() for p in config_dir.rglob("*")) == listing
+    assert path.read_text(encoding="utf-8") == '{"status": "FAILED", "slurm_job_id": "77"}'
+
+
+@needs_p19
+def test_runner_resume_re_evaluates_a_trained_run_only_when_the_failed_job_is_named(canary, monkeypatch):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setenv("SLURM_JOB_ID", "111")
+    calls = _fake_nh(monkeypatch, runner, manifest, fail_on_epoch=2)  # e.g. time limit while evaluating
+    with pytest.raises(RuntimeError, match="evaluation died at epoch 2"):
+        runner.main(_cli(canary))
+    receipt_path = config_dir / runner.RECEIPT_NAME
+    failed_bytes = receipt_path.read_bytes()
+    assert json.loads(failed_bytes)["status"] == "FAILED" and calls["train"] == 1
+
+    # a plain rerun is refused and points at the explicit resume; nothing is touched
+    with pytest.raises(runner.RunRefused, match="--resume-from-job 111"):
+        runner.main(_cli(canary))
+    # the wrong job, a malformed id, or another manifest are refused too
+    with pytest.raises(runner.RunRefused, match="written by job 111"):
+        runner.main(_cli(canary, "--resume-from-job", "112"))
+    with pytest.raises(runner.RunRefused, match="not a Slurm job id"):
+        runner.main(_cli(canary, "--resume-from-job", "../x"))
+    tampered = json.loads(failed_bytes)
+    tampered["manifest_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(runner.RunRefused, match="are not this run's"):
+        runner.main(_cli(canary, "--resume-from-job", "111"))
+    receipt_path.write_bytes(failed_bytes)
+    assert not list(config_dir.glob("*.job*.json")) and calls["train"] == 1
+
+    monkeypatch.setenv("SLURM_JOB_ID", "222")
+    calls["fail_on_epoch"] = None
+    assert runner.main(_cli(canary, "--resume-from-job", "111")) == 0
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE" and receipt["trained_in_this_job"] is False and calls["train"] == 1
+    assert (receipt["slurm_job_id"], receipt["resumed_from_job"], receipt["previous_status"]) == ("222", "111",
+                                                                                                  "FAILED")
+    assert receipt["previous_receipt_sha256"] == __import__("hashlib").sha256(failed_bytes).hexdigest()
+    assert receipt["archived"] == {runner.RECEIPT_NAME: "wy_rotation_run_receipt.job111.json"}
+    assert (config_dir / "wy_rotation_run_receipt.job111.json").read_bytes() == failed_bytes
+    # epoch 1's pickle from job 111 is kept; only epoch 2 is evaluated by the resume
+    assert [r["skipped_existing"] for r in receipt["evaluation"]] == [True, False]
+    assert calls["evaluated"] == [1, 2]
+    # the resumed run is now COMPLETE: never again
+    with pytest.raises(runner.RunRefused, match="the receipt is COMPLETE"):
+        runner.main(_cli(canary, "--resume-from-job", "222"))
+
+
+@needs_p19
+def test_runner_resume_archives_the_previous_evidence_and_refuses_a_different_archive(canary, monkeypatch):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    _fake_nh(monkeypatch, runner, manifest)
+    real_verify = rot.verify_score_blind_run
+    monkeypatch.setattr(rot, "verify_score_blind_run",
+                        lambda *a, **k: {"passed": False, "problems": ["fake"], "per_epoch": {}, "missing_basins": []})
+    with pytest.raises(rot.WyRotationRunsError, match="score-blind verification failed"):
+        runner.main(_cli(canary))
+    evidence_bytes = (config_dir / runner.EVIDENCE_NAME).read_bytes()
+    (config_dir / "wy_rotation_score_blind_evidence.jobnone.json").write_text("other", encoding="utf-8")
+    with pytest.raises(runner.RunRefused, match="a different wy_rotation_score_blind_evidence.jobnone.json"):
+        runner.main(_cli(canary, "--resume-from-job", "none"))
+    assert json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))["status"] == "FAILED"
+    (config_dir / "wy_rotation_score_blind_evidence.jobnone.json").unlink()
+    monkeypatch.setattr(rot, "verify_score_blind_run", real_verify)
+    assert runner.main(_cli(canary, "--resume-from-job", "none")) == 0
+    assert (config_dir / "wy_rotation_score_blind_evidence.jobnone.json").read_bytes() == evidence_bytes
+    assert json.loads((config_dir / runner.EVIDENCE_NAME).read_text(encoding="utf-8"))["passed"]
 
 
 def test_runner_refuses_on_provenance_failure(tmp_path, monkeypatch):
@@ -666,27 +780,41 @@ def _tracked_policy(tmp_path) -> Path:
     return path
 
 
-def _fake_nh(monkeypatch, runner, manifest):
+def _fake_nh(monkeypatch, runner, manifest, *, train_epochs=None, fail_on_epoch=None) -> dict:
+    """Fake NH training + tester. ``train_epochs`` < the config's epochs leaves
+    an interrupted checkpoint set; ``calls["fail_on_epoch"]`` makes the tester
+    die at that epoch (settable between runs)."""
     population = wy.verify_basin_population(wy.load_split_contract(manifest["split_contract"]["path"]), ROOT)
+    calls = {"train": 0, "evaluated": [], "fail_on_epoch": fail_on_epoch}
 
     def fake_train(request):
+        calls["train"] += 1
+        n = request.additional_epochs if train_epochs is None else train_epochs
         config = yaml.safe_load(Path(request.config_path).read_text(encoding="utf-8"))
         nh_run_dir = Path(config["run_dir"]) / f"{config['experiment_name']}_1511_120000"
         nh_run_dir.mkdir(parents=True)
         (nh_run_dir / "config.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
-        for e in range(1, request.additional_epochs + 1):
+        for e in range(1, n + 1):
             (nh_run_dir / f"model_epoch{e:03d}.pt").write_bytes(b"w")
-        (nh_run_dir / "output.log").write_text(_log_text(range(1, request.additional_epochs + 1)), encoding="utf-8")
+        (nh_run_dir / "output.log").write_text(_log_text(range(1, n + 1)), encoding="utf-8")
         _write_receipts(nh_run_dir, nre.read_run_rotation_sealing(nh_run_dir), len(population), periods=("train",))
+
+    class DyingTester(FakeTester):
+        def evaluate(self, *, epoch, save_results, metrics):
+            if epoch == calls["fail_on_epoch"]:
+                raise RuntimeError(f"evaluation died at epoch {epoch}")
+            calls["evaluated"].append(epoch)
+            super().evaluate(epoch=epoch, save_results=save_results, metrics=metrics)
 
     def fake_tester_factory(nh_run_dir):
         sealing = nre.read_run_rotation_sealing(nh_run_dir)
         _write_receipts(nh_run_dir, sealing, len(population), periods=("validation",))
         start = pd.to_datetime(sealing.nh_dates["validation_start_date"], format="%d/%m/%Y")
-        return FakeTester(nh_run_dir, population, pd.date_range(start, periods=3, freq="h"))
+        return DyingTester(nh_run_dir, population, pd.date_range(start, periods=3, freq="h"))
 
     monkeypatch.setattr(po, "default_train_chunk", fake_train)
     monkeypatch.setattr(runner, "_tester_factory", fake_tester_factory)
+    return calls
 
 
 @needs_p19
@@ -700,6 +828,10 @@ def test_runner_with_wandb_policy_tracks_stage_a_only(canary, monkeypatch, tmp_p
     manifest = json.loads(canary.read_text(encoding="utf-8"))
     monkeypatch.setattr(rc, "verify_commit_and_interpreter",
                         lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setenv("SLURM_JOB_ID", "46800001")
+    monkeypatch.setenv("SLURM_ARRAY_JOB_ID", "46800000")
+    monkeypatch.setenv("SLURM_JOB_NAME", "wyrot")
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
     _fake_nh(monkeypatch, runner, manifest)
     assert runner.main(["--manifest", str(canary), "--expected-commit", "abc",
                         "--wandb-policy", str(_tracked_policy(tmp_path))]) == 0
@@ -713,6 +845,10 @@ def test_runner_with_wandb_policy_tracks_stage_a_only(canary, monkeypatch, tmp_p
     assert (kw["name"], kw["group"], kw["job_type"]) == ("canary-c1-base", "canary", "canary")
     assert kw["dir"] == str(config_dir / "wandb") and kw["config"]["checkpoint_wy"] == 2022
     assert kw["config"]["git_commit"] == "abc" and kw["config"]["hyperparameters"]["seq_length"] == 120
+    # x_disable_meta keeps the Slurm env out of W&B: the job's ids come through the run config
+    assert {k: v for k, v in kw["config"].items() if k.startswith("slurm")} == {
+        "slurm_job_id": "46800001", "slurm_array_job_id": "46800000"}
+    assert (receipt["slurm_job_id"], receipt["slurm_array_job_id"]) == ("46800001", "46800000")
     losses = [p for p in run.logs if "train/avg_total_loss" in p]
     assert [p["epoch"] for p in losses] == [1, 2]
     for payload in run.logs:  # every key sent passed the stage-A gate
@@ -757,10 +893,7 @@ def test_runner_failure_finishes_the_wandb_run_as_failed(canary, monkeypatch, tm
     manifest = json.loads(canary.read_text(encoding="utf-8"))
     monkeypatch.setattr(rc, "verify_commit_and_interpreter",
                         lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
-    nh_run_dir = Path(manifest["config_dir"]) / "runs" / f"{manifest['run_id']}_1511_120000"
-    nh_run_dir.mkdir(parents=True)
-    (nh_run_dir / "model_epoch001.pt").write_bytes(b"w")
-    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("retrained"))
+    _fake_nh(monkeypatch, runner, manifest, train_epochs=1)
     with pytest.raises(rot.WyRotationRunsError, match="not the flat 1..2 set"):
         runner.main(["--manifest", str(canary), "--expected-commit", "abc",
                      "--wandb-policy", str(_tracked_policy(tmp_path))])
@@ -768,6 +901,122 @@ def test_runner_failure_finishes_the_wandb_run_as_failed(canary, monkeypatch, tm
     (run,) = fake.runs
     assert receipt["status"] == "FAILED" and run.exit_code == 1 and run.summary["status/receipt"] == "FAILED"
     assert run.uploaded_names() == [f"flashnh/{runner.RECEIPT_NAME}"]  # no stale evidence uploaded
+    assert receipt["wandb"]["finished"] is True and "finished_in_finally" not in receipt["wandb"]
+
+
+def _counting_finish(run):
+    """Wrap a fake run's finish to count calls."""
+    original = run.finish
+    run.finish_calls = 0
+
+    def finish(exit_code=0):
+        run.finish_calls += 1
+        original(exit_code=exit_code)
+
+    run.finish = finish
+
+
+@needs_p19
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, lambda: SystemExit("terminated by signal 15")])
+def test_runner_finishes_wandb_in_finally_when_a_signal_hits_the_complete_close(canary, monkeypatch, tmp_path,
+                                                                                interrupt):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from src.baseline import wy_rotation_tracking as trk
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest)
+
+    def summary_interrupted(self, receipt, evidence=None):
+        _counting_finish(self.run._wandb_run)
+        raise interrupt()  # before _close_tracker reaches finish()
+
+    monkeypatch.setattr(trk.RotationTracker, "log_receipt_summary", summary_interrupted)
+    with pytest.raises((KeyboardInterrupt, SystemExit)):
+        runner.main(_cli(canary, "--wandb-policy", str(_tracked_policy(tmp_path))))
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    (run,) = fake.runs
+    assert receipt["status"] == "COMPLETE" and "post_complete_error" in receipt
+    assert run.exit_code == 0 and run.finish_calls == 1
+    assert receipt["wandb"]["finished"] is True and receipt["wandb"]["finished_in_finally"] is True
+
+
+@needs_p19
+def test_runner_finishes_wandb_in_finally_when_a_signal_hits_the_failed_close(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from src.baseline import wy_rotation_tracking as trk
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest, fail_on_epoch=1)
+
+    def save_interrupted(self, path):
+        _counting_finish(self.run._wandb_run)
+        runner._raise_on_sigterm(15, None)  # Slurm time limit while uploading the FAILED receipt
+
+    monkeypatch.setattr(trk.RotationTracker, "save_file", save_interrupted)
+    with pytest.raises(SystemExit, match="signal 15"):
+        runner.main(_cli(canary, "--wandb-policy", str(_tracked_policy(tmp_path))))
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    (run,) = fake.runs
+    assert receipt["status"] == "FAILED" and "evaluation died at epoch 1" in receipt["error"]
+    assert run.exit_code == 1 and run.finish_calls == 1 and receipt["wandb"]["finished_in_finally"] is True
+
+
+@needs_p19
+def test_runner_finishes_wandb_once_when_the_close_raises_an_ordinary_error(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from src.baseline import wy_rotation_tracking as trk
+    from tests.test_wy_rotation_tracking import install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest)
+
+    def summary_broken(self, receipt, evidence=None):
+        _counting_finish(self.run._wandb_run)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(trk.RotationTracker, "log_receipt_summary", summary_broken)
+    assert runner.main(_cli(canary, "--wandb-policy", str(_tracked_policy(tmp_path)))) == 0
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    (run,) = fake.runs
+    assert receipt["status"] == "COMPLETE" and "disk full" in receipt["wandb"]["close_error"]
+    assert run.exit_code == 0 and run.finish_calls == 1 and receipt["wandb"]["finished_in_finally"] is True
+
+
+@needs_p19
+def test_runner_finishes_an_orphan_wandb_run_when_a_signal_ends_init(canary, monkeypatch, tmp_path):
+    from src.baseline import sweep_v1_runtime_contract as rc
+    from tests.test_wy_rotation_tracking import FakeRun, install_fake_wandb
+
+    fake = install_fake_wandb(monkeypatch)
+    runner = _load_runner()
+
+    def init(**kwargs):  # the run started, then SIGTERM before init_rotation_tracker returned
+        fake.run = FakeRun(**kwargs)
+        runner._raise_on_sigterm(15, None)
+
+    fake.init = init
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("trained after a signal"))
+    with pytest.raises(SystemExit, match="signal 15"):
+        runner.main(_cli(canary, "--wandb-policy", str(_tracked_policy(tmp_path))))
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "FAILED" and fake.run.exit_code == 1
 
 
 def test_runner_refuses_a_missing_wandb_policy_before_writing_anything(tmp_path, monkeypatch):
@@ -825,3 +1074,30 @@ def test_runner_records_failed_when_a_signal_arrives_during_wandb_init(canary, m
                      "--wandb-policy", str(_tracked_policy(tmp_path))])
     receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
     assert receipt["status"] == "FAILED" and "signal 15" in receipt["error"]
+
+
+@pytest.mark.parametrize("os_name, failures, expect_written", [("nt", 2, True), ("nt", 99, False), ("posix", 1, False)])
+def test_write_json_retries_a_brief_windows_replace_lock_only(tmp_path, monkeypatch, os_name, failures, expect_written):
+    runner = _load_runner()
+    calls = {"n": 0}
+    real_replace = Path.replace
+
+    def flaky_replace(self, target):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr(runner.os, "name", os_name)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    target = tmp_path / "receipt.json"
+    if expect_written:
+        runner._write_json(target, {"status": "COMPLETE"})
+        assert json.loads(target.read_text(encoding="utf-8")) == {"status": "COMPLETE"}
+        assert calls["n"] == failures + 1
+    else:
+        with pytest.raises(PermissionError):
+            runner._write_json(target, {"status": "COMPLETE"})
+        assert not target.exists()
+        assert calls["n"] == (runner._REPLACE_TRIES if os_name == "nt" else 1)

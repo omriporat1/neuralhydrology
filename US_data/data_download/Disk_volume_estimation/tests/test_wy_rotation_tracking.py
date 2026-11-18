@@ -1,9 +1,10 @@
 """Stage-A W&B tracking of the water-year rotation runs, with a fake ``wandb``
-module (the local venv has no wandb; the real-package qualification is an
-online smoke on Moriah)."""
+module, plus one real-package offline smoke of the init settings at the end
+(it skips where ``wandb`` is not importable, e.g. the local venv)."""
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sys
 import types
@@ -153,6 +154,32 @@ def test_failed_init_degrades_and_never_raises(monkeypatch, tmp_path):
     rec = tracker.receipt_record()
     assert rec["backend"] == "null" and rec["degraded"] and rec["degraded_operations"] == ["rotation_init"]
     tracker.log({"train/avg_total_loss": 1.0}, epoch=1)  # still a no-op sink
+
+
+@pytest.mark.parametrize("finish_fails", [False, True])
+def test_setup_failure_after_init_finishes_the_created_run_as_failed(monkeypatch, tmp_path, finish_fails):
+    """wandb.init worked but define_metric raised: the run W&B opened is closed
+    with exit code 1 before the null fallback, never left to W&B's exit hook."""
+    def broken_define_metric(self, name, step_metric=None):
+        raise RuntimeError("define_metric broke")
+
+    def broken_finish(self, exit_code=0):
+        self.exit_code = exit_code
+        raise RuntimeError("finish broke")
+
+    monkeypatch.setattr(FakeRun, "define_metric", broken_define_metric)
+    if finish_fails:
+        monkeypatch.setattr(FakeRun, "finish", broken_finish)
+    with pytest.warns(RuntimeWarning):
+        tracker, fake = _tracker(monkeypatch, tmp_path)
+    (run,) = fake.runs
+    assert run.exit_code == 1
+    rec = tracker.receipt_record()
+    expected = ["rotation_init", "rotation_init_cleanup"] if finish_fails else ["rotation_init"]
+    assert rec["backend"] == "null" and rec["degraded"] and rec["degraded_operations"] == expected
+    tracker.log({"train/avg_total_loss": 1.0}, epoch=1)  # a no-op sink: nothing reaches the closed run
+    tracker.finish(failed=False)
+    assert run.logs == [] and run.exit_code == 1
 
 
 def test_backend_failure_degrades_without_raising(monkeypatch, tmp_path):
@@ -313,11 +340,41 @@ def test_run_config_carries_identity_years_and_hyperparameters():
                          manifest_sha256="m", provenance={"git_commit": "c", "runtime_python": "py"})
     assert out["hyperparameters"] == {"hidden_size": 256, "seq_length": 120}
     assert (out["arm"], out["lambda"], out["checkpoint_wy"], out["git_commit"]) == ("base", 0.0, 2022, "c")
+    assert not any(k.startswith("slurm") for k in out)
 
 
-def test_init_turns_off_console_capture(monkeypatch, tmp_path):
+@pytest.mark.parametrize("environ, expected", [
+    ({"SLURM_JOB_ID": "46800001", "SLURM_ARRAY_JOB_ID": "46800000", "SLURM_ARRAY_TASK_ID": "2",
+      "SLURM_JOB_NAME": "wyrot", "SLURM_SUBMIT_HOST": "moriah-gw-01"},
+     {"slurm_job_id": "46800001", "slurm_array_job_id": "46800000", "slurm_array_task_id": "2"}),
+    ({"SLURM_JOB_ID": "46800001", "SLURM_ARRAY_TASK_ID": ""}, {"slurm_job_id": "46800001"}),
+    ({"PATH": "x"}, {}),
+])
+def test_slurm_ids_take_only_the_job_and_array_ids(environ, expected):
+    assert trk.slurm_ids(environ) == expected
+
+
+def test_run_config_carries_the_slurm_ids():
+    row = {"run_id": "r", "cycle": 2}
+    campaign = {"campaign_id": "cid", "split_contract": {"contract_id": "k", "file_sha256": "s"}}
+    slurm = trk.slurm_ids({"SLURM_JOB_ID": "46800001", "SLURM_ARRAY_JOB_ID": "46800000",
+                           "SLURM_ARRAY_TASK_ID": "1", "SLURM_JOB_NAME": "wyrot"})
+    out = trk.run_config(row=row, campaign_row={}, config={}, campaign=campaign, manifest_sha256="m",
+                         provenance={}, slurm=slurm)
+    assert {k: v for k, v in out.items() if k.startswith("slurm")} == {
+        "slurm_job_id": "46800001", "slurm_array_job_id": "46800000", "slurm_array_task_id": "1"}
+
+
+def test_init_turns_off_console_capture_and_system_metadata(monkeypatch, tmp_path):
     _, fake = _tracker(monkeypatch, tmp_path)
-    assert fake.runs[0].init_kwargs["settings"] == ("Settings", {"console": "off"})
+    assert fake.runs[0].init_kwargs["settings"] == ("Settings", {"console": "off", "x_disable_meta": True})
+
+
+def test_receipt_record_reports_whether_the_run_was_finished(monkeypatch, tmp_path):
+    tracker, _ = _tracker(monkeypatch, tmp_path)
+    assert tracker.receipt_record()["finished"] is False
+    tracker.finish(failed=False)
+    assert tracker.receipt_record()["finished"] is True
 
 
 def test_live_handler_never_touches_the_root_logger(monkeypatch, tmp_path):
@@ -369,3 +426,99 @@ def test_an_unrecognised_magnitude_weight_key_is_refused():
 def test_extra_score_fragments_are_refused(key):
     with pytest.raises(TrackingError):
         trk.check_metric_keys({key: 1.0})
+
+
+# --------------------------------------------------------------------------- real wandb package (offline)
+
+_META_CHILD = r'''
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["FLASHNH_ROOT"])
+from src.baseline import wy_rotation_tracking as trk
+
+wandb_dir, disable_meta = Path(sys.argv[1]), sys.argv[2] == "on"
+if not disable_meta:  # positive control: the same tracker with W&B's metadata collection left on
+    trk.WANDB_SETTINGS = {k: v for k, v in trk.WANDB_SETTINGS.items() if k != "x_disable_meta"}
+policy = {"policy_name": "smoke", "enabled": True, "mode": "offline", "project": "flashnh-meta-smoke",
+          "entity": None, "tags": ["smoke"], "max_artifact_reference_bytes": 1024}
+config = trk.run_config(row={"run_id": "meta-smoke-" + sys.argv[2], "cycle": 1}, campaign_row={}, config={},
+                       campaign={"campaign_id": "smoke", "split_contract": {}}, manifest_sha256="m",
+                       provenance={}, slurm=trk.slurm_ids(os.environ))
+tracker = trk.init_rotation_tracker(policy, flashnh_run_id="meta-smoke-" + sys.argv[2], config=config,
+                                    layout=trk.run_layout(cycle=1, config={}, is_canary=True), wandb_dir=wandb_dir)
+wandb_config = {k: v for k, v in dict(tracker.run._wandb_run.config).items() if k.startswith("slurm")}
+tracker.log({"train/avg_total_loss": 0.5}, epoch=1)
+tracker.finish(failed=False)
+print(json.dumps({"backend": tracker.run.backend, "degraded": sorted(tracker.run.degraded_operations),
+                  "settings": trk.WANDB_SETTINGS, "wandb_config_slurm": wandb_config}))
+'''
+
+
+def _run_real_wandb_child(tmp_path: Path, disable_meta: bool, sentinel: str) -> tuple[dict, dict[str, bytes]]:
+    """One real-wandb offline run in its own process; returns the child's report
+    and the bytes W&B would sync (the run's .wandb log and files/)."""
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    tag = "on" if disable_meta else "off"
+    work = tmp_path / tag
+    for sub in ("wandb", "config", "cache", "data", "artifacts", "tmp"):
+        (work / sub).mkdir(parents=True)
+    script = work / "meta_smoke_child.py"
+    script.write_text(_META_CHILD, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("WANDB_", "SLURM_"))}
+    env.update(FLASHNH_ROOT=str(root), WANDB_MODE="offline", WANDB_SILENT="true",
+               WANDB_CONFIG_DIR=str(work / "config"), WANDB_CACHE_DIR=str(work / "cache"),
+               WANDB_DATA_DIR=str(work / "data"), WANDB_ARTIFACT_DIR=str(work / "artifacts"),
+               TMP=str(work / "tmp"), TEMP=str(work / "tmp"), TMPDIR=str(work / "tmp"),
+               SLURM_JOB_ID=sentinel + "-jobid", SLURM_ARRAY_JOB_ID=sentinel + "-arrayjob",
+               SLURM_ARRAY_TASK_ID="3", SLURM_JOB_NAME=sentinel + "-jobname")
+    done = subprocess.run([sys.executable, str(script), str(work / "wandb"), tag, sentinel + "-argv"], cwd=root,
+                          env=env, capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-3000:]
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    (run_dir,) = (work / "wandb" / "wandb").glob("offline-run-*")
+    synced = {p.relative_to(run_dir).as_posix(): p.read_bytes() for p in run_dir.rglob("*")
+              if p.is_file() and (p.suffix == ".wandb" or "files" in p.relative_to(run_dir).parts)}
+    return report, synced
+
+
+def test_real_wandb_offline_x_disable_meta_keeps_system_metadata_out(tmp_path):
+    """Real-package smoke (no fake, no network, no API key), against a positive
+    control that differs only by x_disable_meta. It checks exactly this:
+    - with x_disable_meta the program args (argv sentinel, script name) and the
+      Slurm env (SLURM_JOB_NAME sentinel) are absent from what W&B syncs, while
+      the control run has both;
+    - the Slurm job/array ids reach W&B through the run config.
+    It does not check host, git, python/platform or requirements.txt: they stay
+    in the run with x_disable_meta on. The account email is absent offline in
+    both runs, so this test cannot detect it."""
+    import uuid
+
+    wandb = pytest.importorskip("wandb", reason="real wandb package not installed in this interpreter")
+    sentinel = "flashnhmeta" + uuid.uuid4().hex[:12]
+
+    report, synced = _run_real_wandb_child(tmp_path, True, sentinel)
+    control_report, control_synced = _run_real_wandb_child(tmp_path, False, sentinel)
+    record = {"wandb_version": wandb.__version__, "disabled": sorted(synced), "control": sorted(control_synced)}
+    print(json.dumps(record))
+
+    assert report["backend"] == control_report["backend"] == "wandb", (report, control_report)
+    assert not report["degraded"] and not control_report["degraded"]
+    assert report["settings"]["x_disable_meta"] is True and "x_disable_meta" not in control_report["settings"]
+    assert any(name.endswith(".wandb") for name in synced)
+    # the control proves the scan can see collected metadata ...
+    control_blob = b"".join(control_synced.values())
+    for collected in (sentinel + "-argv", sentinel + "-jobname"):  # program args and the Slurm env
+        assert collected.encode() in control_blob, (collected, sorted(control_synced))
+    # ... and with x_disable_meta nothing of it is left for W&B to sync
+    blob = b"".join(synced.values())
+    for leak in (sentinel + "-argv", sentinel + "-jobname", "meta_smoke_child.py"):
+        assert leak.encode() not in blob, leak
+    # the Slurm ids are in the W&B run config, and so in what W&B syncs
+    expected = {"slurm_job_id": sentinel + "-jobid", "slurm_array_job_id": sentinel + "-arrayjob",
+                "slurm_array_task_id": "3"}
+    assert report["wandb_config_slurm"] == expected == control_report["wandb_config_slurm"]
+    for value in (sentinel + "-jobid", sentinel + "-arrayjob"):
+        assert value.encode() in blob, value

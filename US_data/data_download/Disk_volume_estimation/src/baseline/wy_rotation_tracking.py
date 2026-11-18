@@ -75,6 +75,17 @@ WANDB_RESERVED_FILE_NAMES = frozenset({"config.yaml", "wandb-summary.json", "wan
 # run's Files (e.g. ``flashnh/config.yaml``); the frozen original is never linked.
 UPLOAD_SUBDIR = "flashnh"
 UPLOAD_STAGING_DIRNAME = "flashnh_upload_staging"
+# wandb.Settings of every rotation run. console="off": stdout/stderr are not
+# mirrored, so only the gated keys, the run config and the uploaded small files
+# reach W&B. x_disable_meta=True turns off W&B's system-metadata block: the
+# program path and args, the Slurm env and the disk usage are no longer sent.
+# It does NOT hide everything: in wandb 0.28.1 offline, the run record still
+# carries the host name, the git remote URL + HEAD commit, the python version,
+# the platform, and files/requirements.txt.
+# The Slurm job/array ids are put back through the run config (slurm_ids).
+# x_* settings are W&B-private API: the real-package smoke test pins what is
+# dropped (program args, Slurm env) and what is kept (the Slurm ids in config).
+WANDB_SETTINGS = {"console": "off", "x_disable_meta": True}
 
 _EPOCH_LOSS_PATTERN = re.compile(r"^Epoch (\d+) average loss: (.*)$")
 _LOG_LINE_PATTERN = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+: Epoch (\d+) average loss: (.*)$")
@@ -118,9 +129,22 @@ def run_layout(*, cycle: int, config: Mapping[str, Any], is_canary: bool) -> dic
     return {"name": f"c{cycle}-{arm}", "group": arm, "job_type": "train"}
 
 
+SLURM_ID_ENV = (("slurm_job_id", "SLURM_JOB_ID"), ("slurm_array_job_id", "SLURM_ARRAY_JOB_ID"),
+                ("slurm_array_task_id", "SLURM_ARRAY_TASK_ID"))
+
+
+def slurm_ids(environ: Mapping[str, str]) -> dict[str, str]:
+    """The Slurm job id and, when present, the array job/task ids. x_disable_meta keeps
+    W&B from collecting the Slurm env, so these go into the run config to show which
+    Moriah job a run came from. Unset or empty variables are left out."""
+    return {key: str(environ[var]) for key, var in SLURM_ID_ENV if environ.get(var)}
+
+
 def run_config(*, row: Mapping[str, Any], campaign_row: Mapping[str, Any], config: Mapping[str, Any],
-               campaign: Mapping[str, Any], manifest_sha256: str, provenance: Mapping[str, Any]) -> dict[str, Any]:
-    """The W&B config of a rotation run: identity, years and frozen hyperparameters."""
+               campaign: Mapping[str, Any], manifest_sha256: str, provenance: Mapping[str, Any],
+               slurm: Optional[Mapping[str, str]] = None) -> dict[str, Any]:
+    """The W&B config of a rotation run: identity, years, frozen hyperparameters and
+    the Slurm ids of the job (``slurm``, from :func:`slurm_ids`)."""
     arm, lam = _arm(config)
     hyper = {k: config[k] for k in CONFIG_KEYS if k in config}
     out = {
@@ -139,6 +163,7 @@ def run_config(*, row: Mapping[str, Any], campaign_row: Mapping[str, Any], confi
         "manifest_sha256": manifest_sha256,
         "hyperparameters": json.loads(json.dumps(hyper, default=str)),
         **{k: provenance[k] for k in ("commit", "git_commit", "runtime_python") if k in provenance},
+        **{key: str(slurm[key]) for key, _ in SLURM_ID_ENV if slurm and slurm.get(key)},
     }
     _reject_credential_like_keys(out, "rotation run config")
     return out
@@ -362,7 +387,7 @@ class RotationTracker:
     def receipt_record(self) -> dict[str, Any]:
         return {"mode": self.run.mode, "backend": self.run.backend, "id": self.run.wandb_run_id,
                 **self.layout, "degraded": self.run.degraded, "root_logging_restored": self.root_logging_restored,
-                "degraded_operations": sorted(self.run.degraded_operations)}
+                "degraded_operations": sorted(self.run.degraded_operations), "finished": self.run.finished}
 
     def finish(self, *, failed: bool) -> None:
         self.detach_live_loss_handler()
@@ -387,21 +412,23 @@ def init_rotation_tracker(policy: Mapping[str, Any], *, flashnh_run_id: str, con
                            mode=policy["mode"], wandb_run_id=run_id)
     root = logging.getLogger()
     root_handlers, root_level = list(root.handlers), root.level
+    wandb_run = None
     try:
         import wandb
 
         Path(wandb_dir).mkdir(parents=True, exist_ok=True)
-        # console="off": stdout/stderr are not mirrored, so only the gated keys,
-        # the config above and the uploaded small files reach W&B.
         wandb_run = wandb.init(project=policy["project"], entity=policy.get("entity"),
                                tags=list(policy.get("tags", [])), config=dict(config), mode=policy["mode"],
                                id=run_id, resume="allow", dir=str(wandb_dir),
-                               settings=wandb.Settings(console="off"), **dict(layout))
+                               settings=wandb.Settings(**WANDB_SETTINGS), **dict(layout))
         wandb_run.define_metric("epoch")
         for prefix in ("train", "evalrun"):
             wandb_run.define_metric(f"{prefix}/*", step_metric="epoch")
     except Exception as exc:  # noqa: BLE001 -- tracking never stops the scientific run
         _mark_degraded(null_run, "rotation_init", exc)
+        if wandb_run is not None:  # init worked, the setup after it failed: close that run
+            # as failed now, instead of W&B's exit hook later closing it with exit code 0
+            _guard_backend_call(null_run, "rotation_init_cleanup", lambda: wandb_run.finish(exit_code=1))
         tracker = RotationTracker(null_run, layout=layout)
     else:
         tracker = RotationTracker(TrackingRun(backend="wandb", max_artifact_reference_bytes=max_bytes,
