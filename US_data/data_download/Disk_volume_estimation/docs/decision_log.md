@@ -2,6 +2,48 @@
 
 # Decision Log
 
+## 2026-11-18 — Rotation results: reported over the five cycles, WY2026 as a consistency check; event threshold without our own return periods — record only
+
+**Decision (Omri with Efrat, supervisor meeting 2026-11-18).**
+- **Reporting.** Each run is scored on each cycle's assessment year. The headline stays as frozen in spec D2: the median over all basin-years pooled, with the five per-cycle medians printed beside it. **Added: the minimum and maximum of the five per-cycle medians** next to the headline in every summary table. No mean across cycles; medians across basins throughout. The full presentation list (per-basin CDFs, maps, breakdowns by basin type, per-basin gain-vs-cost scatter) is agreed and recorded later, after the checkpoint picks and **before any assessment year is scored**. This covers both losses (baseline, flood-weighted) and both checkpoint rules (best median NSE; lowest error above Q98). When the Q98 rule picks the checkpoint, overall NSE is reported too, so the cost of the flood gain is visible.
+- **WY2026 is reported as a check, not used for any choice.** After the rotation results are recorded, WY2026 is scored once to confirm that it is broadly in line with the five-cycle range. Nothing is picked or tuned on it. **WY2026 is opened once**, after the rotation results of both arms (baseline and arm 2) are recorded. All chosen checkpoints (5 cycles × both picks × both arms) are scored on it together, each once, per spec §4f. If arm 2 is not finished when this stage is due to close, the question goes back to Omri; scoring the baseline first does not happen by default. The opening itself still needs Omri's explicit go at the time.
+- **Event threshold.** No return-period estimates of our own. The current 0.1 specific-discharge threshold is a rule of thumb, to be replaced by a USGS flood threshold if USGS publishes one, otherwise by a fixed fraction of a published US envelope curve (peak specific discharge against basin area). The choice is made in a short design note before any event metric is computed.
+
+- **Arm-2 result reported descriptively, with no pass/fail verdict (addendum to `docs/wy_rotation_metric_spec_v001.md` §4d; the spec file is not edited).** Decided before any rotation score was opened.
+  - The analysis plan stays frozen as written: §4a (paired per basin-year), §4b (C1 primary; C2-C4), §4c (pooled median paired difference, fraction improved, per-cycle medians and k/5 sign agreement, basin bootstrap with the fixed seed), §4e (report contents), and the rule that every outcome is reported, including results against arm 2.
+  - §4d's verdict wording ("improves flood skill", "flood gain with an overall cost", "no clear flood gain", "worse on floods") is withdrawn. The result is described by its numbers: the flood-metric difference with its 95% interval and k/5; the costs in NSE and in below-Q98 PBIAS, each with its interval; and a trade-off view over λ ∈ {0.5, 2, 8} (flood gain against NSE cost).
+  - −0.02 NSE and +5 pp PBIAS stay only as stated reference scales for the reader. They decide nothing.
+  - Carrying any loss into the next stage stays a separate user decision after a gate-3 review.
+- **Hydrograph reference panel: rule-based only (refines the 2026-11-16 addendum).** No basins are added by hand; the supervisor has no preference among the US basins. On top of the 2026-11-16 rule (about 12 development basins, area × flashiness strata spread over regions, chosen from attributes and observed flow only, never from model output, ineligible in no rotation year), the panel must be:
+  - **non-regulated**: GAGES-II reference class where the stratum has one. Otherwise the least-disturbed basin with no regulation flag, and the fallback is recorded.
+  - **diverse and representative**: every area × flashiness cell is covered, regions do not repeat where possible, and the draw inside each cell uses a fixed seed.
+  - The rule and the basin list are frozen in a file before any rotation score is opened.
+
+**Why.** Five cycles give a spread, not one number, so the spread is what is reported. WY2026 is the only year no cycle has seen; one look at the end confirms the rotation result without using it to choose. Return periods from short gauge records are uncertain and cannot be computed for many gauges; a published threshold or envelope curve is simpler and good enough to move forward.
+
+**Why (verdict withdrawn).** This is a PhD study of a first, exploratory change of loss and checkpoint rule. Nobody can yet say what size of effect to expect. A reproducible, pre-specified analysis plan and an honest report of the numbers serve the work; a binary label set by arbitrary thresholds does not. The thresholds remain as reference scales.
+
+**Strongest argument against (recorded).** Without a fixed criterion, the later choice of what to carry forward can drift towards whatever looks good. The frozen analysis plan and the rule that everything is reported are the guard against that, but it is weaker than a fixed bar. With five cycles, the minimum-maximum range is wide and the mean is sensitive to one odd year. A single look at WY2026 that disagrees with the rotation leaves no approved next step. A threshold based on area alone ignores land use and climate and favours small basins.
+
+## 2026-11-18 — Rotation runs: no Slurm re-queue, resume across a code change, remaining W&B metadata accepted — record only
+
+**Decision (user, 2026-11-18).** These follow the gate review of commit 9c9f346 (findings 1-3 and 5, deferred there).
+- **Slurm re-queue is off.** The campaign sbatch has `#SBATCH --no-requeue`. For the running baseline launch (job 46774453, cycles 2-5) re-queue was switched off with `scontrol update ... Requeue=0` on 2026-11-18 while the four tasks were running; they were not touched otherwise. If a node fails, the row now fails visibly, and the operator chooses: `--resume-from-job` or a new decision.
+- **A resume across a code change is allowed.** If the commit of the resume differs from the commit in the run's receipt, or the receipt has no commit, **every** epoch is re-evaluated, not only the missing ones. A resume of any job launched from 9c9f346 (cycles 2-5, job 46774453) therefore re-evaluates all 12 epochs, about 2 GPU-h per cycle. The receipt records `previous_git_commit` and which path was taken (missing epochs only, or all epochs). Training is never repeated, so the weights still come from the earlier commit, and the receipt says so.
+- **Remaining W&B metadata is accepted for now.** With system metadata off (decision 2026-11-18, 9c9f346), W&B still records the host name and the git remote and commit. The W&B project is private. Before the project is shared with anyone, W&B's git capture is switched off; that is a one-line setting change.
+
+**Why.**
+- With re-queue on, Slurm restarts a failed row under the same job id. The runner would then refuse (a receipt already exists) or meet a stale row lock, and the restart would also blur which job wrote which receipt. A visible failure is safer than an automatic retry that cannot succeed.
+- A full re-evaluation keeps all epochs of one run scored by one version of the evaluation code; mixing versions inside a run would make the checkpoint choice depend on the code version.
+- The git commit is part of each run's provenance, and the host name is harmless while the project is private.
+
+**Strongest argument against (recorded).**
+- Without re-queue, a node failure needs a person to act; a run may sit idle overnight.
+- A full re-evaluation of 12 epochs costs more Moriah time than evaluating the missing ones, and the run still mixes a training commit and an evaluation commit (recorded, not hidden).
+- The git remote names the repository, and turning git capture off later does not remove it from runs already logged.
+
+Code: re-queue in the untracked campaign sbatch (`.scratch_local/wy_rotation_runs_v001/`); resume policy in the runner-fix session's patch (review packet `.scratch_local/review_packets/20261118_wy_rotation_resume_path/`, commit d8dfa5c after an independent delta review)
+
 ## 2026-11-18 — Rotation runner: refuse repeated runs, narrow resume, W&B system metadata off — record only
 
 **Decision (user, 2026-11-18).**
