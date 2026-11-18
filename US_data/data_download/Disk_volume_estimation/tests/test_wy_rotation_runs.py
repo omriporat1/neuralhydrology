@@ -349,6 +349,73 @@ def test_evaluate_all_epochs_fails_when_nh_writes_nothing(tmp_path, contract_pat
         rot.evaluate_all_epochs(run["nh_run_dir"], [1], tester_factory=lambda _: Silent())
 
 
+def _damage_pickle(path: Path, damage: str) -> None:
+    if damage == "truncated":  # NH writes in place: a kill mid-write leaves a prefix of the file
+        path.write_bytes(path.read_bytes()[: len(path.read_bytes()) // 2])
+    elif damage == "empty":
+        path.write_bytes(b"")
+    else:  # loads, but is not an NH results dict
+        path.write_bytes(pickle.dumps(["not", "a", "dict"]))
+
+
+@pytest.mark.parametrize("damage, why", [("truncated", "does not load"), ("empty", "does not load"),
+                                         ("not_a_dict", "not an NH results dict")])
+def test_evaluate_all_epochs_redoes_an_existing_pickle_that_does_not_load(tmp_path, contract_path, damage, why):
+    run = _synthetic_run(tmp_path, contract_path, epochs=(1, 2))
+    good = rot.results_pickle_path(run["nh_run_dir"], 1).read_bytes()
+    _damage_pickle(rot.results_pickle_path(run["nh_run_dir"], 2), damage)
+    assert rot.results_pickle_problem(rot.results_pickle_path(run["nh_run_dir"], 1)) is None
+    assert why in rot.results_pickle_problem(rot.results_pickle_path(run["nh_run_dir"], 2))
+    tester = FakeTester(run["nh_run_dir"], run["basins"], run["dates"])
+    records = rot.evaluate_all_epochs(run["nh_run_dir"], [1, 2], tester_factory=lambda _: tester)
+    assert [c["epoch"] for c in tester.calls] == [2]  # only the bad one, never the loadable one
+    assert records[0] == {"epoch": 1, "skipped_existing": True}
+    assert records[1]["skipped_existing"] is False and why in records[1]["redone_existing"]
+    assert rot.results_pickle_path(run["nh_run_dir"], 1).read_bytes() == good
+    assert rot.results_pickle_problem(rot.results_pickle_path(run["nh_run_dir"], 2)) is None
+
+
+def test_evaluate_all_epochs_leaves_no_bad_pickle_when_the_redo_dies(tmp_path, contract_path):
+    run = _synthetic_run(tmp_path, contract_path, epochs=(1,))
+    path = rot.results_pickle_path(run["nh_run_dir"], 1)
+    _damage_pickle(path, "truncated")
+
+    class Dying:
+        def evaluate(self, **kwargs):
+            raise RuntimeError("killed")
+
+    with pytest.raises(RuntimeError, match="killed"):
+        rot.evaluate_all_epochs(run["nh_run_dir"], [1], tester_factory=lambda _: Dying())
+    assert not path.exists()  # the next resume sees a missing epoch, not the truncated file
+
+
+def test_delete_results_pickles_deletes_only_the_pickles(tmp_path, contract_path):
+    run = _synthetic_run(tmp_path, contract_path, epochs=(1, 3))
+    before = {p for p in run["nh_run_dir"].rglob("*") if p.is_file()}
+    assert rot.delete_results_pickles(run["nh_run_dir"], [3, 2, 1]) == [1, 3]
+    after = {p for p in run["nh_run_dir"].rglob("*") if p.is_file()}
+    assert before - after == {rot.results_pickle_path(run["nh_run_dir"], e) for e in (1, 3)}
+
+
+@pytest.mark.parametrize("fault", [MemoryError("oom"), ModuleNotFoundError("no module named 'xarray'"),
+                                   ImportError("cannot import name")])
+def test_a_job_or_environment_fault_never_deletes_a_valid_pickle(tmp_path, contract_path, monkeypatch, fault):
+    run = _synthetic_run(tmp_path, contract_path, epochs=(1,))
+    path = rot.results_pickle_path(run["nh_run_dir"], 1)
+    good = path.read_bytes()
+
+    def broken_load(fh):
+        raise fault
+
+    monkeypatch.setattr(rot.pickle, "load", broken_load)
+    with pytest.raises(type(fault)):
+        rot.results_pickle_problem(path)
+    tester = FakeTester(run["nh_run_dir"], run["basins"], run["dates"])
+    with pytest.raises(type(fault)):
+        rot.evaluate_all_epochs(run["nh_run_dir"], [1], tester_factory=lambda _: tester)
+    assert path.read_bytes() == good and tester.calls == []  # kept, not re-evaluated
+
+
 def test_log_epoch_timestamps_returns_times_only(tmp_path):
     log = tmp_path / "output.log"
     log.write_text(_log_text([1, 2, 3]) + "2026-11-15 13:30:00,000: something else\n", encoding="utf-8")
@@ -756,6 +823,262 @@ def test_runner_resume_archives_the_previous_evidence_and_refuses_a_different_ar
     assert runner.main(_cli(canary, "--resume-from-job", "none")) == 0
     assert (config_dir / "wy_rotation_score_blind_evidence.jobnone.json").read_bytes() == evidence_bytes
     assert json.loads((config_dir / runner.EVIDENCE_NAME).read_text(encoding="utf-8"))["passed"]
+
+
+def _failed_job_111(canary, monkeypatch, runner):
+    """Job 111 on commit abc trains, writes epoch 1's pickle and dies evaluating epoch 2."""
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setenv("SLURM_JOB_ID", "111")
+    calls = _fake_nh(monkeypatch, runner, manifest, fail_on_epoch=2)
+    with pytest.raises(RuntimeError, match="evaluation died at epoch 2"):
+        runner.main(_cli(canary))
+    assert not (config_dir / runner.LOCK_NAME).exists()  # released on the failure path too
+    nh_run_dir = po.discover_nh_run_dir(config_dir, manifest["run_id"])
+    assert rot.results_pickle_path(nh_run_dir, 1).is_file() and not rot.results_pickle_path(nh_run_dir, 2).exists()
+    monkeypatch.setenv("SLURM_JOB_ID", "222")
+    calls["fail_on_epoch"] = None
+    calls["evaluated"].clear()
+    return config_dir, nh_run_dir, calls
+
+
+@needs_p19
+def test_runner_resume_on_the_same_commit_redoes_a_truncated_pickle(canary, monkeypatch):
+    runner = _load_runner()
+    config_dir, nh_run_dir, calls = _failed_job_111(canary, monkeypatch, runner)
+    _damage_pickle(rot.results_pickle_path(nh_run_dir, 1), "truncated")  # killed while NH wrote epoch 1
+    assert runner.main(_cli(canary, "--resume-from-job", "111")) == 0
+    receipt = json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE" and calls["evaluated"] == [1, 2] and calls["train"] == 1
+    assert receipt["previous_git_commit"] == "abc" == receipt["git_commit"]
+    policy = receipt["resume_evaluation_policy"]
+    assert policy["mode"] == "reuse_loadable" and "deleted_pickle_epochs" not in policy
+    assert set(receipt["resume_reevaluated_epochs"]) == {"1", "2"}
+    assert receipt["resume_reevaluated_epochs"]["1"].startswith("existing pickle does not load")
+    assert receipt["resume_reevaluated_epochs"]["2"] == "no pickle present when this resume started"
+    assert all(rot.results_pickle_problem(rot.results_pickle_path(nh_run_dir, e)) is None for e in (1, 2))
+    assert not (config_dir / runner.LOCK_NAME).exists()
+
+
+_RESUME_ON_DEF = ("--expected-commit", "def", "--resume-from-job", "111")
+_REEVALUATE_ALL = "re-evaluated: commit differs, reevaluate_all"
+
+
+@needs_p19
+def test_runner_resume_on_another_commit_reevaluates_every_epoch(canary, monkeypatch):
+    runner = _load_runner()
+    config_dir, nh_run_dir, calls = _failed_job_111(canary, monkeypatch, runner)
+    assert runner.main(["--manifest", str(canary), *_RESUME_ON_DEF]) == 0
+    receipt = json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE" and calls["evaluated"] == [1, 2] and calls["train"] == 1
+    assert (receipt["previous_git_commit"], receipt["git_commit"]) == ("abc", "def")
+    policy = receipt["resume_evaluation_policy"]
+    assert (policy["mode"], policy["deleted_pickle_epochs"]) == ("reevaluate_all", [1])  # job 111's epoch 1
+    assert policy["deleted_pickle_epochs_meaning"].startswith("pickles present when this job started and deleted")
+    assert receipt["resume_reevaluated_epochs"] == {"1": _REEVALUATE_ALL, "2": _REEVALUATE_ALL}
+    assert [r["skipped_existing"] for r in receipt["evaluation"]] == [False, False]
+
+
+@needs_p19
+def test_a_killed_cross_commit_resume_leaves_an_honest_receipt_for_the_next(canary, monkeypatch):
+    runner = _load_runner()
+    config_dir, nh_run_dir, calls = _failed_job_111(canary, monkeypatch, runner)
+    failed_bytes = (config_dir / runner.RECEIPT_NAME).read_bytes()
+
+    # job 222 (def) is killed after deleting job 111's pickles, before archiving its
+    # receipt: that receipt (commit abc) stays, so the next resume on def decides the same way
+    real_archive = runner._archive_previous
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_archive_previous", killed)
+    with pytest.raises(KeyboardInterrupt):
+        runner.main(["--manifest", str(canary), *_RESUME_ON_DEF])
+    assert (config_dir / runner.RECEIPT_NAME).read_bytes() == failed_bytes
+    assert not rot.results_pickle_path(nh_run_dir, 1).exists() and calls["evaluated"] == []
+    assert not (config_dir / runner.LOCK_NAME).exists()
+    monkeypatch.setattr(runner, "_archive_previous", real_archive)
+
+    # no pickle re-written: job 111 DID write epoch 1, and the receipt must not deny it
+    assert runner.main(["--manifest", str(canary), *_RESUME_ON_DEF]) == 0
+    receipt = json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE" and calls["evaluated"] == [1, 2]
+    policy = receipt["resume_evaluation_policy"]
+    assert (policy["mode"], policy["deleted_pickle_epochs"]) == ("reevaluate_all", [])
+    assert receipt["resume_reevaluated_epochs"] == {"1": _REEVALUATE_ALL, "2": _REEVALUATE_ALL}
+    assert not any("earlier job" in why for why in receipt["resume_reevaluated_epochs"].values())
+
+
+@needs_p19
+def test_a_resume_killed_after_archiving_points_to_the_archive(canary, monkeypatch):
+    runner = _load_runner()
+    config_dir, nh_run_dir, calls = _failed_job_111(canary, monkeypatch, runner)
+    failed_bytes = (config_dir / runner.RECEIPT_NAME).read_bytes()
+    real_write = runner._write_json
+
+    def killed_before_started(path, payload):
+        if Path(path).name == runner.RECEIPT_NAME and payload.get("status") == "STARTED":
+            raise KeyboardInterrupt
+        real_write(path, payload)
+
+    monkeypatch.setattr(runner, "_write_json", killed_before_started)
+    with pytest.raises(KeyboardInterrupt):
+        runner.main(_cli(canary, "--resume-from-job", "111"))
+    monkeypatch.setattr(runner, "_write_json", real_write)
+    archive = config_dir / "wy_rotation_run_receipt.job111.json"
+    assert not (config_dir / runner.RECEIPT_NAME).exists() and archive.read_bytes() == failed_bytes
+
+    with pytest.raises(runner.RunRefused, match=r"Archived receipts here: wy_rotation_run_receipt\.job111\.json\. "
+                                                r".*check that no job for this run is alive.*restore it by hand"):
+        runner.main(_cli(canary, "--resume-from-job", "111"))
+    assert archive.read_bytes() == failed_bytes and not (config_dir / runner.LOCK_NAME).exists()
+    archive.rename(config_dir / runner.RECEIPT_NAME)  # the operator's restore, as the message says
+    assert runner.main(_cli(canary, "--resume-from-job", "111")) == 0
+    assert calls["evaluated"] == [2]  # same commit: job 111's valid epoch 1 pickle is kept
+
+
+def test_resume_evaluation_policy_is_one_decision():
+    runner = _load_runner()
+    assert runner._resume_evaluation_policy("abc", "abc")["mode"] == "reuse_loadable"
+    assert runner._resume_evaluation_policy("abc", "def")["mode"] == "reevaluate_all"
+    assert runner._resume_evaluation_policy(None, "def")["mode"] == "reevaluate_all"  # unrecorded: assume differs
+    assert runner._resume_evaluation_policy(None, None)["mode"] == "reevaluate_all"
+
+
+@needs_p19
+def test_runner_refuses_a_second_runner_while_the_first_holds_the_lock(canary, monkeypatch):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setenv("SLURM_JOB_ID", "333")
+    calls = _fake_nh(monkeypatch, runner, manifest)
+    train = po.default_train_chunk
+    seen = {}
+
+    def train_while_a_second_runner_starts(request):
+        owner = json.loads((config_dir / runner.LOCK_NAME / "owner.json").read_text(encoding="utf-8"))
+        seen["owner"] = owner
+        for argv in (_cli(canary), _cli(canary, "--resume-from-job", "333")):
+            with pytest.raises(runner.RunRefused, match=r"job 333 on host .* \(pid \d+\), since .*remove .* by hand"):
+                runner.main(argv)
+        train(request)
+
+    monkeypatch.setattr(po, "default_train_chunk", train_while_a_second_runner_starts)
+    assert runner.main(_cli(canary)) == 0
+    assert seen["owner"]["slurm_job_id"] == "333" and seen["owner"]["pid"] == __import__("os").getpid()
+    assert calls["train"] == 1 and not (config_dir / runner.LOCK_NAME).exists()
+    receipt = json.loads((config_dir / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "COMPLETE"  # the refused runners changed nothing
+
+
+@needs_p19
+@pytest.mark.parametrize("owner_record", ["valid", "missing", "garbled"])
+def test_runner_refuses_a_stale_lock_and_leaves_it_for_the_operator(canary, monkeypatch, owner_record):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    config_dir = Path(manifest["config_dir"])
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    monkeypatch.setattr(po, "default_train_chunk", lambda request: pytest.fail("trained under a held lock"))
+    lock = config_dir / runner.LOCK_NAME
+    lock.mkdir()  # e.g. left by job 999, SIGKILLed
+    if owner_record == "valid":
+        (lock / "owner.json").write_text(json.dumps({"slurm_job_id": "999", "host": "n7", "pid": 42,
+                                                     "acquired_utc": "2026-11-18T10:00:00Z", "token": "t"}))
+        who = r"job 999 on host n7 \(pid 42\), since 2026-11-18T10:00:00Z"
+    else:
+        if owner_record == "garbled":
+            (lock / "owner.json").write_text("{not json")
+        who = "an owner whose record is missing or unreadable"
+    listing = sorted(p.relative_to(config_dir).as_posix() for p in config_dir.rglob("*"))
+    with pytest.raises(runner.RunRefused, match=f"{who}.*SIGKILL.*check that the job is dead.*by hand"):
+        runner.main(_cli(canary))
+    assert sorted(p.relative_to(config_dir).as_posix() for p in config_dir.rglob("*")) == listing
+    assert not (config_dir / runner.RECEIPT_NAME).exists()
+
+
+def test_release_run_lock_leaves_a_lock_that_is_not_its_own(tmp_path, capsys):
+    runner = _load_runner()
+    mine = runner._acquire_run_lock(tmp_path)
+    lock = tmp_path / runner.LOCK_NAME
+    (lock / "owner.json").write_text(json.dumps({**mine, "token": "someone-else"}), encoding="utf-8")
+    runner._release_run_lock(tmp_path, mine)
+    assert lock.is_dir() and "left in place" in capsys.readouterr().err
+    (lock / "owner.json").write_text(json.dumps(mine), encoding="utf-8")
+    runner._release_run_lock(tmp_path, mine)
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("fails", ["write", "replace"])
+def test_acquire_run_lock_takes_the_lock_back_down_when_the_owner_write_fails(tmp_path, monkeypatch, fails):
+    import os
+
+    runner = _load_runner()
+    if fails == "write":  # e.g. quota: nothing (or half a file) written
+        real_write_text = Path.write_text
+
+        def write_text(self, *a, **k):
+            if self.name == "owner.json.tmp":
+                real_write_text(self, "{\"slurm_job_id\": ", encoding="utf-8")
+                raise OSError("Disk quota exceeded")
+            return real_write_text(self, *a, **k)
+
+        monkeypatch.setattr(Path, "write_text", write_text)
+    else:
+        def replace(*a, **k):
+            raise OSError("I/O error")
+
+        monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError, match="quota|I/O"):
+        runner._acquire_run_lock(tmp_path)
+    assert list(tmp_path.iterdir()) == []  # no empty or half-written lock left to block later runners
+
+
+def test_release_run_lock_never_raises_and_leaves_what_it_cannot_remove(tmp_path, monkeypatch, capsys):
+    runner = _load_runner()
+    mine = runner._acquire_run_lock(tmp_path)
+
+    def rmdir(self):
+        raise OSError("Device or resource busy")
+
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    runner._release_run_lock(tmp_path, mine)  # no exception
+    assert (tmp_path / runner.LOCK_NAME).is_dir()
+    assert "could not remove" in capsys.readouterr().err
+
+
+@needs_p19
+def test_a_lock_release_failure_never_hides_the_runs_own_error(canary, monkeypatch):
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    _fake_nh(monkeypatch, runner, manifest, fail_on_epoch=1)
+    real_rmdir = Path.rmdir
+
+    def rmdir(self):
+        if self.name == runner.LOCK_NAME:
+            raise OSError("Device or resource busy")
+        return real_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    with pytest.raises(RuntimeError, match="evaluation died at epoch 1"):
+        runner.main(_cli(canary))
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "FAILED"
 
 
 def test_runner_refuses_on_provenance_failure(tmp_path, monkeypatch):

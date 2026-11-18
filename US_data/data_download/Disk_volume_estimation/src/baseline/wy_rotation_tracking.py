@@ -136,7 +136,15 @@ SLURM_ID_ENV = (("slurm_job_id", "SLURM_JOB_ID"), ("slurm_array_job_id", "SLURM_
 def slurm_ids(environ: Mapping[str, str]) -> dict[str, str]:
     """The Slurm job id and, when present, the array job/task ids. x_disable_meta keeps
     W&B from collecting the Slurm env, so these go into the run config to show which
-    Moriah job a run came from. Unset or empty variables are left out."""
+    Moriah job a run came from. Unset or empty variables are left out.
+
+    The W&B config is NOT the authority on which job produced a result: on a
+    ``--resume-from-job`` run the deterministic id reattaches to the earlier W&B run,
+    and wandb 0.28.1 (``Run._set_run_obj``) lays the server's stored config over
+    ``config=`` with allow_val_change, so these keys may still show the earlier job.
+    The receipt and the summary's ``status/slurm_job_id`` are the authority; a resumed
+    run also gets ``status/resumed_from_job`` and ``status/resume_slurm_job_id``
+    (:meth:`RotationTracker.log_receipt_summary`)."""
     return {key: str(environ[var]) for key, var in SLURM_ID_ENV if environ.get(var)}
 
 
@@ -371,7 +379,13 @@ class RotationTracker:
         for phase in ("train_peak_memory", "evaluation_peak_memory"):
             for k, v in (receipt.get(phase) or {}).items():
                 summary[f"resource/{phase}_{k}"] = v
-        if receipt.get("slurm_job_id"):
+        if receipt.get("resumed_from_job") is not None:
+            # a resume: W&B reloads the earlier job's summary, so always overwrite this
+            # job's id ("none" without one) and show both the earlier and this job
+            summary["status/slurm_job_id"] = str(receipt.get("slurm_job_id") or "none")
+            summary["status/resumed_from_job"] = str(receipt["resumed_from_job"])
+            summary["status/resume_slurm_job_id"] = str(receipt.get("slurm_job_id") or "none")
+        elif receipt.get("slurm_job_id"):  # this job's id: the authority (the config may keep an earlier job's)
             summary["status/slurm_job_id"] = str(receipt["slurm_job_id"])
         if receipt.get("host"):
             summary["status/host"] = receipt["host"]

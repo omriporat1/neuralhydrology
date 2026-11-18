@@ -77,7 +77,8 @@ __all__ = [
     "CONTRACT_COPY_NAME", "WyRotationRunsError", "run_identity", "campaign_rows", "config_differences",
     "derive_cycle_config", "derive_canary_config", "prepare_campaign", "prepare_canary", "verify_campaign_row",
     "verify_canary_manifest", "results_pickle_path",
-    "sha256_file", "evaluate_all_epochs", "verify_score_blind_run", "describe_results_pickle",
+    "sha256_file", "evaluate_all_epochs", "results_pickle_problem", "delete_results_pickles",
+    "verify_score_blind_run", "describe_results_pickle",
     "log_epoch_timestamps", "SCORE_LINE_PATTERN",
 ]
 
@@ -401,12 +402,48 @@ def _default_tester_factory(nh_run_dir: Path):
     return get_tester(cfg=cfg, run_dir=nh_run_dir, period="validation", init_model=True)
 
 
+def results_pickle_problem(path) -> Optional[str]:
+    """``None`` when ``path`` unpickles to a dict (an NH results pickle), else
+    why not. Only loadability is checked, no content: NH writes the pickle in
+    place (``open(..., "wb")``), so a job killed mid-write leaves a truncated
+    file that is present but does not load.
+
+    ``MemoryError`` and ``ImportError`` (incl. ``ModuleNotFoundError``) are raised,
+    not reported: they say the job or environment is broken, not the file, and a
+    valid (~0.5 GB) pickle must not be deleted and re-evaluated because of them."""
+    try:
+        with Path(path).open("rb") as fh:
+            results = pickle.load(fh)
+    except (MemoryError, ImportError):
+        raise
+    except Exception as exc:  # noqa: BLE001 -- EOFError, UnpicklingError, ... all mean "redo this epoch"
+        return f"does not load: {exc!r}"
+    if not isinstance(results, dict):
+        return f"loads as {type(results).__name__}, not an NH results dict"
+    return None
+
+
+def delete_results_pickles(nh_run_dir, epochs) -> list[int]:
+    """Delete the ``validation_results.p`` of each epoch in ``epochs``; returns
+    the epochs that had one. Nothing else in the run dir is touched."""
+    deleted = []
+    for epoch in sorted(int(e) for e in epochs):
+        path = results_pickle_path(nh_run_dir, epoch)
+        if path.is_file():
+            path.unlink()
+            deleted.append(epoch)
+    return deleted
+
+
 def evaluate_all_epochs(nh_run_dir, epochs, *, tester_factory: Optional[Callable] = None,
                         clock: Callable[[], float] = time.monotonic) -> list[dict[str, Any]]:
     """Write NH's ``validation_results.p`` for every epoch in ``epochs`` that
-    lacks one, using one tester (datasets loaded once). ``metrics=[]``: no
-    metric is computed, printed or stored. Returns per-epoch timing records
-    (seconds) only; the results dicts are dropped."""
+    lacks a loadable one, using one tester (datasets loaded once). An existing
+    pickle is skipped only if it loads (:func:`results_pickle_problem`); one
+    that does not is deleted and re-evaluated, and its record carries
+    ``redone_existing`` (why). ``metrics=[]``: no metric is computed, printed
+    or stored. Returns per-epoch timing records (seconds) only; the results
+    dicts are dropped."""
     nh_run_dir = Path(nh_run_dir)
     config = yaml.safe_load((nh_run_dir / "config.yml").read_text(encoding="utf-8")) or {}
     _check_forbidden(config, f"run config {nh_run_dir / 'config.yml'}")
@@ -417,9 +454,14 @@ def evaluate_all_epochs(nh_run_dir, epochs, *, tester_factory: Optional[Callable
     records = []
     for epoch in sorted(int(e) for e in epochs):
         path = results_pickle_path(nh_run_dir, epoch)
+        redone = {}
         if path.is_file():
-            records.append({"epoch": epoch, "skipped_existing": True})
-            continue
+            problem = results_pickle_problem(path)
+            if problem is None:
+                records.append({"epoch": epoch, "skipped_existing": True})
+                continue
+            path.unlink()  # a later kill then leaves a missing pickle, never the bad one
+            redone = {"redone_existing": problem}
         t0 = clock()
         if tester is None:
             tester = (tester_factory or _default_tester_factory)(nh_run_dir)
@@ -429,7 +471,7 @@ def evaluate_all_epochs(nh_run_dir, epochs, *, tester_factory: Optional[Callable
         if not path.is_file():
             raise WyRotationRunsError(f"NH evaluation of epoch {epoch} wrote no {path}")
         records.append({"epoch": epoch, "skipped_existing": False, "tester_setup_s": round(t1 - t0, 3),
-                        "evaluate_s": round(t2 - t1, 3)})
+                        "evaluate_s": round(t2 - t1, 3), **redone})
     return records
 
 

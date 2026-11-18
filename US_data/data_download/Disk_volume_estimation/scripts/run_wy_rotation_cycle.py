@@ -21,11 +21,17 @@ Evidence written to the config dir: ``wy_rotation_run_receipt.json``
 (STARTED -> COMPLETE/FAILED; provenance, Slurm ids, timing, peak memory) and
 ``wy_rotation_score_blind_evidence.json`` (verify_score_blind_run).
 
+Exclusive lock: the runner's first write is an atomic ``mkdir`` of
+``<config_dir>/wy_rotation_run.lock`` (owner: Slurm job id, host, pid, time),
+removed on exit, on the fresh and the resume path alike. A second runner on the
+same config dir is refused with the owner named. A lock left by a SIGKILLed job
+is never removed automatically: check that the job is dead, then remove it by hand.
+
 Repeats are refused, never silently retrained or overwritten. A run starts only
 on a config dir with no receipt, no evidence, no receipt archive and no
-non-empty ``runs/`` or ``wandb/``; otherwise the runner exits non-zero before
-writing anything. A COMPLETE run is never rerun (a new run needs a new attempt
-id and manifest).
+non-empty ``runs/`` or ``wandb/``; otherwise the runner exits non-zero and
+leaves nothing behind (its lock is removed again). A COMPLETE run is never
+rerun (a new run needs a new attempt id and manifest).
 
 The one opt-in exception is ``--resume-from-job JOBID``: it re-evaluates an
 already fully trained run whose receipt is FAILED or STARTED and records
@@ -33,9 +39,16 @@ already fully trained run whose receipt is FAILED or STARTED and records
 and manifest bytes, exactly one NH run dir with the flat 1..N checkpoint set;
 it never trains. The earlier receipt/evidence are moved to
 ``<name>.job<JOBID>.json`` first and the new receipt records
-``resumed_from_job`` and ``previous_receipt_sha256``. Per-epoch pickles that
-already exist are not re-evaluated. The runner cannot tell whether a STARTED
-receipt's job is still alive: naming the job is the operator's confirmation.
+``resumed_from_job``, ``previous_receipt_sha256`` and ``previous_git_commit``.
+Which epochs are re-evaluated is decided in ``_resume_evaluation_policy`` and
+recorded as ``resume_evaluation_policy``: on the earlier job's commit, existing
+pickles that load are kept (one that does not load, e.g. truncated by a kill
+mid-write, is deleted and re-evaluated); on another commit every pickle is
+deleted and every epoch re-evaluated. ``resume_reevaluated_epochs`` gives each
+re-evaluated epoch and why. The lock refuses a resume while the earlier job
+still holds the config dir (only a runner that takes this lock holds it; older
+runners took none). The runner cannot otherwise tell whether that job is alive,
+so naming the job stays the operator's confirmation.
 """
 from __future__ import annotations
 
@@ -131,7 +144,15 @@ def _check_resume(config_dir: Path, *, run_id: str, manifest_sha256: str, epochs
         raise RunRefused(f"--resume-from-job {job!r} is not a Slurm job id (or 'none')")
     receipt_path = config_dir / RECEIPT_NAME
     if not receipt_path.is_file():
-        raise RunRefused(f"--resume-from-job {job}: no {RECEIPT_NAME} in {config_dir}")
+        archives = sorted(p.name for p in config_dir.glob(_archive_name(RECEIPT_NAME, "*")))
+        hint = ""
+        if archives:  # e.g. a resume killed after archiving the receipt, before writing its own
+            hint = (f". Archived receipts here: {', '.join(archives)}. If a resume was killed after archiving "
+                    f"one and before writing its own receipt, check that no job for this run is alive "
+                    f"(sacct/squeue), then restore it by hand: rename {_archive_name(RECEIPT_NAME, '<JOBID>')} "
+                    f"back to {RECEIPT_NAME} (and {_archive_name(EVIDENCE_NAME, '<JOBID>')}, if present, back to "
+                    f"{EVIDENCE_NAME}) and rerun with --resume-from-job <JOBID>")
+        raise RunRefused(f"--resume-from-job {job}: no {RECEIPT_NAME} in {config_dir}{hint}")
     previous_bytes = receipt_path.read_bytes()
     previous = json.loads(previous_bytes.decode("utf-8"))
     status = previous.get("status")
@@ -157,7 +178,116 @@ def _check_resume(config_dir: Path, *, run_id: str, manifest_sha256: str, epochs
         if source.is_file() and archive.exists() and archive.read_bytes() != source.read_bytes():
             raise RunRefused(f"--resume-from-job {job}: a different {archive.name} already exists")
     return {"resumed_from_job": job, "previous_status": status,
-            "previous_receipt_sha256": hashlib.sha256(previous_bytes).hexdigest()}
+            "previous_receipt_sha256": hashlib.sha256(previous_bytes).hexdigest(),
+            "previous_git_commit": previous.get("git_commit")}, nh_run_dir
+
+
+def _resume_evaluation_policy(previous_git_commit, git_commit) -> dict:
+    """The ONE place that decides which epochs a resume re-evaluates. The policy is the
+    user's decision, docs/decision_log.md entry 2026-11-18 "Rotation runs: no Slurm
+    re-queue, resume across a code change, ...". To change it, swap it here (e.g. raise
+    RunRefused to refuse a cross-commit resume instead).
+
+    Same commit as the earlier job: keep every existing pickle that loads, evaluate
+    the missing and unloadable ones. Different commit, or an earlier receipt with no
+    git_commit (counted as different): re-evaluate every epoch, so all pickles of
+    the run come from one commit."""
+    if previous_git_commit and previous_git_commit == git_commit:
+        return {"mode": "reuse_loadable", "previous_git_commit": previous_git_commit, "git_commit": git_commit,
+                "reason": "same git commit as the earlier job: only missing or unloadable pickles are evaluated"}
+    return {"mode": "reevaluate_all", "previous_git_commit": previous_git_commit, "git_commit": git_commit,
+            "reason": "the git commit differs from the earlier job's (or it was not recorded): every epoch is "
+                      "re-evaluated so all pickles of the run come from one commit"}
+
+
+def _resume_reevaluated_epochs(resume: dict, records: list) -> dict:
+    """Epoch -> why this resume evaluated it. Epochs whose existing pickle was kept are
+    not listed. Only what this job saw is claimed: an earlier job (e.g. a killed resume)
+    may already have deleted a pickle, so "none present" never means "never written"."""
+    if resume["resume_evaluation_policy"]["mode"] == "reevaluate_all":
+        # every epoch, whatever was on disk; which pickles this job found and deleted
+        # is deleted_pickle_epochs in resume_evaluation_policy
+        return {str(int(rec["epoch"])): "re-evaluated: commit differs, reevaluate_all"
+                for rec in records if not rec.get("skipped_existing")}
+    out = {}
+    for rec in records:
+        if rec.get("skipped_existing"):
+            continue
+        epoch = int(rec["epoch"])
+        if rec.get("redone_existing"):
+            out[str(epoch)] = f"existing pickle {rec['redone_existing']}"
+        else:
+            out[str(epoch)] = "no pickle present when this resume started"
+    return out
+
+
+LOCK_NAME = "wy_rotation_run.lock"
+_LOCK_OWNER = "owner.json"
+
+
+def _acquire_run_lock(config_dir: Path) -> dict:
+    """Take this run's exclusive lock: an atomic ``mkdir`` of ``config_dir/LOCK_NAME``
+    (atomic on Moriah's shared FS too, like the campaign sbatch's own row lock in
+    ``campaign/``, a different path). It is the runner's first write, on fresh and resume
+    paths alike, and is removed when the runner exits. A runner killed with SIGKILL
+    leaves it behind on purpose: nobody can tell from here that the job is dead."""
+    import uuid
+
+    path = config_dir / LOCK_NAME
+    owner = {"slurm_job_id": os.environ.get("SLURM_JOB_ID"), "host": socket.gethostname(), "pid": os.getpid(),
+             "acquired_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "token": uuid.uuid4().hex}
+    try:
+        path.mkdir()
+    except FileExistsError:
+        try:
+            held = json.loads((path / _LOCK_OWNER).read_text(encoding="utf-8"))
+            who = (f"job {held.get('slurm_job_id') or 'none'} on host {held.get('host')} (pid {held.get('pid')}), "
+                   f"since {held.get('acquired_utc')}")
+        except (OSError, ValueError):
+            who = "an owner whose record is missing or unreadable"
+        raise RunRefused(f"{path} exists: another runner holds this config dir: {who}. If that job is still "
+                         "running, let it finish. A lock left by a job killed with SIGKILL (or a lost node) is "
+                         f"never removed automatically: check that the job is dead (sacct/squeue), then remove "
+                         f"{path} by hand") from None
+    # written aside, then renamed: a reader never sees half-written JSON. If the write
+    # fails (quota, I/O), take the lock back down before raising: it is outside main's
+    # try/finally, and an empty lock dir would block every later runner.
+    tmp = path / (_LOCK_OWNER + ".tmp")
+    try:
+        tmp.write_text(json.dumps(owner, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path / _LOCK_OWNER)
+    except BaseException:
+        for leftover in (tmp, path / _LOCK_OWNER):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        raise
+    return owner
+
+
+def _release_run_lock(config_dir: Path, owner: dict) -> None:
+    """Remove the lock if it is still this runner's (same token); otherwise leave it.
+    Never raises OSError: it runs in main's ``finally`` and must not replace the run's
+    own exception; a lock it cannot remove is left in place with a warning."""
+    path = config_dir / LOCK_NAME
+    try:
+        held = json.loads((path / _LOCK_OWNER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        held = None
+    if not held or held.get("token") != owner["token"]:
+        print(f"warning: {path} is not this runner's lock any more; left in place", file=sys.stderr)
+        return
+    try:
+        (path / _LOCK_OWNER).unlink()
+        path.rmdir()
+    except OSError as exc:
+        print(f"warning: could not remove {path} ({exc!r}); left in place: check that this job has ended, "
+              "then remove it by hand", file=sys.stderr)
 
 
 def _archive_previous(config_dir: Path, job: str) -> dict:
@@ -325,17 +455,36 @@ def main(argv=None) -> int:
         checked = rot.verify_campaign_row(manifest, index)
         campaign = manifest
         campaign_row = checked["row"]
+    config_dir = Path(checked["row"]["config_dir"])
+    epochs = list(range(1, int(checked["config"]["epochs"]) + 1))
+    manifest_sha256 = rot.sha256_file(args.manifest)
+    lock = _acquire_run_lock(config_dir)  # the first write: from here on this process owns the config dir
+    try:
+        return _run_locked(args, provenance=provenance, policy=policy, checked=checked, campaign=campaign,
+                           campaign_row=campaign_row, epochs=epochs, manifest_sha256=manifest_sha256)
+    finally:
+        _release_run_lock(config_dir, lock)
+
+
+def _run_locked(args, *, provenance, policy, checked, campaign, campaign_row, epochs, manifest_sha256) -> int:
     row, config = checked["row"], checked["config"]
     config_dir = Path(row["config_dir"])
-    epochs = list(range(1, int(config["epochs"]) + 1))
     receipt_path = config_dir / RECEIPT_NAME
-    manifest_sha256 = rot.sha256_file(args.manifest)
     resume = None
     if args.resume_from_job is None:
         _refuse_existing_run(config_dir, row["run_id"])
     else:
-        resume = _check_resume(config_dir, run_id=row["run_id"], manifest_sha256=manifest_sha256, epochs=epochs,
-                               job=str(args.resume_from_job))
+        resume, resume_run_dir = _check_resume(config_dir, run_id=row["run_id"], manifest_sha256=manifest_sha256,
+                                               epochs=epochs, job=str(args.resume_from_job))
+        decision = _resume_evaluation_policy(resume["previous_git_commit"], provenance.get("git_commit"))
+        if decision["mode"] == "reevaluate_all":
+            # before the earlier receipt is archived: a kill in between leaves that receipt (and its
+            # commit) in place, so the next resume decides the same way and no pickle mix survives
+            decision["deleted_pickle_epochs"] = rot.delete_results_pickles(resume_run_dir, epochs)
+            decision["deleted_pickle_epochs_meaning"] = (
+                "pickles present when this job started and deleted by this job (an earlier, killed resume "
+                "may have deleted others)")
+        resume["resume_evaluation_policy"] = decision
         resume["archived"] = _archive_previous(config_dir, resume["resumed_from_job"])
 
     receipt = {"status": "STARTED", "run_id": row["run_id"], "cycle": row["cycle"],
@@ -393,6 +542,8 @@ def main(argv=None) -> int:
         receipt["evaluation"] = rot.evaluate_all_epochs(nh_run_dir, epochs, tester_factory=_tester_factory)
         receipt["evaluation_wall_s"] = round(time.monotonic() - t0, 1)
         receipt["evaluation_peak_memory"] = _peak_memory()
+        if resume is not None:
+            receipt["resume_reevaluated_epochs"] = _resume_reevaluated_epochs(resume, receipt["evaluation"])
         _write_json(receipt_path, receipt)
         _track(tracker, "rotation_evaluation_records", lambda: tracker.log_evaluation_records(receipt["evaluation"]))
 

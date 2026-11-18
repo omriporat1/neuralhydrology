@@ -257,6 +257,22 @@ def test_evaluation_records_and_receipt_summary(monkeypatch, tmp_path):
     assert s["status/receipt"] == "COMPLETE" and s["verify/passed"] is True
     assert s["verify/missing_basins"] == ["01381800"] and s["verify/n_basins_missing_explained"] == 1
     assert s["resource/train_peak_memory_cuda_max_allocated_mib"] == 900.0
+    assert s["status/slurm_job_id"] == "123"
+    assert "status/resumed_from_job" not in s and "status/resume_slurm_job_id" not in s
+
+
+@pytest.mark.parametrize("job, expected", [("222", "222"), (None, "none")])
+def test_resumed_run_summary_shows_the_earlier_and_this_job(monkeypatch, tmp_path, job, expected):
+    # the W&B config of a reattached run may keep the earlier job's slurm_job_id
+    # (wandb applies the stored server config), and its summary is the earlier job's
+    # until overwritten: the summary carries both jobs and this job's id, even "none"
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    fake.runs[0].summary.update({"status/slurm_job_id": "111", "status/receipt": "FAILED"})  # reloaded from job 111
+    tracker.log_receipt_summary({"status": "COMPLETE", "trained_in_this_job": False, "slurm_job_id": job,
+                                 "resumed_from_job": "111"})
+    s = fake.runs[0].summary
+    assert s["status/resumed_from_job"] == "111" and s["status/resume_slurm_job_id"] == expected
+    assert s["status/slurm_job_id"] == expected and s["status/receipt"] == "COMPLETE"
 
 
 def test_save_file_uploads_small_files_only(monkeypatch, tmp_path):
