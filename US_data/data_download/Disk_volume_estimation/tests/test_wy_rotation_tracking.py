@@ -538,3 +538,240 @@ def test_real_wandb_offline_x_disable_meta_keeps_system_metadata_out(tmp_path):
     assert report["wandb_config_slurm"] == expected == control_report["wandb_config_slurm"]
     for value in (sentinel + "-jobid", sentinel + "-arrayjob"):
         assert value.encode() in blob, value
+
+
+# --------------------------------------------------------------------------- stages B and C (gated by a StageUnlock)
+
+SYNTH_BUDGET = 3  # synthetic campaign budget for the unlock fixtures
+
+
+def _synthetic_unlock_files(base: Path, *, run_id: str, cycle: int, budget: int = SYNTH_BUDGET,
+                            picks: bool = False) -> dict:
+    """Synthetic receipt, evidence and score file (and, with ``picks``, both
+    families' pick records) in the layout the scorer writes; no real run."""
+    from src.baseline import wy_rotation_scoring as sc
+
+    cfg, out = base / "cfg", base / "out"
+    cfg.mkdir(parents=True)
+    (out / run_id).mkdir(parents=True)
+    receipt, evidence = cfg / sc.RECEIPT_NAME, cfg / sc.EVIDENCE_NAME
+    receipt.write_text(json.dumps({"status": "COMPLETE", "run_id": run_id, "cycle": cycle, "is_canary": False,
+                                   "epochs": budget, "slurm_job_id": "900", "git_commit": "c0ffee1"}),
+                       encoding="utf-8")
+    evidence.write_text(json.dumps({"passed": True}), encoding="utf-8")
+    reconciliation = out / sc.RECONCILIATION_NAME  # D1: the cycle's round-E reconciliation (synthetic)
+    reconciliation.write_text(json.dumps({"cycle": cycle, "published_round_e": {"facts_agree": True}}),
+                              encoding="utf-8")
+    reconciliation_sha = hashlib.sha256(reconciliation.read_bytes()).hexdigest()
+    scores = out / run_id / sc.RUN_SCORES_NAME
+    scores.write_text(json.dumps({
+        "spec_sha256": sc.SPEC_SHA256, "period": sc.CHECKPOINT_PERIOD, "run_id": run_id, "cycle": cycle,
+        "budget_epochs": budget, "receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "resume_chain": sc.resume_chain(cfg),  # Q1: what the scorer records
+        "round_e_reconciliation_sha256": reconciliation_sha}), encoding="utf-8")
+    if picks:
+        for family in sc.REQUIRED_ARM_FAMILIES:
+            (out / sc.PICKS_TEMPLATE.format(family=family)).write_text(json.dumps({
+                "spec_sha256": sc.SPEC_SHA256, "cycle": cycle, "family": family, "budget_epochs": budget,
+                "round_e_reconciliation_sha256": reconciliation_sha,
+                "picks": {rule: {"epoch": 1} for rule in sc.PICK_RULES},
+                "runs": [{"run_id": run_id, "scores_file": f"{run_id}/{sc.RUN_SCORES_NAME}",  # D3: re-hashed
+                          "scores_sha256": hashlib.sha256(scores.read_bytes()).hexdigest()}]}),
+                encoding="utf-8")
+    return {"config_dir": cfg, "out": out, "scores": scores}
+
+
+def _real_unlock(tmp_path: Path, stage: str = "B", run_id: str = "run-c2", cycle: int = 2):
+    """An unlock issued by wy_rotation_scoring from synthetic files."""
+    from src.baseline import wy_rotation_scoring as sc
+
+    f = _synthetic_unlock_files(tmp_path / f"unlock_{stage}_{run_id}_{cycle}", run_id=run_id, cycle=cycle,
+                                picks=stage == "C")
+    if stage == "B":
+        return sc.unlock_stage_b(config_dir=f["config_dir"], run_scores_path=f["scores"],
+                                 budget_epochs=SYNTH_BUDGET)
+    return sc.unlock_stage_c(cycle=cycle, cycle_output_dir=f["out"], flashnh_run_id=run_id,
+                             budget_epochs=SYNTH_BUDGET)
+
+
+def _spec_only(stage: str, run_id: str = "run-c2", derivation: tuple = ()):
+    """A hand-built unlock whose only evidence is the frozen spec (the gate-4 R1 bypass)."""
+    from src.baseline import wy_rotation_scoring as sc
+
+    root = Path(__file__).resolve().parents[1]
+    return trk.StageUnlock(stage=stage, flashnh_run_id=run_id, cycle=2,
+                           evidence=((str(root / sc.SPEC_RELATIVE_PATH), sc.SPEC_SHA256),), derivation=derivation)
+
+
+def test_stage_b_goes_to_wandb_on_the_epoch_axis(monkeypatch, tmp_path):
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    run = fake.runs[0]
+    assert ("ckpt/*", "epoch") in run.defined
+    unlock = _real_unlock(tmp_path)
+    tracker.log_stage(unlock, {"ckpt/median_nse": 0.61, "ckpt/n_basins_scored": 3}, epoch=2)
+    tracker.set_stage_summary(unlock, {"ckpt/pick_nse_epoch": 2})
+    assert run.logs[-1] == {"ckpt/median_nse": 0.61, "ckpt/n_basins_scored": 3, "epoch": 2}
+    assert run.summary["ckpt/pick_nse_epoch"] == 2
+    with pytest.raises(TrackingError, match="stage B"):  # the stage-A path still refuses it
+        tracker.log({"ckpt/median_nse": 0.61}, epoch=3)
+
+
+def test_stage_b_c_need_a_valid_unlock_for_this_run(monkeypatch, tmp_path):
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    n_logs = len(fake.runs[0].logs)
+    unlock_b, unlock_c = _real_unlock(tmp_path), _real_unlock(tmp_path, "C")
+    with pytest.raises(TrackingError, match="needs a StageUnlock"):
+        tracker.log_stage(None, {"ckpt/median_nse": 0.6}, epoch=1)
+    with pytest.raises(TrackingError, match="unlock is for"):
+        tracker.log_stage(_real_unlock(tmp_path, run_id="run-c3"), {"ckpt/median_nse": 0.6}, epoch=1)
+    with pytest.raises(TrackingError, match="positive int"):
+        tracker.log_stage(unlock_b, {"ckpt/median_nse": 0.6}, epoch=0)
+    with pytest.raises(TrackingError):  # a stage-C key under a stage-B unlock
+        tracker.set_stage_summary(unlock_b, {"assess/nse_pick/median_nse": 0.6})
+    with pytest.raises(TrackingError):  # stage C has no per-epoch keys
+        tracker.log_stage(unlock_c, {"assess/nse_pick/median_nse": 0.6}, epoch=1)
+    with pytest.raises(TrackingError, match="no logger"):  # stage D has no issuer and no logger
+        tracker.set_stage_summary(_spec_only("D"), {"wy2026/median_nse": 0.6})
+    assert len(fake.runs[0].logs) == n_logs and not any(k.startswith(("ckpt/", "assess/"))
+                                                        for k in fake.runs[0].summary)
+    tracker.set_stage_summary(unlock_c, {"assess/flood_pick/median_nse": 0.4})
+    assert fake.runs[0].summary["assess/flood_pick/median_nse"] == 0.4
+
+
+@pytest.mark.parametrize("stage,key,epoch", [("B", "ckpt/median_nse", 1), ("C", "assess/nse_pick/median_nse", None)])
+def test_a_hand_built_spec_only_unlock_is_refused(monkeypatch, tmp_path, stage, key, epoch):
+    # gate-4 review R1: a StageUnlock carrying only the frozen spec's sha opened stage C with no picks
+    from src.baseline import wy_rotation_scoring as sc
+
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    with pytest.raises(sc.WyRotationScoringError, match="derivation"):
+        if epoch is None:
+            tracker.set_stage_summary(_spec_only(stage), {key: 0.6})
+        else:
+            tracker.log_stage(_spec_only(stage), {key: 0.6}, epoch=epoch)
+    assert not any(k.startswith(("ckpt/", "assess/")) for k in fake.runs[0].summary)
+    assert not any(k.startswith(("ckpt/", "assess/")) for row in fake.runs[0].logs for k in row)
+
+
+def test_a_spec_only_c_unlock_with_a_well_formed_derivation_but_no_picks_is_refused(monkeypatch, tmp_path):
+    from src.baseline import wy_rotation_scoring as sc
+
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    empty = tmp_path / "no_picks_here"
+    empty.mkdir()
+    derivation = sc._derivation(cycle=2, cycle_output_dir=empty, flashnh_run_id="run-c2", project_root=None,
+                                budget_epochs=SYNTH_BUDGET)
+    with pytest.raises(sc.WyRotationScoringError, match="precondition does not hold: stage C locked"):
+        tracker.set_stage_summary(_spec_only("C", derivation=derivation), {"assess/nse_pick/median_nse": 0.6})
+    assert not any(k.startswith("assess/") for k in fake.runs[0].summary)
+
+
+def test_a_forged_unlock_that_reuses_real_evidence_is_refused(monkeypatch, tmp_path):
+    import dataclasses
+
+    from src.baseline import wy_rotation_scoring as sc
+
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    real_c = _real_unlock(tmp_path, "C")
+    for forged in (dataclasses.replace(real_c, cycle=3),  # another cycle's stage C from cycle 2's picks
+                   dataclasses.replace(real_c, evidence=real_c.evidence[:1]),  # picks dropped from the evidence
+                   dataclasses.replace(real_c, stage="B")):  # C evidence presented as a B unlock
+        with pytest.raises(sc.WyRotationScoringError):
+            tracker.set_stage_summary(forged, {"assess/nse_pick/median_nse": 0.6})
+    real_b = _real_unlock(tmp_path)
+    other = dict(real_b.derivation)
+    other["budget_epochs"] = "12"  # the run is not at the stated budget
+    with pytest.raises(sc.WyRotationScoringError, match="precondition does not hold"):
+        tracker.log_stage(dataclasses.replace(real_b, derivation=tuple(sorted(other.items()))),
+                          {"ckpt/median_nse": 0.6}, epoch=1)
+    assert not any(k.startswith(("ckpt/", "assess/")) for k in fake.runs[0].summary)
+    assert not any(k.startswith(("ckpt/", "assess/")) for row in fake.runs[0].logs for k in row)
+
+
+def test_a_stage_unlock_whose_evidence_changed_is_refused(monkeypatch, tmp_path):
+    from src.baseline import wy_rotation_scoring as sc
+
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    unlock = _real_unlock(tmp_path)
+    tracker.log_stage(unlock, {"ckpt/median_nse": 0.6}, epoch=1)
+    scores = Path(dict(unlock.derivation)["run_scores_path"])
+    scores.write_bytes(scores.read_bytes() + b"\n")
+    with pytest.raises(sc.WyRotationScoringError, match="changed or vanished"):
+        tracker.log_stage(unlock, {"ckpt/median_nse": 0.7}, epoch=2)
+    assert fake.runs[0].logs[-1]["ckpt/median_nse"] == 0.6
+
+
+def test_a_stage_c_unlock_is_refused_once_a_pick_record_is_deleted(monkeypatch, tmp_path):
+    from src.baseline import wy_rotation_scoring as sc
+
+    tracker, fake = _tracker(monkeypatch, tmp_path)
+    unlock = _real_unlock(tmp_path, "C")
+    tracker.set_stage_summary(unlock, {"assess/nse_pick/median_nse": 0.6})
+    Path(dict(unlock.derivation)["cycle_output_dir"], sc.PICKS_TEMPLATE.format(family="magw")).unlink()
+    with pytest.raises(sc.WyRotationScoringError, match="changed or vanished"):
+        tracker.set_stage_summary(unlock, {"assess/flood_pick/median_nse": 0.4})
+    assert "assess/flood_pick/median_nse" not in fake.runs[0].summary
+
+
+_STAGE_B_CHILD = r'''
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["FLASHNH_ROOT"])
+from src.baseline import wy_rotation_scoring as sc
+from src.baseline import wy_rotation_tracking as trk
+
+wandb_dir, config_dir, scores = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+policy = {"policy_name": "smoke", "enabled": True, "mode": "offline", "project": "flashnh-stageb-smoke",
+          "entity": None, "tags": ["smoke"], "max_artifact_reference_bytes": 1024}
+rid = "stageb-smoke"
+tracker = trk.init_rotation_tracker(policy, flashnh_run_id=rid, config={"cycle": 1},
+                                    layout=trk.run_layout(cycle=1, config={}, is_canary=True), wandb_dir=wandb_dir)
+unlock = sc.unlock_stage_b(config_dir=config_dir, run_scores_path=scores, budget_epochs=int(sys.argv[4]))
+tracker.log({"train/avg_total_loss": 0.5}, epoch=1)
+tracker.log_stage(unlock, {"ckpt/median_nse": 0.123456, "ckpt/n_basins_scored": 3}, epoch=1)
+tracker.set_stage_summary(unlock, {"ckpt/pick_nse_epoch": 1})
+tracker.finish(failed=False)
+print(json.dumps({"backend": tracker.run.backend, "degraded": sorted(tracker.run.degraded_operations)}))
+'''
+
+
+def test_real_wandb_offline_stage_b_keys_reach_the_run_log(tmp_path):
+    """Real-package offline smoke: stage-B keys logged through an unlock that
+    unlock_stage_b issued from synthetic files land in the run's .wandb log, on
+    the epoch axis, with no degraded backend operation. Synthetic values only."""
+    import os
+    import subprocess
+
+    pytest.importorskip("wandb", reason="real wandb package not installed in this interpreter")
+    root = Path(__file__).resolve().parents[1]
+    for sub in ("wandb", "config", "cache", "data", "artifacts", "tmp"):
+        (tmp_path / sub).mkdir()
+    script = tmp_path / "stage_b_child.py"
+    script.write_text(_STAGE_B_CHILD, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("WANDB_", "SLURM_"))}
+    env.update(FLASHNH_ROOT=str(root), WANDB_MODE="offline", WANDB_SILENT="true",
+               WANDB_CONFIG_DIR=str(tmp_path / "config"), WANDB_CACHE_DIR=str(tmp_path / "cache"),
+               WANDB_DATA_DIR=str(tmp_path / "data"), WANDB_ARTIFACT_DIR=str(tmp_path / "artifacts"),
+               TMP=str(tmp_path / "tmp"), TEMP=str(tmp_path / "tmp"), TMPDIR=str(tmp_path / "tmp"))
+    files = _synthetic_unlock_files(tmp_path / "unlock", run_id="stageb-smoke", cycle=1)
+    done = subprocess.run([sys.executable, str(script), str(tmp_path / "wandb"), str(files["config_dir"]),
+                           str(files["scores"]), str(SYNTH_BUDGET)], cwd=root, env=env,
+                          capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-3000:]
+    report = json.loads(done.stdout.strip().splitlines()[-1])
+    assert report == {"backend": "wandb", "degraded": []}
+    (run_dir,) = (tmp_path / "wandb" / "wandb").glob("offline-run-*")
+    (log,) = run_dir.glob("*.wandb")
+    blob = log.read_bytes()
+    for needle in (b"ckpt/median_nse", b"0.123456", b"ckpt/n_basins_scored", b"ckpt/pick_nse_epoch"):
+        assert needle in blob, needle
+
+
+def test_a_stage_unlock_is_refused_when_the_run_config_names_another_run(monkeypatch, tmp_path):
+    install_fake_wandb(monkeypatch)
+    tracker = trk.init_rotation_tracker(POLICY, flashnh_run_id="run-c2", config={"cycle": 2, "flashnh_run_id": "x"},
+                                        layout=trk.run_layout(cycle=2, config={}, is_canary=False),
+                                        wandb_dir=tmp_path / "wandb")
+    with pytest.raises(TrackingError, match="unlock is for"):
+        tracker.log_stage(_real_unlock(tmp_path), {"ckpt/median_nse": 0.6}, epoch=1)

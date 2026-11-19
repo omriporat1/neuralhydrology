@@ -8,9 +8,13 @@ every later stage through a deterministic id. Stages open in a fixed order:
   normalized space, never a skill score), epoch wall time, evaluation timing,
   peak memory, receipt status, the explained-missing basin list + counts, and
   the run's small evidence files.
-* B (checkpoint-year spec metrics), C (assessment year at the picks) and
-  D (WY2026) are closed here: their key prefixes raise at the call site. They
-  get their own gated logger later.
+* B (checkpoint-year spec metrics) and C (assessment year at the picks) never
+  pass the stage-A gate. They go only through :meth:`RotationTracker.log_stage`
+  / :meth:`RotationTracker.set_stage_summary`, which need a :class:`StageUnlock`
+  issued by ``wy_rotation_scoring`` (B: frozen spec sha + COMPLETE receipt +
+  passed score-blind evidence + the run's checkpoint score file; C: recorded
+  picks of every arm of the cycle) and accept only an exact key allow-list.
+* D (WY2026) is closed: no logger in this build accepts its keys.
 
 Flash-NH evidence stays authoritative; W&B only mirrors. Every backend call is
 best-effort (``wandb_tracking._guard_backend_call``): a W&B failure, including
@@ -27,6 +31,7 @@ import math
 import re
 import shutil
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from .wandb_tracking import (
@@ -45,6 +50,51 @@ STAGE_PREFIXES = {
     "D": ("wy2026/",),
 }
 OPEN_STAGES = frozenset({"A"})
+
+# Stage B/C exact key allow-lists (spec v001 D1-D7; W&B mirrors the Flash-NH files).
+STAGE_B_EPOCH_KEYS = ("median_nse", "median_q98_nrmse", "n_basins_scored", "n_nse_finite", "n_flood_scored")
+STAGE_B_SUMMARY_KEYS = ("n_area_excluded", "n_missing_explained", "n_flood_eligible", "flood_eligible_fraction",
+                        "flood_low_eligibility_flag",
+                        *(f"pick_{rule}_{field}" for rule in ("nse", "flood")
+                          for field in ("epoch", "lambda", "value", "budget_edge", "strength_edge")))
+STAGE_C_METRIC_KEYS = ("epoch", "lambda", "n_basins_scored", "n_flood_scored", "median_nse", "median_kge",
+                       "median_pbias", "median_q98_nrmse", "median_high_flow_nse", "median_q98_rel_volume_bias",
+                       "median_peak_rel_error", "median_pbias_below_q98")
+_STAGE_ALLOWED = {
+    "B": {"epoch": frozenset(f"ckpt/{k}" for k in STAGE_B_EPOCH_KEYS),
+          "summary": frozenset(f"ckpt/{k}" for k in STAGE_B_SUMMARY_KEYS)},
+    "C": {"epoch": frozenset(),
+          "summary": frozenset(f"assess/{pick}_pick/{k}" for pick in ("nse", "flood") for k in STAGE_C_METRIC_KEYS)},
+}
+
+
+@dataclass(frozen=True)
+class StageUnlock:
+    """Proof that stage B or C may open for one Flash-NH run: issued only by
+    ``wy_rotation_scoring.unlock_stage_b`` / ``unlock_stage_c``. ``evidence`` is
+    ((path, sha256), ...) of the files behind the unlock; ``derivation`` is the
+    issuer's sorted (argument, value) pairs. Before every send the tracker calls
+    ``wy_rotation_scoring.reverify_unlock``, which re-hashes the evidence, calls
+    the issuer again with ``derivation`` and requires an equal unlock, so a
+    hand-built instance is refused."""
+    stage: str
+    flashnh_run_id: str
+    cycle: int
+    evidence: tuple
+    derivation: tuple
+
+
+def check_stage_keys(metrics: Mapping[str, Any], stage: str, *, kind: str) -> None:
+    """Raise unless ``stage`` is B or C and every key is on that stage's exact
+    ``kind`` ("epoch" or "summary") allow-list. Stage D is always refused."""
+    if stage not in _STAGE_ALLOWED:
+        raise TrackingError(f"stage {stage!r} has no logger in this build")
+    allowed = _STAGE_ALLOWED[stage][kind]
+    bad = sorted(k for k in metrics if k != "epoch" and k not in allowed)
+    if bad:
+        raise TrackingError(f"stage {stage} {kind} key(s) {bad} are not on the allow-list")
+    _reject_credential_like_keys(dict(metrics), f"stage {stage} metrics")
+
 
 # No stage-A key may look like a score or name a sealed/evaluation scope.
 # "loss" is allowed only under train/ (NH's normalized-space training loss).
@@ -251,6 +301,45 @@ class RotationTracker:
                     self.run._wandb_run.summary[k] = v
             _guard_backend_call(self.run, "rotation_summary", _set)
 
+    # ---- stage B / C (gated by a StageUnlock) ---------------------------------------
+    def _check_unlock(self, unlock: StageUnlock) -> None:
+        if not isinstance(unlock, StageUnlock):
+            raise TrackingError("stage B/C logging needs a StageUnlock from wy_rotation_scoring")
+        if unlock.stage not in _STAGE_ALLOWED:
+            raise TrackingError(f"stage {unlock.stage!r} has no logger in this build")
+        # The binding is the W&B run id, derived from init_rotation_tracker's own
+        # flashnh_run_id; a flashnh_run_id in the run config must agree when present.
+        flashnh_run_id = self.run.run_identity.get("flashnh_run_id", unlock.flashnh_run_id)
+        if flashnh_run_id != unlock.flashnh_run_id or self.run.wandb_run_id != wandb_run_id(unlock.flashnh_run_id):
+            raise TrackingError(f"stage {unlock.stage} unlock is for {unlock.flashnh_run_id!r}, this tracker logs "
+                                f"W&B run {self.run.wandb_run_id!r} ({flashnh_run_id!r})")
+        from .wy_rotation_scoring import reverify_unlock  # lazy: scoring imports this module
+
+        reverify_unlock(unlock)
+
+    def log_stage(self, unlock: StageUnlock, metrics: Mapping[str, Any], *, epoch: int) -> None:
+        """Log one epoch's stage-B checkpoint-year curve values."""
+        if not isinstance(epoch, int) or epoch < 1:
+            raise TrackingError(f"epoch must be a positive int, got {epoch!r}")
+        self._check_unlock(unlock)
+        payload = dict(metrics)
+        payload["epoch"] = epoch
+        check_stage_keys(payload, unlock.stage, kind="epoch")
+        self.run.resource_metrics.append((epoch, dict(payload)))
+        if self.run.backend == "wandb":
+            _guard_backend_call(self.run, f"rotation_log_stage_{unlock.stage}",
+                                lambda: self.run._wandb_run.log(payload))
+
+    def set_stage_summary(self, unlock: StageUnlock, values: Mapping[str, Any]) -> None:
+        self._check_unlock(unlock)
+        check_stage_keys(values, unlock.stage, kind="summary")
+        self.run.resource_metrics.append((0, dict(values)))
+        if self.run.backend == "wandb":
+            def _set():
+                for k, v in values.items():
+                    self.run._wandb_run.summary[k] = v
+            _guard_backend_call(self.run, f"rotation_summary_stage_{unlock.stage}", _set)
+
     def save_file(self, path, *, max_bytes: Optional[int] = None) -> None:
         """Upload one small evidence file (receipt, evidence JSON, config) to the
         run's Files as ``flashnh/<name>``.
@@ -436,7 +525,7 @@ def init_rotation_tracker(policy: Mapping[str, Any], *, flashnh_run_id: str, con
                                id=run_id, resume="allow", dir=str(wandb_dir),
                                settings=wandb.Settings(**WANDB_SETTINGS), **dict(layout))
         wandb_run.define_metric("epoch")
-        for prefix in ("train", "evalrun"):
+        for prefix in ("train", "evalrun", "ckpt"):
             wandb_run.define_metric(f"{prefix}/*", step_metric="epoch")
     except Exception as exc:  # noqa: BLE001 -- tracking never stops the scientific run
         _mark_degraded(null_run, "rotation_init", exc)

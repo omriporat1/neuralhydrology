@@ -72,7 +72,7 @@ from .wy_rotation_split import (
 )
 
 __all__ = [
-    "CAMPAIGN_ID", "SEED_A", "FIDELITY_TAG", "P19_CONFIG_SHA256", "ALLOWED_CHANGED_KEYS", "CANARY_CHANGED_KEYS",
+    "CAMPAIGN_ID", "CAMPAIGN_EPOCHS", "SEED_A", "FIDELITY_TAG", "P19_CONFIG_SHA256", "ALLOWED_CHANGED_KEYS", "CANARY_CHANGED_KEYS",
     "DATE_KEYS", "BASIN_FILE_KEYS", "CAMPAIGN_MANIFEST_SCHEMA_NAME", "CAMPAIGN_MANIFEST_SCHEMA_VERSION",
     "CONTRACT_COPY_NAME", "WyRotationRunsError", "run_identity", "campaign_rows", "config_differences",
     "derive_cycle_config", "derive_canary_config", "prepare_campaign", "prepare_canary", "verify_campaign_row",
@@ -100,8 +100,12 @@ ALLOWED_CHANGED_KEYS = frozenset({"experiment_name", "run_dir", *DATE_KEYS, *BAS
 # A canary differs from its campaign config only in budget and identity.
 CANARY_CHANGED_KEYS = frozenset({"epochs", "max_updates_per_epoch", "experiment_name", "run_dir"})
 
+# The campaign budget (epochs per rotation run): the frozen P19 value, read by
+# the scorer and the picks so the budget is stated once.
+CAMPAIGN_EPOCHS = 12
+
 # Frozen P19 facts the base config must reproduce before anything is derived.
-_BASE_EXPECTED = {"seq_length": 120, "seed": SEED_A, "epochs": 12, "max_updates_per_epoch": 50000,
+_BASE_EXPECTED = {"seq_length": 120, "seed": SEED_A, "epochs": CAMPAIGN_EPOCHS, "max_updates_per_epoch": 50000,
                   "predict_last_n": 1, "dataset": "flashnh", "target_variables": ["qobs_mm_per_h_lead06"],
                   "dynamic_inputs": ["mrms_qpe_1h_mm", "rtma_2t_K"], "loss": "NSE", "validate_every": 3,
                   "validate_n_random_basins": 1000, "save_weights_every": 1,
@@ -410,11 +414,14 @@ def results_pickle_problem(path) -> Optional[str]:
 
     ``MemoryError`` and ``ImportError`` (incl. ``ModuleNotFoundError``) are raised,
     not reported: they say the job or environment is broken, not the file, and a
-    valid (~0.5 GB) pickle must not be deleted and re-evaluated because of them."""
+    valid (~0.5 GB) pickle must not be deleted and re-evaluated because of them.
+    ``PermissionError`` is raised too (Omri, 2026-11-19, gate-4 Q2): it may mean
+    another job owns the run directory, so it stops the run as a defect for
+    inspection and the pickle is never deleted."""
     try:
         with Path(path).open("rb") as fh:
             results = pickle.load(fh)
-    except (MemoryError, ImportError):
+    except (MemoryError, ImportError, PermissionError):
         raise
     except Exception as exc:  # noqa: BLE001 -- EOFError, UnpicklingError, ... all mean "redo this epoch"
         return f"does not load: {exc!r}"
@@ -520,6 +527,49 @@ def log_epoch_timestamps(output_log) -> dict[int, str]:
     return out
 
 
+def package_series_path(data_dir, basin: str) -> Optional[Path]:
+    """The basin's package NetCDF under ``<data_dir>/time_series`` (``.nc4`` or
+    ``.nc``); ``None`` when there is none. More than one raises."""
+    folder = Path(data_dir) / "time_series"
+    found = [p for p in (folder / f"{basin}{ext}" for ext in (".nc4", ".nc")) if p.is_file()]
+    if len(found) > 1:
+        raise WyRotationRunsError(f"basin {basin}: expected one NetCDF in {folder}, found {[str(p) for p in found]}")
+    return found[0] if found else None
+
+
+def read_admissible_period_targets(path, *, sealing, target: str, period: str = "validation"):
+    """Issue dates and ``target`` values (NaN kept) of every issue time ``t``
+    of NH period ``period`` with ``t`` and ``t + lead`` inside the period's
+    slice, read from one package NetCDF through the sealed reader (that
+    period's readable windows, the contract upper bound, no forcing). Only
+    the target variable is opened, and only inside those windows.
+
+    This is the one reader behind the explained-missing count
+    (:func:`count_admissible_checkpoint_targets`) and the score-blind
+    eligibility table (``wy_rotation_scoring.build_eligibility_table``)."""
+    import numpy as np
+    import pandas as pd
+    import xarray
+
+    from .nh_raw_space_evaluation import select_readable_observations
+
+    windows = sealing.readable_windows(period)
+    lead = pd.Timedelta(hours=int(sealing.lead_hours))
+    first = pd.to_datetime(sealing.nh_dates[f"{period}_start_date"], format="%d/%m/%Y")
+    last = pd.to_datetime(sealing.nh_dates[f"{period}_end_date"], format="%d/%m/%Y") + pd.Timedelta(hours=23)
+    path = Path(path)
+    with xarray.open_dataset(path) as ds:
+        coordinate = "date" if "date" in ds.coords else "time"
+        if target not in ds.data_vars:
+            raise WyRotationRunsError(f"{path.name}: target {target!r} not in the file")
+        sealed = select_readable_observations(ds[[target]], windows=windows, coordinate=coordinate,
+                                              forcing_variables=(), upper_bound=sealing.upper_bound)
+        issue = sealed[target].sel({coordinate: slice(first, last - lead)})
+        dates = np.asarray(issue[coordinate].values).astype("datetime64[ns]")
+        values = np.asarray(issue.values, dtype=float).reshape(-1)
+    return dates, values
+
+
 def count_admissible_checkpoint_targets(nh_run_dir, basins, *, sealing, target: str,
                                         project_root=None) -> dict[str, int]:
     """Independent count, per basin, of checkpoint-year issue times ``t`` with
@@ -532,34 +582,22 @@ def count_admissible_checkpoint_targets(nh_run_dir, basins, *, sealing, target: 
     finite targets but loses every sample to forcing gaps counts > 0 and is
     therefore NOT explained (fail closed)."""
     import numpy as np
-    import pandas as pd
-    import xarray
-
-    from .nh_raw_space_evaluation import select_readable_observations
 
     nh_run_dir = Path(nh_run_dir)
     config = yaml.safe_load((nh_run_dir / "config.yml").read_text(encoding="utf-8")) or {}
     data_dir = Path(str(config.get("data_dir")))
     if not data_dir.is_absolute() and project_root is not None:
         data_dir = Path(project_root) / data_dir
-    windows = sealing.readable_windows("validation")
-    lead = pd.Timedelta(hours=int(sealing.lead_hours))
-    first = pd.to_datetime(sealing.nh_dates["validation_start_date"], format="%d/%m/%Y")
-    last = pd.to_datetime(sealing.nh_dates["validation_end_date"], format="%d/%m/%Y") + pd.Timedelta(hours=23)
     counts = {}
     for basin in sorted(map(str, basins)):
-        found = [p for p in (data_dir / "time_series" / f"{basin}{ext}" for ext in (".nc4", ".nc")) if p.is_file()]
-        if len(found) != 1:
-            raise WyRotationRunsError(f"basin {basin}: expected one NetCDF in {data_dir / 'time_series'}, "
-                                      f"found {[str(p) for p in found]}")
-        with xarray.open_dataset(found[0]) as ds:
-            coordinate = "date" if "date" in ds.coords else "time"
-            if target not in ds.data_vars:
-                raise WyRotationRunsError(f"basin {basin}: target {target!r} not in {found[0].name}")
-            sealed = select_readable_observations(ds[[target]], windows=windows, coordinate=coordinate,
-                                                  forcing_variables=(), upper_bound=sealing.upper_bound)
-            issue = sealed[target].sel({coordinate: slice(first, last - lead)})
-            counts[basin] = int(np.isfinite(np.asarray(issue.values, dtype=float)).sum())
+        path = package_series_path(data_dir, basin)
+        if path is None:
+            raise WyRotationRunsError(f"basin {basin}: expected one NetCDF in {data_dir / 'time_series'}, found []")
+        try:
+            _, values = read_admissible_period_targets(path, sealing=sealing, target=target, period="validation")
+        except WyRotationRunsError as exc:
+            raise WyRotationRunsError(f"basin {basin}: {exc}") from exc
+        counts[basin] = int(np.isfinite(values).sum())
     return counts
 
 

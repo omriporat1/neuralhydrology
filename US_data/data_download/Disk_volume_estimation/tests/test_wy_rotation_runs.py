@@ -416,6 +416,28 @@ def test_a_job_or_environment_fault_never_deletes_a_valid_pickle(tmp_path, contr
     assert path.read_bytes() == good and tester.calls == []  # kept, not re-evaluated
 
 
+def test_a_permission_error_stops_the_run_and_never_deletes_a_pickle(tmp_path, contract_path, monkeypatch):
+    """Omri, 2026-11-19 (gate-4 Q2): not a "does not load, redo it" problem."""
+    run = _synthetic_run(tmp_path, contract_path, epochs=(1,))
+    path = rot.results_pickle_path(run["nh_run_dir"], 1)
+    good = path.read_bytes()
+    real_open = Path.open
+
+    def denied_open(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_open)
+    with pytest.raises(PermissionError):
+        rot.results_pickle_problem(path)
+    tester = FakeTester(run["nh_run_dir"], run["basins"], run["dates"])
+    with pytest.raises(PermissionError):
+        rot.evaluate_all_epochs(run["nh_run_dir"], [1], tester_factory=lambda _: tester)
+    monkeypatch.undo()
+    assert path.read_bytes() == good and tester.calls == []
+
+
 def test_log_epoch_timestamps_returns_times_only(tmp_path):
     log = tmp_path / "output.log"
     log.write_text(_log_text([1, 2, 3]) + "2026-11-15 13:30:00,000: something else\n", encoding="utf-8")
@@ -747,6 +769,32 @@ def test_runner_refuses_any_leftover_of_an_earlier_attempt_before_writing(canary
 
 
 @needs_p19
+def test_a_permission_error_fails_the_run_as_a_defect_for_inspection(canary, monkeypatch):
+    """Omri, 2026-11-19 (gate-4 Q2); an ordinary failure carries no such marker."""
+    from src.baseline import sweep_v1_runtime_contract as rc
+
+    runner = _load_runner()
+    manifest = json.loads(canary.read_text(encoding="utf-8"))
+    monkeypatch.setattr(rc, "verify_commit_and_interpreter",
+                        lambda **kw: {"git_commit": kw["expected_commit"], "runtime_python": "fake"})
+    calls = _fake_nh(monkeypatch, runner, manifest, fail_on_epoch=2)
+    calls["fail_with"] = PermissionError(13, "Permission denied", "validation_results.p")
+    with pytest.raises(PermissionError):
+        runner.main(_cli(canary))
+    receipt = json.loads((Path(manifest["config_dir"]) / runner.RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["status"] == "FAILED" and "PermissionError" in receipt["error"]
+    assert "another job may own this run directory" in receipt["stopped_as_defect"]
+    assert runner._defect_marker(RuntimeError("x")) == {}
+    try:
+        try:
+            raise PermissionError(13, "denied")
+        except PermissionError as inner:
+            raise RuntimeError("wrapped") from inner
+    except RuntimeError as outer:
+        assert "PermissionError" in runner._defect_marker(outer)["stopped_as_defect"]
+
+
+@needs_p19
 def test_runner_resume_re_evaluates_a_trained_run_only_when_the_failed_job_is_named(canary, monkeypatch):
     from src.baseline import sweep_v1_runtime_contract as rc
 
@@ -762,6 +810,7 @@ def test_runner_resume_re_evaluates_a_trained_run_only_when_the_failed_job_is_na
     receipt_path = config_dir / runner.RECEIPT_NAME
     failed_bytes = receipt_path.read_bytes()
     assert json.loads(failed_bytes)["status"] == "FAILED" and calls["train"] == 1
+    assert "stopped_as_defect" not in json.loads(failed_bytes)
 
     # a plain rerun is refused and points at the explicit resume; nothing is touched
     with pytest.raises(runner.RunRefused, match="--resume-from-job 111"):
@@ -933,8 +982,10 @@ def test_a_resume_killed_after_archiving_points_to_the_archive(canary, monkeypat
     archive = config_dir / "wy_rotation_run_receipt.job111.json"
     assert not (config_dir / runner.RECEIPT_NAME).exists() and archive.read_bytes() == failed_bytes
 
-    with pytest.raises(runner.RunRefused, match=r"Archived receipts here: wy_rotation_run_receipt\.job111\.json\. "
-                                                r".*check that no job for this run is alive.*restore it by hand"):
+    with pytest.raises(runner.RunRefused, match=r"Archived receipts here: wy_rotation_run_receipt\.job111\.json "
+                                                r"\(job 111, status FAILED\)\. .*check that no job for this run is "
+                                                r"alive.*restore by hand: rename wy_rotation_run_receipt\.job111\."
+                                                r"json back to wy_rotation_run_receipt\.json.*--resume-from-job 111$"):
         runner.main(_cli(canary, "--resume-from-job", "111"))
     assert archive.read_bytes() == failed_bytes and not (config_dir / runner.LOCK_NAME).exists()
     archive.rename(config_dir / runner.RECEIPT_NAME)  # the operator's restore, as the message says
@@ -1018,6 +1069,100 @@ def test_release_run_lock_leaves_a_lock_that_is_not_its_own(tmp_path, capsys):
     (lock / "owner.json").write_text(json.dumps(mine), encoding="utf-8")
     runner._release_run_lock(tmp_path, mine)
     assert not lock.exists()
+
+
+@pytest.mark.parametrize("record", ["[]", "null", "\"token\"", "42", "{\"token\": 1"])
+def test_release_run_lock_survives_a_malformed_owner_file(tmp_path, capsys, record):
+    # review N3 (2026-11-18): valid JSON that is not an object made held.get raise
+    runner = _load_runner()
+    mine = runner._acquire_run_lock(tmp_path)
+    lock = tmp_path / runner.LOCK_NAME
+    (lock / "owner.json").write_text(record, encoding="utf-8")
+    runner._release_run_lock(tmp_path, mine)  # no exception
+    assert lock.is_dir() and (lock / "owner.json").read_text(encoding="utf-8") == record
+    assert "left in place" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("record", ["[]", "null", "\"x\""])
+def test_acquire_run_lock_refuses_cleanly_over_a_malformed_owner_file(tmp_path, record):
+    runner = _load_runner()
+    lock = tmp_path / runner.LOCK_NAME
+    lock.mkdir()
+    (lock / "owner.json").write_text(record, encoding="utf-8")
+    with pytest.raises(runner.RunRefused, match="an owner whose record is missing or unreadable"):
+        runner._acquire_run_lock(tmp_path)
+    assert (lock / "owner.json").read_text(encoding="utf-8") == record
+
+
+def _archive_receipt(config_dir, runner, job, *, resumed_from=None, status="FAILED", evidence=False):
+    payload = {"status": status, "slurm_job_id": job, "resumed_from_job": resumed_from}
+    (config_dir / runner._archive_name(runner.RECEIPT_NAME, job)).write_text(json.dumps(payload), encoding="utf-8")
+    if evidence:
+        (config_dir / runner._archive_name(runner.EVIDENCE_NAME, job)).write_text("{}", encoding="utf-8")
+
+
+def test_restore_hint_names_the_archive_of_the_requested_job_when_it_is_the_head(tmp_path):
+    # review S1 (2026-11-18): name the archive to restore, not a <JOBID> placeholder
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111")
+    _archive_receipt(tmp_path, runner, "222", resumed_from="111")
+    hint = runner._archive_restore_hint(tmp_path, "222")
+    assert "rename wy_rotation_run_receipt.job222.json back to wy_rotation_run_receipt.json" in hint
+    assert "(there is no wy_rotation_score_blind_evidence.job222.json)" in hint
+    assert hint.endswith("--resume-from-job 222") and "<JOBID>" not in hint and "not the head" not in hint
+
+
+def test_restore_hint_names_a_stale_requested_job_and_chooses_the_head(tmp_path):
+    # gate-4 review R6: job 111 was resumed by 222, so restoring 111 would roll the run back
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111", evidence=True)
+    _archive_receipt(tmp_path, runner, "222", resumed_from="111", evidence=True)
+    hint = runner._archive_restore_hint(tmp_path, "111")
+    assert "Job 111 is not the head of the resume chain; the head is job 222." in hint
+    assert "rename wy_rotation_run_receipt.job222.json back to wy_rotation_run_receipt.json" in hint
+    assert "rename wy_rotation_run_receipt.job111.json" not in hint
+    assert hint.endswith("--resume-from-job 222")
+
+
+def test_restore_hint_names_a_requested_job_that_is_not_a_head_when_the_head_is_ambiguous(tmp_path):
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111")
+    _archive_receipt(tmp_path, runner, "222", resumed_from="111")
+    _archive_receipt(tmp_path, runner, "333", resumed_from="111")  # two heads
+    hint = runner._archive_restore_hint(tmp_path, "111")
+    assert "Job 111 is not the head of the resume chain." in hint
+    assert "No single one is the latest" in hint and "rename" not in hint
+
+
+def test_restore_hint_without_a_job_names_the_head_of_the_resume_chain(tmp_path):
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111")
+    _archive_receipt(tmp_path, runner, "222", resumed_from="111", evidence=True)
+    hint = runner._archive_restore_hint(tmp_path)
+    assert ("rename wy_rotation_run_receipt.job222.json back to wy_rotation_run_receipt.json and "
+            "wy_rotation_score_blind_evidence.job222.json back to wy_rotation_score_blind_evidence.json") in hint
+    assert hint.endswith("--resume-from-job 222")
+    # a requested job without an archive also falls back to the chain head
+    assert runner._archive_restore_hint(tmp_path, "999").endswith("--resume-from-job 222")
+
+
+def test_restore_hint_chooses_none_when_the_chain_head_is_ambiguous(tmp_path):
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111")
+    _archive_receipt(tmp_path, runner, "333")  # two unrelated archives: neither names the other
+    (tmp_path / runner._archive_name(runner.RECEIPT_NAME, "444")).write_text("[1]", encoding="utf-8")
+    hint = runner._archive_restore_hint(tmp_path)
+    assert "No single one is the latest" in hint and "rename" not in hint
+    assert "job 444, status unreadable" in hint
+    assert runner._archive_restore_hint(tmp_path / "nothing_here_dir") == ""
+
+
+def test_refusal_of_an_existing_run_without_a_receipt_names_the_archive(tmp_path):
+    runner = _load_runner()
+    _archive_receipt(tmp_path, runner, "111")
+    with pytest.raises(runner.RunRefused, match=r"inspect it by hand; nothing was written\. Archived receipts here: "
+                                                r".*rename wy_rotation_run_receipt\.job111\.json back"):
+        runner._refuse_existing_run(tmp_path, "r1")
 
 
 @pytest.mark.parametrize("fails", ["write", "replace"])
@@ -1125,7 +1270,7 @@ def _fake_nh(monkeypatch, runner, manifest, *, train_epochs=None, fail_on_epoch=
     class DyingTester(FakeTester):
         def evaluate(self, *, epoch, save_results, metrics):
             if epoch == calls["fail_on_epoch"]:
-                raise RuntimeError(f"evaluation died at epoch {epoch}")
+                raise calls.get("fail_with") or RuntimeError(f"evaluation died at epoch {epoch}")
             calls["evaluated"].append(epoch)
             super().evaluate(epoch=epoch, save_results=save_results, metrics=metrics)
 

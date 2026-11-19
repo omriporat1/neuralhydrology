@@ -62,6 +62,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -118,6 +119,57 @@ def _existing_run_artifacts(config_dir: Path) -> list[str]:
     return found
 
 
+def _receipt_archives(config_dir: Path) -> list[dict]:
+    """The archived receipts in ``config_dir``: job id (from the file name), file name,
+    and the status / resumed_from_job read from the file (None when unreadable)."""
+    stem, suffix = RECEIPT_NAME.rsplit(".", 1)
+    out = []
+    for path in sorted(config_dir.glob(_archive_name(RECEIPT_NAME, "*"))):
+        job = path.name[len(stem) + len(".job"):-len("." + suffix)]
+        try:
+            content = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            content = None
+        if not isinstance(content, dict):
+            content = {}
+        out.append({"job": job, "name": path.name, "status": content.get("status"),
+                    "resumed_from_job": (None if content.get("resumed_from_job") is None
+                                         else str(content["resumed_from_job"]))})
+    return out
+
+
+def _archive_restore_hint(config_dir: Path, job: Optional[str] = None) -> str:
+    """A refusal hint that names the archived receipt to restore, or "" without archives.
+
+    A resume archives the earlier job's receipt as ``<stem>.job<JOB>.json`` before it
+    writes its own; killed in between, it leaves no receipt. The archive to restore is
+    the head of the resume chain: the one archive no other archive names as its
+    resumed_from_job. ``job`` (the --resume-from-job argument) is chosen only when it
+    is that head; an older job of the chain is named as stale and the head is chosen
+    instead. When the head is not unique, every archive is listed and none chosen."""
+    archives = _receipt_archives(config_dir)
+    if not archives:
+        return ""
+    listing = ", ".join(f"{a['name']} (job {a['job']}, status {a['status'] or 'unreadable'})" for a in archives)
+    referenced = {a["resumed_from_job"] for a in archives if a["resumed_from_job"] is not None}
+    heads = [a for a in archives if a["job"] not in referenced]
+    chosen = heads[0] if len(heads) == 1 else None
+    stale = ""
+    if job is not None and any(a["job"] == job for a in archives) and (chosen is None or chosen["job"] != job):
+        stale = (f" Job {job} is not the head of the resume chain"
+                 + (f"; the head is job {chosen['job']}." if chosen is not None else "."))
+    if chosen is None:
+        return (f". Archived receipts here: {listing}.{stale} No single one is the latest of a resume chain: "
+                "check with sacct which job last ran for this run before restoring any by hand")
+    evidence = config_dir / _archive_name(EVIDENCE_NAME, chosen["job"])
+    evidence_part = (f" and {evidence.name} back to {EVIDENCE_NAME}" if evidence.exists()
+                     else f" (there is no {evidence.name})")
+    return (f". Archived receipts here: {listing}.{stale} If a resume was killed after archiving one and before "
+            f"writing its own receipt, check that no job for this run is alive (sacct/squeue), then restore by "
+            f"hand: rename {chosen['name']} back to {RECEIPT_NAME}{evidence_part}, and rerun with "
+            f"--resume-from-job {chosen['job']}")
+
+
 def _refuse_existing_run(config_dir: Path, run_id: str) -> None:
     found = _existing_run_artifacts(config_dir)
     if not found:
@@ -134,7 +186,7 @@ def _refuse_existing_run(config_dir: Path, run_id: str) -> None:
                 f"re-evaluate with --resume-from-job {'none' if job is None else job}, otherwise a retrain "
                 "needs a new attempt id and manifest")
     else:
-        hint = "inspect it by hand; nothing was written"
+        hint = "inspect it by hand; nothing was written" + _archive_restore_hint(config_dir)
     raise RunRefused(f"{run_id} already has {', '.join(found)} in {config_dir}: {hint}")
 
 
@@ -144,14 +196,8 @@ def _check_resume(config_dir: Path, *, run_id: str, manifest_sha256: str, epochs
         raise RunRefused(f"--resume-from-job {job!r} is not a Slurm job id (or 'none')")
     receipt_path = config_dir / RECEIPT_NAME
     if not receipt_path.is_file():
-        archives = sorted(p.name for p in config_dir.glob(_archive_name(RECEIPT_NAME, "*")))
-        hint = ""
-        if archives:  # e.g. a resume killed after archiving the receipt, before writing its own
-            hint = (f". Archived receipts here: {', '.join(archives)}. If a resume was killed after archiving "
-                    f"one and before writing its own receipt, check that no job for this run is alive "
-                    f"(sacct/squeue), then restore it by hand: rename {_archive_name(RECEIPT_NAME, '<JOBID>')} "
-                    f"back to {RECEIPT_NAME} (and {_archive_name(EVIDENCE_NAME, '<JOBID>')}, if present, back to "
-                    f"{EVIDENCE_NAME}) and rerun with --resume-from-job <JOBID>")
+        # e.g. a resume killed after archiving the receipt, before writing its own
+        hint = _archive_restore_hint(config_dir, job)
         raise RunRefused(f"--resume-from-job {job}: no {RECEIPT_NAME} in {config_dir}{hint}")
     previous_bytes = receipt_path.read_bytes()
     previous = json.loads(previous_bytes.decode("utf-8"))
@@ -241,6 +287,8 @@ def _acquire_run_lock(config_dir: Path) -> dict:
     except FileExistsError:
         try:
             held = json.loads((path / _LOCK_OWNER).read_text(encoding="utf-8"))
+            if not isinstance(held, dict):
+                raise ValueError("owner record is not a JSON object")
             who = (f"job {held.get('slurm_job_id') or 'none'} on host {held.get('host')} (pid {held.get('pid')}), "
                    f"since {held.get('acquired_utc')}")
         except (OSError, ValueError):
@@ -272,14 +320,15 @@ def _acquire_run_lock(config_dir: Path) -> dict:
 
 def _release_run_lock(config_dir: Path, owner: dict) -> None:
     """Remove the lock if it is still this runner's (same token); otherwise leave it.
-    Never raises OSError: it runs in main's ``finally`` and must not replace the run's
-    own exception; a lock it cannot remove is left in place with a warning."""
+    Never raises: it runs in main's ``finally`` and must not replace the run's own
+    exception. A lock it cannot remove, or whose owner record is missing, unreadable or
+    not a JSON object (malformed), is left in place with a warning."""
     path = config_dir / LOCK_NAME
     try:
         held = json.loads((path / _LOCK_OWNER).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         held = None
-    if not held or held.get("token") != owner["token"]:
+    if not isinstance(held, dict) or held.get("token") != owner["token"]:
         print(f"warning: {path} is not this runner's lock any more; left in place", file=sys.stderr)
         return
     try:
@@ -318,6 +367,24 @@ def _write_json(path: Path, payload) -> None:
 
 
 _REPLACE_TRIES = 6
+
+
+def _defect_marker(exc: BaseException) -> dict:
+    """Omri, 2026-11-19 (gate-4 Q2): a ``PermissionError`` anywhere in the failure's
+    exception chain is not a retriable environment fault. It may mean another job
+    owns this run directory, so the FAILED receipt says the run stopped as a defect
+    and must be inspected before anyone resumes it (``--resume-from-job`` stays an
+    explicit operator act). The bounded Windows-only replace retry in
+    :func:`_write_json` is separate: it never runs on Moriah, and a lasting error is
+    still raised and lands here."""
+    seen, cur = set(), exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, PermissionError):
+            return {"stopped_as_defect": f"{cur!r}: another job may own this run directory; inspect it "
+                                         "(sacct/squeue, file owners) before any resume"}
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return {}
 
 
 def _peak_memory() -> dict:
@@ -566,7 +633,8 @@ def _run_locked(args, *, provenance, policy, checked, campaign, campaign_row, ep
             receipt["post_complete_error"] = repr(exc)
             _write_json(receipt_path, receipt)
             raise
-        receipt.update(status="FAILED", finished_utc=time.time(), error=repr(exc), traceback=traceback.format_exc())
+        receipt.update(status="FAILED", finished_utc=time.time(), error=repr(exc), traceback=traceback.format_exc(),
+                       **_defect_marker(exc))
         _write_json(receipt_path, receipt)
         if tracker is not None and not tracker.run.finished:
             # only this job's evidence is uploaded, never a stale file of an earlier job
